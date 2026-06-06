@@ -274,6 +274,34 @@ pub const Git = struct {
         return self.exec(&.{"reset"});
     }
 
+    pub fn discardFile(self: *Git, file: model.FileStatus) !ExecResult {
+        if (file.isRename()) {
+            if (try self.resetFilePaths(file)) |failure| return failure;
+            if (file.previous_path) |previous| {
+                if (try self.runStep(&.{ "checkout", "HEAD", "--", previous })) |failure| return failure;
+            }
+            if (try self.runStep(&.{ "clean", "-fd", "--", file.path })) |failure| return failure;
+            return self.successResult();
+        }
+
+        if (!file.tracked or file.added) {
+            if (file.has_staged) {
+                if (try self.resetFilePaths(file)) |failure| return failure;
+            }
+            if (try self.runStep(&.{ "clean", "-fd", "--", file.path })) |failure| return failure;
+            return self.successResult();
+        }
+
+        if (try self.runStep(&.{ "checkout", "HEAD", "--", file.path })) |failure| return failure;
+        return self.successResult();
+    }
+
+    pub fn discardAll(self: *Git) !ExecResult {
+        if (try self.runStep(&.{ "reset", "--hard", "HEAD" })) |failure| return failure;
+        if (try self.runStep(&.{ "clean", "-fd" })) |failure| return failure;
+        return self.successResult();
+    }
+
     pub fn commit(self: *Git, message: []const u8) !ExecResult {
         return self.exec(&.{ "commit", "-m", message });
     }
@@ -310,6 +338,29 @@ pub const Git = struct {
         const selector = try std.fmt.allocPrint(self.allocator, "stash@{{{d}}}", .{index});
         defer self.allocator.free(selector);
         return self.exec(&.{ "stash", "drop", selector });
+    }
+
+    fn resetFilePaths(self: *Git, file: model.FileStatus) !?ExecResult {
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(self.allocator);
+        try args.appendSlice(self.allocator, &.{ "reset", "HEAD", "--", file.path });
+        if (file.previous_path) |previous| try args.append(self.allocator, previous);
+        return self.runStep(args.items);
+    }
+
+    fn runStep(self: *Git, args: []const []const u8) !?ExecResult {
+        var result = try self.exec(args);
+        if (!result.ok()) return result;
+        result.deinit(self.allocator);
+        return null;
+    }
+
+    fn successResult(self: *Git) !ExecResult {
+        return .{
+            .stdout = try self.allocator.alloc(u8, 0),
+            .stderr = try self.allocator.alloc(u8, 0),
+            .term = .{ .exited = 0 },
+        };
     }
 };
 

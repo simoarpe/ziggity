@@ -18,6 +18,8 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 - Keyboard navigation across side panels and the diff panel.
 - Stage/unstage selected file.
 - Stage/unstage all files.
+- Discard selected file with confirmation.
+- Discard all working tree changes with confirmation.
 - Commit staged changes with an in-app one-line commit prompt.
 - Checkout selected branch.
 - Fetch, pull, and push.
@@ -69,6 +71,8 @@ Useful keys:
 - `1`/`2`/`3`/`4`/`0`: focus files, branches, commits, stash, diff
 - `space`: stage/unstage file, checkout branch, or apply stash depending on focus
 - `a`: stage all if there are unstaged files, otherwise unstage all
+- `d`: discard selected file after confirmation
+- `D`: discard all working tree changes after confirmation
 - `c`: commit staged changes
 - `f`: fetch
 - `p`: pull
@@ -90,6 +94,8 @@ diff_context = 3
 
 key.quit = q
 key.refresh = R
+key.discard = d
+key.discard_all = D
 key.commit = c
 key.push = P
 key.select = space

@@ -247,9 +247,14 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
         win.showCursor(cursor_col, 0);
         return;
     }
+    if (app.mode == .confirmation) {
+        var confirm_buf: [1024]u8 = undefined;
+        print(win, 0, 0, app.confirmationText(&confirm_buf), st.bottom_accent);
+        return;
+    }
 
     var buf: [1024]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "{s} | q quit R refresh h/l panels j/k move space action c commit f fetch p pull P push", .{app.message}) catch app.message;
+    const line = std.fmt.bufPrint(&buf, "{s} | q quit R refresh h/l panels j/k move space action d discard D discard-all c commit f fetch p pull P push", .{app.message}) catch app.message;
     print(win, 0, 0, line, st.bottom);
 }
 

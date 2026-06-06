@@ -13,6 +13,8 @@ pub const Action = enum {
     focus_right,
     select,
     stage_all,
+    discard_selected,
+    discard_all,
     start_commit,
     fetch,
     pull,
@@ -53,6 +55,8 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
         .files => {
             if (keymap.select.matches(key)) return .select;
             if (keymap.stage_all.matches(key)) return .stage_all;
+            if (keymap.discard.matches(key)) return .discard_selected;
+            if (keymap.discard_all.matches(key)) return .discard_all;
             if (keymap.commit.matches(key)) return .start_commit;
         },
         .branches => {
@@ -81,6 +85,8 @@ test "normal key mapping handles global and focused actions" {
     try std.testing.expectEqual(Action.refresh, fromNormalKey(testKey('R'), keymap, .files).?);
     try std.testing.expectEqual(Action.focus_branches, fromNormalKey(testKey('2'), keymap, .files).?);
     try std.testing.expectEqual(Action.stage_all, fromNormalKey(testKey('a'), keymap, .files).?);
+    try std.testing.expectEqual(Action.discard_selected, fromNormalKey(testKey('d'), keymap, .files).?);
+    try std.testing.expectEqual(Action.discard_all, fromNormalKey(testKey('D'), keymap, .files).?);
     try std.testing.expectEqual(Action.start_commit, fromNormalKey(testKey('c'), keymap, .files).?);
     try std.testing.expectEqual(Action.stash_pop, fromNormalKey(testKey('g'), keymap, .stash).?);
     try std.testing.expect(fromNormalKey(testKey('g'), keymap, .files) == null);

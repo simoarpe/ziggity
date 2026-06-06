@@ -9,6 +9,12 @@ const model = @import("model.zig");
 pub const Mode = enum {
     normal,
     commit_prompt,
+    confirmation,
+};
+
+pub const Confirmation = enum {
+    discard_file,
+    discard_all,
 };
 
 pub const App = struct {
@@ -26,6 +32,7 @@ pub const App = struct {
     message: []u8 = &.{},
     commit_buffer: std.ArrayList(u8) = .empty,
     mode: Mode = .normal,
+    pending_confirmation: ?Confirmation = null,
     running: bool = true,
 
     pub fn init(
@@ -73,6 +80,10 @@ pub const App = struct {
             try self.handleCommitPromptKey(key);
             return;
         }
+        if (self.mode == .confirmation) {
+            try self.handleConfirmationKey(key);
+            return;
+        }
 
         if (key.matches(vaxis.Key.page_up, .{})) return self.scrollMain(-10);
         if (key.matches(vaxis.Key.page_down, .{})) return self.scrollMain(10);
@@ -111,6 +122,8 @@ pub const App = struct {
                 .commits, .main => {},
             },
             .stage_all => try self.toggleAllStaged(),
+            .discard_selected => try self.startDiscardSelectedConfirmation(),
+            .discard_all => try self.startDiscardAllConfirmation(),
             .start_commit => try self.startCommitPrompt(),
             .stash_pop => try self.popSelectedStash(),
             .stash_drop => try self.dropSelectedStash(),
@@ -136,6 +149,18 @@ pub const App = struct {
     pub fn selectedStash(self: *const App) ?model.StashEntry {
         if (self.data.stash.len == 0) return null;
         return self.data.stash[@min(self.stash_index, self.data.stash.len - 1)];
+    }
+
+    pub fn confirmationText(self: *const App, buf: []u8) []const u8 {
+        return switch (self.pending_confirmation orelse return "No pending action.") {
+            .discard_file => blk: {
+                if (self.selectedFile()) |file| {
+                    break :blk std.fmt.bufPrint(buf, "Discard all changes to {s}? y/enter confirm, n/esc cancel", .{file.path}) catch "Discard selected file? y/enter confirm, n/esc cancel";
+                }
+                break :blk "Discard selected file? y/enter confirm, n/esc cancel";
+            },
+            .discard_all => "Discard all working tree changes? y/enter confirm, n/esc cancel",
+        };
     }
 
     fn setFocus(self: *App, focus: model.Focus) !void {
@@ -240,6 +265,26 @@ pub const App = struct {
         try self.setMessage("enter commit message", .{});
     }
 
+    fn startDiscardSelectedConfirmation(self: *App) !void {
+        _ = self.selectedFile() orelse {
+            try self.setMessage("no file selected", .{});
+            return;
+        };
+        self.mode = .confirmation;
+        self.pending_confirmation = .discard_file;
+        try self.setMessage("confirm discard selected file", .{});
+    }
+
+    fn startDiscardAllConfirmation(self: *App) !void {
+        if (self.data.files.len == 0) {
+            try self.setMessage("no files to discard", .{});
+            return;
+        }
+        self.mode = .confirmation;
+        self.pending_confirmation = .discard_all;
+        try self.setMessage("confirm discard all changes", .{});
+    }
+
     fn checkoutSelectedBranch(self: *App) !void {
         const branch = self.selectedBranch() orelse {
             try self.setMessage("no branch selected", .{});
@@ -303,6 +348,39 @@ pub const App = struct {
             if (!key.mods.ctrl and !key.mods.alt and text.len > 0 and text[0] >= 0x20) {
                 try self.commit_buffer.appendSlice(self.allocator, text);
             }
+        }
+    }
+
+    fn handleConfirmationKey(self: *App, key: vaxis.Key) !void {
+        const km = self.config.keymap;
+        if (km.enter.matches(key) or key.matches('y', .{})) {
+            try self.confirmPendingAction();
+            return;
+        }
+        if (km.escape.matches(key) or key.matches('n', .{})) {
+            self.mode = .normal;
+            self.pending_confirmation = null;
+            try self.setMessage("cancelled", .{});
+            return;
+        }
+    }
+
+    fn confirmPendingAction(self: *App) !void {
+        const pending = self.pending_confirmation orelse {
+            self.mode = .normal;
+            return;
+        };
+        self.mode = .normal;
+        self.pending_confirmation = null;
+        switch (pending) {
+            .discard_file => {
+                const file = self.selectedFile() orelse {
+                    try self.setMessage("no file selected", .{});
+                    return;
+                };
+                return self.runMutation(try self.git.discardFile(file), "discarded {s}", .{file.path});
+            },
+            .discard_all => return self.runMutation(try self.git.discardAll(), "discarded all changes", .{}),
         }
     }
 
