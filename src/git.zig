@@ -160,30 +160,7 @@ pub const Git = struct {
     pub fn loadBranches(self: *Git) ![]model.Branch {
         const bytes = try self.output(&.{ "branch", "--format=%(HEAD)%00%(refname:short)%00%(upstream:short)" });
         defer self.allocator.free(bytes);
-
-        var branches: std.ArrayList(model.Branch) = .empty;
-        errdefer {
-            for (branches.items) |*branch| branch.deinit(self.allocator);
-            branches.deinit(self.allocator);
-        }
-
-        var lines = std.mem.splitScalar(u8, bytes, '\n');
-        while (lines.next()) |line| {
-            if (line.len == 0) continue;
-            var fields = std.mem.splitScalar(u8, line, 0);
-            const head = fields.next() orelse continue;
-            const name = fields.next() orelse continue;
-            const upstream = fields.next() orelse "";
-            var branch = model.Branch{
-                .name = try self.allocator.dupe(u8, name),
-                .current = head.len > 0 and head[0] == '*',
-            };
-            errdefer branch.deinit(self.allocator);
-            if (upstream.len > 0) branch.upstream = try self.allocator.dupe(u8, upstream);
-            try branches.append(self.allocator, branch);
-        }
-
-        return branches.toOwnedSlice(self.allocator);
+        return parseBranches(self.allocator, bytes);
     }
 
     pub fn loadCommits(self: *Git, ref_name: []const u8, limit: usize) ![]model.Commit {
@@ -199,68 +176,14 @@ pub const Git = struct {
         });
         defer self.allocator.free(bytes);
 
-        var commits: std.ArrayList(model.Commit) = .empty;
-        errdefer {
-            for (commits.items) |*item| item.deinit(self.allocator);
-            commits.deinit(self.allocator);
-        }
-
-        var lines = std.mem.splitScalar(u8, bytes, '\n');
-        while (lines.next()) |line| {
-            if (line.len == 0) continue;
-            var fields = std.mem.splitScalar(u8, line, 0);
-            const hash = fields.next() orelse continue;
-            const short_hash = fields.next() orelse continue;
-            const author = fields.next() orelse "";
-            const time = fields.next() orelse "";
-            const refs = fields.next() orelse "";
-            const subject = fields.next() orelse "";
-            var item = model.Commit{
-                .hash = try self.allocator.dupe(u8, hash),
-                .short_hash = try self.allocator.dupe(u8, short_hash),
-                .author = try self.allocator.dupe(u8, author),
-                .time = try self.allocator.dupe(u8, time),
-                .refs = try self.allocator.dupe(u8, refs),
-                .subject = try self.allocator.dupe(u8, subject),
-            };
-            errdefer item.deinit(self.allocator);
-            try commits.append(self.allocator, item);
-        }
-
-        return commits.toOwnedSlice(self.allocator);
+        return parseCommits(self.allocator, bytes);
     }
 
     pub fn loadStash(self: *Git) ![]model.StashEntry {
         var result = try self.exec(&.{ "stash", "list", "--format=%gd%x00%H%x00%cr%x00%gs" });
         defer result.deinit(self.allocator);
-        if (!result.ok()) return &.{};
-
-        var entries: std.ArrayList(model.StashEntry) = .empty;
-        errdefer {
-            for (entries.items) |*entry| entry.deinit(self.allocator);
-            entries.deinit(self.allocator);
-        }
-
-        var lines = std.mem.splitScalar(u8, result.stdout, '\n');
-        while (lines.next()) |line| {
-            if (line.len == 0) continue;
-            var fields = std.mem.splitScalar(u8, line, 0);
-            const selector = fields.next() orelse continue;
-            const hash = fields.next() orelse "";
-            const time = fields.next() orelse "";
-            const message = fields.next() orelse "";
-            var entry = model.StashEntry{
-                .index = parseStashIndex(selector) orelse entries.items.len,
-                .selector = try self.allocator.dupe(u8, selector),
-                .hash = try self.allocator.dupe(u8, hash),
-                .time = try self.allocator.dupe(u8, time),
-                .message = try self.allocator.dupe(u8, message),
-            };
-            errdefer entry.deinit(self.allocator);
-            try entries.append(self.allocator, entry);
-        }
-
-        return entries.toOwnedSlice(self.allocator);
+        if (!result.ok()) return self.allocator.alloc(model.StashEntry, 0);
+        return parseStash(self.allocator, result.stdout);
     }
 
     pub fn diffForFile(self: *Git, file: model.FileStatus, diff_context: u8) ![]u8 {
@@ -427,6 +350,93 @@ pub fn parseStatus(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Fil
     return files.toOwnedSlice(allocator);
 }
 
+pub fn parseBranches(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Branch {
+    var branches: std.ArrayList(model.Branch) = .empty;
+    errdefer {
+        for (branches.items) |*branch| branch.deinit(allocator);
+        branches.deinit(allocator);
+    }
+
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        var fields = std.mem.splitScalar(u8, line, 0);
+        const head = fields.next() orelse continue;
+        const name = fields.next() orelse continue;
+        const upstream = fields.next() orelse "";
+        var branch = model.Branch{
+            .name = try allocator.dupe(u8, name),
+            .current = head.len > 0 and head[0] == '*',
+        };
+        errdefer branch.deinit(allocator);
+        if (upstream.len > 0) branch.upstream = try allocator.dupe(u8, upstream);
+        try branches.append(allocator, branch);
+    }
+
+    return branches.toOwnedSlice(allocator);
+}
+
+pub fn parseCommits(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Commit {
+    var commits: std.ArrayList(model.Commit) = .empty;
+    errdefer {
+        for (commits.items) |*item| item.deinit(allocator);
+        commits.deinit(allocator);
+    }
+
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        var fields = std.mem.splitScalar(u8, line, 0);
+        const hash = fields.next() orelse continue;
+        const short_hash = fields.next() orelse continue;
+        const author = fields.next() orelse "";
+        const time = fields.next() orelse "";
+        const refs = fields.next() orelse "";
+        const subject = fields.next() orelse "";
+        var item = model.Commit{
+            .hash = try allocator.dupe(u8, hash),
+            .short_hash = try allocator.dupe(u8, short_hash),
+            .author = try allocator.dupe(u8, author),
+            .time = try allocator.dupe(u8, time),
+            .refs = try allocator.dupe(u8, refs),
+            .subject = try allocator.dupe(u8, subject),
+        };
+        errdefer item.deinit(allocator);
+        try commits.append(allocator, item);
+    }
+
+    return commits.toOwnedSlice(allocator);
+}
+
+pub fn parseStash(allocator: std.mem.Allocator, bytes: []const u8) ![]model.StashEntry {
+    var entries: std.ArrayList(model.StashEntry) = .empty;
+    errdefer {
+        for (entries.items) |*entry| entry.deinit(allocator);
+        entries.deinit(allocator);
+    }
+
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        var fields = std.mem.splitScalar(u8, line, 0);
+        const selector = fields.next() orelse continue;
+        const hash = fields.next() orelse "";
+        const time = fields.next() orelse "";
+        const message = fields.next() orelse "";
+        var entry = model.StashEntry{
+            .index = parseStashIndex(selector) orelse entries.items.len,
+            .selector = try allocator.dupe(u8, selector),
+            .hash = try allocator.dupe(u8, hash),
+            .time = try allocator.dupe(u8, time),
+            .message = try allocator.dupe(u8, message),
+        };
+        errdefer entry.deinit(allocator);
+        try entries.append(allocator, entry);
+    }
+
+    return entries.toOwnedSlice(allocator);
+}
+
 fn parseStashIndex(selector: []const u8) ?usize {
     const start = std.mem.indexOfScalar(u8, selector, '{') orelse return null;
     const end = std.mem.indexOfScalarPos(u8, selector, start, '}') orelse return null;
@@ -447,4 +457,61 @@ test "parse porcelain status including rename" {
     try std.testing.expect(files[1].isRename());
     try std.testing.expectEqualSlices(u8, "old.txt", files[1].previous_path.?);
     try std.testing.expect(!files[2].tracked);
+}
+
+test "parse branches captures current marker and upstream" {
+    const input =
+        "*\x00main\x00origin/main\n" ++
+        " \x00feature/demo\x00origin/feature/demo\n" ++
+        " \x00local-only\x00\n";
+    const branches = try parseBranches(std.testing.allocator, input);
+    defer {
+        for (branches) |*branch| branch.deinit(std.testing.allocator);
+        std.testing.allocator.free(branches);
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), branches.len);
+    try std.testing.expect(branches[0].current);
+    try std.testing.expectEqualSlices(u8, "main", branches[0].name);
+    try std.testing.expectEqualSlices(u8, "origin/main", branches[0].upstream.?);
+    try std.testing.expect(!branches[1].current);
+    try std.testing.expectEqualSlices(u8, "feature/demo", branches[1].name);
+    try std.testing.expect(branches[2].upstream == null);
+}
+
+test "parse commits handles optional refs and subjects" {
+    const input =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\x00aaaaaaa\x00Sam\x002 hours ago\x00HEAD -> main, origin/main\x00Initial commit\n" ++
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\x00bbbbbbb\x00Lee\x00yesterday\x00\x00Follow up\n";
+    const commits = try parseCommits(std.testing.allocator, input);
+    defer {
+        for (commits) |*commit| commit.deinit(std.testing.allocator);
+        std.testing.allocator.free(commits);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), commits.len);
+    try std.testing.expectEqualSlices(u8, "aaaaaaa", commits[0].short_hash);
+    try std.testing.expectEqualSlices(u8, "Sam", commits[0].author);
+    try std.testing.expectEqualSlices(u8, "HEAD -> main, origin/main", commits[0].refs);
+    try std.testing.expectEqualSlices(u8, "Initial commit", commits[0].subject);
+    try std.testing.expectEqualSlices(u8, "", commits[1].refs);
+    try std.testing.expectEqualSlices(u8, "Follow up", commits[1].subject);
+}
+
+test "parse stash entries extracts selector index" {
+    const input =
+        "stash@{0}\x001111111111111111111111111111111111111111\x005 minutes ago\x00WIP on main\n" ++
+        "stash@{12}\x002222222222222222222222222222222222222222\x003 days ago\x00Saved work\n";
+    const entries = try parseStash(std.testing.allocator, input);
+    defer {
+        for (entries) |*entry| entry.deinit(std.testing.allocator);
+        std.testing.allocator.free(entries);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), entries.len);
+    try std.testing.expectEqual(@as(usize, 0), entries[0].index);
+    try std.testing.expectEqualSlices(u8, "stash@{0}", entries[0].selector);
+    try std.testing.expectEqualSlices(u8, "WIP on main", entries[0].message);
+    try std.testing.expectEqual(@as(usize, 12), entries[1].index);
+    try std.testing.expectEqualSlices(u8, "Saved work", entries[1].message);
 }

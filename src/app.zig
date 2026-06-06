@@ -74,59 +74,47 @@ pub const App = struct {
             return;
         }
 
-        const km = self.config.keymap;
-        if (km.quit.matches(key) or km.quit_ctrl.matches(key)) {
-            self.running = false;
-            return;
-        }
-        if (km.escape.matches(key)) {
-            if (self.focus == .main) {
-                self.focus = .files;
-                try self.updatePreview();
-            } else {
-                self.running = false;
-            }
-            return;
-        }
-
-        if (km.files_panel.matches(key)) return self.setFocus(.files);
-        if (km.branches_panel.matches(key)) return self.setFocus(.branches);
-        if (km.commits_panel.matches(key)) return self.setFocus(.commits);
-        if (km.stash_panel.matches(key)) return self.setFocus(.stash);
-        if (km.main_panel.matches(key)) return self.setFocus(.main);
-
-        if (km.refresh.matches(key)) {
-            try self.refresh();
-            try self.setMessage("refreshed", .{});
-            return;
-        }
-        if (km.fetch.matches(key)) return self.runMutation(try self.git.fetch(), "fetch complete", .{});
-        if (km.pull.matches(key)) return self.runMutation(try self.git.pull(), "pull complete", .{});
-        if (km.push.matches(key)) return self.runMutation(try self.git.push(), "push complete", .{});
-
-        if (km.up.matches(key) or key.matches(vaxis.Key.up, .{})) return self.moveUp();
-        if (km.down.matches(key) or key.matches(vaxis.Key.down, .{})) return self.moveDown();
-        if (km.left.matches(key) or key.matches(vaxis.Key.left, .{})) return self.focusPrevious();
-        if (km.right.matches(key) or key.matches(vaxis.Key.right, .{}) or key.matches(vaxis.Key.tab, .{})) return self.focusNext();
         if (key.matches(vaxis.Key.page_up, .{})) return self.scrollMain(-10);
         if (key.matches(vaxis.Key.page_down, .{})) return self.scrollMain(10);
 
-        switch (self.focus) {
-            .files => {
-                if (km.select.matches(key)) return self.toggleFileStaged();
-                if (km.stage_all.matches(key)) return self.toggleAllStaged();
-                if (km.commit.matches(key)) return self.startCommitPrompt();
+        const action = actions.fromNormalKey(key, self.config.keymap, self.focus) orelse return;
+        switch (action) {
+            .quit => self.running = false,
+            .cancel => {
+                if (self.focus == .main) {
+                    self.focus = .files;
+                    try self.updatePreview();
+                } else {
+                    self.running = false;
+                }
             },
-            .branches => {
-                if (km.select.matches(key) or km.enter.matches(key)) return self.checkoutSelectedBranch();
+            .focus_files => try self.setFocus(.files),
+            .focus_branches => try self.setFocus(.branches),
+            .focus_commits => try self.setFocus(.commits),
+            .focus_stash => try self.setFocus(.stash),
+            .focus_main => try self.setFocus(.main),
+            .refresh => {
+                try self.refresh();
+                try self.setMessage("refreshed", .{});
             },
-            .commits => {},
-            .stash => {
-                if (km.stash_apply.matches(key) or km.enter.matches(key)) return self.applySelectedStash();
-                if (km.stash_pop.matches(key)) return self.popSelectedStash();
-                if (km.stash_drop.matches(key)) return self.dropSelectedStash();
+            .fetch => try self.runMutation(try self.git.fetch(), "fetch complete", .{}),
+            .pull => try self.runMutation(try self.git.pull(), "pull complete", .{}),
+            .push => try self.runMutation(try self.git.push(), "push complete", .{}),
+            .move_up => try self.moveUp(),
+            .move_down => try self.moveDown(),
+            .focus_left => try self.focusPrevious(),
+            .focus_right => try self.focusNext(),
+            .select => switch (self.focus) {
+                .files => try self.toggleFileStaged(),
+                .branches => try self.checkoutSelectedBranch(),
+                .stash => try self.applySelectedStash(),
+                .commits, .main => {},
             },
-            .main => {},
+            .stage_all => try self.toggleAllStaged(),
+            .start_commit => try self.startCommitPrompt(),
+            .stash_pop => try self.popSelectedStash(),
+            .stash_drop => try self.dropSelectedStash(),
+            .confirm, .backspace => {},
         }
     }
 
