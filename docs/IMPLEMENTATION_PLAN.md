@@ -54,12 +54,14 @@ the core remains testable before larger workflows are added.
 
 ## 5. Add Async Execution
 
+- Keep the current scoped timer refresh for files/status.
+- Keep the current full refresh on terminal focus regain.
 - Move long-running Git commands off the UI loop.
 - Add loading state for in-flight commands.
 - Add command log panel.
-- Add background refresh.
 - Add background fetch timers.
-- Make refresh granular so one failed loader does not break the whole app.
+- Make all panel refreshes granular so one failed loader does not break the
+  whole app.
 
 ## 6. Add Secondary Panels
 

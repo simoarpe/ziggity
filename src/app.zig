@@ -33,6 +33,7 @@ pub const App = struct {
     commit_buffer: std.ArrayList(u8) = .empty,
     mode: Mode = .normal,
     pending_confirmation: ?Confirmation = null,
+    terminal_focused: bool = true,
     running: bool = true,
 
     pub fn init(
@@ -73,6 +74,29 @@ pub const App = struct {
         self.updatePreview() catch |err| {
             try self.setMessage("preview failed: {s}", .{@errorName(err)});
         };
+    }
+
+    pub fn refreshWorkingTree(self: *App) !void {
+        const selected_path = if (self.selectedFile()) |file| try self.allocator.dupe(u8, file.path) else null;
+        defer if (selected_path) |path| self.allocator.free(path);
+
+        var status = try self.git.loadStatusSummary();
+        errdefer status.deinit(self.allocator);
+        var files = try self.git.loadFiles();
+        errdefer model.deinitFileStatuses(self.allocator, files);
+
+        self.data.replaceStatus(self.allocator, status);
+        status = .{};
+        self.data.replaceFiles(self.allocator, files);
+        files = &.{};
+
+        self.restoreFileSelection(selected_path);
+        self.clampSelections();
+        if (self.focus == .files or self.focus == .main) {
+            self.updatePreview() catch |err| {
+                try self.setMessage("preview failed: {s}", .{@errorName(err)});
+            };
+        }
     }
 
     pub fn handleKey(self: *App, key: vaxis.Key) !void {
@@ -129,6 +153,26 @@ pub const App = struct {
             .stash_drop => try self.dropSelectedStash(),
             .confirm, .backspace => {},
         }
+    }
+
+    pub fn handleRefreshTick(self: *App) !void {
+        if (self.mode != .normal) return;
+        if (!self.terminal_focused) return;
+        self.refreshWorkingTree() catch |err| {
+            try self.setMessage("auto refresh failed: {s}", .{@errorName(err)});
+        };
+    }
+
+    pub fn handleFocusIn(self: *App) !void {
+        self.terminal_focused = true;
+        if (self.mode != .normal) return;
+        self.refresh() catch |err| {
+            try self.setMessage("focus refresh failed: {s}", .{@errorName(err)});
+        };
+    }
+
+    pub fn handleFocusOut(self: *App) void {
+        self.terminal_focused = false;
     }
 
     pub fn selectedFile(self: *const App) ?model.FileStatus {
@@ -435,6 +479,16 @@ pub const App = struct {
         if (self.data.branches.len == 0) self.branch_index = 0 else self.branch_index = @min(self.branch_index, self.data.branches.len - 1);
         if (self.data.commits.len == 0) self.commit_index = 0 else self.commit_index = @min(self.commit_index, self.data.commits.len - 1);
         if (self.data.stash.len == 0) self.stash_index = 0 else self.stash_index = @min(self.stash_index, self.data.stash.len - 1);
+    }
+
+    fn restoreFileSelection(self: *App, selected_path: ?[]const u8) void {
+        const path = selected_path orelse return;
+        for (self.data.files, 0..) |file, idx| {
+            if (std.mem.eql(u8, file.path, path)) {
+                self.file_index = idx;
+                return;
+            }
+        }
     }
 };
 

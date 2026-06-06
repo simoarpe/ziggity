@@ -87,6 +87,24 @@ pub const StashEntry = struct {
     }
 };
 
+pub const StatusSummary = struct {
+    current_branch: []u8 = &.{},
+    upstream: ?[]u8 = null,
+    ahead: ?usize = null,
+    behind: ?usize = null,
+
+    pub fn deinit(self: *StatusSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.current_branch);
+        if (self.upstream) |upstream| allocator.free(upstream);
+        self.* = .{};
+    }
+};
+
+pub fn deinitFileStatuses(allocator: std.mem.Allocator, files: []FileStatus) void {
+    for (files) |*file| file.deinit(allocator);
+    allocator.free(files);
+}
+
 pub const RepoData = struct {
     current_branch: []u8 = &.{},
     upstream: ?[]u8 = null,
@@ -104,8 +122,7 @@ pub const RepoData = struct {
     pub fn deinit(self: *RepoData, allocator: std.mem.Allocator) void {
         allocator.free(self.current_branch);
         if (self.upstream) |upstream| allocator.free(upstream);
-        for (self.files) |*file| file.deinit(allocator);
-        allocator.free(self.files);
+        deinitFileStatuses(allocator, self.files);
         for (self.branches) |*branch| branch.deinit(allocator);
         allocator.free(self.branches);
         for (self.commits) |*commit| commit.deinit(allocator);
@@ -113,6 +130,20 @@ pub const RepoData = struct {
         for (self.stash) |*entry| entry.deinit(allocator);
         allocator.free(self.stash);
         self.* = empty();
+    }
+
+    pub fn replaceStatus(self: *RepoData, allocator: std.mem.Allocator, status: StatusSummary) void {
+        allocator.free(self.current_branch);
+        if (self.upstream) |upstream| allocator.free(upstream);
+        self.current_branch = status.current_branch;
+        self.upstream = status.upstream;
+        self.ahead = status.ahead;
+        self.behind = status.behind;
+    }
+
+    pub fn replaceFiles(self: *RepoData, allocator: std.mem.Allocator, files: []FileStatus) void {
+        deinitFileStatuses(allocator, self.files);
+        self.files = files;
     }
 
     pub fn stagedCount(self: RepoData) usize {

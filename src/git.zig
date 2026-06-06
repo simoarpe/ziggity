@@ -91,21 +91,35 @@ pub const Git = struct {
         var data = model.RepoData.empty();
         errdefer data.deinit(self.allocator);
 
-        data.current_branch = try self.currentBranch();
-        data.upstream = try self.upstreamBranch();
-        if (data.upstream != null) {
-            const counts = self.aheadBehind() catch null;
-            if (counts) |value| {
-                data.behind = value.behind;
-                data.ahead = value.ahead;
-            }
-        }
+        const status = try self.loadStatusSummary();
+        data.current_branch = status.current_branch;
+        data.upstream = status.upstream;
+        data.ahead = status.ahead;
+        data.behind = status.behind;
         data.files = try self.loadFiles();
         data.branches = try self.loadBranches();
         data.commits = try self.loadCommits("HEAD", 100);
         data.stash = try self.loadStash();
 
         return data;
+    }
+
+    pub fn loadStatusSummary(self: *Git) !model.StatusSummary {
+        var status = model.StatusSummary{
+            .current_branch = try self.currentBranch(),
+        };
+        errdefer status.deinit(self.allocator);
+
+        status.upstream = try self.upstreamBranch();
+        if (status.upstream != null) {
+            const counts = self.aheadBehind() catch null;
+            if (counts) |value| {
+                status.behind = value.behind;
+                status.ahead = value.ahead;
+            }
+        }
+
+        return status;
     }
 
     pub fn currentBranch(self: *Git) ![]u8 {

@@ -9,6 +9,17 @@ const Event = union(enum) {
     winsize: vaxis.Winsize,
     focus_in,
     focus_out,
+    refresh_tick,
+};
+
+const refresh_interval = std.Io.Duration.fromMilliseconds(1500);
+const focus_events_set = "\x1b[?1004h";
+const focus_events_reset = "\x1b[?1004l";
+
+const RefreshTicker = struct {
+    io: std.Io,
+    loop: *vaxis.Loop(Event),
+    stop: std.atomic.Value(bool) = .init(false),
 };
 
 pub fn run(init: std.process.Init, app: *app_mod.App) !void {
@@ -28,8 +39,22 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     try loop.start();
     defer loop.stop();
 
+    var refresh_ticker: RefreshTicker = .{ .io = io, .loop = &loop };
+    var refresh_future = try io.concurrent(refreshTickerRun, .{&refresh_ticker});
+    defer {
+        refresh_ticker.stop.store(true, .release);
+        _ = loop.tryPostEvent(.refresh_tick) catch false;
+        refresh_future.await(io);
+    }
+
     const writer = tty.writer();
     try vx.enterAltScreen(writer);
+    try writer.writeAll(focus_events_set);
+    try writer.flush();
+    defer {
+        writer.writeAll(focus_events_reset) catch {};
+        writer.flush() catch {};
+    }
     try vx.queryTerminal(writer, .fromSeconds(1));
 
     try renderAndFlush(&vx, writer, app);
@@ -38,9 +63,19 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
         switch (event) {
             .key_press => |key| try app.handleKey(key),
             .winsize => |ws| try vx.resize(allocator, tty.writer(), ws),
-            else => {},
+            .refresh_tick => try app.handleRefreshTick(),
+            .focus_in => try app.handleFocusIn(),
+            .focus_out => app.handleFocusOut(),
         }
         try renderAndFlush(&vx, writer, app);
+    }
+}
+
+fn refreshTickerRun(state: *RefreshTicker) void {
+    while (!state.stop.load(.acquire)) {
+        std.Io.sleep(state.io, refresh_interval, .awake) catch return;
+        if (state.stop.load(.acquire)) return;
+        _ = state.loop.tryPostEvent(.refresh_tick) catch false;
     }
 }
 

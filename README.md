@@ -16,6 +16,8 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 - Stash panel from `git stash list`.
 - Diff preview for selected files, commits, branches, and stash entries.
 - Keyboard navigation across side panels and the diff panel.
+- Scoped periodic auto-refresh for external working tree changes.
+- Full refresh when the terminal reports focus regain.
 - Stage/unstage selected file.
 - Stage/unstage all files.
 - Discard selected file with confirmation.
@@ -36,7 +38,7 @@ This is an MVP. Large lazygit workflows are intentionally not implemented yet:
 - Filtering/search.
 - Remote branch, tag, worktree, and submodule panels.
 - Mouse handling.
-- Async/background refresh.
+- Nonblocking async command execution.
 - Full lazygit config compatibility.
 
 ## Build
@@ -109,7 +111,7 @@ Key values may be a single character or one of `space`, `enter`, `tab`, `esc`,
 The TUI layer uses libvaxis' low-level API:
 
 - `vaxis.Tty` for terminal raw mode and writing.
-- `vaxis.Loop(Event)` for keyboard and resize events.
+- `vaxis.Loop(Event)` for keyboard, resize, focus, and refresh tick events.
 - `vaxis.Window.child` for panel layout and borders.
 - `Window.printSegment` and cell styles for text rendering.
 - Alternate screen rendering with explicit redraws after each event.
@@ -117,8 +119,8 @@ The TUI layer uses libvaxis' low-level API:
 ## Architecture
 
 - `src/main.zig`: process entry point and startup error reporting.
-- `src/app.zig`: application state, focus, selections, actions, refreshes, and
-  commit prompt handling.
+- `src/app.zig`: application state, focus, selections, actions, full/scoped
+  refreshes, and commit prompt handling.
 - `src/git.zig`: Git subprocess wrapper and parsers.
 - `src/tui.zig`: libvaxis event loop, layout, and rendering.
 - `src/model.zig`: owned domain models and status derivation.
