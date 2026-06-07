@@ -120,11 +120,19 @@ pub const App = struct {
 
         if (key.matches(vaxis.Key.page_up, .{})) return self.scrollMain(-10);
         if (key.matches(vaxis.Key.page_down, .{})) return self.scrollMain(10);
+        if (self.isEscapeKey(key) and self.fileFilterActive()) {
+            try self.clearFileFilter();
+            return;
+        }
 
         const action = actions.fromNormalKey(key, self.config.keymap, self.focus) orelse return;
         switch (action) {
             .quit => self.running = false,
             .cancel => {
+                if (self.fileFilterActive()) {
+                    try self.clearFileFilter();
+                    return;
+                }
                 if (self.focus == .main) {
                     self.focus = .files;
                     try self.updatePreview();
@@ -358,8 +366,7 @@ pub const App = struct {
         self.main_scroll = 0;
         self.mode = .file_filter_prompt;
         self.file_filter_buffer.clearRetainingCapacity();
-        try self.file_filter_buffer.appendSlice(self.allocator, self.file_filter);
-        try self.updatePreview();
+        try self.updateFileFilterFromPrompt();
         try self.setMessage("filter files", .{});
     }
 
@@ -420,14 +427,13 @@ pub const App = struct {
     }
 
     fn handleCommitPromptKey(self: *App, key: vaxis.Key) !void {
-        const km = self.config.keymap;
-        if (km.escape.matches(key)) {
+        if (self.isEscapeKey(key)) {
             self.mode = .normal;
             self.commit_buffer.clearRetainingCapacity();
             try self.setMessage("commit cancelled", .{});
             return;
         }
-        if (km.enter.matches(key)) {
+        if (self.isEnterKey(key)) {
             const message = std.mem.trim(u8, self.commit_buffer.items, " \t\r\n");
             if (message.len == 0) {
                 try self.setMessage("commit message cannot be empty", .{});
@@ -438,7 +444,7 @@ pub const App = struct {
             self.commit_buffer.clearRetainingCapacity();
             return self.runMutation(result, "commit created", .{});
         }
-        if (km.backspace.matches(key)) {
+        if (self.isBackspaceKey(key)) {
             if (self.commit_buffer.items.len > 0) self.commit_buffer.items.len -= 1;
             return;
         }
@@ -450,36 +456,34 @@ pub const App = struct {
     }
 
     fn handleFileFilterPromptKey(self: *App, key: vaxis.Key) !void {
-        const km = self.config.keymap;
-        if (km.escape.matches(key)) {
-            self.mode = .normal;
-            self.file_filter_buffer.clearRetainingCapacity();
-            try self.setMessage("filter cancelled", .{});
+        if (self.isEscapeKey(key)) {
+            try self.clearFileFilter();
             return;
         }
-        if (km.enter.matches(key)) {
+        if (self.isEnterKey(key)) {
             const filter = std.mem.trim(u8, self.file_filter_buffer.items, " \t\r\n");
             try self.applyFileFilter(filter);
             return;
         }
-        if (km.backspace.matches(key)) {
+        if (self.isBackspaceKey(key)) {
             if (self.file_filter_buffer.items.len > 0) self.file_filter_buffer.items.len -= 1;
+            try self.updateFileFilterFromPrompt();
             return;
         }
         if (key.text) |text| {
             if (!key.mods.ctrl and !key.mods.alt and text.len > 0 and text[0] >= 0x20) {
                 try self.file_filter_buffer.appendSlice(self.allocator, text);
+                try self.updateFileFilterFromPrompt();
             }
         }
     }
 
     fn handleConfirmationKey(self: *App, key: vaxis.Key) !void {
-        const km = self.config.keymap;
-        if (km.enter.matches(key) or key.matches('y', .{})) {
+        if (self.isEnterKey(key) or key.matches('y', .{})) {
             try self.confirmPendingAction();
             return;
         }
-        if (km.escape.matches(key) or key.matches('n', .{})) {
+        if (self.isEscapeKey(key) or key.matches('n', .{})) {
             self.mode = .normal;
             self.pending_confirmation = null;
             try self.setMessage("cancelled", .{});
@@ -573,17 +577,38 @@ pub const App = struct {
 
     fn applyFileFilter(self: *App, filter: []const u8) !void {
         self.mode = .normal;
-        self.allocator.free(self.file_filter);
-        self.file_filter = try self.allocator.dupe(u8, filter);
+        try self.setFileFilter(filter);
         self.file_filter_buffer.clearRetainingCapacity();
-        self.normalizeFileSelectionForFilter();
-        self.main_scroll = 0;
-        try self.updatePreview();
         if (self.file_filter.len == 0) {
             try self.setMessage("file filter cleared", .{});
         } else {
             try self.setMessage("filter \"{s}\" ({d}/{d})", .{ self.file_filter, self.visibleFileCount(), self.data.files.len });
         }
+    }
+
+    fn clearFileFilter(self: *App) !void {
+        self.mode = .normal;
+        self.file_filter_buffer.clearRetainingCapacity();
+        try self.applyFileFilter("");
+    }
+
+    fn updateFileFilterFromPrompt(self: *App) !void {
+        const filter = std.mem.trim(u8, self.file_filter_buffer.items, " \t\r\n");
+        try self.setFileFilter(filter);
+        if (self.file_filter.len == 0) {
+            try self.setMessage("filter files", .{});
+        } else {
+            try self.setMessage("filter \"{s}\" ({d}/{d})", .{ self.file_filter, self.visibleFileCount(), self.data.files.len });
+        }
+    }
+
+    fn setFileFilter(self: *App, filter: []const u8) !void {
+        const next_filter = try self.allocator.dupe(u8, filter);
+        self.allocator.free(self.file_filter);
+        self.file_filter = next_filter;
+        self.file_index = self.firstMatchingFileIndex() orelse 0;
+        self.main_scroll = 0;
+        try self.updatePreview();
     }
 
     fn moveFileUp(self: *App) void {
@@ -627,14 +652,48 @@ pub const App = struct {
         }
         return null;
     }
+
+    fn isEscapeKey(self: *const App, key: vaxis.Key) bool {
+        return self.config.keymap.escape.matches(key) or key.matches(vaxis.Key.escape, .{});
+    }
+
+    fn isEnterKey(self: *const App, key: vaxis.Key) bool {
+        return self.config.keymap.enter.matches(key) or key.matches(vaxis.Key.enter, .{});
+    }
+
+    fn isBackspaceKey(self: *const App, key: vaxis.Key) bool {
+        return self.config.keymap.backspace.matches(key) or key.matches(vaxis.Key.backspace, .{});
+    }
 };
 
 pub fn pathMatchesFilter(path: []const u8, filter: []const u8) bool {
-    if (filter.len == 0) return true;
-    if (filter.len > path.len) return false;
+    var terms = std.mem.tokenizeAny(u8, filter, " \t\r\n");
+    while (terms.next()) |term| {
+        if (!caseAwareContains(path, term)) return false;
+    }
+    return true;
+}
+
+fn caseAwareContains(haystack: []const u8, needle: []const u8) bool {
+    if (containsAsciiUppercase(needle)) {
+        return std.mem.indexOf(u8, haystack, needle) != null;
+    }
+    return containsIgnoreCaseAscii(haystack, needle);
+}
+
+fn containsAsciiUppercase(bytes: []const u8) bool {
+    for (bytes) |byte| {
+        if (byte >= 'A' and byte <= 'Z') return true;
+    }
+    return false;
+}
+
+fn containsIgnoreCaseAscii(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
     var idx: usize = 0;
-    while (idx + filter.len <= path.len) : (idx += 1) {
-        if (std.ascii.eqlIgnoreCase(path[idx .. idx + filter.len], filter)) return true;
+    while (idx + needle.len <= haystack.len) : (idx += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[idx .. idx + needle.len], needle)) return true;
     }
     return false;
 }
@@ -643,9 +702,36 @@ test "action enum is referenced" {
     try std.testing.expect(actions.Action.quit == .quit);
 }
 
-test "path filter is case-insensitive substring match" {
+test "path filter follows lazygit substring matching" {
     try std.testing.expect(pathMatchesFilter("src/App.zig", "app"));
+    try std.testing.expect(pathMatchesFilter("src/App.zig", "App"));
+    try std.testing.expect(!pathMatchesFilter("src/App.zig", "APP"));
     try std.testing.expect(pathMatchesFilter("README.md", "read"));
+    try std.testing.expect(pathMatchesFilter("integration-testing", "int test"));
+    try std.testing.expect(pathMatchesFilter("integration-testing", "test int"));
+    try std.testing.expect(!pathMatchesFilter("integration-testing", "int missing"));
     try std.testing.expect(!pathMatchesFilter("src/main.zig", "model"));
     try std.testing.expect(pathMatchesFilter("src/main.zig", ""));
+    try std.testing.expect(pathMatchesFilter("src/main.zig", "  \t  "));
+}
+
+test "escape clears active file filter before quitting" {
+    const allocator = std.testing.allocator;
+    var app = App{
+        .allocator = allocator,
+        .git = undefined,
+        .config = .{},
+        .diff = try allocator.dupe(u8, "old preview"),
+        .message = try allocator.dupe(u8, "old message"),
+        .file_filter = try allocator.dupe(u8, "app"),
+    };
+    defer allocator.free(app.diff);
+    defer allocator.free(app.message);
+    defer allocator.free(app.file_filter);
+
+    try app.handleKey(.{ .codepoint = vaxis.Key.escape });
+
+    try std.testing.expect(app.running);
+    try std.testing.expectEqual(@as(usize, 0), app.file_filter.len);
+    try std.testing.expectEqualStrings("file filter cleared", app.message);
 }
