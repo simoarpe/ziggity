@@ -9,6 +9,7 @@ const model = @import("model.zig");
 pub const Mode = enum {
     normal,
     commit_prompt,
+    file_filter_prompt,
     confirmation,
 };
 
@@ -30,7 +31,9 @@ pub const App = struct {
     main_scroll: usize = 0,
     diff: []u8 = &.{},
     message: []u8 = &.{},
+    file_filter: []u8 = &.{},
     commit_buffer: std.ArrayList(u8) = .empty,
+    file_filter_buffer: std.ArrayList(u8) = .empty,
     mode: Mode = .normal,
     pending_confirmation: ?Confirmation = null,
     terminal_focused: bool = true,
@@ -61,7 +64,9 @@ pub const App = struct {
         self.data.deinit(self.allocator);
         self.allocator.free(self.diff);
         self.allocator.free(self.message);
+        self.allocator.free(self.file_filter);
         self.commit_buffer.deinit(self.allocator);
+        self.file_filter_buffer.deinit(self.allocator);
         self.git.deinit();
         self.* = undefined;
     }
@@ -102,6 +107,10 @@ pub const App = struct {
     pub fn handleKey(self: *App, key: vaxis.Key) !void {
         if (self.mode == .commit_prompt) {
             try self.handleCommitPromptKey(key);
+            return;
+        }
+        if (self.mode == .file_filter_prompt) {
+            try self.handleFileFilterPromptKey(key);
             return;
         }
         if (self.mode == .confirmation) {
@@ -148,6 +157,7 @@ pub const App = struct {
             .stage_all => try self.toggleAllStaged(),
             .discard_selected => try self.startDiscardSelectedConfirmation(),
             .discard_all => try self.startDiscardAllConfirmation(),
+            .start_file_filter => try self.startFileFilterPrompt(),
             .start_commit => try self.startCommitPrompt(),
             .stash_pop => try self.popSelectedStash(),
             .stash_drop => try self.dropSelectedStash(),
@@ -177,7 +187,43 @@ pub const App = struct {
 
     pub fn selectedFile(self: *const App) ?model.FileStatus {
         if (self.data.files.len == 0) return null;
-        return self.data.files[@min(self.file_index, self.data.files.len - 1)];
+        const idx = @min(self.file_index, self.data.files.len - 1);
+        if (self.fileMatchesFilter(self.data.files[idx])) return self.data.files[idx];
+        if (self.firstMatchingFileIndex()) |first| return self.data.files[first];
+        return null;
+    }
+
+    pub fn fileFilterActive(self: *const App) bool {
+        return self.file_filter.len > 0;
+    }
+
+    pub fn fileMatchesFilter(self: *const App, file: model.FileStatus) bool {
+        if (self.file_filter.len == 0) return true;
+        if (pathMatchesFilter(file.path, self.file_filter)) return true;
+        if (file.previous_path) |previous| {
+            return pathMatchesFilter(previous, self.file_filter);
+        }
+        return false;
+    }
+
+    pub fn visibleFileCount(self: *const App) usize {
+        var count: usize = 0;
+        for (self.data.files) |file| {
+            if (self.fileMatchesFilter(file)) count += 1;
+        }
+        return count;
+    }
+
+    pub fn selectedFileVisibleOrdinal(self: *const App) usize {
+        if (self.data.files.len == 0) return 0;
+        var ordinal: usize = 0;
+        const selected_idx = @min(self.file_index, self.data.files.len - 1);
+        for (self.data.files, 0..) |file, idx| {
+            if (!self.fileMatchesFilter(file)) continue;
+            if (idx == selected_idx) return ordinal;
+            ordinal += 1;
+        }
+        return 0;
     }
 
     pub fn selectedBranch(self: *const App) ?model.Branch {
@@ -239,7 +285,7 @@ pub const App = struct {
 
     fn moveUp(self: *App) !void {
         switch (self.focus) {
-            .files => self.file_index -|= 1,
+            .files => self.moveFileUp(),
             .branches => self.branch_index -|= 1,
             .commits => self.commit_index -|= 1,
             .stash => self.stash_index -|= 1,
@@ -250,9 +296,7 @@ pub const App = struct {
 
     fn moveDown(self: *App) !void {
         switch (self.focus) {
-            .files => {
-                if (self.file_index + 1 < self.data.files.len) self.file_index += 1;
-            },
+            .files => self.moveFileDown(),
             .branches => {
                 if (self.branch_index + 1 < self.data.branches.len) self.branch_index += 1;
             },
@@ -307,6 +351,16 @@ pub const App = struct {
         self.mode = .commit_prompt;
         self.commit_buffer.clearRetainingCapacity();
         try self.setMessage("enter commit message", .{});
+    }
+
+    fn startFileFilterPrompt(self: *App) !void {
+        self.focus = .files;
+        self.main_scroll = 0;
+        self.mode = .file_filter_prompt;
+        self.file_filter_buffer.clearRetainingCapacity();
+        try self.file_filter_buffer.appendSlice(self.allocator, self.file_filter);
+        try self.updatePreview();
+        try self.setMessage("filter files", .{});
     }
 
     fn startDiscardSelectedConfirmation(self: *App) !void {
@@ -395,6 +449,30 @@ pub const App = struct {
         }
     }
 
+    fn handleFileFilterPromptKey(self: *App, key: vaxis.Key) !void {
+        const km = self.config.keymap;
+        if (km.escape.matches(key)) {
+            self.mode = .normal;
+            self.file_filter_buffer.clearRetainingCapacity();
+            try self.setMessage("filter cancelled", .{});
+            return;
+        }
+        if (km.enter.matches(key)) {
+            const filter = std.mem.trim(u8, self.file_filter_buffer.items, " \t\r\n");
+            try self.applyFileFilter(filter);
+            return;
+        }
+        if (km.backspace.matches(key)) {
+            if (self.file_filter_buffer.items.len > 0) self.file_filter_buffer.items.len -= 1;
+            return;
+        }
+        if (key.text) |text| {
+            if (!key.mods.ctrl and !key.mods.alt and text.len > 0 and text[0] >= 0x20) {
+                try self.file_filter_buffer.appendSlice(self.allocator, text);
+            }
+        }
+    }
+
     fn handleConfirmationKey(self: *App, key: vaxis.Key) !void {
         const km = self.config.keymap;
         if (km.enter.matches(key) or key.matches('y', .{})) {
@@ -433,6 +511,7 @@ pub const App = struct {
         self.diff = switch (self.focus) {
             .files, .main => blk: {
                 if (self.selectedFile()) |file| break :blk try self.git.diffForFile(file, self.config.diff_context);
+                if (self.fileFilterActive() and self.data.files.len > 0) break :blk try self.allocator.dupe(u8, "No files match the active filter.\n");
                 break :blk try self.allocator.dupe(u8, "Working tree clean.\n");
             },
             .branches => blk: {
@@ -476,6 +555,7 @@ pub const App = struct {
 
     fn clampSelections(self: *App) void {
         if (self.data.files.len == 0) self.file_index = 0 else self.file_index = @min(self.file_index, self.data.files.len - 1);
+        self.normalizeFileSelectionForFilter();
         if (self.data.branches.len == 0) self.branch_index = 0 else self.branch_index = @min(self.branch_index, self.data.branches.len - 1);
         if (self.data.commits.len == 0) self.commit_index = 0 else self.commit_index = @min(self.commit_index, self.data.commits.len - 1);
         if (self.data.stash.len == 0) self.stash_index = 0 else self.stash_index = @min(self.stash_index, self.data.stash.len - 1);
@@ -490,8 +570,82 @@ pub const App = struct {
             }
         }
     }
+
+    fn applyFileFilter(self: *App, filter: []const u8) !void {
+        self.mode = .normal;
+        self.allocator.free(self.file_filter);
+        self.file_filter = try self.allocator.dupe(u8, filter);
+        self.file_filter_buffer.clearRetainingCapacity();
+        self.normalizeFileSelectionForFilter();
+        self.main_scroll = 0;
+        try self.updatePreview();
+        if (self.file_filter.len == 0) {
+            try self.setMessage("file filter cleared", .{});
+        } else {
+            try self.setMessage("filter \"{s}\" ({d}/{d})", .{ self.file_filter, self.visibleFileCount(), self.data.files.len });
+        }
+    }
+
+    fn moveFileUp(self: *App) void {
+        if (self.data.files.len == 0) return;
+        self.normalizeFileSelectionForFilter();
+        var idx = @min(self.file_index, self.data.files.len - 1);
+        while (idx > 0) {
+            idx -= 1;
+            if (self.fileMatchesFilter(self.data.files[idx])) {
+                self.file_index = idx;
+                return;
+            }
+        }
+    }
+
+    fn moveFileDown(self: *App) void {
+        if (self.data.files.len == 0) return;
+        self.normalizeFileSelectionForFilter();
+        var idx = @min(self.file_index, self.data.files.len - 1) + 1;
+        while (idx < self.data.files.len) : (idx += 1) {
+            if (self.fileMatchesFilter(self.data.files[idx])) {
+                self.file_index = idx;
+                return;
+            }
+        }
+    }
+
+    fn normalizeFileSelectionForFilter(self: *App) void {
+        if (self.data.files.len == 0) {
+            self.file_index = 0;
+            return;
+        }
+        self.file_index = @min(self.file_index, self.data.files.len - 1);
+        if (self.fileMatchesFilter(self.data.files[self.file_index])) return;
+        self.file_index = self.firstMatchingFileIndex() orelse 0;
+    }
+
+    fn firstMatchingFileIndex(self: *const App) ?usize {
+        for (self.data.files, 0..) |file, idx| {
+            if (self.fileMatchesFilter(file)) return idx;
+        }
+        return null;
+    }
 };
+
+pub fn pathMatchesFilter(path: []const u8, filter: []const u8) bool {
+    if (filter.len == 0) return true;
+    if (filter.len > path.len) return false;
+    var idx: usize = 0;
+    while (idx + filter.len <= path.len) : (idx += 1) {
+        if (std.ascii.eqlIgnoreCase(path[idx .. idx + filter.len], filter)) return true;
+    }
+    return false;
+}
 
 test "action enum is referenced" {
     try std.testing.expect(actions.Action.quit == .quit);
+}
+
+test "path filter is case-insensitive substring match" {
+    try std.testing.expect(pathMatchesFilter("src/App.zig", "app"));
+    try std.testing.expect(pathMatchesFilter("README.md", "read"));
+    try std.testing.expect(!pathMatchesFilter("src/main.zig", "model"));
+    try std.testing.expect(pathMatchesFilter("src/main.zig", ""));
 }

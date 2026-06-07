@@ -28,6 +28,7 @@ pub const KeyMap = struct {
     escape: Binding = .{ .codepoint = 0x1b },
     backspace: Binding = .{ .codepoint = 0x7f },
     stage_all: Binding = .{ .codepoint = 'a' },
+    file_filter: Binding = .{ .codepoint = '/' },
     discard: Binding = .{ .codepoint = 'd' },
     discard_all: Binding = .{ .codepoint = 'D' },
     commit: Binding = .{ .codepoint = 'c' },

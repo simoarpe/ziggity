@@ -16,6 +16,7 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 - Stash panel from `git stash list`.
 - Diff preview for selected files, commits, branches, and stash entries.
 - Keyboard navigation across side panels and the diff panel.
+- Files-panel path filtering.
 - Scoped periodic auto-refresh for external working tree changes.
 - Full refresh when the terminal reports focus regain.
 - Stage/unstage selected file.
@@ -35,7 +36,6 @@ This is an MVP. Large lazygit workflows are intentionally not implemented yet:
 - Interactive rebase, squash/fixup flows, cherry-pick flows, and undo/redo.
 - Merge conflict helpers.
 - Custom commands and custom command menus.
-- Filtering/search.
 - Remote branch, tag, worktree, and submodule panels.
 - Mouse handling.
 - Nonblocking async command execution.
@@ -68,6 +68,7 @@ Useful keys:
 
 - `q` or `ctrl+c`: quit
 - `R`: refresh
+- `/`: filter files by path, enter applies, empty filter clears
 - `j`/`k` or arrows: move selection
 - `h`/`l`: move focus between panels
 - `1`/`2`/`3`/`4`/`0`: focus files, branches, commits, stash, diff
@@ -96,6 +97,7 @@ diff_context = 3
 
 key.quit = q
 key.refresh = R
+key.file_filter = /
 key.discard = d
 key.discard_all = D
 key.commit = c

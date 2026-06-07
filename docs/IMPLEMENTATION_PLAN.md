@@ -4,6 +4,13 @@ This plan tracks the next stages for turning the current MVP into a more
 complete lazygit-inspired Zig TUI Git client. Work should proceed in order so
 the core remains testable before larger workflows are added.
 
+## Feature Workflow Rule
+
+Before adding any new user-facing feature, inspect how lazygit implements the
+same or closest workflow. Record the relevant lazygit files/functions in the
+working notes or final summary, then implement the ziggity version pragmatically
+rather than as a line-by-line port.
+
 ## 1. Stabilize The MVP
 
 - Add focused tests for Git parsers:
@@ -25,7 +32,8 @@ the core remains testable before larger workflows are added.
 - Add confirmation prompts.
 - Implement discard selected file.
 - Implement discard all changes.
-- Add file filtering/search.
+- Add file filtering/search. Implemented: case-insensitive files-panel path
+  filter with `/`.
 - Add file tree grouping.
 - Add patch/hunk/line staging in the diff view.
 
@@ -81,10 +89,8 @@ the core remains testable before larger workflows are added.
 
 ## Current Priority
 
-Start with section 1:
+Continue with section 2:
 
-1. Extract pure parser functions where parsing is currently embedded in Git
-   command methods.
-2. Add parser tests.
-3. Add a small action/key mapping layer and tests.
-4. Re-run build and tests before moving to discard confirmations.
+1. Add file tree grouping.
+2. Add patch/hunk/line staging in the diff view.
+3. Re-run build and tests after each step.

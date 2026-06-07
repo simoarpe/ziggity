@@ -171,6 +171,11 @@ fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
         const line = std.fmt.bufPrint(&upstream_buf, "{s} +{d} -{d}", .{ upstream, ahead, behind }) catch return;
         print(win, 2, 0, line, st.muted);
     }
+    if (app.fileFilterActive()) {
+        var filter_buf: [256]u8 = undefined;
+        const line = std.fmt.bufPrint(&filter_buf, "filter {d}/{d} {s}", .{ app.visibleFileCount(), app.data.files.len, app.file_filter }) catch return;
+        print(win, 3, 0, line, st.muted);
+    }
 }
 
 fn drawFiles(win: vaxis.Window, app: *const app_mod.App) void {
@@ -178,14 +183,21 @@ fn drawFiles(win: vaxis.Window, app: *const app_mod.App) void {
         print(win, 0, 0, "Working tree clean", styles().muted);
         return;
     }
-    const start = scrollStart(app.file_index, app.data.files.len, win.height);
+    const visible_count = app.visibleFileCount();
+    if (visible_count == 0) {
+        print(win, 0, 0, "No files match filter", styles().muted);
+        return;
+    }
+    const start = scrollStart(app.selectedFileVisibleOrdinal(), visible_count, win.height);
     var row: u16 = 0;
-    var idx = start;
-    while (idx < app.data.files.len and row < win.height) : ({
-        idx += 1;
-        row += 1;
-    }) {
-        const file = app.data.files[idx];
+    var ordinal: usize = 0;
+    for (app.data.files, 0..) |file, idx| {
+        if (!app.fileMatchesFilter(file)) continue;
+        if (ordinal < start) {
+            ordinal += 1;
+            continue;
+        }
+        if (row >= win.height) break;
         var buf: [512]u8 = undefined;
         const line = if (file.previous_path) |previous|
             std.fmt.bufPrint(&buf, "{c}{c} {s} -> {s}", .{ file.short_status[0], file.short_status[1], previous, file.path }) catch file.path
@@ -193,6 +205,8 @@ fn drawFiles(win: vaxis.Window, app: *const app_mod.App) void {
             std.fmt.bufPrint(&buf, "{c}{c} {s}", .{ file.short_status[0], file.short_status[1], file.path }) catch file.path;
         const style = if (file.conflict) styles().warning else if (file.has_unstaged) styles().unstaged else if (file.has_staged) styles().staged else styles().normal;
         drawSelectable(win, row, line, style, idx == app.file_index and app.focus == .files);
+        ordinal += 1;
+        row += 1;
     }
 }
 
@@ -282,6 +296,13 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
         win.showCursor(cursor_col, 0);
         return;
     }
+    if (app.mode == .file_filter_prompt) {
+        print(win, 0, 0, "filter: ", st.bottom_accent);
+        print(win, 0, 8, app.file_filter_buffer.items, st.bottom);
+        const cursor_col: u16 = @min(win.width -| 1, @as(u16, @intCast(8 + app.file_filter_buffer.items.len)));
+        win.showCursor(cursor_col, 0);
+        return;
+    }
     if (app.mode == .confirmation) {
         var confirm_buf: [1024]u8 = undefined;
         print(win, 0, 0, app.confirmationText(&confirm_buf), st.bottom_accent);
@@ -289,7 +310,7 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
     }
 
     var buf: [1024]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "{s} | q quit R refresh h/l panels j/k move space action d discard D discard-all c commit f fetch p pull P push", .{app.message}) catch app.message;
+    const line = std.fmt.bufPrint(&buf, "{s} | q quit R refresh / filter h/l panels j/k move space action d discard D discard-all c commit f fetch p pull P push", .{app.message}) catch app.message;
     print(win, 0, 0, line, st.bottom);
 }
 
