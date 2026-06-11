@@ -134,8 +134,19 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         .status_filter_menu => drawStatusFilterPopup(root, app),
         .menu => drawMenuPopup(root, app),
         .confirmation => drawConfirmPopup(root, app),
+        .commit_prompt => drawCommitPopup(root, app),
         else => {},
     }
+}
+
+fn drawCommitPopup(root: vaxis.Window, app: *const app_mod.App) void {
+    const st = styles();
+    const w: u16 = @min(@as(u16, 72), root.width -| 4);
+    const win = popup(root, w, 5, "Commit summary");
+    print(win, 0, 0, app.commit_buffer.items, st.normal);
+    print(win, 2, 0, "enter commit   esc cancel", st.bottom_accent);
+    const cursor_col: u16 = @min(win.width -| 1, @as(u16, @intCast(app.commit_buffer.items.len)));
+    win.showCursor(cursor_col, 0);
 }
 
 /// Centered, bordered, opaque popup window. Fills its region first so the
@@ -374,10 +385,7 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
     fillRow(win, 0, st.bottom);
     if (app.mode == .commit_prompt) {
-        print(win, 0, 0, "commit: ", st.bottom_accent);
-        print(win, 0, 8, app.commit_buffer.items, st.bottom);
-        const cursor_col: u16 = @min(win.width -| 1, @as(u16, @intCast(8 + app.commit_buffer.items.len)));
-        win.showCursor(cursor_col, 0);
+        print(win, 0, 0, "enter commit  -  esc cancel", st.bottom_accent);
         return;
     }
     if (app.mode == .file_filter_prompt) {
