@@ -33,6 +33,7 @@ pub const KeyMap = struct {
     discard: Binding = .{ .codepoint = 'd' },
     discard_all: Binding = .{ .codepoint = 'D' },
     commit: Binding = .{ .codepoint = 'c' },
+    new_branch: Binding = .{ .codepoint = 'n' },
     fetch: Binding = .{ .codepoint = 'f' },
     pull: Binding = .{ .codepoint = 'p' },
     push: Binding = .{ .codepoint = 'P' },

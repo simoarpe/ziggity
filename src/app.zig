@@ -12,7 +12,20 @@ pub const Mode = enum {
     file_filter_prompt,
     status_filter_menu,
     menu,
+    text_prompt,
     confirmation,
+};
+
+/// A reusable single-line text-input popup. Each kind knows its title and what
+/// to do with the submitted text.
+pub const TextPromptKind = enum {
+    new_branch,
+
+    pub fn title(self: TextPromptKind) []const u8 {
+        return switch (self) {
+            .new_branch => "New branch name",
+        };
+    }
 };
 
 pub const Confirmation = enum {
@@ -108,6 +121,8 @@ pub const App = struct {
     file_filter: []u8 = &.{},
     commit_buffer: std.ArrayList(u8) = .empty,
     file_filter_buffer: std.ArrayList(u8) = .empty,
+    input_buffer: std.ArrayList(u8) = .empty,
+    text_prompt_kind: ?TextPromptKind = null,
     mode: Mode = .normal,
     status_filter_index: usize = 0,
     active_menu: ?Menu = null,
@@ -143,6 +158,7 @@ pub const App = struct {
         self.allocator.free(self.file_filter);
         self.commit_buffer.deinit(self.allocator);
         self.file_filter_buffer.deinit(self.allocator);
+        self.input_buffer.deinit(self.allocator);
         self.git.deinit();
         self.* = undefined;
     }
@@ -196,6 +212,10 @@ pub const App = struct {
         }
         if (self.mode == .menu) {
             try self.handleMenuKey(key);
+            return;
+        }
+        if (self.mode == .text_prompt) {
+            try self.handleTextPromptKey(key);
             return;
         }
         if (self.mode == .confirmation) {
@@ -255,6 +275,7 @@ pub const App = struct {
             .start_file_filter => try self.startFileFilterPrompt(),
             .open_status_filter => try self.startStatusFilterMenu(),
             .start_commit => try self.startCommitPrompt(),
+            .new_branch => try self.startTextPrompt(.new_branch),
             .stash_pop => try self.popSelectedStash(),
             .stash_drop => try self.dropSelectedStash(),
             .confirm, .backspace => {},
@@ -575,6 +596,67 @@ pub const App = struct {
         self.mode = .commit_prompt;
         self.commit_buffer.clearRetainingCapacity();
         try self.setMessage("enter commit message", .{});
+    }
+
+    fn startTextPrompt(self: *App, kind: TextPromptKind) !void {
+        switch (kind) {
+            .new_branch => {
+                if (self.branches_tab != .local) self.branches_tab = .local;
+                self.focus = .branches;
+            },
+        }
+        self.mode = .text_prompt;
+        self.text_prompt_kind = kind;
+        self.input_buffer.clearRetainingCapacity();
+        try self.setMessage("{s}", .{kind.title()});
+    }
+
+    fn handleTextPromptKey(self: *App, key: vaxis.Key) !void {
+        if (self.isEscapeKey(key)) {
+            self.cancelTextPrompt("cancelled");
+            return;
+        }
+        if (self.isEnterKey(key)) {
+            try self.submitTextPrompt();
+            return;
+        }
+        if (self.isBackspaceKey(key)) {
+            if (self.input_buffer.items.len > 0) self.input_buffer.items.len -= 1;
+            return;
+        }
+        if (key.text) |text| {
+            if (!key.mods.ctrl and !key.mods.alt and text.len > 0 and text[0] >= 0x20) {
+                try self.input_buffer.appendSlice(self.allocator, text);
+            }
+        }
+    }
+
+    fn cancelTextPrompt(self: *App, comptime reason: []const u8) void {
+        self.mode = .normal;
+        self.text_prompt_kind = null;
+        self.input_buffer.clearRetainingCapacity();
+        self.setMessage(reason, .{}) catch {};
+    }
+
+    fn submitTextPrompt(self: *App) !void {
+        const kind = self.text_prompt_kind orelse {
+            self.mode = .normal;
+            return;
+        };
+        const value = std.mem.trim(u8, self.input_buffer.items, " \t\r\n");
+        if (value.len == 0) {
+            try self.setMessage("{s} cannot be empty", .{kind.title()});
+            return;
+        }
+        switch (kind) {
+            .new_branch => {
+                const result = try self.git.createBranch(value);
+                self.mode = .normal;
+                self.text_prompt_kind = null;
+                self.input_buffer.clearRetainingCapacity();
+                return self.runMutation(result, "created branch {s}", .{value});
+            },
+        }
     }
 
     fn startFileFilterPrompt(self: *App) !void {
@@ -1209,4 +1291,19 @@ test "commits panel tab selects between the commits and reflog lists" {
     app.commits_tab = .reflog;
     try std.testing.expectEqualStrings("2222222", app.selectedCommit().?.short_hash);
     try std.testing.expectEqualStrings("HEAD@{0}", app.selectedCommit().?.refs);
+}
+
+test "new branch prompt opens on the local branches tab" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.branches_tab = .tags;
+    try app.startTextPrompt(.new_branch);
+
+    try std.testing.expectEqual(Mode.text_prompt, app.mode);
+    try std.testing.expectEqual(TextPromptKind.new_branch, app.text_prompt_kind.?);
+    try std.testing.expectEqual(model.Focus.branches, app.focus);
+    try std.testing.expectEqual(BranchesTab.local, app.branches_tab);
 }

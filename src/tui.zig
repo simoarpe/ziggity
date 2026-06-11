@@ -141,8 +141,20 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         .menu => drawMenuPopup(root, app),
         .confirmation => drawConfirmPopup(root, app),
         .commit_prompt => drawCommitPopup(root, app),
+        .text_prompt => drawTextPromptPopup(root, app),
         else => {},
     }
+}
+
+fn drawTextPromptPopup(root: vaxis.Window, app: *const app_mod.App) void {
+    const st = styles();
+    const kind = app.text_prompt_kind orelse return;
+    const w: u16 = @min(@as(u16, 64), root.width -| 4);
+    const win = popup(root, w, 5, kind.title());
+    print(win, 0, 0, app.input_buffer.items, st.normal);
+    print(win, 2, 0, "enter confirm   esc cancel", st.bottom_accent);
+    const cursor_col: u16 = @min(win.width -| 1, @as(u16, @intCast(app.input_buffer.items.len)));
+    win.showCursor(cursor_col, 0);
 }
 
 fn drawCommitPopup(root: vaxis.Window, app: *const app_mod.App) void {
@@ -445,6 +457,10 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
         print(win, 0, 0, "j/k move  -  enter select  -  esc cancel", st.bottom_accent);
         return;
     }
+    if (app.mode == .text_prompt) {
+        print(win, 0, 0, "enter confirm  -  esc cancel", st.bottom_accent);
+        return;
+    }
     if (app.mode == .confirmation) {
         print(win, 0, 0, "y/enter confirm  -  n/esc cancel", st.bottom_accent);
         return;
@@ -462,7 +478,7 @@ fn contextHints(focus: model.Focus) []const u8 {
     return switch (focus) {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push" ++ global,
         .files => "space stage  a stage-all  c commit  d discard  D discard-all  / filter  ^b status  enter view" ++ global,
-        .branches => "space checkout  enter view  [ ] local/remotes/tags  f fetch" ++ global,
+        .branches => "space checkout  n new  enter view  [ ] local/remotes/tags" ++ global,
         .commits => "enter view  j/k move  [ ] commits/reflog" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => "j/k scroll  PgUp/PgDn page  esc back" ++ global,

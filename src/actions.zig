@@ -18,6 +18,7 @@ pub const Action = enum {
     start_file_filter,
     open_status_filter,
     start_commit,
+    new_branch,
     fetch,
     pull,
     push,
@@ -76,6 +77,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
         },
         .branches => {
             if (keymap.select.matches(key)) return .select;
+            if (keymap.new_branch.matches(key)) return .new_branch;
         },
         .commits => {},
         .stash => {

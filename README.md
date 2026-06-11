@@ -81,6 +81,7 @@ Useful keys:
 - `[`/`]`: switch panel tabs (branches: Local/Remotes/Tags; commits: Commits/Reflog)
 - `enter`: inspect the selected item in the main panel; `esc`/`h` returns
 - `space`: stage/unstage file, checkout branch, or apply stash depending on focus
+- `n`: create a new branch from HEAD (branches panel, Local tab)
 - `a`: stage all if there are unstaged files, otherwise unstage all
 - `d`: open the discard menu for the selected file (all changes, or unstaged only)
 - `D`: discard all working tree changes after confirmation

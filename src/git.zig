@@ -401,6 +401,11 @@ pub const Git = struct {
         return self.exec(&.{ "checkout", branch_name });
     }
 
+    /// Create a new branch from HEAD and switch to it (lazygit's new-branch).
+    pub fn createBranch(self: *Git, name: []const u8) !ExecResult {
+        return self.exec(&.{ "checkout", "-b", name });
+    }
+
     pub fn fetch(self: *Git) !ExecResult {
         return self.exec(&.{ "fetch", "--all", "--no-write-fetch-head" });
     }
