@@ -82,6 +82,10 @@ Useful keys:
 - `enter`: inspect the selected item in the main panel; `esc`/`h` returns
 - `space`: stage/unstage file, checkout branch, or apply stash depending on focus
 - `n`: create a new branch from HEAD (branches panel, Local tab)
+- `d`: delete the selected local branch (menu: delete / force delete)
+- `M`: merge the selected branch into the current branch (after confirmation)
+- `r`: rebase the current branch onto the selected branch (after confirmation)
+- `space` on the Remotes/Tags tab: check out the remote branch or tag
 - `a`: stage all if there are unstaged files, otherwise unstage all
 - `d`: open the discard menu for the selected file (all changes, or unstaged only)
 - `D`: discard all working tree changes after confirmation

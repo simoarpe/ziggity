@@ -30,6 +30,8 @@ pub const TextPromptKind = enum {
 
 pub const Confirmation = enum {
     discard_all,
+    merge_branch,
+    rebase_branch,
 };
 
 /// Tabs within the Branches panel, switched with [ and ] (lazygit).
@@ -64,6 +66,8 @@ pub const CommitsTab = enum {
 pub const MenuAction = enum {
     discard_file_all,
     discard_file_unstaged,
+    delete_branch,
+    force_delete_branch,
 };
 
 pub const MenuItem = struct {
@@ -86,6 +90,11 @@ const discard_menu_staged_and_unstaged = [_]MenuItem{
 
 const discard_menu_all_only = [_]MenuItem{
     .{ .label = "Discard all changes", .action = .discard_file_all },
+};
+
+const branch_delete_menu = [_]MenuItem{
+    .{ .label = "Delete branch", .action = .delete_branch },
+    .{ .label = "Force delete branch", .action = .force_delete_branch },
 };
 
 /// Order of entries shown in the status-filter menu popup.
@@ -276,6 +285,9 @@ pub const App = struct {
             .open_status_filter => try self.startStatusFilterMenu(),
             .start_commit => try self.startCommitPrompt(),
             .new_branch => try self.startTextPrompt(.new_branch),
+            .delete_branch => try self.startBranchDeleteMenu(),
+            .merge_branch => try self.startBranchConfirm(.merge_branch),
+            .rebase_branch => try self.startBranchConfirm(.rebase_branch),
             .stash_pop => try self.popSelectedStash(),
             .stash_drop => try self.dropSelectedStash(),
             .confirm, .backspace => {},
@@ -439,9 +451,20 @@ pub const App = struct {
     }
 
     pub fn confirmationText(self: *const App, buf: []u8) []const u8 {
-        _ = buf;
         return switch (self.pending_confirmation orelse return "No pending action.") {
             .discard_all => "Discard all working tree changes? This cannot be undone.",
+            .merge_branch => blk: {
+                if (self.selectedBranch()) |branch| {
+                    break :blk std.fmt.bufPrint(buf, "Merge {s} into {s}?", .{ branch.name, self.data.current_branch }) catch "Merge the selected branch into the current one?";
+                }
+                break :blk "Merge the selected branch into the current one?";
+            },
+            .rebase_branch => blk: {
+                if (self.selectedBranch()) |branch| {
+                    break :blk std.fmt.bufPrint(buf, "Rebase {s} onto {s}?", .{ self.data.current_branch, branch.name }) catch "Rebase the current branch onto the selected one?";
+                }
+                break :blk "Rebase the current branch onto the selected one?";
+            },
         };
     }
 
@@ -739,6 +762,14 @@ pub const App = struct {
                 };
                 return self.runMutation(try self.git.discardUnstaged(file), "discarded unstaged changes in {s}", .{file.path});
             },
+            .delete_branch, .force_delete_branch => {
+                const branch = self.selectedBranch() orelse {
+                    try self.setMessage("no branch selected", .{});
+                    return;
+                };
+                const force = action == .force_delete_branch;
+                return self.runMutation(try self.git.deleteBranch(branch.name, force), "deleted {s}", .{branch.name});
+            },
         }
     }
 
@@ -752,20 +783,73 @@ pub const App = struct {
         try self.setMessage("confirm discard all changes", .{});
     }
 
-    fn checkoutSelectedBranch(self: *App) !void {
-        if (self.branches_tab != .local) {
-            try self.setMessage("checkout is available on the Branches (Local) tab", .{});
-            return;
-        }
-        const branch = self.selectedBranch() orelse {
-            try self.setMessage("no branch selected", .{});
-            return;
-        };
+    fn startBranchDeleteMenu(self: *App) !void {
+        const branch = try self.localBranchForAction() orelse return;
         if (branch.current) {
-            try self.setMessage("already on {s}", .{branch.name});
+            try self.setMessage("cannot delete the checked-out branch", .{});
             return;
         }
-        return self.runMutation(try self.git.checkout(branch.name), "checked out {s}", .{branch.name});
+        self.mode = .menu;
+        self.active_menu = .{ .title = "Delete branch", .items = &branch_delete_menu, .index = 0 };
+        try self.setMessage("delete {s}", .{branch.name});
+    }
+
+    fn startBranchConfirm(self: *App, kind: Confirmation) !void {
+        const branch = try self.localBranchForAction() orelse return;
+        if (branch.current) {
+            try self.setMessage("select a branch other than the current one", .{});
+            return;
+        }
+        self.mode = .confirmation;
+        self.pending_confirmation = kind;
+        try self.setMessage("confirm action on {s}", .{branch.name});
+    }
+
+    /// Validate that a branch action can run: the Branches panel must be on the
+    /// Local tab with a branch selected. Returns the selected branch or null
+    /// (after setting an explanatory message).
+    fn localBranchForAction(self: *App) !?model.Branch {
+        if (self.branches_tab != .local) {
+            try self.setMessage("branch actions apply to the Local tab", .{});
+            return null;
+        }
+        return self.selectedBranch() orelse {
+            try self.setMessage("no branch selected", .{});
+            return null;
+        };
+    }
+
+    fn checkoutSelectedBranch(self: *App) !void {
+        switch (self.branches_tab) {
+            .local => {
+                const branch = self.selectedBranch() orelse {
+                    try self.setMessage("no branch selected", .{});
+                    return;
+                };
+                if (branch.current) {
+                    try self.setMessage("already on {s}", .{branch.name});
+                    return;
+                }
+                return self.runMutation(try self.git.checkout(branch.name), "checked out {s}", .{branch.name});
+            },
+            .remotes => {
+                const branch = self.selectedRemoteBranch() orelse {
+                    try self.setMessage("no remote branch selected", .{});
+                    return;
+                };
+                // git's DWIM checkout creates a local tracking branch from
+                // "<remote>/<name>" when "<name>" doesn't already exist locally.
+                const local_name = localNameForRemote(branch.name);
+                return self.runMutation(try self.git.checkout(local_name), "checked out {s}", .{local_name});
+            },
+            .tags => {
+                const tag = self.selectedTag() orelse {
+                    try self.setMessage("no tag selected", .{});
+                    return;
+                };
+                return self.runMutation(try self.git.checkout(tag.name), "checked out {s} (detached)", .{tag.name});
+            },
+        }
     }
 
     fn applySelectedStash(self: *App) !void {
@@ -892,6 +976,20 @@ pub const App = struct {
         self.pending_confirmation = null;
         switch (pending) {
             .discard_all => return self.runMutation(try self.git.discardAll(), "discarded all changes", .{}),
+            .merge_branch => {
+                const branch = self.selectedBranch() orelse {
+                    try self.setMessage("no branch selected", .{});
+                    return;
+                };
+                return self.runMutation(try self.git.mergeBranch(branch.name), "merged {s}", .{branch.name});
+            },
+            .rebase_branch => {
+                const branch = self.selectedBranch() orelse {
+                    try self.setMessage("no branch selected", .{});
+                    return;
+                };
+                return self.runMutation(try self.git.rebaseOnto(branch.name), "rebased onto {s}", .{branch.name});
+            },
         }
     }
 
@@ -1132,6 +1230,15 @@ pub const App = struct {
     }
 };
 
+/// Strip the remote prefix from a remote-tracking branch name so git's DWIM
+/// checkout can create a local tracking branch: "origin/feature" -> "feature".
+pub fn localNameForRemote(remote_name: []const u8) []const u8 {
+    if (std.mem.indexOfScalar(u8, remote_name, '/')) |slash| {
+        return remote_name[slash + 1 ..];
+    }
+    return remote_name;
+}
+
 pub fn pathMatchesFilter(path: []const u8, filter: []const u8) bool {
     var terms = std.mem.tokenizeAny(u8, filter, " \t\r\n");
     while (terms.next()) |term| {
@@ -1179,6 +1286,12 @@ test "path filter follows lazygit substring matching" {
     try std.testing.expect(!pathMatchesFilter("src/main.zig", "model"));
     try std.testing.expect(pathMatchesFilter("src/main.zig", ""));
     try std.testing.expect(pathMatchesFilter("src/main.zig", "  \t  "));
+}
+
+test "local name for remote strips the remote prefix" {
+    try std.testing.expectEqualStrings("feature", localNameForRemote("origin/feature"));
+    try std.testing.expectEqualStrings("feat/x", localNameForRemote("origin/feat/x"));
+    try std.testing.expectEqualStrings("solo", localNameForRemote("solo"));
 }
 
 test "escape clears active file filter before quitting" {
@@ -1291,6 +1404,37 @@ test "commits panel tab selects between the commits and reflog lists" {
     app.commits_tab = .reflog;
     try std.testing.expectEqualStrings("2222222", app.selectedCommit().?.short_hash);
     try std.testing.expectEqualStrings("HEAD@{0}", app.selectedCommit().?.refs);
+}
+
+test "branch delete menu refuses the current branch and non-local tabs" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var branches = [_]model.Branch{
+        .{ .name = @constCast("main"), .current = true },
+        .{ .name = @constCast("feature"), .current = false },
+    };
+    app.data.branches = &branches;
+
+    // The checked-out branch cannot be deleted.
+    app.branch_index = 0;
+    try app.startBranchDeleteMenu();
+    try std.testing.expectEqual(Mode.normal, app.mode);
+
+    // A non-current local branch opens the delete menu with both options.
+    app.branch_index = 1;
+    try app.startBranchDeleteMenu();
+    try std.testing.expectEqual(Mode.menu, app.mode);
+    try std.testing.expectEqual(@as(usize, 2), app.active_menu.?.items.len);
+    try std.testing.expectEqual(MenuAction.force_delete_branch, app.active_menu.?.items[1].action);
+
+    // Branch actions are unavailable on the Remotes/Tags tabs.
+    app.closeMenu();
+    app.branches_tab = .remotes;
+    try app.startBranchDeleteMenu();
+    try std.testing.expectEqual(Mode.normal, app.mode);
 }
 
 test "new branch prompt opens on the local branches tab" {

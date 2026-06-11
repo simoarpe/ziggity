@@ -406,6 +406,19 @@ pub const Git = struct {
         return self.exec(&.{ "checkout", "-b", name });
     }
 
+    pub fn deleteBranch(self: *Git, name: []const u8, force: bool) !ExecResult {
+        const flag = if (force) "-D" else "-d";
+        return self.exec(&.{ "branch", flag, "--", name });
+    }
+
+    pub fn mergeBranch(self: *Git, name: []const u8) !ExecResult {
+        return self.exec(&.{ "merge", "--no-edit", name });
+    }
+
+    pub fn rebaseOnto(self: *Git, name: []const u8) !ExecResult {
+        return self.exec(&.{ "rebase", name });
+    }
+
     pub fn fetch(self: *Git) !ExecResult {
         return self.exec(&.{ "fetch", "--all", "--no-write-fetch-head" });
     }

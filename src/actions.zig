@@ -19,6 +19,9 @@ pub const Action = enum {
     open_status_filter,
     start_commit,
     new_branch,
+    delete_branch,
+    merge_branch,
+    rebase_branch,
     fetch,
     pull,
     push,
@@ -78,6 +81,9 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
         .branches => {
             if (keymap.select.matches(key)) return .select;
             if (keymap.new_branch.matches(key)) return .new_branch;
+            if (keymap.discard.matches(key)) return .delete_branch;
+            if (keymap.merge.matches(key)) return .merge_branch;
+            if (keymap.rebase.matches(key)) return .rebase_branch;
         },
         .commits => {},
         .stash => {

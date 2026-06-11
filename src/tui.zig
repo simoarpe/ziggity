@@ -226,6 +226,8 @@ fn drawConfirmPopup(root: vaxis.Window, app: *const app_mod.App) void {
     const text = app.confirmationText(&buf);
     const title = switch (app.pending_confirmation orelse .discard_all) {
         .discard_all => "Discard all changes",
+        .merge_branch => "Merge branch",
+        .rebase_branch => "Rebase branch",
     };
     const w: u16 = @intCast(@min(@as(usize, 72), @max(text.len, 34) + 4));
     const win = popup(root, w, 5, title);
@@ -478,7 +480,7 @@ fn contextHints(focus: model.Focus) []const u8 {
     return switch (focus) {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push" ++ global,
         .files => "space stage  a stage-all  c commit  d discard  D discard-all  / filter  ^b status  enter view" ++ global,
-        .branches => "space checkout  n new  enter view  [ ] local/remotes/tags" ++ global,
+        .branches => "space checkout  n new  d delete  M merge  r rebase  [ ] tabs" ++ global,
         .commits => "enter view  j/k move  [ ] commits/reflog" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => "j/k scroll  PgUp/PgDn page  esc back" ++ global,
