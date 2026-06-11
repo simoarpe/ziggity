@@ -326,8 +326,22 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
     }
 
     var buf: [1024]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "{s} | q quit R refresh / filter ^b status h/l panels j/k move space action d discard D discard-all c commit f fetch p pull P push", .{app.message}) catch app.message;
+    const line = std.fmt.bufPrint(&buf, "{s}  |  {s}", .{ app.message, contextHints(app.focus) }) catch app.message;
     print(win, 0, 0, line, st.bottom);
+}
+
+/// Keybinding hints for the focused panel only, lazygit-style. A short global
+/// suffix (refresh/quit) is appended since those apply everywhere.
+fn contextHints(focus: model.Focus) []const u8 {
+    const global = "  -  R refresh  q quit";
+    return switch (focus) {
+        .status => "1-5 panels  enter inspect  f fetch  p pull  P push" ++ global,
+        .files => "space stage  a stage-all  c commit  d discard  D discard-all  / filter  ^b status  enter view" ++ global,
+        .branches => "space checkout  enter view  f fetch  p pull  P push" ++ global,
+        .commits => "enter view  j/k move" ++ global,
+        .stash => "space apply  g pop  d drop  enter view" ++ global,
+        .main => "j/k scroll  PgUp/PgDn page  esc back" ++ global,
+    };
 }
 
 fn drawSelectable(win: vaxis.Window, row: u16, text: []const u8, style: vaxis.Style, selected: bool) void {
