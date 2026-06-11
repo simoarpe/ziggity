@@ -106,7 +106,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     const main_w = root.width - side_w;
 
     var y: u16 = 0;
-    const status_h: u16 = 5;
+    const status_h: u16 = 6;
     const remaining = body_h - status_h;
     const base = remaining / 4;
     const extra = remaining % 4;
@@ -152,9 +152,11 @@ fn panel(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, title: []const u8, 
 
 fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
     const st = styles();
+    var row: u16 = 0;
     var buf: [256]u8 = undefined;
     const branch = std.fmt.bufPrint(&buf, "branch {s}", .{app.data.current_branch}) catch return;
-    print(win, 0, 0, branch, st.normal);
+    print(win, row, 0, branch, st.normal);
+    row += 1;
 
     var counts_buf: [256]u8 = undefined;
     const counts = std.fmt.bufPrint(&counts_buf, "files {d} staged {d} unstaged {d}", .{
@@ -162,19 +164,27 @@ fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
         app.data.stagedCount(),
         app.data.unstagedCount(),
     }) catch return;
-    print(win, 1, 0, counts, st.muted);
+    print(win, row, 0, counts, st.muted);
+    row += 1;
 
     if (app.data.upstream) |upstream| {
         var upstream_buf: [256]u8 = undefined;
         const ahead = app.data.ahead orelse 0;
         const behind = app.data.behind orelse 0;
         const line = std.fmt.bufPrint(&upstream_buf, "{s} +{d} -{d}", .{ upstream, ahead, behind }) catch return;
-        print(win, 2, 0, line, st.muted);
+        print(win, row, 0, line, st.muted);
+        row += 1;
     }
-    if (app.fileFilterActive()) {
+
+    if (app.anyFileFilterActive()) {
         var filter_buf: [256]u8 = undefined;
-        const line = std.fmt.bufPrint(&filter_buf, "filter {d}/{d} {s}", .{ app.visibleFileCount(), app.data.files.len, app.file_filter }) catch return;
-        print(win, 3, 0, line, st.muted);
+        const line = if (app.fileDisplayFilterActive() and app.fileFilterActive())
+            std.fmt.bufPrint(&filter_buf, "filter {s} {d}/{d} {s}", .{ app.file_display_filter.label(), app.visibleFileCount(), app.data.files.len, app.file_filter }) catch return
+        else if (app.fileDisplayFilterActive())
+            std.fmt.bufPrint(&filter_buf, "filter {s} {d}/{d}", .{ app.file_display_filter.label(), app.visibleFileCount(), app.data.files.len }) catch return
+        else
+            std.fmt.bufPrint(&filter_buf, "filter {d}/{d} {s}", .{ app.visibleFileCount(), app.data.files.len, app.file_filter }) catch return;
+        print(win, row, 0, line, st.muted);
     }
 }
 
@@ -303,6 +313,12 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
         win.showCursor(cursor_col, 0);
         return;
     }
+    if (app.mode == .status_filter_menu) {
+        var menu_buf: [256]u8 = undefined;
+        const line = std.fmt.bufPrint(&menu_buf, "status filter ({s}): s staged u unstaged t tracked T untracked r all esc cancel", .{app.file_display_filter.label()}) catch "status filter";
+        print(win, 0, 0, line, st.bottom_accent);
+        return;
+    }
     if (app.mode == .confirmation) {
         var confirm_buf: [1024]u8 = undefined;
         print(win, 0, 0, app.confirmationText(&confirm_buf), st.bottom_accent);
@@ -310,7 +326,7 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
     }
 
     var buf: [1024]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "{s} | q quit R refresh / filter h/l panels j/k move space action d discard D discard-all c commit f fetch p pull P push", .{app.message}) catch app.message;
+    const line = std.fmt.bufPrint(&buf, "{s} | q quit R refresh / filter ^b status h/l panels j/k move space action d discard D discard-all c commit f fetch p pull P push", .{app.message}) catch app.message;
     print(win, 0, 0, line, st.bottom);
 }
 

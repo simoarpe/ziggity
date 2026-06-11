@@ -10,6 +10,7 @@ pub const Mode = enum {
     normal,
     commit_prompt,
     file_filter_prompt,
+    status_filter_menu,
     confirmation,
 };
 
@@ -29,6 +30,7 @@ pub const App = struct {
     commit_index: usize = 0,
     stash_index: usize = 0,
     main_scroll: usize = 0,
+    file_display_filter: model.FileDisplayFilter = .all,
     diff: []u8 = &.{},
     message: []u8 = &.{},
     file_filter: []u8 = &.{},
@@ -113,6 +115,10 @@ pub const App = struct {
             try self.handleFileFilterPromptKey(key);
             return;
         }
+        if (self.mode == .status_filter_menu) {
+            try self.handleStatusFilterMenuKey(key);
+            return;
+        }
         if (self.mode == .confirmation) {
             try self.handleConfirmationKey(key);
             return;
@@ -166,6 +172,7 @@ pub const App = struct {
             .discard_selected => try self.startDiscardSelectedConfirmation(),
             .discard_all => try self.startDiscardAllConfirmation(),
             .start_file_filter => try self.startFileFilterPrompt(),
+            .open_status_filter => try self.startStatusFilterMenu(),
             .start_commit => try self.startCommitPrompt(),
             .stash_pop => try self.popSelectedStash(),
             .stash_drop => try self.dropSelectedStash(),
@@ -205,7 +212,16 @@ pub const App = struct {
         return self.file_filter.len > 0;
     }
 
+    pub fn fileDisplayFilterActive(self: *const App) bool {
+        return self.file_display_filter != .all;
+    }
+
+    pub fn anyFileFilterActive(self: *const App) bool {
+        return self.fileFilterActive() or self.fileDisplayFilterActive();
+    }
+
     pub fn fileMatchesFilter(self: *const App, file: model.FileStatus) bool {
+        if (!self.file_display_filter.matches(file)) return false;
         if (self.file_filter.len == 0) return true;
         if (pathMatchesFilter(file.path, self.file_filter)) return true;
         if (file.previous_path) |previous| {
@@ -342,13 +358,25 @@ pub const App = struct {
     }
 
     fn toggleAllStaged(self: *App) !void {
-        if (self.data.unstagedCount() > 0) {
+        if (self.visibleUnstagedCount() > 0) {
+            if (self.anyFileFilterActive()) {
+                var paths: std.ArrayList([]const u8) = .empty;
+                defer paths.deinit(self.allocator);
+                try self.collectVisiblePaths(&paths, .unstaged);
+                return self.runMutation(try self.git.stagePaths(paths.items), "staged visible files", .{});
+            }
             return self.runMutation(try self.git.stageAll(), "staged all files", .{});
         }
-        if (self.data.stagedCount() > 0) {
+        if (self.visibleStagedCount() > 0) {
+            if (self.anyFileFilterActive()) {
+                var paths: std.ArrayList([]const u8) = .empty;
+                defer paths.deinit(self.allocator);
+                try self.collectVisiblePaths(&paths, .staged);
+                return self.runMutation(try self.git.unstagePaths(paths.items), "unstaged visible files", .{});
+            }
             return self.runMutation(try self.git.unstageAll(), "unstaged all files", .{});
         }
-        try self.setMessage("no files to stage", .{});
+        try self.setMessage("no visible files to stage", .{});
     }
 
     fn startCommitPrompt(self: *App) !void {
@@ -368,6 +396,12 @@ pub const App = struct {
         self.file_filter_buffer.clearRetainingCapacity();
         try self.updateFileFilterFromPrompt();
         try self.setMessage("filter files", .{});
+    }
+
+    fn startStatusFilterMenu(self: *App) !void {
+        self.focus = .files;
+        self.mode = .status_filter_menu;
+        try self.setMessage("status filter", .{});
     }
 
     fn startDiscardSelectedConfirmation(self: *App) !void {
@@ -478,6 +512,19 @@ pub const App = struct {
         }
     }
 
+    fn handleStatusFilterMenuKey(self: *App, key: vaxis.Key) !void {
+        if (self.isEscapeKey(key)) {
+            self.mode = .normal;
+            try self.setMessage("status filter cancelled", .{});
+            return;
+        }
+        if (key.matches('s', .{})) return self.setFileDisplayFilter(.staged);
+        if (key.matches('u', .{})) return self.setFileDisplayFilter(.unstaged);
+        if (key.matches('t', .{})) return self.setFileDisplayFilter(.tracked);
+        if (key.matches('T', .{})) return self.setFileDisplayFilter(.untracked);
+        if (key.matches('r', .{})) return self.setFileDisplayFilter(.all);
+    }
+
     fn handleConfirmationKey(self: *App, key: vaxis.Key) !void {
         if (self.isEnterKey(key) or key.matches('y', .{})) {
             try self.confirmPendingAction();
@@ -515,7 +562,7 @@ pub const App = struct {
         self.diff = switch (self.focus) {
             .files, .main => blk: {
                 if (self.selectedFile()) |file| break :blk try self.git.diffForFile(file, self.config.diff_context);
-                if (self.fileFilterActive() and self.data.files.len > 0) break :blk try self.allocator.dupe(u8, "No files match the active filter.\n");
+                if (self.anyFileFilterActive() and self.data.files.len > 0) break :blk try self.allocator.dupe(u8, "No files match the active filter.\n");
                 break :blk try self.allocator.dupe(u8, "Working tree clean.\n");
             },
             .branches => blk: {
@@ -611,6 +658,19 @@ pub const App = struct {
         try self.updatePreview();
     }
 
+    fn setFileDisplayFilter(self: *App, filter: model.FileDisplayFilter) !void {
+        self.mode = .normal;
+        self.file_display_filter = filter;
+        self.file_index = self.firstMatchingFileIndex() orelse 0;
+        self.main_scroll = 0;
+        try self.updatePreview();
+        if (filter == .all) {
+            try self.setMessage("file status filter cleared", .{});
+        } else {
+            try self.setMessage("showing {s} files ({d}/{d})", .{ filter.label(), self.visibleFileCount(), self.data.files.len });
+        }
+    }
+
     fn moveFileUp(self: *App) void {
         if (self.data.files.len == 0) return;
         self.normalizeFileSelectionForFilter();
@@ -651,6 +711,38 @@ pub const App = struct {
             if (self.fileMatchesFilter(file)) return idx;
         }
         return null;
+    }
+
+    fn visibleUnstagedCount(self: *const App) usize {
+        var count: usize = 0;
+        for (self.data.files) |file| {
+            if (self.fileMatchesFilter(file) and file.has_unstaged) count += 1;
+        }
+        return count;
+    }
+
+    fn visibleStagedCount(self: *const App) usize {
+        var count: usize = 0;
+        for (self.data.files) |file| {
+            if (self.fileMatchesFilter(file) and file.has_staged) count += 1;
+        }
+        return count;
+    }
+
+    const VisiblePathKind = enum {
+        staged,
+        unstaged,
+    };
+
+    fn collectVisiblePaths(self: *const App, paths: *std.ArrayList([]const u8), kind: VisiblePathKind) !void {
+        for (self.data.files) |file| {
+            if (!self.fileMatchesFilter(file)) continue;
+            const include = switch (kind) {
+                .staged => file.has_staged,
+                .unstaged => file.has_unstaged,
+            };
+            if (include) try paths.append(self.allocator, file.path);
+        }
     }
 
     fn isEscapeKey(self: *const App, key: vaxis.Key) bool {

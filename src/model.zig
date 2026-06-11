@@ -40,6 +40,37 @@ pub const FileStatus = struct {
     }
 };
 
+pub const FileDisplayFilter = enum {
+    all,
+    staged,
+    unstaged,
+    tracked,
+    untracked,
+    conflicted,
+
+    pub fn label(self: FileDisplayFilter) []const u8 {
+        return switch (self) {
+            .all => "all",
+            .staged => "staged",
+            .unstaged => "unstaged",
+            .tracked => "tracked",
+            .untracked => "untracked",
+            .conflicted => "conflicted",
+        };
+    }
+
+    pub fn matches(self: FileDisplayFilter, file: FileStatus) bool {
+        return switch (self) {
+            .all => true,
+            .staged => file.has_staged,
+            .unstaged => file.has_unstaged,
+            .tracked => file.tracked or file.has_staged,
+            .untracked => !(file.tracked or file.has_staged),
+            .conflicted => file.conflict,
+        };
+    }
+};
+
 pub const Branch = struct {
     name: []u8,
     upstream: ?[]u8 = null,
@@ -210,4 +241,43 @@ test "derive status fields follows porcelain status columns" {
 
     const conflict = deriveStatusFields(.{ 'U', 'U' });
     try std.testing.expect(conflict.conflict);
+}
+
+test "file display filter follows lazygit status filter semantics" {
+    const unstaged: FileStatus = .{
+        .path = @constCast("src/main.zig"),
+        .short_status = .{ ' ', 'M' },
+        .has_staged = false,
+        .has_unstaged = true,
+        .tracked = true,
+        .added = false,
+        .deleted = false,
+        .conflict = false,
+    };
+    const staged_untracked: FileStatus = .{
+        .path = @constCast("new.zig"),
+        .short_status = .{ 'A', ' ' },
+        .has_staged = true,
+        .has_unstaged = false,
+        .tracked = false,
+        .added = true,
+        .deleted = false,
+        .conflict = false,
+    };
+    const untracked: FileStatus = .{
+        .path = @constCast("scratch.txt"),
+        .short_status = .{ '?', '?' },
+        .has_staged = false,
+        .has_unstaged = true,
+        .tracked = false,
+        .added = true,
+        .deleted = false,
+        .conflict = false,
+    };
+
+    try std.testing.expect(FileDisplayFilter.unstaged.matches(unstaged));
+    try std.testing.expect(!FileDisplayFilter.staged.matches(unstaged));
+    try std.testing.expect(FileDisplayFilter.tracked.matches(staged_untracked));
+    try std.testing.expect(!FileDisplayFilter.untracked.matches(staged_untracked));
+    try std.testing.expect(FileDisplayFilter.untracked.matches(untracked));
 }

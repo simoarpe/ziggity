@@ -272,12 +272,30 @@ pub const Git = struct {
     }
 
     pub fn stageFile(self: *Git, path: []const u8) !ExecResult {
-        return self.exec(&.{ "add", "--", path });
+        return self.stagePaths(&.{path});
+    }
+
+    pub fn stagePaths(self: *Git, paths: []const []const u8) !ExecResult {
+        if (paths.len == 0) return self.successResult();
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(self.allocator);
+        try args.appendSlice(self.allocator, &.{ "add", "--" });
+        try args.appendSlice(self.allocator, paths);
+        return self.exec(args.items);
     }
 
     pub fn unstageFile(self: *Git, file: model.FileStatus) !ExecResult {
         if (file.tracked) return self.exec(&.{ "reset", "HEAD", "--", file.path });
         return self.exec(&.{ "rm", "--cached", "--force", "--", file.path });
+    }
+
+    pub fn unstagePaths(self: *Git, paths: []const []const u8) !ExecResult {
+        if (paths.len == 0) return self.successResult();
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(self.allocator);
+        try args.appendSlice(self.allocator, &.{ "reset", "HEAD", "--" });
+        try args.appendSlice(self.allocator, paths);
+        return self.exec(args.items);
     }
 
     pub fn stageAll(self: *Git) !ExecResult {
