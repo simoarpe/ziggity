@@ -54,11 +54,15 @@ Each iteration ends with `zig fmt`, `zig build`, `zig build test`, and a commit.
 - Single line first; leave multi-line description as a later enhancement.
 
 ## Backlog (after fidelity pass) — tracked in IMPLEMENTATION_PLAN.md
-- Panel tabs (`[`/`]`): Branches→Local/Remotes/Tags, Commits→Commits/Reflog.
-- New/delete/rename branch; merge/rebase.
+- ~~Panel tabs (`[`/`]`): Branches→Local/Remotes/Tags, Commits→Commits/Reflog.~~ **DONE**
+- New/delete/rename branch; merge/rebase. Remote/tag checkout (deferred from the
+  branches-tabs work — `space` is currently guarded to the Local tab).
 - Commit amend/reword/reset/revert; view commit/branch/stash file lists.
 - Hunk/line staging.
 - Command log panel; async command execution.
+
+A reusable **text-input popup** (for branch name / rename / amend) is the next
+natural primitive; the commit-message popup can be generalized into it.
 
 ## Lazygit references (default keybindings)
 - Universal: `q` quit, `<esc>` back, `<tab>`/`<backtab>` next/prev block,

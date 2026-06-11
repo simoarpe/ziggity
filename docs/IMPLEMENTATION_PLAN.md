@@ -97,10 +97,13 @@ A dedicated lazygit TUI/UX fidelity pass is complete — see
 context-sensitive bottom bar, centered popups for menus/confirmations/commit,
 and the discard menu).
 
+Panel tabs (`[`/`]`) are now implemented for both the Branches panel
+(Local/Remotes/Tags) and the Commits panel (Commits/Reflog).
+
 Next, resume feature breadth:
 
-1. Panel tabs (`[`/`]`): Branches→Local/Remotes/Tags, Commits→Commits/Reflog.
-2. Branch workflows: new, delete, rename, merge, rebase.
+1. Branch workflows: new, delete, rename, merge, rebase (+ remote/tag checkout).
+2. Commit workflows: reset (soft/mixed/hard), revert, view commit file list.
 3. Add file tree grouping.
 4. Add patch/hunk/line staging in the diff view.
 5. Re-run `zig fmt`, `zig build`, and `zig build test` after each step.
