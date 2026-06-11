@@ -92,6 +92,17 @@ pub const Branch = struct {
     }
 };
 
+pub const Tag = struct {
+    name: []u8,
+    subject: []u8 = &.{},
+
+    pub fn deinit(self: *Tag, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.subject);
+        self.* = undefined;
+    }
+};
+
 pub const Commit = struct {
     hash: []u8,
     short_hash: []u8,
@@ -152,6 +163,8 @@ pub const RepoData = struct {
     behind: ?usize = null,
     files: []FileStatus = &.{},
     branches: []Branch = &.{},
+    remote_branches: []Branch = &.{},
+    tags: []Tag = &.{},
     commits: []Commit = &.{},
     reflog: []Commit = &.{},
     stash: []StashEntry = &.{},
@@ -166,6 +179,10 @@ pub const RepoData = struct {
         deinitFileStatuses(allocator, self.files);
         for (self.branches) |*branch| branch.deinit(allocator);
         allocator.free(self.branches);
+        for (self.remote_branches) |*branch| branch.deinit(allocator);
+        allocator.free(self.remote_branches);
+        for (self.tags) |*tag| tag.deinit(allocator);
+        allocator.free(self.tags);
         for (self.commits) |*commit| commit.deinit(allocator);
         allocator.free(self.commits);
         for (self.reflog) |*entry| entry.deinit(allocator);

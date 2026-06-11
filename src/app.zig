@@ -19,6 +19,21 @@ pub const Confirmation = enum {
     discard_all,
 };
 
+/// Tabs within the Branches panel, switched with [ and ] (lazygit).
+pub const BranchesTab = enum {
+    local,
+    remotes,
+    tags,
+
+    pub fn label(self: BranchesTab) []const u8 {
+        return switch (self) {
+            .local => "Branches",
+            .remotes => "Remotes",
+            .tags => "Tags",
+        };
+    }
+};
+
 /// Tabs within the Commits panel, switched with [ and ] (lazygit).
 pub const CommitsTab = enum {
     commits,
@@ -79,9 +94,12 @@ pub const App = struct {
     main_origin: model.Focus = .files,
     file_index: usize = 0,
     branch_index: usize = 0,
+    remote_index: usize = 0,
+    tag_index: usize = 0,
     commit_index: usize = 0,
     reflog_index: usize = 0,
     stash_index: usize = 0,
+    branches_tab: BranchesTab = .local,
     commits_tab: CommitsTab = .commits,
     main_scroll: usize = 0,
     file_display_filter: model.FileDisplayFilter = .all,
@@ -318,6 +336,26 @@ pub const App = struct {
         return self.data.branches[@min(self.branch_index, self.data.branches.len - 1)];
     }
 
+    pub fn selectedRemoteBranch(self: *const App) ?model.Branch {
+        if (self.data.remote_branches.len == 0) return null;
+        return self.data.remote_branches[@min(self.remote_index, self.data.remote_branches.len - 1)];
+    }
+
+    pub fn selectedTag(self: *const App) ?model.Tag {
+        if (self.data.tags.len == 0) return null;
+        return self.data.tags[@min(self.tag_index, self.data.tags.len - 1)];
+    }
+
+    /// The ref name selected in the Branches panel, whichever tab is active.
+    /// Used to drive the main-panel preview.
+    pub fn selectedBranchRefName(self: *const App) ?[]const u8 {
+        return switch (self.branches_tab) {
+            .local => if (self.selectedBranch()) |branch| branch.name else null,
+            .remotes => if (self.selectedRemoteBranch()) |branch| branch.name else null,
+            .tags => if (self.selectedTag()) |tag| tag.name else null,
+        };
+    }
+
     /// The commit list backing the Commits panel for the active tab.
     pub fn activeCommits(self: *const App) []model.Commit {
         return switch (self.commits_tab) {
@@ -343,12 +381,29 @@ pub const App = struct {
 
     fn cycleTab(self: *App, direction: TabDirection) !void {
         switch (self.focus) {
+            .branches => {
+                self.branches_tab = switch (direction) {
+                    .next => switch (self.branches_tab) {
+                        .local => .remotes,
+                        .remotes => .tags,
+                        .tags => .local,
+                    },
+                    .prev => switch (self.branches_tab) {
+                        .local => .tags,
+                        .remotes => .local,
+                        .tags => .remotes,
+                    },
+                };
+                self.main_scroll = 0;
+                try self.updatePreview();
+                try self.setMessage("{s}", .{self.branches_tab.label()});
+            },
             .commits => {
+                // Only two tabs, so prev and next are equivalent here.
                 self.commits_tab = switch (self.commits_tab) {
                     .commits => .reflog,
                     .reflog => .commits,
                 };
-                _ = direction; // only two tabs, so prev and next are equivalent
                 self.main_scroll = 0;
                 try self.updatePreview();
                 try self.setMessage("{s}", .{self.commits_tab.label()});
@@ -422,7 +477,11 @@ pub const App = struct {
         switch (self.focus) {
             .status => return,
             .files => self.moveFileUp(),
-            .branches => self.branch_index -|= 1,
+            .branches => switch (self.branches_tab) {
+                .local => self.branch_index -|= 1,
+                .remotes => self.remote_index -|= 1,
+                .tags => self.tag_index -|= 1,
+            },
             .commits => switch (self.commits_tab) {
                 .commits => self.commit_index -|= 1,
                 .reflog => self.reflog_index -|= 1,
@@ -437,8 +496,16 @@ pub const App = struct {
         switch (self.focus) {
             .status => return,
             .files => self.moveFileDown(),
-            .branches => {
-                if (self.branch_index + 1 < self.data.branches.len) self.branch_index += 1;
+            .branches => switch (self.branches_tab) {
+                .local => if (self.branch_index + 1 < self.data.branches.len) {
+                    self.branch_index += 1;
+                },
+                .remotes => if (self.remote_index + 1 < self.data.remote_branches.len) {
+                    self.remote_index += 1;
+                },
+                .tags => if (self.tag_index + 1 < self.data.tags.len) {
+                    self.tag_index += 1;
+                },
             },
             .commits => switch (self.commits_tab) {
                 .commits => if (self.commit_index + 1 < self.data.commits.len) {
@@ -604,6 +671,10 @@ pub const App = struct {
     }
 
     fn checkoutSelectedBranch(self: *App) !void {
+        if (self.branches_tab != .local) {
+            try self.setMessage("checkout is available on the Branches (Local) tab", .{});
+            return;
+        }
         const branch = self.selectedBranch() orelse {
             try self.setMessage("no branch selected", .{});
             return;
@@ -758,8 +829,8 @@ pub const App = struct {
                 break :blk try self.allocator.dupe(u8, "Working tree clean.\n");
             },
             .branches => blk: {
-                if (self.selectedBranch()) |branch| break :blk try self.git.showBranch(branch.name);
-                break :blk try self.allocator.dupe(u8, "No branches found.\n");
+                if (self.selectedBranchRefName()) |name| break :blk try self.git.showBranch(name);
+                break :blk try self.allocator.dupe(u8, "Nothing to show in this tab.\n");
             },
             .commits => blk: {
                 if (self.selectedCommit()) |commit| break :blk try self.git.showCommit(commit.hash, self.config.diff_context);
@@ -826,6 +897,8 @@ pub const App = struct {
         if (self.data.files.len == 0) self.file_index = 0 else self.file_index = @min(self.file_index, self.data.files.len - 1);
         self.normalizeFileSelectionForFilter();
         if (self.data.branches.len == 0) self.branch_index = 0 else self.branch_index = @min(self.branch_index, self.data.branches.len - 1);
+        if (self.data.remote_branches.len == 0) self.remote_index = 0 else self.remote_index = @min(self.remote_index, self.data.remote_branches.len - 1);
+        if (self.data.tags.len == 0) self.tag_index = 0 else self.tag_index = @min(self.tag_index, self.data.tags.len - 1);
         if (self.data.commits.len == 0) self.commit_index = 0 else self.commit_index = @min(self.commit_index, self.data.commits.len - 1);
         if (self.data.reflog.len == 0) self.reflog_index = 0 else self.reflog_index = @min(self.reflog_index, self.data.reflog.len - 1);
         if (self.data.stash.len == 0) self.stash_index = 0 else self.stash_index = @min(self.stash_index, self.data.stash.len - 1);

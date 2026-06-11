@@ -98,6 +98,8 @@ pub const Git = struct {
         data.behind = status.behind;
         data.files = try self.loadFiles();
         data.branches = try self.loadBranches();
+        data.remote_branches = try self.loadRemoteBranches();
+        data.tags = try self.loadTags();
         data.commits = try self.loadCommits("HEAD", 100);
         data.reflog = try self.loadReflog(100);
         data.stash = try self.loadStash();
@@ -176,6 +178,38 @@ pub const Git = struct {
         const bytes = try self.output(&.{ "branch", "--format=%(HEAD)%00%(refname:short)%00%(upstream:short)" });
         defer self.allocator.free(bytes);
         return parseBranches(self.allocator, bytes);
+    }
+
+    pub fn loadRemoteBranches(self: *Git) ![]model.Branch {
+        // Skip the `<remote>/HEAD -> ...` symbolic entry git lists for remotes.
+        var result = try self.exec(&.{ "branch", "--remotes", "--format=%00%(refname:short)%00", "--list" });
+        defer result.deinit(self.allocator);
+        if (!result.ok()) return self.allocator.alloc(model.Branch, 0);
+        const all = try parseBranches(self.allocator, result.stdout);
+        defer self.allocator.free(all);
+
+        var kept: std.ArrayList(model.Branch) = .empty;
+        errdefer {
+            for (kept.items) |*branch| branch.deinit(self.allocator);
+            kept.deinit(self.allocator);
+        }
+        for (all) |*branch| {
+            // The symbolic `<remote>/HEAD` entry shortens to just the remote
+            // name (no slash); real remote branches are always `remote/branch`.
+            if (std.mem.indexOfScalar(u8, branch.name, '/') == null) {
+                branch.deinit(self.allocator);
+                continue;
+            }
+            try kept.append(self.allocator, branch.*);
+        }
+        return kept.toOwnedSlice(self.allocator);
+    }
+
+    pub fn loadTags(self: *Git) ![]model.Tag {
+        var result = try self.exec(&.{ "tag", "--sort=-creatordate", "--format=%(refname:short)%00%(contents:subject)" });
+        defer result.deinit(self.allocator);
+        if (!result.ok()) return self.allocator.alloc(model.Tag, 0);
+        return parseTags(self.allocator, result.stdout);
     }
 
     pub fn loadCommits(self: *Git, ref_name: []const u8, limit: usize) ![]model.Commit {
@@ -484,6 +518,31 @@ pub fn parseBranches(allocator: std.mem.Allocator, bytes: []const u8) ![]model.B
     return branches.toOwnedSlice(allocator);
 }
 
+pub fn parseTags(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Tag {
+    var tags: std.ArrayList(model.Tag) = .empty;
+    errdefer {
+        for (tags.items) |*tag| tag.deinit(allocator);
+        tags.deinit(allocator);
+    }
+
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        var fields = std.mem.splitScalar(u8, line, 0);
+        const name = fields.next() orelse continue;
+        if (name.len == 0) continue;
+        const subject = fields.next() orelse "";
+        var tag = model.Tag{
+            .name = try allocator.dupe(u8, name),
+            .subject = try allocator.dupe(u8, subject),
+        };
+        errdefer tag.deinit(allocator);
+        try tags.append(allocator, tag);
+    }
+
+    return tags.toOwnedSlice(allocator);
+}
+
 pub fn parseCommits(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Commit {
     var commits: std.ArrayList(model.Commit) = .empty;
     errdefer {
@@ -585,6 +644,24 @@ test "parse branches captures current marker and upstream" {
     try std.testing.expect(!branches[1].current);
     try std.testing.expectEqualSlices(u8, "feature/demo", branches[1].name);
     try std.testing.expect(branches[2].upstream == null);
+}
+
+test "parse tags captures name and optional subject" {
+    const input =
+        "v1.2.0\x00Release 1.2.0\n" ++
+        "v1.1.0\x00\n" ++
+        "v1.0.0\x00First stable\n";
+    const tags = try parseTags(std.testing.allocator, input);
+    defer {
+        for (tags) |*tag| tag.deinit(std.testing.allocator);
+        std.testing.allocator.free(tags);
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), tags.len);
+    try std.testing.expectEqualSlices(u8, "v1.2.0", tags[0].name);
+    try std.testing.expectEqualSlices(u8, "Release 1.2.0", tags[0].subject);
+    try std.testing.expectEqualSlices(u8, "v1.1.0", tags[1].name);
+    try std.testing.expectEqual(@as(usize, 0), tags[1].subject.len);
 }
 
 test "parse commits handles optional refs and subjects" {

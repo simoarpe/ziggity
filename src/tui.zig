@@ -119,7 +119,12 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     y += status_h;
     drawFiles(panel(root, 0, y, side_w, files_h, "Files [2]", app.focus == .files), app);
     y += files_h;
-    drawBranches(panel(root, 0, y, side_w, branches_h, "Branches [3]", app.focus == .branches), app);
+    const branches_title = switch (app.branches_tab) {
+        .local => "Branches [3]",
+        .remotes => "Remotes [3]",
+        .tags => "Tags [3]",
+    };
+    drawBranches(panel(root, 0, y, side_w, branches_h, branches_title, app.focus == .branches), app);
     y += branches_h;
     const commits_title = if (app.commits_tab == .reflog) "Reflog [4]" else "Commits [4]";
     drawCommits(panel(root, 0, y, side_w, commits_h, commits_title, app.focus == .commits), app);
@@ -307,25 +312,58 @@ fn drawFiles(win: vaxis.Window, app: *const app_mod.App) void {
 }
 
 fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
-    if (app.data.branches.len == 0) {
-        print(win, 0, 0, "No branches", styles().muted);
+    if (app.branches_tab == .tags) return drawTags(win, app);
+
+    const branches = switch (app.branches_tab) {
+        .remotes => app.data.remote_branches,
+        else => app.data.branches,
+    };
+    const selected = switch (app.branches_tab) {
+        .remotes => app.remote_index,
+        else => app.branch_index,
+    };
+    if (branches.len == 0) {
+        const empty_label = if (app.branches_tab == .remotes) "No remote branches" else "No branches";
+        print(win, 0, 0, empty_label, styles().muted);
         return;
     }
-    const start = scrollStart(app.branch_index, app.data.branches.len, win.height);
+    const start = scrollStart(selected, branches.len, win.height);
     var row: u16 = 0;
     var idx = start;
-    while (idx < app.data.branches.len and row < win.height) : ({
+    while (idx < branches.len and row < win.height) : ({
         idx += 1;
         row += 1;
     }) {
-        const branch = app.data.branches[idx];
+        const branch = branches[idx];
         var buf: [512]u8 = undefined;
         const marker: u8 = if (branch.current) '*' else ' ';
         const line = if (branch.upstream) |upstream|
             std.fmt.bufPrint(&buf, "{c} {s} -> {s}", .{ marker, branch.name, upstream }) catch branch.name
         else
             std.fmt.bufPrint(&buf, "{c} {s}", .{ marker, branch.name }) catch branch.name;
-        drawSelectable(win, row, line, if (branch.current) styles().staged else styles().normal, idx == app.branch_index and app.focus == .branches);
+        drawSelectable(win, row, line, if (branch.current) styles().staged else styles().normal, idx == selected and app.focus == .branches);
+    }
+}
+
+fn drawTags(win: vaxis.Window, app: *const app_mod.App) void {
+    if (app.data.tags.len == 0) {
+        print(win, 0, 0, "No tags", styles().muted);
+        return;
+    }
+    const start = scrollStart(app.tag_index, app.data.tags.len, win.height);
+    var row: u16 = 0;
+    var idx = start;
+    while (idx < app.data.tags.len and row < win.height) : ({
+        idx += 1;
+        row += 1;
+    }) {
+        const tag = app.data.tags[idx];
+        var buf: [512]u8 = undefined;
+        const line = if (tag.subject.len > 0)
+            std.fmt.bufPrint(&buf, "{s}  {s}", .{ tag.name, tag.subject }) catch tag.name
+        else
+            tag.name;
+        drawSelectable(win, row, line, styles().normal, idx == app.tag_index and app.focus == .branches);
     }
 }
 
@@ -424,7 +462,7 @@ fn contextHints(focus: model.Focus) []const u8 {
     return switch (focus) {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push" ++ global,
         .files => "space stage  a stage-all  c commit  d discard  D discard-all  / filter  ^b status  enter view" ++ global,
-        .branches => "space checkout  enter view  f fetch  p pull  P push" ++ global,
+        .branches => "space checkout  enter view  [ ] local/remotes/tags  f fetch" ++ global,
         .commits => "enter view  j/k move  [ ] commits/reflog" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => "j/k scroll  PgUp/PgDn page  esc back" ++ global,
