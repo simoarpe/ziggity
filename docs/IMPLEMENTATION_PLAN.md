@@ -106,10 +106,14 @@ rebase (`r`), and remote/tag checkout. Still open: rename and fast-forward
 resolution** flow (conflicts currently surface as an error message + `U` file
 statuses, with no in-app resolver).
 
+Commit workflows: reset (`g`, soft/mixed/hard menu) and revert (`t`) are done.
+Still open: a navigable commit **file list** on `<enter>` (currently the main
+panel shows the commit's stat+patch, not a selectable file list).
+
 Next, resume feature breadth:
 
-1. Commit workflows: reset (soft/mixed/hard), revert, view commit file list.
-2. Branch rename + fast-forward; merge/rebase conflict handling.
+1. Commit file-list view; branch rename + fast-forward.
+2. Merge/rebase conflict handling.
 3. Add file tree grouping.
 4. Add patch/hunk/line staging in the diff view.
 5. Re-run `zig fmt`, `zig build`, and `zig build test` after each step.
