@@ -99,6 +99,7 @@ pub const Git = struct {
         data.files = try self.loadFiles();
         data.branches = try self.loadBranches();
         data.commits = try self.loadCommits("HEAD", 100);
+        data.reflog = try self.loadReflog(100);
         data.stash = try self.loadStash();
 
         return data;
@@ -191,6 +192,24 @@ pub const Git = struct {
         defer self.allocator.free(bytes);
 
         return parseCommits(self.allocator, bytes);
+    }
+
+    pub fn loadReflog(self: *Git, limit: usize) ![]model.Commit {
+        const limit_arg = try std.fmt.allocPrint(self.allocator, "-{d}", .{limit});
+        defer self.allocator.free(limit_arg);
+        // %gd is the reflog selector (HEAD@{n}); %gs the reflog subject. They
+        // map onto the Commit model's refs/subject fields for reuse.
+        var result = try self.exec(&.{
+            "log",
+            "-g",
+            "--date=relative",
+            "--pretty=format:%H%x00%h%x00%an%x00%cr%x00%gd%x00%gs",
+            "--no-show-signature",
+            limit_arg,
+        });
+        defer result.deinit(self.allocator);
+        if (!result.ok()) return self.allocator.alloc(model.Commit, 0);
+        return parseCommits(self.allocator, result.stdout);
     }
 
     pub fn loadStash(self: *Git) ![]model.StashEntry {

@@ -78,6 +78,7 @@ Useful keys:
 - `j`/`k` or arrows: move selection
 - `h`/`l`, `tab`/`shift+tab`, or arrows: cycle focus between side panels
 - `1`/`2`/`3`/`4`/`5`: focus status, files, branches, commits, stash
+- `[`/`]`: switch panel tabs (commits panel: Commits / Reflog)
 - `enter`: inspect the selected item in the main panel; `esc`/`h` returns
 - `space`: stage/unstage file, checkout branch, or apply stash depending on focus
 - `a`: stage all if there are unstaged files, otherwise unstage all

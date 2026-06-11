@@ -121,7 +121,8 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     y += files_h;
     drawBranches(panel(root, 0, y, side_w, branches_h, "Branches [3]", app.focus == .branches), app);
     y += branches_h;
-    drawCommits(panel(root, 0, y, side_w, commits_h, "Commits [4]", app.focus == .commits), app);
+    const commits_title = if (app.commits_tab == .reflog) "Reflog [4]" else "Commits [4]";
+    drawCommits(panel(root, 0, y, side_w, commits_h, commits_title, app.focus == .commits), app);
     y += commits_h;
     drawStash(panel(root, 0, y, side_w, stash_h, "Stash [5]", app.focus == .stash), app);
 
@@ -329,21 +330,24 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
 }
 
 fn drawCommits(win: vaxis.Window, app: *const app_mod.App) void {
-    if (app.data.commits.len == 0) {
-        print(win, 0, 0, "No commits", styles().muted);
+    const commits = app.activeCommits();
+    if (commits.len == 0) {
+        const empty_label = if (app.commits_tab == .reflog) "No reflog entries" else "No commits";
+        print(win, 0, 0, empty_label, styles().muted);
         return;
     }
-    const start = scrollStart(app.commit_index, app.data.commits.len, win.height);
+    const selected = app.activeCommitIndex();
+    const start = scrollStart(selected, commits.len, win.height);
     var row: u16 = 0;
     var idx = start;
-    while (idx < app.data.commits.len and row < win.height) : ({
+    while (idx < commits.len and row < win.height) : ({
         idx += 1;
         row += 1;
     }) {
-        const commit = app.data.commits[idx];
+        const commit = commits[idx];
         var buf: [512]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, "{s} {s}", .{ commit.short_hash, commit.subject }) catch commit.subject;
-        drawSelectable(win, row, line, styles().normal, idx == app.commit_index and app.focus == .commits);
+        drawSelectable(win, row, line, styles().normal, idx == selected and app.focus == .commits);
     }
 }
 
@@ -421,7 +425,7 @@ fn contextHints(focus: model.Focus) []const u8 {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push" ++ global,
         .files => "space stage  a stage-all  c commit  d discard  D discard-all  / filter  ^b status  enter view" ++ global,
         .branches => "space checkout  enter view  f fetch  p pull  P push" ++ global,
-        .commits => "enter view  j/k move" ++ global,
+        .commits => "enter view  j/k move  [ ] commits/reflog" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => "j/k scroll  PgUp/PgDn page  esc back" ++ global,
     };

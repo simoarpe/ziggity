@@ -44,6 +44,8 @@ pub const KeyMap = struct {
     branches_panel: Binding = .{ .codepoint = '3' },
     commits_panel: Binding = .{ .codepoint = '4' },
     stash_panel: Binding = .{ .codepoint = '5' },
+    prev_tab: Binding = .{ .codepoint = '[' },
+    next_tab: Binding = .{ .codepoint = ']' },
 };
 
 pub const Config = struct {

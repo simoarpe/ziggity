@@ -27,6 +27,8 @@ pub const Action = enum {
     focus_commits,
     focus_stash,
     focus_main,
+    prev_tab,
+    next_tab,
     cancel,
     confirm,
     backspace,
@@ -47,6 +49,9 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     // <enter> on a side panel descends into the main panel (lazygit: inspect
     // the selected item). The main panel is left with <esc>/<h>.
     if (focus.isSidePanel() and keymap.enter.matches(key)) return .focus_main;
+
+    if (keymap.prev_tab.matches(key)) return .prev_tab;
+    if (keymap.next_tab.matches(key)) return .next_tab;
 
     if (keymap.refresh.matches(key)) return .refresh;
     if (keymap.file_filter.matches(key)) return .start_file_filter;

@@ -19,6 +19,19 @@ pub const Confirmation = enum {
     discard_all,
 };
 
+/// Tabs within the Commits panel, switched with [ and ] (lazygit).
+pub const CommitsTab = enum {
+    commits,
+    reflog,
+
+    pub fn label(self: CommitsTab) []const u8 {
+        return switch (self) {
+            .commits => "Commits",
+            .reflog => "Reflog",
+        };
+    }
+};
+
 /// Actions a generic menu popup can dispatch when its selected item is chosen.
 pub const MenuAction = enum {
     discard_file_all,
@@ -67,7 +80,9 @@ pub const App = struct {
     file_index: usize = 0,
     branch_index: usize = 0,
     commit_index: usize = 0,
+    reflog_index: usize = 0,
     stash_index: usize = 0,
+    commits_tab: CommitsTab = .commits,
     main_scroll: usize = 0,
     file_display_filter: model.FileDisplayFilter = .all,
     diff: []u8 = &.{},
@@ -197,6 +212,8 @@ pub const App = struct {
             .focus_commits => try self.setFocus(.commits),
             .focus_stash => try self.setFocus(.stash),
             .focus_main => try self.enterMain(),
+            .prev_tab => try self.cycleTab(.prev),
+            .next_tab => try self.cycleTab(.next),
             .refresh => {
                 try self.refresh();
                 try self.setMessage("refreshed", .{});
@@ -301,9 +318,43 @@ pub const App = struct {
         return self.data.branches[@min(self.branch_index, self.data.branches.len - 1)];
     }
 
+    /// The commit list backing the Commits panel for the active tab.
+    pub fn activeCommits(self: *const App) []model.Commit {
+        return switch (self.commits_tab) {
+            .commits => self.data.commits,
+            .reflog => self.data.reflog,
+        };
+    }
+
+    pub fn activeCommitIndex(self: *const App) usize {
+        return switch (self.commits_tab) {
+            .commits => self.commit_index,
+            .reflog => self.reflog_index,
+        };
+    }
+
     pub fn selectedCommit(self: *const App) ?model.Commit {
-        if (self.data.commits.len == 0) return null;
-        return self.data.commits[@min(self.commit_index, self.data.commits.len - 1)];
+        const list = self.activeCommits();
+        if (list.len == 0) return null;
+        return list[@min(self.activeCommitIndex(), list.len - 1)];
+    }
+
+    const TabDirection = enum { prev, next };
+
+    fn cycleTab(self: *App, direction: TabDirection) !void {
+        switch (self.focus) {
+            .commits => {
+                self.commits_tab = switch (self.commits_tab) {
+                    .commits => .reflog,
+                    .reflog => .commits,
+                };
+                _ = direction; // only two tabs, so prev and next are equivalent
+                self.main_scroll = 0;
+                try self.updatePreview();
+                try self.setMessage("{s}", .{self.commits_tab.label()});
+            },
+            else => {},
+        }
     }
 
     pub fn selectedStash(self: *const App) ?model.StashEntry {
@@ -372,7 +423,10 @@ pub const App = struct {
             .status => return,
             .files => self.moveFileUp(),
             .branches => self.branch_index -|= 1,
-            .commits => self.commit_index -|= 1,
+            .commits => switch (self.commits_tab) {
+                .commits => self.commit_index -|= 1,
+                .reflog => self.reflog_index -|= 1,
+            },
             .stash => self.stash_index -|= 1,
             .main => return self.scrollMain(-1),
         }
@@ -386,8 +440,13 @@ pub const App = struct {
             .branches => {
                 if (self.branch_index + 1 < self.data.branches.len) self.branch_index += 1;
             },
-            .commits => {
-                if (self.commit_index + 1 < self.data.commits.len) self.commit_index += 1;
+            .commits => switch (self.commits_tab) {
+                .commits => if (self.commit_index + 1 < self.data.commits.len) {
+                    self.commit_index += 1;
+                },
+                .reflog => if (self.reflog_index + 1 < self.data.reflog.len) {
+                    self.reflog_index += 1;
+                },
             },
             .stash => {
                 if (self.stash_index + 1 < self.data.stash.len) self.stash_index += 1;
@@ -768,6 +827,7 @@ pub const App = struct {
         self.normalizeFileSelectionForFilter();
         if (self.data.branches.len == 0) self.branch_index = 0 else self.branch_index = @min(self.branch_index, self.data.branches.len - 1);
         if (self.data.commits.len == 0) self.commit_index = 0 else self.commit_index = @min(self.commit_index, self.data.commits.len - 1);
+        if (self.data.reflog.len == 0) self.reflog_index = 0 else self.reflog_index = @min(self.reflog_index, self.data.reflog.len - 1);
         if (self.data.stash.len == 0) self.stash_index = 0 else self.stash_index = @min(self.stash_index, self.data.stash.len - 1);
     }
 
@@ -1042,4 +1102,38 @@ test "discard menu offers the unstaged option only when a file has both" {
     try app2.startDiscardMenu();
     try std.testing.expectEqual(@as(usize, 1), app2.active_menu.?.items.len);
     try std.testing.expectEqual(MenuAction.discard_file_all, app2.active_menu.?.items[0].action);
+}
+
+test "commits panel tab selects between the commits and reflog lists" {
+    const allocator = std.testing.allocator;
+
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits = [_]model.Commit{.{
+        .hash = @constCast("1111111111111111111111111111111111111111"),
+        .short_hash = @constCast("1111111"),
+        .author = @constCast("Sam"),
+        .time = @constCast("now"),
+        .refs = @constCast(""),
+        .subject = @constCast("a real commit"),
+    }};
+    var reflog = [_]model.Commit{.{
+        .hash = @constCast("2222222222222222222222222222222222222222"),
+        .short_hash = @constCast("2222222"),
+        .author = @constCast("Sam"),
+        .time = @constCast("now"),
+        .refs = @constCast("HEAD@{0}"),
+        .subject = @constCast("commit: a reflog entry"),
+    }};
+    app.data.commits = &commits;
+    app.data.reflog = &reflog;
+
+    try std.testing.expectEqual(CommitsTab.commits, app.commits_tab);
+    try std.testing.expectEqualStrings("1111111", app.selectedCommit().?.short_hash);
+
+    app.commits_tab = .reflog;
+    try std.testing.expectEqualStrings("2222222", app.selectedCommit().?.short_hash);
+    try std.testing.expectEqualStrings("HEAD@{0}", app.selectedCommit().?.refs);
 }

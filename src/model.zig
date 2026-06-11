@@ -153,6 +153,7 @@ pub const RepoData = struct {
     files: []FileStatus = &.{},
     branches: []Branch = &.{},
     commits: []Commit = &.{},
+    reflog: []Commit = &.{},
     stash: []StashEntry = &.{},
 
     pub fn empty() RepoData {
@@ -167,6 +168,8 @@ pub const RepoData = struct {
         allocator.free(self.branches);
         for (self.commits) |*commit| commit.deinit(allocator);
         allocator.free(self.commits);
+        for (self.reflog) |*entry| entry.deinit(allocator);
+        allocator.free(self.reflog);
         for (self.stash) |*entry| entry.deinit(allocator);
         allocator.free(self.stash);
         self.* = empty();
