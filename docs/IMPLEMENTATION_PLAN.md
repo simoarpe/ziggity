@@ -100,10 +100,16 @@ and the discard menu).
 Panel tabs (`[`/`]`) are now implemented for both the Branches panel
 (Local/Remotes/Tags) and the Commits panel (Commits/Reflog).
 
+Branch workflows are largely done: new (`n`), delete (`d` menu), merge (`M`),
+rebase (`r`), and remote/tag checkout. Still open: rename and fast-forward
+(both need a non-conflicting key decision), and a merge/rebase **conflict
+resolution** flow (conflicts currently surface as an error message + `U` file
+statuses, with no in-app resolver).
+
 Next, resume feature breadth:
 
-1. Branch workflows: new, delete, rename, merge, rebase (+ remote/tag checkout).
-2. Commit workflows: reset (soft/mixed/hard), revert, view commit file list.
+1. Commit workflows: reset (soft/mixed/hard), revert, view commit file list.
+2. Branch rename + fast-forward; merge/rebase conflict handling.
 3. Add file tree grouping.
 4. Add patch/hunk/line staging in the diff view.
 5. Re-run `zig fmt`, `zig build`, and `zig build test` after each step.
