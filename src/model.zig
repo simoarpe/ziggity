@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const Focus = enum {
+    status,
     files,
     branches,
     commits,
@@ -9,12 +10,20 @@ pub const Focus = enum {
 
     pub fn title(self: Focus) []const u8 {
         return switch (self) {
+            .status => "Status",
             .files => "Files",
             .branches => "Branches",
             .commits => "Commits",
             .stash => "Stash",
             .main => "Diff",
         };
+    }
+
+    /// True for the left-column list panels that participate in block
+    /// navigation (lazygit's "blocks"). The main panel is reached with
+    /// <enter> and left with <esc>, so it is excluded here.
+    pub fn isSidePanel(self: Focus) bool {
+        return self != .main;
     }
 };
 

@@ -73,8 +73,9 @@ Useful keys:
 - `/`: filter files by path live; enter accepts; esc clears
 - `ctrl+b`: open files status filter menu
 - `j`/`k` or arrows: move selection
-- `h`/`l`: move focus between panels
-- `1`/`2`/`3`/`4`/`0`: focus files, branches, commits, stash, diff
+- `h`/`l`, `tab`/`shift+tab`, or arrows: cycle focus between side panels
+- `1`/`2`/`3`/`4`/`5`: focus status, files, branches, commits, stash
+- `enter`: inspect the selected item in the main panel; `esc`/`h` returns
 - `space`: stage/unstage file, checkout branch, or apply stash depending on focus
 - `a`: stage all if there are unstaged files, otherwise unstage all
 - `d`: discard selected file after confirmation

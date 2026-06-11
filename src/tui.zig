@@ -115,17 +115,17 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     const commits_h = base + if (extra > 2) @as(u16, 1) else 0;
     const stash_h = body_h - status_h - files_h - branches_h - commits_h;
 
-    drawStatus(panel(root, 0, y, side_w, status_h, "Status", false), app);
+    drawStatus(panel(root, 0, y, side_w, status_h, "Status [1]", app.focus == .status), app);
     y += status_h;
-    drawFiles(panel(root, 0, y, side_w, files_h, "Files [1]", app.focus == .files), app);
+    drawFiles(panel(root, 0, y, side_w, files_h, "Files [2]", app.focus == .files), app);
     y += files_h;
-    drawBranches(panel(root, 0, y, side_w, branches_h, "Branches [2]", app.focus == .branches), app);
+    drawBranches(panel(root, 0, y, side_w, branches_h, "Branches [3]", app.focus == .branches), app);
     y += branches_h;
-    drawCommits(panel(root, 0, y, side_w, commits_h, "Commits [3]", app.focus == .commits), app);
+    drawCommits(panel(root, 0, y, side_w, commits_h, "Commits [4]", app.focus == .commits), app);
     y += commits_h;
-    drawStash(panel(root, 0, y, side_w, stash_h, "Stash [4]", app.focus == .stash), app);
+    drawStash(panel(root, 0, y, side_w, stash_h, "Stash [5]", app.focus == .stash), app);
 
-    const main = panel(root, side_w, 0, main_w, body_h, "Diff [0]", app.focus == .main);
+    const main = panel(root, side_w, 0, main_w, body_h, "Diff", app.focus == .main);
     drawDiff(main, app);
     drawBottom(root.child(.{ .x_off = 0, .y_off = @intCast(body_h), .width = root.width, .height = bottom_h }), app);
 }

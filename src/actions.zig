@@ -21,6 +21,7 @@ pub const Action = enum {
     fetch,
     pull,
     push,
+    focus_status,
     focus_files,
     focus_branches,
     focus_commits,
@@ -37,11 +38,15 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     if (keymap.quit.matches(key) or keymap.quit_ctrl.matches(key)) return .quit;
     if (keymap.escape.matches(key)) return .cancel;
 
+    if (keymap.status_panel.matches(key)) return .focus_status;
     if (keymap.files_panel.matches(key)) return .focus_files;
     if (keymap.branches_panel.matches(key)) return .focus_branches;
     if (keymap.commits_panel.matches(key)) return .focus_commits;
     if (keymap.stash_panel.matches(key)) return .focus_stash;
-    if (keymap.main_panel.matches(key)) return .focus_main;
+
+    // <enter> on a side panel descends into the main panel (lazygit: inspect
+    // the selected item). The main panel is left with <esc>/<h>.
+    if (focus.isSidePanel() and keymap.enter.matches(key)) return .focus_main;
 
     if (keymap.refresh.matches(key)) return .refresh;
     if (keymap.file_filter.matches(key)) return .start_file_filter;
@@ -51,6 +56,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
 
     if (keymap.up.matches(key) or key.matches(vaxis.Key.up, .{})) return .move_up;
     if (keymap.down.matches(key) or key.matches(vaxis.Key.down, .{})) return .move_down;
+    if (key.matches(vaxis.Key.tab, .{ .shift = true })) return .focus_left;
     if (keymap.left.matches(key) or key.matches(vaxis.Key.left, .{})) return .focus_left;
     if (keymap.right.matches(key) or key.matches(vaxis.Key.right, .{}) or key.matches(vaxis.Key.tab, .{})) return .focus_right;
 
@@ -64,15 +70,15 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
             if (keymap.commit.matches(key)) return .start_commit;
         },
         .branches => {
-            if (keymap.select.matches(key) or keymap.enter.matches(key)) return .select;
+            if (keymap.select.matches(key)) return .select;
         },
         .commits => {},
         .stash => {
-            if (keymap.stash_apply.matches(key) or keymap.enter.matches(key)) return .select;
+            if (keymap.stash_apply.matches(key)) return .select;
             if (keymap.stash_pop.matches(key)) return .stash_pop;
             if (keymap.stash_drop.matches(key)) return .stash_drop;
         },
-        .main => {},
+        .status, .main => {},
     }
 
     return null;
@@ -91,7 +97,11 @@ test "normal key mapping handles global and focused actions" {
 
     try std.testing.expectEqual(Action.quit, fromNormalKey(testKey('q'), keymap, .files).?);
     try std.testing.expectEqual(Action.refresh, fromNormalKey(testKey('R'), keymap, .files).?);
-    try std.testing.expectEqual(Action.focus_branches, fromNormalKey(testKey('2'), keymap, .files).?);
+    try std.testing.expectEqual(Action.focus_status, fromNormalKey(testKey('1'), keymap, .files).?);
+    try std.testing.expectEqual(Action.focus_files, fromNormalKey(testKey('2'), keymap, .files).?);
+    try std.testing.expectEqual(Action.focus_branches, fromNormalKey(testKey('3'), keymap, .files).?);
+    try std.testing.expectEqual(Action.focus_commits, fromNormalKey(testKey('4'), keymap, .files).?);
+    try std.testing.expectEqual(Action.focus_stash, fromNormalKey(testKey('5'), keymap, .files).?);
     try std.testing.expectEqual(Action.stage_all, fromNormalKey(testKey('a'), keymap, .files).?);
     try std.testing.expectEqual(Action.discard_selected, fromNormalKey(testKey('d'), keymap, .files).?);
     try std.testing.expectEqual(Action.discard_all, fromNormalKey(testKey('D'), keymap, .files).?);
@@ -100,4 +110,14 @@ test "normal key mapping handles global and focused actions" {
     try std.testing.expectEqual(Action.start_commit, fromNormalKey(testKey('c'), keymap, .files).?);
     try std.testing.expectEqual(Action.stash_pop, fromNormalKey(testKey('g'), keymap, .stash).?);
     try std.testing.expect(fromNormalKey(testKey('g'), keymap, .files) == null);
+
+    // <enter> descends into the main panel from any side panel, but does
+    // nothing once the main panel already has focus.
+    const enter = testKey(0x0d);
+    try std.testing.expectEqual(Action.focus_main, fromNormalKey(enter, keymap, .files).?);
+    try std.testing.expectEqual(Action.focus_main, fromNormalKey(enter, keymap, .commits).?);
+    try std.testing.expect(fromNormalKey(enter, keymap, .main) == null);
+
+    // <space> on branches/stash is the primary action, not enter.
+    try std.testing.expectEqual(Action.select, fromNormalKey(testKey(' '), keymap, .branches).?);
 }

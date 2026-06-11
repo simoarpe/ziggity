@@ -25,6 +25,7 @@ pub const App = struct {
     config: config_mod.Config,
     data: model.RepoData = .{},
     focus: model.Focus = .files,
+    main_origin: model.Focus = .files,
     file_index: usize = 0,
     branch_index: usize = 0,
     commit_index: usize = 0,
@@ -99,7 +100,8 @@ pub const App = struct {
 
         self.restoreFileSelection(selected_path);
         self.clampSelections();
-        if (self.focus == .files or self.focus == .main) {
+        const content = self.contentFocus();
+        if (content == .files or content == .status) {
             self.updatePreview() catch |err| {
                 try self.setMessage("preview failed: {s}", .{@errorName(err)});
             };
@@ -140,17 +142,17 @@ pub const App = struct {
                     return;
                 }
                 if (self.focus == .main) {
-                    self.focus = .files;
-                    try self.updatePreview();
+                    try self.leaveMain();
                 } else {
                     self.running = false;
                 }
             },
+            .focus_status => try self.setFocus(.status),
             .focus_files => try self.setFocus(.files),
             .focus_branches => try self.setFocus(.branches),
             .focus_commits => try self.setFocus(.commits),
             .focus_stash => try self.setFocus(.stash),
-            .focus_main => try self.setFocus(.main),
+            .focus_main => try self.enterMain(),
             .refresh => {
                 try self.refresh();
                 try self.setMessage("refreshed", .{});
@@ -166,7 +168,7 @@ pub const App = struct {
                 .files => try self.toggleFileStaged(),
                 .branches => try self.checkoutSelectedBranch(),
                 .stash => try self.applySelectedStash(),
-                .commits, .main => {},
+                .status, .commits, .main => {},
             },
             .stage_all => try self.toggleAllStaged(),
             .discard_selected => try self.startDiscardSelectedConfirmation(),
@@ -283,25 +285,44 @@ pub const App = struct {
         try self.updatePreview();
     }
 
+    /// Descend into the main panel to inspect the selected item, remembering
+    /// the side panel we came from so <esc>/<h> can return there.
+    fn enterMain(self: *App) !void {
+        if (self.focus.isSidePanel()) self.main_origin = self.focus;
+        self.focus = .main;
+        self.main_scroll = 0;
+        try self.updatePreview();
+    }
+
+    fn leaveMain(self: *App) !void {
+        self.focus = self.main_origin;
+        self.main_scroll = 0;
+        try self.updatePreview();
+    }
+
     fn focusNext(self: *App) !void {
+        if (self.focus == .main) return self.leaveMain();
         self.focus = switch (self.focus) {
+            .status => .files,
             .files => .branches,
             .branches => .commits,
             .commits => .stash,
-            .stash => .main,
-            .main => .files,
+            .stash => .status,
+            .main => unreachable,
         };
         self.main_scroll = 0;
         try self.updatePreview();
     }
 
     fn focusPrevious(self: *App) !void {
+        if (self.focus == .main) return self.leaveMain();
         self.focus = switch (self.focus) {
-            .files => .main,
+            .status => .stash,
+            .files => .status,
             .branches => .files,
             .commits => .branches,
             .stash => .commits,
-            .main => .stash,
+            .main => unreachable,
         };
         self.main_scroll = 0;
         try self.updatePreview();
@@ -309,6 +330,7 @@ pub const App = struct {
 
     fn moveUp(self: *App) !void {
         switch (self.focus) {
+            .status => return,
             .files => self.moveFileUp(),
             .branches => self.branch_index -|= 1,
             .commits => self.commit_index -|= 1,
@@ -320,6 +342,7 @@ pub const App = struct {
 
     fn moveDown(self: *App) !void {
         switch (self.focus) {
+            .status => return,
             .files => self.moveFileDown(),
             .branches => {
                 if (self.branch_index + 1 < self.data.branches.len) self.branch_index += 1;
@@ -557,9 +580,16 @@ pub const App = struct {
         }
     }
 
+    /// The panel whose selection drives the main-panel content. When the main
+    /// panel is focused we keep showing the side panel we descended from.
+    fn contentFocus(self: *const App) model.Focus {
+        return if (self.focus == .main) self.main_origin else self.focus;
+    }
+
     fn updatePreview(self: *App) !void {
         self.allocator.free(self.diff);
-        self.diff = switch (self.focus) {
+        self.diff = switch (self.contentFocus()) {
+            .status => try self.statusPreview(),
             .files, .main => blk: {
                 if (self.selectedFile()) |file| break :blk try self.git.diffForFile(file, self.config.diff_context);
                 if (self.anyFileFilterActive() and self.data.files.len > 0) break :blk try self.allocator.dupe(u8, "No files match the active filter.\n");
@@ -578,6 +608,32 @@ pub const App = struct {
                 break :blk try self.allocator.dupe(u8, "No stash entries.\n");
             },
         };
+    }
+
+    fn statusPreview(self: *App) ![]u8 {
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer aw.deinit();
+        const writer = &aw.writer;
+        try writer.print("On branch {s}\n", .{self.data.current_branch});
+        if (self.data.upstream) |upstream| {
+            try writer.print("Upstream {s} (+{d} ahead, -{d} behind)\n", .{
+                upstream,
+                self.data.ahead orelse 0,
+                self.data.behind orelse 0,
+            });
+        } else {
+            try writer.writeAll("No upstream configured\n");
+        }
+        try writer.print("\n{d} changed files: {d} staged, {d} unstaged\n", .{
+            self.data.files.len,
+            self.data.stagedCount(),
+            self.data.unstagedCount(),
+        });
+        try writer.print("{d} local branches, {d} stash entries\n", .{
+            self.data.branches.len,
+            self.data.stash.len,
+        });
+        return aw.toOwnedSlice();
     }
 
     fn runMutation(self: *App, result: git_mod.ExecResult, comptime success_fmt: []const u8, args: anytype) !void {

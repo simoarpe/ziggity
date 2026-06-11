@@ -39,11 +39,11 @@ pub const KeyMap = struct {
     stash_apply: Binding = .{ .codepoint = ' ' },
     stash_pop: Binding = .{ .codepoint = 'g' },
     stash_drop: Binding = .{ .codepoint = 'd' },
-    files_panel: Binding = .{ .codepoint = '1' },
-    branches_panel: Binding = .{ .codepoint = '2' },
-    commits_panel: Binding = .{ .codepoint = '3' },
-    stash_panel: Binding = .{ .codepoint = '4' },
-    main_panel: Binding = .{ .codepoint = '0' },
+    status_panel: Binding = .{ .codepoint = '1' },
+    files_panel: Binding = .{ .codepoint = '2' },
+    branches_panel: Binding = .{ .codepoint = '3' },
+    commits_panel: Binding = .{ .codepoint = '4' },
+    stash_panel: Binding = .{ .codepoint = '5' },
 };
 
 pub const Config = struct {
