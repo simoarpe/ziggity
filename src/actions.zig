@@ -22,6 +22,8 @@ pub const Action = enum {
     delete_branch,
     merge_branch,
     rebase_branch,
+    reset_commit,
+    revert_commit,
     fetch,
     pull,
     push,
@@ -85,7 +87,10 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
             if (keymap.merge.matches(key)) return .merge_branch;
             if (keymap.rebase.matches(key)) return .rebase_branch;
         },
-        .commits => {},
+        .commits => {
+            if (keymap.reset.matches(key)) return .reset_commit;
+            if (keymap.revert.matches(key)) return .revert_commit;
+        },
         .stash => {
             if (keymap.stash_apply.matches(key)) return .select;
             if (keymap.stash_pop.matches(key)) return .stash_pop;

@@ -68,6 +68,9 @@ pub const MenuAction = enum {
     discard_file_unstaged,
     delete_branch,
     force_delete_branch,
+    reset_soft,
+    reset_mixed,
+    reset_hard,
 };
 
 pub const MenuItem = struct {
@@ -95,6 +98,12 @@ const discard_menu_all_only = [_]MenuItem{
 const branch_delete_menu = [_]MenuItem{
     .{ .label = "Delete branch", .action = .delete_branch },
     .{ .label = "Force delete branch", .action = .force_delete_branch },
+};
+
+const commit_reset_menu = [_]MenuItem{
+    .{ .label = "Soft reset (keep staged changes)", .action = .reset_soft },
+    .{ .label = "Mixed reset (keep working tree)", .action = .reset_mixed },
+    .{ .label = "Hard reset (discard changes)", .action = .reset_hard },
 };
 
 /// Order of entries shown in the status-filter menu popup.
@@ -288,6 +297,8 @@ pub const App = struct {
             .delete_branch => try self.startBranchDeleteMenu(),
             .merge_branch => try self.startBranchConfirm(.merge_branch),
             .rebase_branch => try self.startBranchConfirm(.rebase_branch),
+            .reset_commit => try self.startCommitResetMenu(),
+            .revert_commit => try self.revertSelectedCommit(),
             .stash_pop => try self.popSelectedStash(),
             .stash_drop => try self.dropSelectedStash(),
             .confirm, .backspace => {},
@@ -770,6 +781,19 @@ pub const App = struct {
                 const force = action == .force_delete_branch;
                 return self.runMutation(try self.git.deleteBranch(branch.name, force), "deleted {s}", .{branch.name});
             },
+            .reset_soft, .reset_mixed, .reset_hard => {
+                const commit = self.selectedCommit() orelse {
+                    try self.setMessage("no commit selected", .{});
+                    return;
+                };
+                const mode: git_mod.Git.ResetMode = switch (action) {
+                    .reset_soft => .soft,
+                    .reset_mixed => .mixed,
+                    .reset_hard => .hard,
+                    else => unreachable,
+                };
+                return self.runMutation(try self.git.resetTo(commit.hash, mode), "reset to {s}", .{commit.short_hash});
+            },
         }
     }
 
@@ -815,6 +839,31 @@ pub const App = struct {
         }
         return self.selectedBranch() orelse {
             try self.setMessage("no branch selected", .{});
+            return null;
+        };
+    }
+
+    fn startCommitResetMenu(self: *App) !void {
+        const commit = try self.commitForAction() orelse return;
+        self.mode = .menu;
+        self.active_menu = .{ .title = "Reset to commit", .items = &commit_reset_menu, .index = 0 };
+        try self.setMessage("reset to {s}", .{commit.short_hash});
+    }
+
+    fn revertSelectedCommit(self: *App) !void {
+        const commit = try self.commitForAction() orelse return;
+        return self.runMutation(try self.git.revertCommit(commit.hash), "reverted {s}", .{commit.short_hash});
+    }
+
+    /// Validate that a commit action can run: the Commits panel must be on the
+    /// Commits tab (not Reflog) with a commit selected.
+    fn commitForAction(self: *App) !?model.Commit {
+        if (self.commits_tab != .commits) {
+            try self.setMessage("commit actions apply to the Commits tab", .{});
+            return null;
+        }
+        return self.selectedCommit() orelse {
+            try self.setMessage("no commit selected", .{});
             return null;
         };
     }
@@ -1404,6 +1453,33 @@ test "commits panel tab selects between the commits and reflog lists" {
     app.commits_tab = .reflog;
     try std.testing.expectEqualStrings("2222222", app.selectedCommit().?.short_hash);
     try std.testing.expectEqualStrings("HEAD@{0}", app.selectedCommit().?.refs);
+}
+
+test "commit reset menu opens on the commits tab and refuses reflog" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits = [_]model.Commit{.{
+        .hash = @constCast("1111111111111111111111111111111111111111"),
+        .short_hash = @constCast("1111111"),
+        .author = @constCast("Sam"),
+        .time = @constCast("now"),
+        .refs = @constCast(""),
+        .subject = @constCast("a real commit"),
+    }};
+    app.data.commits = &commits;
+
+    try app.startCommitResetMenu();
+    try std.testing.expectEqual(Mode.menu, app.mode);
+    try std.testing.expectEqual(@as(usize, 3), app.active_menu.?.items.len);
+    try std.testing.expectEqual(MenuAction.reset_hard, app.active_menu.?.items[2].action);
+
+    app.closeMenu();
+    app.commits_tab = .reflog;
+    try app.startCommitResetMenu();
+    try std.testing.expectEqual(Mode.normal, app.mode);
 }
 
 test "branch delete menu refuses the current branch and non-local tabs" {

@@ -419,6 +419,28 @@ pub const Git = struct {
         return self.exec(&.{ "rebase", name });
     }
 
+    pub const ResetMode = enum {
+        soft,
+        mixed,
+        hard,
+
+        fn flag(self: ResetMode) []const u8 {
+            return switch (self) {
+                .soft => "--soft",
+                .mixed => "--mixed",
+                .hard => "--hard",
+            };
+        }
+    };
+
+    pub fn resetTo(self: *Git, hash: []const u8, mode: ResetMode) !ExecResult {
+        return self.exec(&.{ "reset", mode.flag(), hash });
+    }
+
+    pub fn revertCommit(self: *Git, hash: []const u8) !ExecResult {
+        return self.exec(&.{ "revert", "--no-edit", hash });
+    }
+
     pub fn fetch(self: *Git) !ExecResult {
         return self.exec(&.{ "fetch", "--all", "--no-write-fetch-head" });
     }

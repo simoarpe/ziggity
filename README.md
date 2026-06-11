@@ -86,6 +86,8 @@ Useful keys:
 - `M`: merge the selected branch into the current branch (after confirmation)
 - `r`: rebase the current branch onto the selected branch (after confirmation)
 - `space` on the Remotes/Tags tab: check out the remote branch or tag
+- `g`: reset to the selected commit (menu: soft / mixed / hard)
+- `t`: revert the selected commit
 - `a`: stage all if there are unstaged files, otherwise unstage all
 - `d`: open the discard menu for the selected file (all changes, or unstaged only)
 - `D`: discard all working tree changes after confirmation
