@@ -328,6 +328,12 @@ pub const Git = struct {
         return self.successResult();
     }
 
+    /// Discard only the unstaged (working-tree) changes for a file, keeping any
+    /// staged changes intact by restoring the working tree from the index.
+    pub fn discardUnstaged(self: *Git, file: model.FileStatus) !ExecResult {
+        return self.exec(&.{ "checkout", "--", file.path });
+    }
+
     pub fn discardAll(self: *Git) !ExecResult {
         if (try self.runStep(&.{ "reset", "--hard", "HEAD" })) |failure| return failure;
         if (try self.runStep(&.{ "clean", "-fd" })) |failure| return failure;

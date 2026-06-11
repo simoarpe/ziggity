@@ -132,6 +132,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     // Centered popups render on top of everything else.
     switch (app.mode) {
         .status_filter_menu => drawStatusFilterPopup(root, app),
+        .menu => drawMenuPopup(root, app),
         .confirmation => drawConfirmPopup(root, app),
         else => {},
     }
@@ -177,12 +178,24 @@ fn drawStatusFilterPopup(root: vaxis.Window, app: *const app_mod.App) void {
     }
 }
 
+fn drawMenuPopup(root: vaxis.Window, app: *const app_mod.App) void {
+    const st = styles();
+    const menu = app.active_menu orelse return;
+    var max_label: usize = menu.title.len;
+    for (menu.items) |item| max_label = @max(max_label, item.label.len);
+    const w: u16 = @intCast(@min(@as(usize, 72), max_label + 6));
+    const h: u16 = @intCast(menu.items.len + 2);
+    const win = popup(root, w, h, menu.title);
+    for (menu.items, 0..) |item, idx| {
+        drawSelectable(win, @intCast(idx), item.label, st.normal, idx == menu.index);
+    }
+}
+
 fn drawConfirmPopup(root: vaxis.Window, app: *const app_mod.App) void {
     const st = styles();
     var buf: [1024]u8 = undefined;
     const text = app.confirmationText(&buf);
-    const title = switch (app.pending_confirmation orelse .discard_file) {
-        .discard_file => "Discard file",
+    const title = switch (app.pending_confirmation orelse .discard_all) {
         .discard_all => "Discard all changes",
     };
     const w: u16 = @intCast(@min(@as(usize, 72), @max(text.len, 34) + 4));
@@ -376,6 +389,10 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
     }
     if (app.mode == .status_filter_menu) {
         print(win, 0, 0, "status filter  -  j/k move  enter apply  esc cancel", st.bottom_accent);
+        return;
+    }
+    if (app.mode == .menu) {
+        print(win, 0, 0, "j/k move  -  enter select  -  esc cancel", st.bottom_accent);
         return;
     }
     if (app.mode == .confirmation) {

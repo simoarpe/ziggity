@@ -11,12 +11,40 @@ pub const Mode = enum {
     commit_prompt,
     file_filter_prompt,
     status_filter_menu,
+    menu,
     confirmation,
 };
 
 pub const Confirmation = enum {
-    discard_file,
     discard_all,
+};
+
+/// Actions a generic menu popup can dispatch when its selected item is chosen.
+pub const MenuAction = enum {
+    discard_file_all,
+    discard_file_unstaged,
+};
+
+pub const MenuItem = struct {
+    label: []const u8,
+    action: MenuAction,
+};
+
+/// A lazygit-style action menu: a titled list of choices navigated with j/k
+/// and confirmed with enter. Items point at static arrays, so no ownership.
+pub const Menu = struct {
+    title: []const u8,
+    items: []const MenuItem,
+    index: usize = 0,
+};
+
+const discard_menu_staged_and_unstaged = [_]MenuItem{
+    .{ .label = "Discard all changes", .action = .discard_file_all },
+    .{ .label = "Discard unstaged changes", .action = .discard_file_unstaged },
+};
+
+const discard_menu_all_only = [_]MenuItem{
+    .{ .label = "Discard all changes", .action = .discard_file_all },
 };
 
 /// Order of entries shown in the status-filter menu popup.
@@ -49,6 +77,7 @@ pub const App = struct {
     file_filter_buffer: std.ArrayList(u8) = .empty,
     mode: Mode = .normal,
     status_filter_index: usize = 0,
+    active_menu: ?Menu = null,
     pending_confirmation: ?Confirmation = null,
     terminal_focused: bool = true,
     running: bool = true,
@@ -132,6 +161,10 @@ pub const App = struct {
             try self.handleStatusFilterMenuKey(key);
             return;
         }
+        if (self.mode == .menu) {
+            try self.handleMenuKey(key);
+            return;
+        }
         if (self.mode == .confirmation) {
             try self.handleConfirmationKey(key);
             return;
@@ -182,7 +215,7 @@ pub const App = struct {
                 .status, .commits, .main => {},
             },
             .stage_all => try self.toggleAllStaged(),
-            .discard_selected => try self.startDiscardSelectedConfirmation(),
+            .discard_selected => try self.startDiscardMenu(),
             .discard_all => try self.startDiscardAllConfirmation(),
             .start_file_filter => try self.startFileFilterPrompt(),
             .open_status_filter => try self.startStatusFilterMenu(),
@@ -279,13 +312,8 @@ pub const App = struct {
     }
 
     pub fn confirmationText(self: *const App, buf: []u8) []const u8 {
+        _ = buf;
         return switch (self.pending_confirmation orelse return "No pending action.") {
-            .discard_file => blk: {
-                if (self.selectedFile()) |file| {
-                    break :blk std.fmt.bufPrint(buf, "Discard all changes to {s}?", .{file.path}) catch "Discard the selected file?";
-                }
-                break :blk "Discard the selected file?";
-            },
             .discard_all => "Discard all working tree changes? This cannot be undone.",
         };
     }
@@ -442,14 +470,68 @@ pub const App = struct {
         try self.setMessage("status filter", .{});
     }
 
-    fn startDiscardSelectedConfirmation(self: *App) !void {
-        _ = self.selectedFile() orelse {
+    fn startDiscardMenu(self: *App) !void {
+        const file = self.selectedFile() orelse {
             try self.setMessage("no file selected", .{});
             return;
         };
-        self.mode = .confirmation;
-        self.pending_confirmation = .discard_file;
-        try self.setMessage("confirm discard selected file", .{});
+        const items: []const MenuItem = if (file.has_staged and file.has_unstaged)
+            &discard_menu_staged_and_unstaged
+        else
+            &discard_menu_all_only;
+        self.mode = .menu;
+        self.active_menu = .{ .title = "Discard changes", .items = items, .index = 0 };
+        try self.setMessage("discard changes", .{});
+    }
+
+    fn handleMenuKey(self: *App, key: vaxis.Key) !void {
+        const menu = &(self.active_menu orelse {
+            self.mode = .normal;
+            return;
+        });
+        if (self.isEscapeKey(key)) {
+            self.closeMenu();
+            try self.setMessage("cancelled", .{});
+            return;
+        }
+        if (self.config.keymap.up.matches(key) or key.matches(vaxis.Key.up, .{})) {
+            menu.index -|= 1;
+            return;
+        }
+        if (self.config.keymap.down.matches(key) or key.matches(vaxis.Key.down, .{})) {
+            if (menu.index + 1 < menu.items.len) menu.index += 1;
+            return;
+        }
+        if (self.isEnterKey(key) or self.config.keymap.select.matches(key)) {
+            const action = menu.items[menu.index].action;
+            self.closeMenu();
+            try self.runMenuAction(action);
+            return;
+        }
+    }
+
+    fn closeMenu(self: *App) void {
+        self.mode = .normal;
+        self.active_menu = null;
+    }
+
+    fn runMenuAction(self: *App, action: MenuAction) !void {
+        switch (action) {
+            .discard_file_all => {
+                const file = self.selectedFile() orelse {
+                    try self.setMessage("no file selected", .{});
+                    return;
+                };
+                return self.runMutation(try self.git.discardFile(file), "discarded {s}", .{file.path});
+            },
+            .discard_file_unstaged => {
+                const file = self.selectedFile() orelse {
+                    try self.setMessage("no file selected", .{});
+                    return;
+                };
+                return self.runMutation(try self.git.discardUnstaged(file), "discarded unstaged changes in {s}", .{file.path});
+            },
+        }
     }
 
     fn startDiscardAllConfirmation(self: *App) !void {
@@ -597,13 +679,6 @@ pub const App = struct {
         self.mode = .normal;
         self.pending_confirmation = null;
         switch (pending) {
-            .discard_file => {
-                const file = self.selectedFile() orelse {
-                    try self.setMessage("no file selected", .{});
-                    return;
-                };
-                return self.runMutation(try self.git.discardFile(file), "discarded {s}", .{file.path});
-            },
             .discard_all => return self.runMutation(try self.git.discardAll(), "discarded all changes", .{}),
         }
     }
@@ -910,4 +985,61 @@ test "escape clears active file filter before quitting" {
     try std.testing.expect(app.running);
     try std.testing.expectEqual(@as(usize, 0), app.file_filter.len);
     try std.testing.expectEqualStrings("file filter cleared", app.message);
+}
+
+fn testApp(allocator: std.mem.Allocator, files: []model.FileStatus) !App {
+    return App{
+        .allocator = allocator,
+        .git = undefined,
+        .config = .{},
+        .diff = try allocator.dupe(u8, ""),
+        .message = try allocator.dupe(u8, ""),
+        .file_filter = try allocator.dupe(u8, ""),
+        .data = .{ .files = files },
+    };
+}
+
+fn deinitTestApp(app: *App) void {
+    app.allocator.free(app.diff);
+    app.allocator.free(app.message);
+    app.allocator.free(app.file_filter);
+}
+
+test "discard menu offers the unstaged option only when a file has both" {
+    const allocator = std.testing.allocator;
+
+    var both = [_]model.FileStatus{.{
+        .path = @constCast("src/main.zig"),
+        .short_status = .{ 'M', 'M' },
+        .has_staged = true,
+        .has_unstaged = true,
+        .tracked = true,
+        .added = false,
+        .deleted = false,
+        .conflict = false,
+    }};
+    var app = try testApp(allocator, &both);
+    defer deinitTestApp(&app);
+
+    try app.startDiscardMenu();
+    try std.testing.expectEqual(Mode.menu, app.mode);
+    try std.testing.expectEqual(@as(usize, 2), app.active_menu.?.items.len);
+    try std.testing.expectEqual(MenuAction.discard_file_unstaged, app.active_menu.?.items[1].action);
+
+    var unstaged_only = [_]model.FileStatus{.{
+        .path = @constCast("src/main.zig"),
+        .short_status = .{ ' ', 'M' },
+        .has_staged = false,
+        .has_unstaged = true,
+        .tracked = true,
+        .added = false,
+        .deleted = false,
+        .conflict = false,
+    }};
+    var app2 = try testApp(allocator, &unstaged_only);
+    defer deinitTestApp(&app2);
+
+    try app2.startDiscardMenu();
+    try std.testing.expectEqual(@as(usize, 1), app2.active_menu.?.items.len);
+    try std.testing.expectEqual(MenuAction.discard_file_all, app2.active_menu.?.items[0].action);
 }
