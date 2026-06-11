@@ -126,7 +126,12 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     };
     drawBranches(panel(root, 0, y, side_w, branches_h, branches_title, app.focus == .branches), app);
     y += branches_h;
-    const commits_title = if (app.commits_tab == .reflog) "Reflog [4]" else "Commits [4]";
+    const commits_title = if (app.commit_files_active)
+        "Commit files [4]"
+    else if (app.commits_tab == .reflog)
+        "Reflog [4]"
+    else
+        "Commits [4]";
     drawCommits(panel(root, 0, y, side_w, commits_h, commits_title, app.focus == .commits), app);
     y += commits_h;
     drawStash(panel(root, 0, y, side_w, stash_h, "Stash [5]", app.focus == .stash), app);
@@ -381,7 +386,32 @@ fn drawTags(win: vaxis.Window, app: *const app_mod.App) void {
     }
 }
 
+fn drawCommitFiles(win: vaxis.Window, app: *const app_mod.App) void {
+    if (app.commit_files.len == 0) {
+        print(win, 0, 0, "No files in this commit", styles().muted);
+        return;
+    }
+    const start = scrollStart(app.commit_file_index, app.commit_files.len, win.height);
+    var row: u16 = 0;
+    var idx = start;
+    while (idx < app.commit_files.len and row < win.height) : ({
+        idx += 1;
+        row += 1;
+    }) {
+        const file = app.commit_files[idx];
+        var buf: [512]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{c} {s}", .{ file.status, file.path }) catch file.path;
+        const style = switch (file.status) {
+            'A' => styles().added,
+            'D' => styles().removed,
+            else => styles().normal,
+        };
+        drawSelectable(win, row, line, style, idx == app.commit_file_index and app.focus == .commits);
+    }
+}
+
 fn drawCommits(win: vaxis.Window, app: *const app_mod.App) void {
+    if (app.commit_files_active) return drawCommitFiles(win, app);
     const commits = app.activeCommits();
     if (commits.len == 0) {
         const empty_label = if (app.commits_tab == .reflog) "No reflog entries" else "No commits";
@@ -469,19 +499,22 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
     }
 
     var buf: [1024]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "{s}  |  {s}", .{ app.message, contextHints(app.focus) }) catch app.message;
+    const line = std.fmt.bufPrint(&buf, "{s}  |  {s}", .{ app.message, contextHints(app) }) catch app.message;
     print(win, 0, 0, line, st.bottom);
 }
 
 /// Keybinding hints for the focused panel only, lazygit-style. A short global
 /// suffix (refresh/quit) is appended since those apply everywhere.
-fn contextHints(focus: model.Focus) []const u8 {
+fn contextHints(app: *const app_mod.App) []const u8 {
     const global = "  -  R refresh  q quit";
-    return switch (focus) {
+    if (app.commit_files_active and app.focus == .commits) {
+        return "j/k file  enter diff  esc back" ++ global;
+    }
+    return switch (app.focus) {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push" ++ global,
         .files => "space stage  a stage-all  c commit  d discard  D discard-all  / filter  ^b status  enter view" ++ global,
         .branches => "space checkout  n new  d delete  M merge  r rebase  [ ] tabs" ++ global,
-        .commits => "enter view  g reset  t revert  [ ] commits/reflog" ++ global,
+        .commits => "enter files  g reset  t revert  [ ] commits/reflog" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => "j/k scroll  PgUp/PgDn page  esc back" ++ global,
     };

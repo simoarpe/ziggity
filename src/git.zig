@@ -253,6 +253,26 @@ pub const Git = struct {
         return parseStash(self.allocator, result.stdout);
     }
 
+    /// Files changed by a single commit (vs its parent, or all files for the
+    /// root commit thanks to --root).
+    pub fn loadCommitFiles(self: *Git, hash: []const u8) ![]model.CommitFile {
+        var result = try self.exec(&.{ "diff-tree", "--root", "--no-commit-id", "--name-status", "-r", "-z", hash });
+        defer result.deinit(self.allocator);
+        if (!result.ok()) return self.allocator.alloc(model.CommitFile, 0);
+        return parseCommitFiles(self.allocator, result.stdout);
+    }
+
+    /// The diff a single commit introduced for one path.
+    pub fn diffForCommitFile(self: *Git, hash: []const u8, path: []const u8, diff_context: u8) ![]u8 {
+        const context_arg = try std.fmt.allocPrint(self.allocator, "--unified={d}", .{diff_context});
+        defer self.allocator.free(context_arg);
+        var result = try self.exec(&.{ "show", hash, "--no-ext-diff", "--no-color", context_arg, "--format=", "--", path });
+        errdefer result.deinit(self.allocator);
+        if (!result.ok()) return GitError.CommandFailed;
+        self.allocator.free(result.stderr);
+        return result.stdout;
+    }
+
     pub fn diffForFile(self: *Git, file: model.FileStatus, diff_context: u8) ![]u8 {
         var output_buf: std.ArrayList(u8) = .empty;
         errdefer output_buf.deinit(self.allocator);
@@ -644,6 +664,35 @@ pub fn parseStash(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Stas
     return entries.toOwnedSlice(allocator);
 }
 
+pub fn parseCommitFiles(allocator: std.mem.Allocator, bytes: []const u8) ![]model.CommitFile {
+    var files: std.ArrayList(model.CommitFile) = .empty;
+    errdefer {
+        for (files.items) |*file| file.deinit(allocator);
+        files.deinit(allocator);
+    }
+
+    // -z output is a flat NUL-separated stream: STATUS, PATH, STATUS, PATH...
+    // Renames/copies (R/C) carry two paths (source then destination).
+    var parts = std.mem.splitScalar(u8, bytes, 0);
+    while (parts.next()) |status_token| {
+        if (status_token.len == 0) continue;
+        const status = status_token[0];
+        const path = if (status == 'R' or status == 'C') blk: {
+            _ = parts.next() orelse break; // source path, unused
+            break :blk parts.next() orelse break; // destination path
+        } else parts.next() orelse break;
+        if (path.len == 0) continue;
+        var file = model.CommitFile{
+            .status = status,
+            .path = try allocator.dupe(u8, path),
+        };
+        errdefer file.deinit(allocator);
+        try files.append(allocator, file);
+    }
+
+    return files.toOwnedSlice(allocator);
+}
+
 fn parseStashIndex(selector: []const u8) ?usize {
     const start = std.mem.indexOfScalar(u8, selector, '{') orelse return null;
     const end = std.mem.indexOfScalarPos(u8, selector, start, '}') orelse return null;
@@ -739,4 +788,19 @@ test "parse stash entries extracts selector index" {
     try std.testing.expectEqualSlices(u8, "WIP on main", entries[0].message);
     try std.testing.expectEqual(@as(usize, 12), entries[1].index);
     try std.testing.expectEqualSlices(u8, "Saved work", entries[1].message);
+}
+
+test "parse commit files handles modifications and renames" {
+    const input = "M\x00src/main.zig\x00A\x00new.zig\x00R100\x00old.zig\x00renamed.zig\x00D\x00gone.zig\x00";
+    const files = try parseCommitFiles(std.testing.allocator, input);
+    defer model.deinitCommitFiles(std.testing.allocator, files);
+
+    try std.testing.expectEqual(@as(usize, 4), files.len);
+    try std.testing.expectEqual(@as(u8, 'M'), files[0].status);
+    try std.testing.expectEqualSlices(u8, "src/main.zig", files[0].path);
+    try std.testing.expectEqual(@as(u8, 'A'), files[1].status);
+    try std.testing.expectEqual(@as(u8, 'R'), files[2].status);
+    try std.testing.expectEqualSlices(u8, "renamed.zig", files[2].path);
+    try std.testing.expectEqual(@as(u8, 'D'), files[3].status);
+    try std.testing.expectEqualSlices(u8, "gone.zig", files[3].path);
 }

@@ -103,6 +103,22 @@ pub const Tag = struct {
     }
 };
 
+/// A file changed by a single commit, from `git diff-tree --name-status`.
+pub const CommitFile = struct {
+    status: u8,
+    path: []u8,
+
+    pub fn deinit(self: *CommitFile, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        self.* = undefined;
+    }
+};
+
+pub fn deinitCommitFiles(allocator: std.mem.Allocator, files: []CommitFile) void {
+    for (files) |*file| file.deinit(allocator);
+    allocator.free(files);
+}
+
 pub const Commit = struct {
     hash: []u8,
     short_hash: []u8,

@@ -80,6 +80,8 @@ Useful keys:
 - `1`/`2`/`3`/`4`/`5`: focus status, files, branches, commits, stash
 - `[`/`]`: switch panel tabs (branches: Local/Remotes/Tags; commits: Commits/Reflog)
 - `enter`: inspect the selected item in the main panel; `esc`/`h` returns
+- `enter` on a commit: drill into its changed-file list (`j`/`k` to pick a file,
+  `enter` to scroll its diff, `esc` to go back)
 - `space`: stage/unstage file, checkout branch, or apply stash depending on focus
 - `n`: create a new branch from HEAD (branches panel, Local tab)
 - `d`: delete the selected local branch (menu: delete / force delete)

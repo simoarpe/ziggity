@@ -130,6 +130,9 @@ pub const App = struct {
     commit_index: usize = 0,
     reflog_index: usize = 0,
     stash_index: usize = 0,
+    commit_files: []model.CommitFile = &.{},
+    commit_file_index: usize = 0,
+    commit_files_active: bool = false,
     branches_tab: BranchesTab = .local,
     commits_tab: CommitsTab = .commits,
     main_scroll: usize = 0,
@@ -171,6 +174,7 @@ pub const App = struct {
 
     pub fn deinit(self: *App) void {
         self.data.deinit(self.allocator);
+        model.deinitCommitFiles(self.allocator, self.commit_files);
         self.allocator.free(self.diff);
         self.allocator.free(self.message);
         self.allocator.free(self.file_filter);
@@ -186,6 +190,7 @@ pub const App = struct {
         self.data.deinit(self.allocator);
         self.data = next;
         self.clampSelections();
+        if (self.commit_files_active) self.reloadCommitFilesAfterRefresh();
         self.updatePreview() catch |err| {
             try self.setMessage("preview failed: {s}", .{@errorName(err)});
         };
@@ -258,6 +263,8 @@ pub const App = struct {
                 }
                 if (self.focus == .main) {
                     try self.leaveMain();
+                } else if (self.commit_files_active) {
+                    try self.closeCommitFiles();
                 } else {
                     self.running = false;
                 }
@@ -267,7 +274,7 @@ pub const App = struct {
             .focus_branches => try self.setFocus(.branches),
             .focus_commits => try self.setFocus(.commits),
             .focus_stash => try self.setFocus(.stash),
-            .focus_main => try self.enterMain(),
+            .focus_main => try self.descendOrOpenCommitFiles(),
             .prev_tab => try self.cycleTab(.prev),
             .next_tab => try self.cycleTab(.next),
             .refresh => {
@@ -421,6 +428,63 @@ pub const App = struct {
         return list[@min(self.activeCommitIndex(), list.len - 1)];
     }
 
+    pub fn selectedCommitFile(self: *const App) ?model.CommitFile {
+        if (self.commit_files.len == 0) return null;
+        return self.commit_files[@min(self.commit_file_index, self.commit_files.len - 1)];
+    }
+
+    /// <enter> on the Commits tab drills into the selected commit's file list;
+    /// a second <enter> (already drilled) descends into the diff to scroll it.
+    /// Elsewhere it just descends into the main panel.
+    fn descendOrOpenCommitFiles(self: *App) !void {
+        if (self.focus == .commits and self.commits_tab == .commits and !self.commit_files_active) {
+            return self.openCommitFiles();
+        }
+        return self.enterMain();
+    }
+
+    fn openCommitFiles(self: *App) !void {
+        const commit = self.selectedCommit() orelse {
+            try self.setMessage("no commit selected", .{});
+            return;
+        };
+        const files = try self.git.loadCommitFiles(commit.hash);
+        model.deinitCommitFiles(self.allocator, self.commit_files);
+        self.commit_files = files;
+        self.commit_file_index = 0;
+        self.commit_files_active = true;
+        self.main_scroll = 0;
+        try self.updatePreview();
+        try self.setMessage("{d} files in {s}", .{ files.len, commit.short_hash });
+    }
+
+    fn closeCommitFiles(self: *App) !void {
+        self.deactivateCommitFiles();
+        self.main_scroll = 0;
+        try self.updatePreview();
+    }
+
+    fn deactivateCommitFiles(self: *App) void {
+        model.deinitCommitFiles(self.allocator, self.commit_files);
+        self.commit_files = &.{};
+        self.commit_file_index = 0;
+        self.commit_files_active = false;
+    }
+
+    /// Keep the drilled-in commit file list consistent after a full refresh
+    /// (e.g. focus regain or a mutation); drop out if the commit is gone.
+    fn reloadCommitFilesAfterRefresh(self: *App) void {
+        const commit = self.selectedCommit() orelse return self.deactivateCommitFiles();
+        const files = self.git.loadCommitFiles(commit.hash) catch return self.deactivateCommitFiles();
+        model.deinitCommitFiles(self.allocator, self.commit_files);
+        self.commit_files = files;
+        if (self.commit_files.len == 0) {
+            self.commit_file_index = 0;
+        } else {
+            self.commit_file_index = @min(self.commit_file_index, self.commit_files.len - 1);
+        }
+    }
+
     const TabDirection = enum { prev, next };
 
     fn cycleTab(self: *App, direction: TabDirection) !void {
@@ -443,6 +507,7 @@ pub const App = struct {
                 try self.setMessage("{s}", .{self.branches_tab.label()});
             },
             .commits => {
+                if (self.commit_files_active) self.deactivateCommitFiles();
                 // Only two tabs, so prev and next are equivalent here.
                 self.commits_tab = switch (self.commits_tab) {
                     .commits => .reflog,
@@ -480,6 +545,7 @@ pub const App = struct {
     }
 
     fn setFocus(self: *App, focus: model.Focus) !void {
+        if (self.commit_files_active) self.deactivateCommitFiles();
         self.focus = focus;
         self.main_scroll = 0;
         try self.updatePreview();
@@ -502,6 +568,7 @@ pub const App = struct {
 
     fn focusNext(self: *App) !void {
         if (self.focus == .main) return self.leaveMain();
+        if (self.commit_files_active) self.deactivateCommitFiles();
         self.focus = switch (self.focus) {
             .status => .files,
             .files => .branches,
@@ -516,6 +583,7 @@ pub const App = struct {
 
     fn focusPrevious(self: *App) !void {
         if (self.focus == .main) return self.leaveMain();
+        if (self.commit_files_active) self.deactivateCommitFiles();
         self.focus = switch (self.focus) {
             .status => .stash,
             .files => .status,
@@ -537,9 +605,13 @@ pub const App = struct {
                 .remotes => self.remote_index -|= 1,
                 .tags => self.tag_index -|= 1,
             },
-            .commits => switch (self.commits_tab) {
-                .commits => self.commit_index -|= 1,
-                .reflog => self.reflog_index -|= 1,
+            .commits => {
+                if (self.commit_files_active) {
+                    self.commit_file_index -|= 1;
+                } else switch (self.commits_tab) {
+                    .commits => self.commit_index -|= 1,
+                    .reflog => self.reflog_index -|= 1,
+                }
             },
             .stash => self.stash_index -|= 1,
             .main => return self.scrollMain(-1),
@@ -562,13 +634,17 @@ pub const App = struct {
                     self.tag_index += 1;
                 },
             },
-            .commits => switch (self.commits_tab) {
-                .commits => if (self.commit_index + 1 < self.data.commits.len) {
-                    self.commit_index += 1;
-                },
-                .reflog => if (self.reflog_index + 1 < self.data.reflog.len) {
-                    self.reflog_index += 1;
-                },
+            .commits => {
+                if (self.commit_files_active) {
+                    if (self.commit_file_index + 1 < self.commit_files.len) self.commit_file_index += 1;
+                } else switch (self.commits_tab) {
+                    .commits => if (self.commit_index + 1 < self.data.commits.len) {
+                        self.commit_index += 1;
+                    },
+                    .reflog => if (self.reflog_index + 1 < self.data.reflog.len) {
+                        self.reflog_index += 1;
+                    },
+                }
             },
             .stash => {
                 if (self.stash_index + 1 < self.data.stash.len) self.stash_index += 1;
@@ -1062,8 +1138,12 @@ pub const App = struct {
                 break :blk try self.allocator.dupe(u8, "Nothing to show in this tab.\n");
             },
             .commits => blk: {
-                if (self.selectedCommit()) |commit| break :blk try self.git.showCommit(commit.hash, self.config.diff_context);
-                break :blk try self.allocator.dupe(u8, "No commits found.\n");
+                const commit = self.selectedCommit() orelse break :blk try self.allocator.dupe(u8, "No commits found.\n");
+                if (self.commit_files_active) {
+                    if (self.selectedCommitFile()) |file| break :blk try self.git.diffForCommitFile(commit.hash, file.path, self.config.diff_context);
+                    break :blk try self.allocator.dupe(u8, "This commit changed no files.\n");
+                }
+                break :blk try self.git.showCommit(commit.hash, self.config.diff_context);
             },
             .stash => blk: {
                 if (self.selectedStash()) |entry| break :blk try self.git.showStash(entry.index, self.config.diff_context);
@@ -1453,6 +1533,27 @@ test "commits panel tab selects between the commits and reflog lists" {
     app.commits_tab = .reflog;
     try std.testing.expectEqualStrings("2222222", app.selectedCommit().?.short_hash);
     try std.testing.expectEqualStrings("HEAD@{0}", app.selectedCommit().?.refs);
+}
+
+test "commit file drill-down tracks selection and deactivates cleanly" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var files = try allocator.alloc(model.CommitFile, 2);
+    files[0] = .{ .status = 'M', .path = try allocator.dupe(u8, "src/a.zig") };
+    files[1] = .{ .status = 'A', .path = try allocator.dupe(u8, "src/b.zig") };
+    app.commit_files = files;
+    app.commit_files_active = true;
+    app.commit_file_index = 1;
+
+    try std.testing.expectEqualStrings("src/b.zig", app.selectedCommitFile().?.path);
+
+    app.deactivateCommitFiles();
+    try std.testing.expect(!app.commit_files_active);
+    try std.testing.expectEqual(@as(usize, 0), app.commit_files.len);
+    try std.testing.expect(app.selectedCommitFile() == null);
 }
 
 test "commit reset menu opens on the commits tab and refuses reflog" {
