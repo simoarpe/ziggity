@@ -19,6 +19,16 @@ pub const Confirmation = enum {
     discard_all,
 };
 
+/// Order of entries shown in the status-filter menu popup.
+pub const status_filter_options = [_]model.FileDisplayFilter{
+    .all,
+    .staged,
+    .unstaged,
+    .tracked,
+    .untracked,
+    .conflicted,
+};
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     git: git_mod.Git,
@@ -38,6 +48,7 @@ pub const App = struct {
     commit_buffer: std.ArrayList(u8) = .empty,
     file_filter_buffer: std.ArrayList(u8) = .empty,
     mode: Mode = .normal,
+    status_filter_index: usize = 0,
     pending_confirmation: ?Confirmation = null,
     terminal_focused: bool = true,
     running: bool = true,
@@ -271,11 +282,11 @@ pub const App = struct {
         return switch (self.pending_confirmation orelse return "No pending action.") {
             .discard_file => blk: {
                 if (self.selectedFile()) |file| {
-                    break :blk std.fmt.bufPrint(buf, "Discard all changes to {s}? y/enter confirm, n/esc cancel", .{file.path}) catch "Discard selected file? y/enter confirm, n/esc cancel";
+                    break :blk std.fmt.bufPrint(buf, "Discard all changes to {s}?", .{file.path}) catch "Discard the selected file?";
                 }
-                break :blk "Discard selected file? y/enter confirm, n/esc cancel";
+                break :blk "Discard the selected file?";
             },
-            .discard_all => "Discard all working tree changes? y/enter confirm, n/esc cancel",
+            .discard_all => "Discard all working tree changes? This cannot be undone.",
         };
     }
 
@@ -424,6 +435,10 @@ pub const App = struct {
     fn startStatusFilterMenu(self: *App) !void {
         self.focus = .files;
         self.mode = .status_filter_menu;
+        self.status_filter_index = 0;
+        for (status_filter_options, 0..) |option, idx| {
+            if (option == self.file_display_filter) self.status_filter_index = idx;
+        }
         try self.setMessage("status filter", .{});
     }
 
@@ -541,11 +556,24 @@ pub const App = struct {
             try self.setMessage("status filter cancelled", .{});
             return;
         }
+        if (self.config.keymap.up.matches(key) or key.matches(vaxis.Key.up, .{})) {
+            self.status_filter_index -|= 1;
+            return;
+        }
+        if (self.config.keymap.down.matches(key) or key.matches(vaxis.Key.down, .{})) {
+            if (self.status_filter_index + 1 < status_filter_options.len) self.status_filter_index += 1;
+            return;
+        }
+        if (self.isEnterKey(key) or self.config.keymap.select.matches(key)) {
+            return self.setFileDisplayFilter(status_filter_options[self.status_filter_index]);
+        }
+        // Letter shortcuts mirror lazygit's quick filters.
+        if (key.matches('r', .{})) return self.setFileDisplayFilter(.all);
         if (key.matches('s', .{})) return self.setFileDisplayFilter(.staged);
         if (key.matches('u', .{})) return self.setFileDisplayFilter(.unstaged);
         if (key.matches('t', .{})) return self.setFileDisplayFilter(.tracked);
         if (key.matches('T', .{})) return self.setFileDisplayFilter(.untracked);
-        if (key.matches('r', .{})) return self.setFileDisplayFilter(.all);
+        if (key.matches('c', .{})) return self.setFileDisplayFilter(.conflicted);
     }
 
     fn handleConfirmationKey(self: *App, key: vaxis.Key) !void {

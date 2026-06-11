@@ -128,6 +128,67 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     const main = panel(root, side_w, 0, main_w, body_h, "Diff", app.focus == .main);
     drawDiff(main, app);
     drawBottom(root.child(.{ .x_off = 0, .y_off = @intCast(body_h), .width = root.width, .height = bottom_h }), app);
+
+    // Centered popups render on top of everything else.
+    switch (app.mode) {
+        .status_filter_menu => drawStatusFilterPopup(root, app),
+        .confirmation => drawConfirmPopup(root, app),
+        else => {},
+    }
+}
+
+/// Centered, bordered, opaque popup window. Fills its region first so the
+/// panels underneath do not bleed through, draws a rounded border and a title,
+/// and returns the inner content window.
+fn popup(root: vaxis.Window, width: u16, height: u16, title: []const u8) vaxis.Window {
+    const w = @min(@max(width, 8), root.width);
+    const h = @min(@max(height, 3), root.height);
+    const x: u16 = (root.width - w) / 2;
+    const y: u16 = (root.height - h) / 2;
+    const raw = root.child(.{ .x_off = x, .y_off = y, .width = w, .height = h });
+    var row: u16 = 0;
+    while (row < h) : (row += 1) fillRow(raw, row, styles().normal);
+    const inner = raw.child(.{
+        .border = .{
+            .where = .all,
+            .style = styles().active_border,
+            .glyphs = .single_rounded,
+        },
+    });
+    _ = raw.printSegment(.{ .text = title, .style = styles().active_title }, .{
+        .row_offset = 0,
+        .col_offset = 2,
+        .wrap = .none,
+    });
+    return inner;
+}
+
+fn drawStatusFilterPopup(root: vaxis.Window, app: *const app_mod.App) void {
+    const st = styles();
+    const options = app_mod.status_filter_options;
+    const w: u16 = 38;
+    const h: u16 = @intCast(options.len + 2);
+    const win = popup(root, w, h, "Status filter");
+    for (options, 0..) |option, idx| {
+        var buf: [64]u8 = undefined;
+        const marker: u8 = if (option == app.file_display_filter) '*' else ' ';
+        const line = std.fmt.bufPrint(&buf, "{c} {s}", .{ marker, option.label() }) catch option.label();
+        drawSelectable(win, @intCast(idx), line, st.normal, idx == app.status_filter_index);
+    }
+}
+
+fn drawConfirmPopup(root: vaxis.Window, app: *const app_mod.App) void {
+    const st = styles();
+    var buf: [1024]u8 = undefined;
+    const text = app.confirmationText(&buf);
+    const title = switch (app.pending_confirmation orelse .discard_file) {
+        .discard_file => "Discard file",
+        .discard_all => "Discard all changes",
+    };
+    const w: u16 = @intCast(@min(@as(usize, 72), @max(text.len, 34) + 4));
+    const win = popup(root, w, 5, title);
+    print(win, 0, 0, text, st.normal);
+    print(win, 2, 0, "(y/enter) confirm   (n/esc) cancel", st.bottom_accent);
 }
 
 fn panel(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, title: []const u8, focused: bool) vaxis.Window {
@@ -314,14 +375,11 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
         return;
     }
     if (app.mode == .status_filter_menu) {
-        var menu_buf: [256]u8 = undefined;
-        const line = std.fmt.bufPrint(&menu_buf, "status filter ({s}): s staged u unstaged t tracked T untracked r all esc cancel", .{app.file_display_filter.label()}) catch "status filter";
-        print(win, 0, 0, line, st.bottom_accent);
+        print(win, 0, 0, "status filter  -  j/k move  enter apply  esc cancel", st.bottom_accent);
         return;
     }
     if (app.mode == .confirmation) {
-        var confirm_buf: [1024]u8 = undefined;
-        print(win, 0, 0, app.confirmationText(&confirm_buf), st.bottom_accent);
+        print(win, 0, 0, "y/enter confirm  -  n/esc cancel", st.bottom_accent);
         return;
     }
 
