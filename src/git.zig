@@ -87,6 +87,32 @@ pub const Git = struct {
         return result.stdout;
     }
 
+    /// The plain unified diff for one file's unstaged (working tree vs index)
+    /// or staged (index vs HEAD) changes, with no decoration — suitable for
+    /// hunk parsing and re-application.
+    pub fn rawFileDiff(self: *Git, path: []const u8, staged: bool, diff_context: u8) ![]u8 {
+        const context_arg = try std.fmt.allocPrint(self.allocator, "--unified={d}", .{diff_context});
+        defer self.allocator.free(context_arg);
+        if (staged) {
+            return self.output(&.{ "diff", "--staged", "--no-ext-diff", "--no-color", context_arg, "--", path });
+        }
+        return self.output(&.{ "diff", "--no-ext-diff", "--no-color", context_arg, "--", path });
+    }
+
+    /// Apply a patch to the index. `reverse` unstages (used on the staged
+    /// side). The patch is written to a temp file under .git since
+    /// `std.process.run` cannot feed stdin.
+    pub fn applyPatch(self: *Git, patch: []const u8, reverse: bool) !ExecResult {
+        const patch_path = try std.fmt.allocPrint(self.allocator, "{s}/.git/ziggity-stage.patch", .{self.root});
+        defer self.allocator.free(patch_path);
+        try std.Io.Dir.writeFile(.cwd(), self.io, .{ .sub_path = patch_path, .data = patch });
+        defer std.Io.Dir.deleteFile(.cwd(), self.io, patch_path) catch {};
+        if (reverse) {
+            return self.exec(&.{ "apply", "--cached", "--reverse", "--whitespace=nowarn", "--", patch_path });
+        }
+        return self.exec(&.{ "apply", "--cached", "--whitespace=nowarn", "--", patch_path });
+    }
+
     pub fn loadRepoData(self: *Git) !model.RepoData {
         var data = model.RepoData.empty();
         errdefer data.deinit(self.allocator);

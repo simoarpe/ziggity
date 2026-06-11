@@ -136,7 +136,11 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     y += commits_h;
     drawStash(panel(root, 0, y, side_w, stash_h, "Stash [5]", app.focus == .stash), app);
 
-    const main = panel(root, side_w, 0, main_w, body_h, "Diff", app.focus == .main);
+    const main_title = if (app.staging_active)
+        (if (app.staging_staged_view) "Staging - staged" else "Staging - unstaged")
+    else
+        "Diff";
+    const main = panel(root, side_w, 0, main_w, body_h, main_title, app.focus == .main);
     drawDiff(main, app);
     drawBottom(root.child(.{ .x_off = 0, .y_off = @intCast(body_h), .width = root.width, .height = bottom_h }), app);
 
@@ -453,7 +457,26 @@ fn drawStash(win: vaxis.Window, app: *const app_mod.App) void {
 }
 
 fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
-    var lines = std.mem.splitScalar(u8, app.diff, '\n');
+    const text = if (app.staging_active) app.staging_diff else app.diff;
+    if (app.staging_active and text.len == 0) {
+        print(win, 0, 0, "No changes on this side - press tab to switch", styles().muted);
+        return;
+    }
+
+    // The selected hunk's line range, used to highlight it while staging.
+    var hl_start: usize = 0;
+    var hl_end: usize = 0;
+    if (app.staging_active) {
+        if (app.staging) |parsed| {
+            if (parsed.hunks.len > 0) {
+                const hunk = parsed.hunks[@min(app.staging_hunk, parsed.hunks.len - 1)];
+                hl_start = hunk.start_line;
+                hl_end = hunk.end_line;
+            }
+        }
+    }
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
     var skipped: usize = 0;
     while (skipped < app.main_scroll) : (skipped += 1) {
         if (lines.next() == null) return;
@@ -462,7 +485,12 @@ fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
     var row: u16 = 0;
     while (row < win.height) : (row += 1) {
         const line = lines.next() orelse break;
-        const style = diffStyle(line);
+        const abs_line = app.main_scroll + row;
+        var style = diffStyle(line);
+        if (app.staging_active and abs_line >= hl_start and abs_line < hl_end) {
+            style.bg = .{ .index = 8 };
+            fillRow(win, row, style);
+        }
         print(win, row, 0, line, style);
     }
 }
@@ -507,12 +535,15 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
 /// suffix (refresh/quit) is appended since those apply everywhere.
 fn contextHints(app: *const app_mod.App) []const u8 {
     const global = "  -  R refresh  q quit";
+    if (app.staging_active) {
+        return "j/k hunk  space stage/unstage  tab switch side  esc back" ++ global;
+    }
     if (app.commit_files_active and app.focus == .commits) {
         return "j/k file  enter diff  esc back" ++ global;
     }
     return switch (app.focus) {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push" ++ global,
-        .files => "space stage  a stage-all  c commit  d discard  D discard-all  / filter  ^b status  enter view" ++ global,
+        .files => "space stage  a stage-all  c commit  d discard  / filter  ^b status  enter stage-hunks" ++ global,
         .branches => "space checkout  n new  R rename  d delete  M merge  r rebase  [ ]" ++ global,
         .commits => "enter files  g reset  t revert  [ ] commits/reflog" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,

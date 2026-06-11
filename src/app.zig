@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 
 const actions = @import("actions.zig");
 const config_mod = @import("config.zig");
+const diff_mod = @import("diff.zig");
 const git_mod = @import("git.zig");
 const model = @import("model.zig");
 
@@ -135,6 +136,12 @@ pub const App = struct {
     commit_files: []model.CommitFile = &.{},
     commit_file_index: usize = 0,
     commit_files_active: bool = false,
+    staging_active: bool = false,
+    staging_staged_view: bool = false,
+    staging_path: []u8 = &.{},
+    staging_diff: []u8 = &.{},
+    staging: ?diff_mod.ParsedDiff = null,
+    staging_hunk: usize = 0,
     branches_tab: BranchesTab = .local,
     commits_tab: CommitsTab = .commits,
     main_scroll: usize = 0,
@@ -177,6 +184,9 @@ pub const App = struct {
     pub fn deinit(self: *App) void {
         self.data.deinit(self.allocator);
         model.deinitCommitFiles(self.allocator, self.commit_files);
+        if (self.staging) |*parsed| parsed.deinit(self.allocator);
+        self.allocator.free(self.staging_diff);
+        self.allocator.free(self.staging_path);
         self.allocator.free(self.diff);
         self.allocator.free(self.message);
         self.allocator.free(self.file_filter);
@@ -263,7 +273,9 @@ pub const App = struct {
                     try self.clearFileFilter();
                     return;
                 }
-                if (self.focus == .main) {
+                if (self.staging_active) {
+                    try self.closeStaging();
+                } else if (self.focus == .main) {
                     try self.leaveMain();
                 } else if (self.commit_files_active) {
                     try self.closeCommitFiles();
@@ -286,15 +298,19 @@ pub const App = struct {
             .fetch => try self.runMutation(try self.git.fetch(), "fetch complete", .{}),
             .pull => try self.runMutation(try self.git.pull(), "pull complete", .{}),
             .push => try self.runMutation(try self.git.push(), "push complete", .{}),
-            .move_up => try self.moveUp(),
-            .move_down => try self.moveDown(),
-            .focus_left => try self.focusPrevious(),
-            .focus_right => try self.focusNext(),
-            .select => switch (self.focus) {
-                .files => try self.toggleFileStaged(),
-                .branches => try self.checkoutSelectedBranch(),
-                .stash => try self.applySelectedStash(),
-                .status, .commits, .main => {},
+            .move_up => if (self.staging_active) try self.moveStagingHunk(-1) else try self.moveUp(),
+            .move_down => if (self.staging_active) try self.moveStagingHunk(1) else try self.moveDown(),
+            .focus_left => if (self.staging_active) try self.closeStaging() else try self.focusPrevious(),
+            .focus_right => if (self.staging_active) try self.toggleStagingSide() else try self.focusNext(),
+            .select => {
+                if (self.staging_active) {
+                    try self.applySelectedHunk();
+                } else switch (self.focus) {
+                    .files => try self.toggleFileStaged(),
+                    .branches => try self.checkoutSelectedBranch(),
+                    .stash => try self.applySelectedStash(),
+                    .status, .commits, .main => {},
+                }
             },
             .stage_all => try self.toggleAllStaged(),
             .discard_selected => try self.startDiscardMenu(),
@@ -317,6 +333,7 @@ pub const App = struct {
 
     pub fn handleRefreshTick(self: *App) !void {
         if (self.mode != .normal) return;
+        if (self.staging_active) return;
         if (!self.terminal_focused) return;
         self.refreshWorkingTree() catch |err| {
             try self.setMessage("auto refresh failed: {s}", .{@errorName(err)});
@@ -436,14 +453,120 @@ pub const App = struct {
         return self.commit_files[@min(self.commit_file_index, self.commit_files.len - 1)];
     }
 
-    /// <enter> on the Commits tab drills into the selected commit's file list;
-    /// a second <enter> (already drilled) descends into the diff to scroll it.
-    /// Elsewhere it just descends into the main panel.
+    /// <enter> behaviour per panel: on the Commits tab it drills into the
+    /// commit's file list; on the Files panel it opens the hunk-staging view;
+    /// elsewhere it descends into the main panel to scroll.
     fn descendOrOpenCommitFiles(self: *App) !void {
         if (self.focus == .commits and self.commits_tab == .commits and !self.commit_files_active) {
             return self.openCommitFiles();
         }
+        if (self.focus == .files) {
+            return self.openStaging();
+        }
         return self.enterMain();
+    }
+
+    fn openStaging(self: *App) !void {
+        const file = self.selectedFile() orelse {
+            try self.setMessage("no file selected", .{});
+            return;
+        };
+        if (!file.tracked and !file.has_staged) {
+            try self.setMessage("stage untracked files with space in the Files panel", .{});
+            return;
+        }
+        const path = try self.allocator.dupe(u8, file.path);
+        self.clearStaging();
+        self.staging_path = path;
+        self.staging_staged_view = false;
+        self.main_origin = .files;
+        self.focus = .main;
+        self.staging_active = true;
+        try self.loadStaging();
+        try self.setMessage("staging {s}", .{file.path});
+    }
+
+    fn loadStaging(self: *App) !void {
+        if (self.staging) |*parsed| parsed.deinit(self.allocator);
+        self.staging = null;
+        self.allocator.free(self.staging_diff);
+        self.staging_diff = &.{};
+
+        self.staging_diff = self.git.rawFileDiff(self.staging_path, self.staging_staged_view, self.config.diff_context) catch
+            try self.allocator.dupe(u8, "");
+        self.staging = try diff_mod.parse(self.allocator, self.staging_diff);
+        self.staging_hunk = 0;
+        self.scrollToStagingHunk();
+    }
+
+    fn toggleStagingSide(self: *App) !void {
+        self.staging_staged_view = !self.staging_staged_view;
+        try self.loadStaging();
+        try self.setMessage("{s} changes", .{if (self.staging_staged_view) "staged" else "unstaged"});
+    }
+
+    fn moveStagingHunk(self: *App, delta: i8) !void {
+        const parsed = self.staging orelse return;
+        if (parsed.hunks.len == 0) return;
+        if (delta < 0) {
+            self.staging_hunk -|= 1;
+        } else if (self.staging_hunk + 1 < parsed.hunks.len) {
+            self.staging_hunk += 1;
+        }
+        self.scrollToStagingHunk();
+    }
+
+    fn scrollToStagingHunk(self: *App) void {
+        const parsed = self.staging orelse {
+            self.main_scroll = 0;
+            return;
+        };
+        if (parsed.hunks.len == 0) {
+            self.main_scroll = 0;
+            return;
+        }
+        self.main_scroll = parsed.hunks[@min(self.staging_hunk, parsed.hunks.len - 1)].start_line;
+    }
+
+    fn applySelectedHunk(self: *App) !void {
+        const parsed = self.staging orelse return;
+        if (parsed.hunks.len == 0) {
+            try self.setMessage("no hunks to apply", .{});
+            return;
+        }
+        const index = @min(self.staging_hunk, parsed.hunks.len - 1);
+        const patch = try diff_mod.buildHunkPatch(self.allocator, self.staging_diff, parsed, index);
+        defer self.allocator.free(patch);
+
+        var result = try self.git.applyPatch(patch, self.staging_staged_view);
+        defer result.deinit(self.allocator);
+        if (!result.ok()) {
+            const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
+            try self.setMessage("apply failed: {s}", .{if (stderr.len > 0) stderr else "git apply error"});
+            return;
+        }
+        try self.setMessage("{s} hunk", .{if (self.staging_staged_view) "unstaged" else "staged"});
+        self.refresh() catch {};
+        try self.loadStaging();
+    }
+
+    fn closeStaging(self: *App) !void {
+        self.clearStaging();
+        self.focus = .files;
+        self.main_scroll = 0;
+        try self.updatePreview();
+    }
+
+    fn clearStaging(self: *App) void {
+        if (self.staging) |*parsed| parsed.deinit(self.allocator);
+        self.staging = null;
+        self.allocator.free(self.staging_diff);
+        self.staging_diff = &.{};
+        self.allocator.free(self.staging_path);
+        self.staging_path = &.{};
+        self.staging_active = false;
+        self.staging_staged_view = false;
+        self.staging_hunk = 0;
     }
 
     fn openCommitFiles(self: *App) !void {
@@ -549,6 +672,7 @@ pub const App = struct {
 
     fn setFocus(self: *App, focus: model.Focus) !void {
         if (self.commit_files_active) self.deactivateCommitFiles();
+        if (self.staging_active) self.clearStaging();
         self.focus = focus;
         self.main_scroll = 0;
         try self.updatePreview();
@@ -1150,6 +1274,9 @@ pub const App = struct {
     }
 
     fn updatePreview(self: *App) !void {
+        // While staging, the main panel renders the raw staging diff instead of
+        // self.diff, so there is nothing to recompute here.
+        if (self.staging_active) return;
         self.allocator.free(self.diff);
         self.diff = switch (self.contentFocus()) {
             .status => try self.statusPreview(),
@@ -1640,6 +1767,32 @@ test "branch delete menu refuses the current branch and non-local tabs" {
     app.branches_tab = .remotes;
     try app.startBranchDeleteMenu();
     try std.testing.expectEqual(Mode.normal, app.mode);
+}
+
+test "staging hunk navigation clamps and tears down cleanly" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    const diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n@@ -5 +5 @@\n-c\n+d\n";
+    app.staging_diff = try allocator.dupe(u8, diff);
+    app.staging = try diff_mod.parse(allocator, app.staging_diff);
+    app.staging_path = try allocator.dupe(u8, "f");
+    app.staging_active = true;
+
+    try std.testing.expectEqual(@as(usize, 2), app.staging.?.hunks.len);
+    try app.moveStagingHunk(1);
+    try std.testing.expectEqual(@as(usize, 1), app.staging_hunk);
+    try app.moveStagingHunk(1); // clamps at the last hunk
+    try std.testing.expectEqual(@as(usize, 1), app.staging_hunk);
+    try app.moveStagingHunk(-1);
+    try std.testing.expectEqual(@as(usize, 0), app.staging_hunk);
+
+    app.clearStaging();
+    try std.testing.expect(!app.staging_active);
+    try std.testing.expect(app.staging == null);
+    try std.testing.expectEqual(@as(usize, 0), app.staging_diff.len);
 }
 
 test "rename prompt prefills the selected branch name" {

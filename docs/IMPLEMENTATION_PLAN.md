@@ -110,10 +110,13 @@ Commit workflows: reset (`g`, soft/mixed/hard menu), revert (`t`), and a
 navigable commit **file list** on `<enter>` (drill into a commit, pick a file
 with `j`/`k`, scroll its diff, `esc` to go back) are done.
 
+Branch rename (`R`) and hunk-level staging (`<enter>` on a file → stage/unstage
+individual hunks, `tab` to switch unstaged/staged sides, via `src/diff.zig` +
+`git apply --cached`) are done.
+
 Next, resume feature breadth:
 
-1. Branch rename + fast-forward.
-2. Merge/rebase conflict handling.
+1. Line-level staging (build on the hunk parser in `src/diff.zig`).
+2. Branch fast-forward; merge/rebase conflict handling.
 3. Add file tree grouping.
-4. Add patch/hunk/line staging in the diff view.
-5. Re-run `zig fmt`, `zig build`, and `zig build test` after each step.
+4. Re-run `zig fmt`, `zig build`, and `zig build test` after each step.

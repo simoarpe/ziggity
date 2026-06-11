@@ -22,6 +22,13 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 - Full refresh when the terminal reports focus regain.
 - Stage/unstage selected file.
 - Stage/unstage all files.
+- Hunk-level staging: `enter` on a file opens a staging view to stage/unstage
+  individual hunks (`tab` switches between the unstaged and staged sides).
+- Branches panel tabs (Local/Remotes/Tags) and Commits panel tabs
+  (Commits/Reflog), switched with `[`/`]`.
+- Branch workflows: new, rename, delete, merge, rebase, remote/tag checkout.
+- Commit workflows: reset (soft/mixed/hard), revert, and a navigable
+  changed-file list per commit.
 - Discard selected file via a lazygit-style menu (all changes / unstaged only).
 - Discard all working tree changes with a confirmation popup.
 - Commit staged changes in a centered commit-message popup.
@@ -36,11 +43,11 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 
 This is an MVP. Large lazygit workflows are intentionally not implemented yet:
 
-- Patch/hunk/line staging.
+- Line-level staging (hunk-level is implemented).
 - Interactive rebase, squash/fixup flows, cherry-pick flows, and undo/redo.
-- Merge conflict helpers.
+- Merge/rebase conflict helpers.
 - Custom commands and custom command menus.
-- Remote branch, tag, worktree, and submodule panels.
+- Worktree and submodule panels.
 - Mouse handling.
 - Nonblocking async command execution.
 - Full lazygit config compatibility.
@@ -82,6 +89,8 @@ Useful keys:
 - `enter`: inspect the selected item in the main panel; `esc`/`h` returns
 - `enter` on a commit: drill into its changed-file list (`j`/`k` to pick a file,
   `enter` to scroll its diff, `esc` to go back)
+- `enter` on a file: open the hunk-staging view (`j`/`k` to pick a hunk, `space`
+  to stage/unstage it, `tab` to switch unstaged/staged side, `esc` to go back)
 - `space`: stage/unstage file, checkout branch, or apply stash depending on focus
 - `n`: create a new branch from HEAD (branches panel, Local tab)
 - `R`: rename the selected local branch (branches panel; refresh elsewhere)
