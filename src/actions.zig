@@ -22,6 +22,7 @@ pub const Action = enum {
     delete_branch,
     merge_branch,
     rebase_branch,
+    rename_branch,
     reset_commit,
     revert_commit,
     fetch,
@@ -58,6 +59,10 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
 
     if (keymap.prev_tab.matches(key)) return .prev_tab;
     if (keymap.next_tab.matches(key)) return .next_tab;
+
+    // Context keybinding: inside the Branches panel, R renames the selected
+    // branch (lazygit-style), shadowing the global refresh there.
+    if (focus == .branches and keymap.rename.matches(key)) return .rename_branch;
 
     if (keymap.refresh.matches(key)) return .refresh;
     if (keymap.file_filter.matches(key)) return .start_file_filter;

@@ -513,7 +513,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
     return switch (app.focus) {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push" ++ global,
         .files => "space stage  a stage-all  c commit  d discard  D discard-all  / filter  ^b status  enter view" ++ global,
-        .branches => "space checkout  n new  d delete  M merge  r rebase  [ ] tabs" ++ global,
+        .branches => "space checkout  n new  R rename  d delete  M merge  r rebase  [ ]" ++ global,
         .commits => "enter files  g reset  t revert  [ ] commits/reflog" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => "j/k scroll  PgUp/PgDn page  esc back" ++ global,

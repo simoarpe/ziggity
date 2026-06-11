@@ -20,10 +20,12 @@ pub const Mode = enum {
 /// to do with the submitted text.
 pub const TextPromptKind = enum {
     new_branch,
+    rename_branch,
 
     pub fn title(self: TextPromptKind) []const u8 {
         return switch (self) {
             .new_branch => "New branch name",
+            .rename_branch => "Rename branch",
         };
     }
 };
@@ -304,6 +306,7 @@ pub const App = struct {
             .delete_branch => try self.startBranchDeleteMenu(),
             .merge_branch => try self.startBranchConfirm(.merge_branch),
             .rebase_branch => try self.startBranchConfirm(.rebase_branch),
+            .rename_branch => try self.startTextPrompt(.rename_branch),
             .reset_commit => try self.startCommitResetMenu(),
             .revert_commit => try self.revertSelectedCommit(),
             .stash_pop => try self.popSelectedStash(),
@@ -709,15 +712,22 @@ pub const App = struct {
     }
 
     fn startTextPrompt(self: *App, kind: TextPromptKind) !void {
+        var prefill: []const u8 = "";
         switch (kind) {
             .new_branch => {
                 if (self.branches_tab != .local) self.branches_tab = .local;
                 self.focus = .branches;
             },
+            .rename_branch => {
+                const branch = try self.localBranchForAction() orelse return;
+                self.focus = .branches;
+                prefill = branch.name;
+            },
         }
         self.mode = .text_prompt;
         self.text_prompt_kind = kind;
         self.input_buffer.clearRetainingCapacity();
+        if (prefill.len > 0) try self.input_buffer.appendSlice(self.allocator, prefill);
         try self.setMessage("{s}", .{kind.title()});
     }
 
@@ -765,6 +775,21 @@ pub const App = struct {
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
                 return self.runMutation(result, "created branch {s}", .{value});
+            },
+            .rename_branch => {
+                const branch = self.selectedBranch() orelse {
+                    self.cancelTextPrompt("no branch selected");
+                    return;
+                };
+                if (std.mem.eql(u8, branch.name, value)) {
+                    self.cancelTextPrompt("branch name unchanged");
+                    return;
+                }
+                const result = try self.git.renameBranch(branch.name, value);
+                self.mode = .normal;
+                self.text_prompt_kind = null;
+                self.input_buffer.clearRetainingCapacity();
+                return self.runMutation(result, "renamed to {s}", .{value});
             },
         }
     }
@@ -1460,6 +1485,9 @@ fn deinitTestApp(app: *App) void {
     app.allocator.free(app.diff);
     app.allocator.free(app.message);
     app.allocator.free(app.file_filter);
+    app.commit_buffer.deinit(app.allocator);
+    app.file_filter_buffer.deinit(app.allocator);
+    app.input_buffer.deinit(app.allocator);
 }
 
 test "discard menu offers the unstaged option only when a file has both" {
@@ -1611,6 +1639,32 @@ test "branch delete menu refuses the current branch and non-local tabs" {
     app.closeMenu();
     app.branches_tab = .remotes;
     try app.startBranchDeleteMenu();
+    try std.testing.expectEqual(Mode.normal, app.mode);
+}
+
+test "rename prompt prefills the selected branch name" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var branches = [_]model.Branch{
+        .{ .name = @constCast("main"), .current = true },
+        .{ .name = @constCast("feature"), .current = false },
+    };
+    app.data.branches = &branches;
+    app.focus = .branches;
+    app.branch_index = 1;
+
+    try app.startTextPrompt(.rename_branch);
+    try std.testing.expectEqual(Mode.text_prompt, app.mode);
+    try std.testing.expectEqual(TextPromptKind.rename_branch, app.text_prompt_kind.?);
+    try std.testing.expectEqualStrings("feature", app.input_buffer.items);
+
+    // Rename is unavailable on the Remotes/Tags tabs.
+    app.cancelTextPrompt("x");
+    app.branches_tab = .tags;
+    try app.startTextPrompt(.rename_branch);
     try std.testing.expectEqual(Mode.normal, app.mode);
 }
 

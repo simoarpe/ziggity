@@ -431,6 +431,10 @@ pub const Git = struct {
         return self.exec(&.{ "branch", flag, "--", name });
     }
 
+    pub fn renameBranch(self: *Git, old_name: []const u8, new_name: []const u8) !ExecResult {
+        return self.exec(&.{ "branch", "-m", old_name, new_name });
+    }
+
     pub fn mergeBranch(self: *Git, name: []const u8) !ExecResult {
         return self.exec(&.{ "merge", "--no-edit", name });
     }

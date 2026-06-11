@@ -84,6 +84,7 @@ Useful keys:
   `enter` to scroll its diff, `esc` to go back)
 - `space`: stage/unstage file, checkout branch, or apply stash depending on focus
 - `n`: create a new branch from HEAD (branches panel, Local tab)
+- `R`: rename the selected local branch (branches panel; refresh elsewhere)
 - `d`: delete the selected local branch (menu: delete / force delete)
 - `M`: merge the selected branch into the current branch (after confirmation)
 - `r`: rebase the current branch onto the selected branch (after confirmation)
