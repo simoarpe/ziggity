@@ -12,11 +12,17 @@ with the maintainer:
 For each feature, inspect lazygit's corresponding workflow first, note the
 relevant lazygit files/keys, then implement pragmatically in Zig.
 
+## Status
+
+Iterations 1–5 (the TUI/UX fidelity pass) are **done** — see git history. The
+app builds, all tests pass, and the binary launches (TTY required). Remaining
+work is the feature backlog below.
+
 ## Iterations
 
 Each iteration ends with `zig fmt`, `zig build`, `zig build test`, and a commit.
 
-### 1. Panel numbering & navigation alignment  — DONE-MARKER
+### 1. Panel numbering & navigation alignment  — DONE
 - Make **Status** a focusable bordered panel.
 - Number side panels lazygit-style: `1`=Status `2`=Files `3`=Branches
   `4`=Commits `5`=Stash.
@@ -27,23 +33,23 @@ Each iteration ends with `zig fmt`, `zig build`, `zig build test`, and a commit.
   `<enter>` inspects — matching lazygit (`space` vs `enter`).
 - Update config defaults, README key list, `.ziggity.ini` docs, and tests.
 
-### 2. Context-sensitive bottom bar
+### 2. Context-sensitive bottom bar  — DONE
 - Replace the fixed full-keybinding dump with a lazygit-style **options line**
   that shows only keys valid for the focused panel.
 - Keep the transient status message; add an info segment on the right.
 
-### 3. Popup / menu widget layer
+### 3. Popup / menu widget layer  — DONE
 - Add a small reusable centered-popup renderer (bordered, title, body lines).
 - Add a generic selectable **menu** popup (items + `j/k` + `<enter>`/`<esc>`).
 - Convert discard confirmation to a centered confirmation popup.
 - Convert the status-filter menu to a centered menu popup.
 
-### 4. Discard menu (lazygit `d`)
+### 4. Discard menu (lazygit `d`)  — DONE
 - `d` opens a menu: "discard all changes" / "discard unstaged changes" for
   files that have both staged and unstaged changes; direct discard otherwise.
 - Keep `D` = reset/discard-all menu.
 
-### 5. Commit-message popup editor
+### 5. Commit-message popup editor  — DONE
 - Replace the bottom-line commit prompt with a centered bordered editor popup.
 - Single line first; leave multi-line description as a later enhancement.
 

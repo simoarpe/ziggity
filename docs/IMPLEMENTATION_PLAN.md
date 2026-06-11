@@ -92,8 +92,15 @@ rather than as a line-by-line port.
 
 ## Current Priority
 
-Continue with section 2:
+A dedicated lazygit TUI/UX fidelity pass is complete — see
+`docs/LAZYGIT_ALIGNMENT.md` and git history (panel numbering/navigation,
+context-sensitive bottom bar, centered popups for menus/confirmations/commit,
+and the discard menu).
 
-1. Add file tree grouping.
-2. Add patch/hunk/line staging in the diff view.
-3. Re-run build and tests after each step.
+Next, resume feature breadth:
+
+1. Panel tabs (`[`/`]`): Branches→Local/Remotes/Tags, Commits→Commits/Reflog.
+2. Branch workflows: new, delete, rename, merge, rebase.
+3. Add file tree grouping.
+4. Add patch/hunk/line staging in the diff view.
+5. Re-run `zig fmt`, `zig build`, and `zig build test` after each step.

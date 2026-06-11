@@ -22,9 +22,12 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 - Full refresh when the terminal reports focus regain.
 - Stage/unstage selected file.
 - Stage/unstage all files.
-- Discard selected file with confirmation.
-- Discard all working tree changes with confirmation.
-- Commit staged changes with an in-app one-line commit prompt.
+- Discard selected file via a lazygit-style menu (all changes / unstaged only).
+- Discard all working tree changes with a confirmation popup.
+- Commit staged changes in a centered commit-message popup.
+- Lazygit-style panel numbering (`1`-`5`), `enter`/`esc` to inspect the main
+  panel, a context-sensitive bottom bar, and centered popups for menus and
+  confirmations.
 - Checkout selected branch.
 - Fetch, pull, and push.
 - Basic repo-local and environment-selected config file support.
