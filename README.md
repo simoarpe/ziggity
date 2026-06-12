@@ -22,8 +22,9 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 - Full refresh when the terminal reports focus regain.
 - Stage/unstage selected file.
 - Stage/unstage all files.
-- Hunk-level staging: `enter` on a file opens a staging view to stage/unstage
-  individual hunks (`tab` switches between the unstaged and staged sides).
+- Hunk- and line-level staging: `enter` on a file opens a staging view to
+  stage/unstage individual lines (`v` for a range) or whole hunks (`tab`
+  switches between the unstaged and staged sides).
 - Branches panel tabs (Local/Remotes/Tags) and Commits panel tabs
   (Commits/Reflog), switched with `[`/`]`.
 - Branch workflows: new, rename, delete, merge, rebase, remote/tag checkout.
@@ -43,7 +44,6 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 
 This is an MVP. Large lazygit workflows are intentionally not implemented yet:
 
-- Line-level staging (hunk-level is implemented).
 - Interactive rebase, squash/fixup flows, cherry-pick flows, and undo/redo.
 - Merge/rebase conflict helpers.
 - Custom commands and custom command menus.
@@ -89,8 +89,9 @@ Useful keys:
 - `enter`: inspect the selected item in the main panel; `esc`/`h` returns
 - `enter` on a commit: drill into its changed-file list (`j`/`k` to pick a file,
   `enter` to scroll its diff, `esc` to go back)
-- `enter` on a file: open the hunk-staging view (`j`/`k` to pick a hunk, `space`
-  to stage/unstage it, `tab` to switch unstaged/staged side, `esc` to go back)
+- `enter` on a file: open the staging view (`j`/`k` move by line, `v` toggles a
+  range, `space` stages/unstages the line(s) — or the whole hunk on a `@@`
+  header, `tab` switches unstaged/staged side, `esc` goes back)
 - `space`: stage/unstage file, checkout branch, or apply stash depending on focus
 - `n`: create a new branch from HEAD (branches panel, Local tab)
 - `R`: rename the selected local branch (branches panel; refresh elsewhere)

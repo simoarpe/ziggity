@@ -141,6 +141,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     else
         "Diff";
     const main = panel(root, side_w, 0, main_w, body_h, main_title, app.focus == .main);
+    app.main_view_height = main.height;
     drawDiff(main, app);
     drawBottom(root.child(.{ .x_off = 0, .y_off = @intCast(body_h), .width = root.width, .height = bottom_h }), app);
 
@@ -463,17 +464,13 @@ fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
         return;
     }
 
-    // The selected hunk's line range, used to highlight it while staging.
+    // The selected line (or v-range) is highlighted while staging.
     var hl_start: usize = 0;
     var hl_end: usize = 0;
     if (app.staging_active) {
-        if (app.staging) |parsed| {
-            if (parsed.hunks.len > 0) {
-                const hunk = parsed.hunks[@min(app.staging_hunk, parsed.hunks.len - 1)];
-                hl_start = hunk.start_line;
-                hl_end = hunk.end_line;
-            }
-        }
+        const anchor = app.staging_anchor orelse app.staging_cursor;
+        hl_start = @min(anchor, app.staging_cursor);
+        hl_end = @max(anchor, app.staging_cursor) + 1;
     }
 
     var lines = std.mem.splitScalar(u8, text, '\n');
@@ -536,7 +533,7 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
 fn contextHints(app: *const app_mod.App) []const u8 {
     const global = "  -  R refresh  q quit";
     if (app.staging_active) {
-        return "j/k hunk  space stage/unstage  tab switch side  esc back" ++ global;
+        return "j/k line  v range  space stage/unstage (@@=hunk)  tab side  esc back" ++ global;
     }
     if (app.commit_files_active and app.focus == .commits) {
         return "j/k file  enter diff  esc back" ++ global;

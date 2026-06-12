@@ -141,7 +141,9 @@ pub const App = struct {
     staging_path: []u8 = &.{},
     staging_diff: []u8 = &.{},
     staging: ?diff_mod.ParsedDiff = null,
-    staging_hunk: usize = 0,
+    staging_cursor: usize = 0,
+    staging_anchor: ?usize = null,
+    main_view_height: u16 = 0,
     branches_tab: BranchesTab = .local,
     commits_tab: CommitsTab = .commits,
     main_scroll: usize = 0,
@@ -298,13 +300,14 @@ pub const App = struct {
             .fetch => try self.runMutation(try self.git.fetch(), "fetch complete", .{}),
             .pull => try self.runMutation(try self.git.pull(), "pull complete", .{}),
             .push => try self.runMutation(try self.git.push(), "push complete", .{}),
-            .move_up => if (self.staging_active) try self.moveStagingHunk(-1) else try self.moveUp(),
-            .move_down => if (self.staging_active) try self.moveStagingHunk(1) else try self.moveDown(),
+            .move_up => if (self.staging_active) self.moveStagingCursor(-1) else try self.moveUp(),
+            .move_down => if (self.staging_active) self.moveStagingCursor(1) else try self.moveDown(),
+            .range_select => if (self.staging_active) self.toggleStagingRange(),
             .focus_left => if (self.staging_active) try self.closeStaging() else try self.focusPrevious(),
             .focus_right => if (self.staging_active) try self.toggleStagingSide() else try self.focusNext(),
             .select => {
                 if (self.staging_active) {
-                    try self.applySelectedHunk();
+                    try self.applyStagingSelection();
                 } else switch (self.focus) {
                     .files => try self.toggleFileStaged(),
                     .branches => try self.checkoutSelectedBranch(),
@@ -495,8 +498,9 @@ pub const App = struct {
         self.staging_diff = self.git.rawFileDiff(self.staging_path, self.staging_staged_view, self.config.diff_context) catch
             try self.allocator.dupe(u8, "");
         self.staging = try diff_mod.parse(self.allocator, self.staging_diff);
-        self.staging_hunk = 0;
-        self.scrollToStagingHunk();
+        self.staging_anchor = null;
+        self.staging_cursor = self.stagingFirstLine();
+        self.scrollToStagingCursor();
     }
 
     fn toggleStagingSide(self: *App) !void {
@@ -505,37 +509,81 @@ pub const App = struct {
         try self.setMessage("{s} changes", .{if (self.staging_staged_view) "staged" else "unstaged"});
     }
 
-    fn moveStagingHunk(self: *App, delta: i8) !void {
-        const parsed = self.staging orelse return;
-        if (parsed.hunks.len == 0) return;
-        if (delta < 0) {
-            self.staging_hunk -|= 1;
-        } else if (self.staging_hunk + 1 < parsed.hunks.len) {
-            self.staging_hunk += 1;
-        }
-        self.scrollToStagingHunk();
+    fn toggleStagingRange(self: *App) void {
+        self.staging_anchor = if (self.staging_anchor == null) self.staging_cursor else null;
     }
 
-    fn scrollToStagingHunk(self: *App) void {
-        const parsed = self.staging orelse {
-            self.main_scroll = 0;
+    /// Line index of the first selectable line (the first hunk's `@@` line).
+    fn stagingFirstLine(self: *const App) usize {
+        const parsed = self.staging orelse return 0;
+        if (parsed.hunks.len == 0) return 0;
+        return parsed.hunks[0].start_line;
+    }
+
+    fn stagingLastLine(self: *const App) usize {
+        const lines = std.mem.count(u8, self.staging_diff, "\n");
+        if (lines == 0) return self.stagingFirstLine();
+        return lines - 1;
+    }
+
+    fn moveStagingCursor(self: *App, delta: i8) void {
+        const first = self.stagingFirstLine();
+        const last = self.stagingLastLine();
+        if (delta < 0) {
+            if (self.staging_cursor > first) self.staging_cursor -= 1;
+        } else if (self.staging_cursor < last) {
+            self.staging_cursor += 1;
+        }
+        self.scrollToStagingCursor();
+    }
+
+    fn scrollToStagingCursor(self: *App) void {
+        const height: usize = if (self.main_view_height == 0) 20 else self.main_view_height;
+        if (self.staging_cursor < self.main_scroll) {
+            self.main_scroll = self.staging_cursor;
+        } else if (self.staging_cursor >= self.main_scroll + height) {
+            self.main_scroll = self.staging_cursor + 1 - height;
+        }
+    }
+
+    /// The hunk index whose body or header line contains `abs`, or null.
+    fn stagingHunkAt(self: *const App, abs: usize) ?usize {
+        const parsed = self.staging orelse return null;
+        for (parsed.hunks, 0..) |hunk, idx| {
+            if (abs >= hunk.start_line and abs < hunk.end_line) return idx;
+        }
+        return null;
+    }
+
+    fn applyStagingSelection(self: *App) !void {
+        const parsed = self.staging orelse return;
+        if (parsed.hunks.len == 0) {
+            try self.setMessage("no changes to stage", .{});
+            return;
+        }
+        const hunk_index = self.stagingHunkAt(self.staging_cursor) orelse {
+            try self.setMessage("move the cursor onto a change", .{});
             return;
         };
-        if (parsed.hunks.len == 0) {
-            self.main_scroll = 0;
-            return;
-        }
-        self.main_scroll = parsed.hunks[@min(self.staging_hunk, parsed.hunks.len - 1)].start_line;
-    }
+        const hunk = parsed.hunks[hunk_index];
 
-    fn applySelectedHunk(self: *App) !void {
-        const parsed = self.staging orelse return;
-        if (parsed.hunks.len == 0) {
-            try self.setMessage("no hunks to apply", .{});
-            return;
-        }
-        const index = @min(self.staging_hunk, parsed.hunks.len - 1);
-        const patch = try diff_mod.buildHunkPatch(self.allocator, self.staging_diff, parsed, index);
+        // On the `@@` header line, stage the whole hunk; otherwise the lines.
+        const patch = if (self.staging_cursor == hunk.start_line)
+            try diff_mod.buildHunkPatch(self.allocator, self.staging_diff, parsed, hunk_index)
+        else blk: {
+            const lo_abs = @min(self.staging_anchor orelse self.staging_cursor, self.staging_cursor);
+            const hi_abs = @max(self.staging_anchor orelse self.staging_cursor, self.staging_cursor);
+            const body_first = hunk.start_line + 1;
+            const lo = (@max(lo_abs, body_first)) - body_first;
+            const hi = (@min(hi_abs, hunk.end_line - 1)) - body_first;
+            break :blk diff_mod.buildLinePatch(self.allocator, self.staging_diff, parsed, hunk_index, lo, hi) catch |err| switch (err) {
+                error.EmptySelection => {
+                    try self.setMessage("selection contains no change", .{});
+                    return;
+                },
+                else => return err,
+            };
+        };
         defer self.allocator.free(patch);
 
         var result = try self.git.applyPatch(patch, self.staging_staged_view);
@@ -545,7 +593,10 @@ pub const App = struct {
             try self.setMessage("apply failed: {s}", .{if (stderr.len > 0) stderr else "git apply error"});
             return;
         }
-        try self.setMessage("{s} hunk", .{if (self.staging_staged_view) "unstaged" else "staged"});
+        const verb = if (self.staging_staged_view) "unstaged" else "staged";
+        const scope = if (self.staging_cursor == hunk.start_line) "hunk" else "selection";
+        try self.setMessage("{s} {s}", .{ verb, scope });
+        self.staging_anchor = null;
         self.refresh() catch {};
         try self.loadStaging();
     }
@@ -566,7 +617,8 @@ pub const App = struct {
         self.staging_path = &.{};
         self.staging_active = false;
         self.staging_staged_view = false;
-        self.staging_hunk = 0;
+        self.staging_cursor = 0;
+        self.staging_anchor = null;
     }
 
     fn openCommitFiles(self: *App) !void {
@@ -1615,6 +1667,9 @@ fn deinitTestApp(app: *App) void {
     app.commit_buffer.deinit(app.allocator);
     app.file_filter_buffer.deinit(app.allocator);
     app.input_buffer.deinit(app.allocator);
+    if (app.staging) |*parsed| parsed.deinit(app.allocator);
+    app.allocator.free(app.staging_diff);
+    app.allocator.free(app.staging_path);
 }
 
 test "discard menu offers the unstaged option only when a file has both" {
@@ -1769,25 +1824,35 @@ test "branch delete menu refuses the current branch and non-local tabs" {
     try std.testing.expectEqual(Mode.normal, app.mode);
 }
 
-test "staging hunk navigation clamps and tears down cleanly" {
+test "staging cursor navigation clamps, ranges, and tears down cleanly" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
     var app = try testApp(allocator, &no_files);
     defer deinitTestApp(&app);
 
-    const diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n@@ -5 +5 @@\n-c\n+d\n";
+    // Header lines 0-3, "@@" at line 4, body lines 5-8.
+    const diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,4 +1,5 @@\n a\n+X\n b\n c\n";
     app.staging_diff = try allocator.dupe(u8, diff);
     app.staging = try diff_mod.parse(allocator, app.staging_diff);
     app.staging_path = try allocator.dupe(u8, "f");
     app.staging_active = true;
+    app.staging_cursor = app.stagingFirstLine();
 
-    try std.testing.expectEqual(@as(usize, 2), app.staging.?.hunks.len);
-    try app.moveStagingHunk(1);
-    try std.testing.expectEqual(@as(usize, 1), app.staging_hunk);
-    try app.moveStagingHunk(1); // clamps at the last hunk
-    try std.testing.expectEqual(@as(usize, 1), app.staging_hunk);
-    try app.moveStagingHunk(-1);
-    try std.testing.expectEqual(@as(usize, 0), app.staging_hunk);
+    // Cursor starts on the @@ line (line 3) and cannot move above it.
+    try std.testing.expectEqual(@as(usize, 3), app.staging_cursor);
+    app.moveStagingCursor(-1);
+    try std.testing.expectEqual(@as(usize, 3), app.staging_cursor);
+
+    // The cursor's hunk is found for body lines.
+    app.moveStagingCursor(1);
+    try std.testing.expectEqual(@as(usize, 4), app.staging_cursor);
+    try std.testing.expectEqual(@as(?usize, 0), app.stagingHunkAt(app.staging_cursor));
+
+    // Range toggle anchors and clears.
+    app.toggleStagingRange();
+    try std.testing.expectEqual(@as(?usize, 4), app.staging_anchor);
+    app.toggleStagingRange();
+    try std.testing.expect(app.staging_anchor == null);
 
     app.clearStaging();
     try std.testing.expect(!app.staging_active);

@@ -39,6 +39,7 @@ pub const KeyMap = struct {
     rename: Binding = .{ .codepoint = 'R' },
     reset: Binding = .{ .codepoint = 'g' },
     revert: Binding = .{ .codepoint = 't' },
+    range_select: Binding = .{ .codepoint = 'v' },
     fetch: Binding = .{ .codepoint = 'f' },
     pull: Binding = .{ .codepoint = 'p' },
     push: Binding = .{ .codepoint = 'P' },

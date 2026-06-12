@@ -25,6 +25,7 @@ pub const Action = enum {
     rename_branch,
     reset_commit,
     revert_commit,
+    range_select,
     fetch,
     pull,
     push,
@@ -63,6 +64,8 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     // Context keybinding: inside the Branches panel, R renames the selected
     // branch (lazygit-style), shadowing the global refresh there.
     if (focus == .branches and keymap.rename.matches(key)) return .rename_branch;
+
+    if (keymap.range_select.matches(key)) return .range_select;
 
     if (keymap.refresh.matches(key)) return .refresh;
     if (keymap.file_filter.matches(key)) return .start_file_filter;
