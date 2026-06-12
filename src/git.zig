@@ -461,6 +461,19 @@ pub const Git = struct {
         return self.exec(&.{ "branch", "-m", old_name, new_name });
     }
 
+    /// Fast-forward the checked-out branch to its upstream.
+    pub fn fastForwardCurrent(self: *Git) !ExecResult {
+        return self.exec(&.{ "pull", "--ff-only" });
+    }
+
+    /// Fast-forward a non-checked-out local branch to its remote tracking ref
+    /// without checking it out, via a fetch refspec `<remote_ref>:<local>`.
+    pub fn fastForwardBranch(self: *Git, remote: []const u8, remote_ref: []const u8, local: []const u8) !ExecResult {
+        const refspec = try std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ remote_ref, local });
+        defer self.allocator.free(refspec);
+        return self.exec(&.{ "fetch", remote, refspec });
+    }
+
     pub fn mergeBranch(self: *Git, name: []const u8) !ExecResult {
         return self.exec(&.{ "merge", "--no-edit", name });
     }

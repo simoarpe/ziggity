@@ -326,6 +326,7 @@ pub const App = struct {
             .merge_branch => try self.startBranchConfirm(.merge_branch),
             .rebase_branch => try self.startBranchConfirm(.rebase_branch),
             .rename_branch => try self.startTextPrompt(.rename_branch),
+            .fast_forward_branch => try self.fastForwardSelectedBranch(),
             .reset_commit => try self.startCommitResetMenu(),
             .revert_commit => try self.revertSelectedCommit(),
             .stash_pop => try self.popSelectedStash(),
@@ -1104,6 +1105,24 @@ pub const App = struct {
         self.mode = .confirmation;
         self.pending_confirmation = kind;
         try self.setMessage("confirm action on {s}", .{branch.name});
+    }
+
+    fn fastForwardSelectedBranch(self: *App) !void {
+        const branch = try self.localBranchForAction() orelse return;
+        const upstream = branch.upstream orelse {
+            try self.setMessage("{s} has no upstream to fast-forward", .{branch.name});
+            return;
+        };
+        if (branch.current) {
+            return self.runMutation(try self.git.fastForwardCurrent(), "fast-forwarded {s}", .{branch.name});
+        }
+        const slash = std.mem.indexOfScalar(u8, upstream, '/') orelse {
+            try self.setMessage("cannot parse upstream {s}", .{upstream});
+            return;
+        };
+        const remote = upstream[0..slash];
+        const remote_ref = upstream[slash + 1 ..];
+        return self.runMutation(try self.git.fastForwardBranch(remote, remote_ref, branch.name), "fast-forwarded {s}", .{branch.name});
     }
 
     /// Validate that a branch action can run: the Branches panel must be on the

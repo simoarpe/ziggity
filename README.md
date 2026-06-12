@@ -28,7 +28,8 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
   switches between the unstaged and staged sides).
 - Branches panel tabs (Local/Remotes/Tags) and Commits panel tabs
   (Commits/Reflog), switched with `[`/`]`.
-- Branch workflows: new, rename, delete, merge, rebase, remote/tag checkout.
+- Branch workflows: new, rename, delete, merge, rebase, fast-forward,
+  remote/tag checkout.
 - Commit workflows: reset (soft/mixed/hard), revert, and a navigable
   changed-file list per commit.
 - Discard selected file via a lazygit-style menu (all changes / unstaged only).
@@ -96,6 +97,8 @@ Useful keys:
 - `space`: stage/unstage file, checkout branch, or apply stash depending on focus
 - `n`: create a new branch from HEAD (branches panel, Local tab)
 - `R`: rename the selected local branch (branches panel; refresh elsewhere)
+- `f`: fast-forward the selected local branch to its upstream (branches panel;
+  fetch elsewhere)
 - `d`: delete the selected local branch (menu: delete / force delete)
 - `M`: merge the selected branch into the current branch (after confirmation)
 - `r`: rebase the current branch onto the selected branch (after confirmation)

@@ -115,8 +115,11 @@ stage/unstage individual lines with `v` for a range, or whole hunks on a `@@`
 header, `tab` to switch unstaged/staged sides; via `src/diff.zig` line-patch
 construction + `git apply --cached [--reverse]`) are done.
 
+Branch fast-forward (`f` in the Branches panel: `git pull --ff-only` for the
+current branch, `git fetch <remote> <ref>:<local>` for others) is done.
+
 Next, resume feature breadth:
 
-1. Branch fast-forward; merge/rebase conflict handling.
-2. Add file tree grouping.
-4. Re-run `zig fmt`, `zig build`, and `zig build test` after each step.
+1. Add file tree grouping in the Files panel.
+2. Merge/rebase conflict handling (resolve `U`-status files).
+3. Re-run `zig fmt`, `zig build`, and `zig build test` after each step.
