@@ -1362,13 +1362,17 @@ pub const App = struct {
         const writer = &aw.writer;
         try writer.print("On branch {s}\n", .{self.data.current_branch});
         if (self.data.upstream) |upstream| {
-            try writer.print("Upstream {s} (+{d} ahead, -{d} behind)\n", .{
-                upstream,
-                self.data.ahead orelse 0,
-                self.data.behind orelse 0,
-            });
+            const ahead = self.data.ahead orelse 0;
+            const behind = self.data.behind orelse 0;
+            try writer.print("Tracking {s}\n", .{upstream});
+            if (ahead == 0 and behind == 0) {
+                try writer.writeAll("Up to date with upstream.\n");
+            } else {
+                if (ahead > 0) try writer.print("{d} commit(s) to push (ahead).\n", .{ahead});
+                if (behind > 0) try writer.print("{d} commit(s) to pull (behind).\n", .{behind});
+            }
         } else {
-            try writer.writeAll("No upstream configured\n");
+            try writer.writeAll("No upstream configured.\n");
         }
         try writer.print("\n{d} changed files: {d} staged, {d} unstaged\n", .{
             self.data.files.len,

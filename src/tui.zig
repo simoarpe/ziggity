@@ -267,30 +267,28 @@ fn panel(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, title: []const u8, 
 
 fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
     const st = styles();
-    var row: u16 = 0;
-    var buf: [256]u8 = undefined;
-    const branch = std.fmt.bufPrint(&buf, "branch {s}", .{app.data.current_branch}) catch return;
-    print(win, row, 0, branch, st.normal);
-    row += 1;
 
-    var counts_buf: [256]u8 = undefined;
-    const counts = std.fmt.bufPrint(&counts_buf, "files {d} staged {d} unstaged {d}", .{
-        app.data.files.len,
-        app.data.stagedCount(),
-        app.data.unstagedCount(),
-    }) catch return;
-    print(win, row, 0, counts, st.muted);
-    row += 1;
+    // Line 0: <repo> → <branch>  <ahead/behind status>   (lazygit-style)
+    const repo = std.fs.path.basename(app.git.root);
+    var col: u16 = 0;
+    col = printSpan(win, 0, col, repo, st.normal);
+    col = printSpan(win, 0, col, " ", st.muted);
+    col = printGlyph(win, 0, col, glyph_to_branch, st.muted);
+    col = printSpan(win, 0, col, " ", st.muted);
+    col = printSpan(win, 0, col, app.data.current_branch, st.active_title);
+    col = printSpan(win, 0, col, " ", st.muted);
+    _ = drawBranchStatus(win, 0, col, st.muted, app.data.upstream != null, app.data.ahead orelse 0, app.data.behind orelse 0);
 
-    if (app.data.upstream) |upstream| {
-        var upstream_buf: [256]u8 = undefined;
-        const ahead = app.data.ahead orelse 0;
-        const behind = app.data.behind orelse 0;
-        const line = std.fmt.bufPrint(&upstream_buf, "{s} +{d} -{d}", .{ upstream, ahead, behind }) catch return;
-        print(win, row, 0, line, st.muted);
-        row += 1;
+    // Line 1: working tree summary.
+    if (app.data.files.len == 0) {
+        print(win, 1, 0, "working tree clean", st.muted);
+    } else {
+        var buf: [128]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{d} staged, {d} unstaged", .{ app.data.stagedCount(), app.data.unstagedCount() }) catch "";
+        print(win, 1, 0, line, st.muted);
     }
 
+    // Line 2: active filter, if any.
     if (app.anyFileFilterActive()) {
         var filter_buf: [256]u8 = undefined;
         const line = if (app.fileDisplayFilterActive() and app.fileFilterActive())
@@ -299,7 +297,7 @@ fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
             std.fmt.bufPrint(&filter_buf, "filter {s} {d}/{d}", .{ app.file_display_filter.label(), app.visibleFileCount(), app.data.files.len }) catch return
         else
             std.fmt.bufPrint(&filter_buf, "filter {d}/{d} {s}", .{ app.visibleFileCount(), app.data.files.len, app.file_filter }) catch return;
-        print(win, row, 0, line, st.muted);
+        print(win, 2, 0, line, st.muted);
     }
 }
 
@@ -362,10 +360,25 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
         var buf: [512]u8 = undefined;
         const marker: u8 = if (branch.current) '*' else ' ';
         const line = if (branch.upstream) |upstream|
-            std.fmt.bufPrint(&buf, "{c} {s} -> {s}", .{ marker, branch.name, upstream }) catch branch.name
+            std.fmt.bufPrint(&buf, "{c} {s} -> {s} ", .{ marker, branch.name, upstream }) catch branch.name
         else
-            std.fmt.bufPrint(&buf, "{c} {s}", .{ marker, branch.name }) catch branch.name;
-        drawSelectable(win, row, line, if (branch.current) styles().staged else styles().normal, idx == selected and app.focus == .branches);
+            std.fmt.bufPrint(&buf, "{c} {s} ", .{ marker, branch.name }) catch branch.name;
+
+        const base = blk: {
+            var s = if (branch.current) styles().staged else styles().normal;
+            if (idx == selected and app.focus == .branches) {
+                s.bg = .{ .index = 4 };
+                s.bold = true;
+                fillRow(win, row, s);
+            }
+            break :blk s;
+        };
+        const end = printSpan(win, row, 0, line, base);
+
+        // The current branch shows its push/pull status (others lack the data).
+        if (branch.current and app.branches_tab == .local) {
+            _ = drawBranchStatus(win, row, end, base, app.data.upstream != null, app.data.ahead orelse 0, app.data.behind orelse 0);
+        }
     }
 }
 
@@ -559,7 +572,13 @@ fn drawSelectable(win: vaxis.Window, row: u16, text: []const u8, style: vaxis.St
 }
 
 fn print(win: vaxis.Window, row: u16, col: u16, text: []const u8, style: vaxis.Style) void {
-    if (row >= win.height or col >= win.width) return;
+    _ = printSpan(win, row, col, text, style);
+}
+
+/// Like `print`, but returns the column after the last cell written so spans
+/// (including static UTF-8 glyphs via `printGlyph`) can be composed on a row.
+fn printSpan(win: vaxis.Window, row: u16, col: u16, text: []const u8, style: vaxis.Style) u16 {
+    if (row >= win.height) return col;
     var out_col = col;
     for (text) |byte| {
         if (out_col >= win.width or byte == '\n' or byte == '\r') break;
@@ -580,6 +599,17 @@ fn print(win: vaxis.Window, row: u16, col: u16, text: []const u8, style: vaxis.S
         });
         out_col += 1;
     }
+    return out_col;
+}
+
+/// Write a single static UTF-8 glyph (e.g. an arrow) as one cell. The grapheme
+/// must be a stable slice — vaxis stores it by reference until render.
+fn printGlyph(win: vaxis.Window, row: u16, col: u16, grapheme: []const u8, style: vaxis.Style) u16 {
+    if (row < win.height and col < win.width) {
+        win.writeCell(col, row, .{ .char = .{ .grapheme = grapheme, .width = 1 }, .style = style });
+        return col + 1;
+    }
+    return col;
 }
 
 fn fillRow(win: vaxis.Window, row: u16, style: vaxis.Style) void {
@@ -660,4 +690,37 @@ fn initAsciiTable() [128][1]u8 {
 fn glyph(byte: u8) []const u8 {
     if (byte >= 32 and byte < 127) return ascii_table[byte][0..1];
     return "?";
+}
+
+// Static UTF-8 glyphs (stable storage for vaxis grapheme references).
+const glyph_to_branch = "→"; // U+2192
+const glyph_ahead = "↑"; // U+2191 (commits to push)
+const glyph_behind = "↓"; // U+2193 (commits to pull)
+const glyph_uptodate = "✓"; // U+2713
+
+/// Render lazygit-style ahead/behind status: `↓2↑3`, `✓` when in sync, or a
+/// note when there is no upstream. Returns the next column.
+fn drawBranchStatus(win: vaxis.Window, row: u16, col: u16, base: vaxis.Style, has_upstream: bool, ahead: usize, behind: usize) u16 {
+    if (!has_upstream) return printSpan(win, row, col, "?", withFg(base, 8));
+    if (ahead == 0 and behind == 0) return printGlyph(win, row, col, glyph_uptodate, withFg(base, 10));
+
+    var c = col;
+    var buf: [16]u8 = undefined;
+    if (behind > 0) {
+        c = printGlyph(win, row, c, glyph_behind, withFg(base, 9));
+        c = printSpan(win, row, c, std.fmt.bufPrint(&buf, "{d}", .{behind}) catch "", withFg(base, 9));
+    }
+    if (ahead > 0) {
+        c = printGlyph(win, row, c, glyph_ahead, withFg(base, 10));
+        c = printSpan(win, row, c, std.fmt.bufPrint(&buf, "{d}", .{ahead}) catch "", withFg(base, 10));
+    }
+    return c;
+}
+
+/// Copy a style with a different foreground colour index, preserving bg/bold
+/// (so highlighted rows keep their background).
+fn withFg(base: vaxis.Style, index: u8) vaxis.Style {
+    var s = base;
+    s.fg = .{ .index = index };
+    return s;
 }

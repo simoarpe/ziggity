@@ -8,8 +8,9 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 
 ## Implemented
 
-- Repository status summary with current branch, upstream, ahead/behind counts,
-  and staged/unstaged file counts.
+- Lazygit-style status panel: `<repo> → <branch>` with push/pull status
+  (`↑ahead`/`↓behind`, `✓` in sync, `?` no upstream) and a working-tree summary.
+  The current branch shows the same push/pull status in the Branches panel.
 - Files panel from `git status --porcelain -z`.
 - Branches panel from `git branch --format`.
 - Recent commits panel from `git log`.
