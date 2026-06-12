@@ -4,6 +4,7 @@ const vaxis = @import("vaxis");
 const actions = @import("actions.zig");
 const config_mod = @import("config.zig");
 const diff_mod = @import("diff.zig");
+const filetree = @import("filetree.zig");
 const git_mod = @import("git.zig");
 const model = @import("model.zig");
 
@@ -127,6 +128,10 @@ pub const App = struct {
     focus: model.Focus = .files,
     main_origin: model.Focus = .files,
     file_index: usize = 0,
+    tree_view: bool = false,
+    tree_rows: []filetree.Row = &.{},
+    tree_cursor: usize = 0,
+    collapsed_dirs: std.BufSet = undefined,
     branch_index: usize = 0,
     remote_index: usize = 0,
     tag_index: usize = 0,
@@ -176,6 +181,7 @@ pub const App = struct {
             .git = git,
             .config = cfg,
         };
+        app.collapsed_dirs = std.BufSet.init(allocator);
         errdefer app.deinit();
 
         try app.refresh();
@@ -186,6 +192,8 @@ pub const App = struct {
     pub fn deinit(self: *App) void {
         self.data.deinit(self.allocator);
         model.deinitCommitFiles(self.allocator, self.commit_files);
+        self.allocator.free(self.tree_rows);
+        self.collapsed_dirs.deinit();
         if (self.staging) |*parsed| parsed.deinit(self.allocator);
         self.allocator.free(self.staging_diff);
         self.allocator.free(self.staging_path);
@@ -200,10 +208,14 @@ pub const App = struct {
     }
 
     pub fn refresh(self: *App) !void {
+        const tree_path = try self.captureTreePath();
+        defer if (tree_path) |p| self.allocator.free(p);
+
         const next = try self.git.loadRepoData();
         self.data.deinit(self.allocator);
         self.data = next;
         self.clampSelections();
+        if (self.tree_view) try self.rebuildTree(tree_path);
         if (self.commit_files_active) self.reloadCommitFilesAfterRefresh();
         self.updatePreview() catch |err| {
             try self.setMessage("preview failed: {s}", .{@errorName(err)});
@@ -213,6 +225,8 @@ pub const App = struct {
     pub fn refreshWorkingTree(self: *App) !void {
         const selected_path = if (self.selectedFile()) |file| try self.allocator.dupe(u8, file.path) else null;
         defer if (selected_path) |path| self.allocator.free(path);
+        const tree_path = try self.captureTreePath();
+        defer if (tree_path) |p| self.allocator.free(p);
 
         var status = try self.git.loadStatusSummary();
         errdefer status.deinit(self.allocator);
@@ -226,6 +240,7 @@ pub const App = struct {
 
         self.restoreFileSelection(selected_path);
         self.clampSelections();
+        if (self.tree_view) try self.rebuildTree(tree_path);
         const content = self.contentFocus();
         if (content == .files or content == .status) {
             self.updatePreview() catch |err| {
@@ -309,12 +324,13 @@ pub const App = struct {
                 if (self.staging_active) {
                     try self.applyStagingSelection();
                 } else switch (self.focus) {
-                    .files => try self.toggleFileStaged(),
+                    .files => try self.toggleSelectedFileStaged(),
                     .branches => try self.checkoutSelectedBranch(),
                     .stash => try self.applySelectedStash(),
                     .status, .commits, .main => {},
                 }
             },
+            .toggle_tree => try self.toggleTreeView(),
             .stage_all => try self.toggleAllStaged(),
             .discard_selected => try self.startDiscardMenu(),
             .discard_all => try self.startDiscardAllConfirmation(),
@@ -358,10 +374,124 @@ pub const App = struct {
 
     pub fn selectedFile(self: *const App) ?model.FileStatus {
         if (self.data.files.len == 0) return null;
+        if (self.tree_view) {
+            const row = self.treeSelectedRow() orelse return null;
+            if (row.is_dir) return null;
+            return self.data.files[row.file_index];
+        }
         const idx = @min(self.file_index, self.data.files.len - 1);
         if (self.fileMatchesFilter(self.data.files[idx])) return self.data.files[idx];
         if (self.firstMatchingFileIndex()) |first| return self.data.files[first];
         return null;
+    }
+
+    pub fn treeSelectedRow(self: *const App) ?filetree.Row {
+        if (self.tree_rows.len == 0) return null;
+        return self.tree_rows[@min(self.tree_cursor, self.tree_rows.len - 1)];
+    }
+
+    /// Capture the currently-selected tree row's path (owned) so the cursor can
+    /// be restored after a rebuild that replaces the underlying file data.
+    fn captureTreePath(self: *App) !?[]u8 {
+        if (!self.tree_view) return null;
+        const row = self.treeSelectedRow() orelse return null;
+        return try self.allocator.dupe(u8, row.path);
+    }
+
+    fn treeEntryLessThan(_: void, a: filetree.Entry, b: filetree.Entry) bool {
+        return std.mem.lessThan(u8, a.path, b.path);
+    }
+
+    /// Rebuild the flattened tree rows from the filtered file list, restoring
+    /// the cursor onto `restore_path` when possible.
+    fn rebuildTree(self: *App, restore_path: ?[]const u8) !void {
+        self.allocator.free(self.tree_rows);
+        self.tree_rows = &.{};
+
+        var entries: std.ArrayList(filetree.Entry) = .empty;
+        defer entries.deinit(self.allocator);
+        for (self.data.files, 0..) |file, idx| {
+            if (self.fileMatchesFilter(file)) try entries.append(self.allocator, .{ .path = file.path, .index = idx });
+        }
+        std.mem.sort(filetree.Entry, entries.items, {}, treeEntryLessThan);
+        self.tree_rows = try filetree.build(self.allocator, entries.items, &self.collapsed_dirs);
+
+        self.tree_cursor = 0;
+        if (restore_path) |path| {
+            for (self.tree_rows, 0..) |row, i| {
+                if (std.mem.eql(u8, row.path, path)) {
+                    self.tree_cursor = i;
+                    break;
+                }
+            }
+        }
+        if (self.tree_rows.len > 0) self.tree_cursor = @min(self.tree_cursor, self.tree_rows.len - 1);
+    }
+
+    fn toggleTreeView(self: *App) !void {
+        self.tree_view = !self.tree_view;
+        if (self.tree_view) {
+            const path = if (self.selectedFile()) |file| try self.allocator.dupe(u8, file.path) else null;
+            defer if (path) |p| self.allocator.free(p);
+            try self.rebuildTree(path);
+            try self.setMessage("file tree", .{});
+        } else {
+            // Keep the flat selection on whatever file the tree cursor showed.
+            if (self.treeSelectedRow()) |row| {
+                if (!row.is_dir) self.file_index = row.file_index;
+            }
+            self.allocator.free(self.tree_rows);
+            self.tree_rows = &.{};
+            try self.setMessage("file list", .{});
+        }
+        self.main_scroll = 0;
+        try self.updatePreview();
+    }
+
+    /// Toggle the collapsed state of the directory under the tree cursor.
+    fn toggleTreeCollapse(self: *App) !void {
+        const row = self.treeSelectedRow() orelse return;
+        if (!row.is_dir) return;
+        if (self.collapsed_dirs.contains(row.path)) {
+            self.collapsed_dirs.remove(row.path);
+        } else {
+            try self.collapsed_dirs.insert(row.path);
+        }
+        const path = try self.allocator.dupe(u8, row.path);
+        defer self.allocator.free(path);
+        try self.rebuildTree(path);
+        try self.updatePreview();
+    }
+
+    /// Stage (or unstage) every file under the directory at the tree cursor,
+    /// mirroring the whole-panel stage/unstage decision.
+    fn toggleDirStaged(self: *App, dir: []const u8) !void {
+        var any_unstaged = false;
+        var any_staged = false;
+        for (self.data.files) |file| {
+            if (!self.fileMatchesFilter(file)) continue;
+            if (!filetree.underDir(file.path, dir)) continue;
+            if (file.has_unstaged) any_unstaged = true;
+            if (file.has_staged) any_staged = true;
+        }
+        if (!any_unstaged and !any_staged) {
+            try self.setMessage("no changes under {s}/", .{dir});
+            return;
+        }
+
+        var paths: std.ArrayList([]const u8) = .empty;
+        defer paths.deinit(self.allocator);
+        const want_staged = any_unstaged; // stage if anything is unstaged, else unstage
+        for (self.data.files) |file| {
+            if (!self.fileMatchesFilter(file)) continue;
+            if (!filetree.underDir(file.path, dir)) continue;
+            const include = if (want_staged) file.has_unstaged else file.has_staged;
+            if (include) try paths.append(self.allocator, file.path);
+        }
+        if (want_staged) {
+            return self.runMutation(try self.git.stagePaths(paths.items), "staged {s}/", .{dir});
+        }
+        return self.runMutation(try self.git.unstagePaths(paths.items), "unstaged {s}/", .{dir});
     }
 
     pub fn fileFilterActive(self: *const App) bool {
@@ -465,6 +595,12 @@ pub const App = struct {
             return self.openCommitFiles();
         }
         if (self.focus == .files) {
+            // In tree view, <enter> on a directory collapses/expands it.
+            if (self.tree_view) {
+                if (self.treeSelectedRow()) |row| {
+                    if (row.is_dir) return self.toggleTreeCollapse();
+                }
+            }
             return self.openStaging();
         }
         return self.enterMain();
@@ -779,7 +915,7 @@ pub const App = struct {
     fn moveUp(self: *App) !void {
         switch (self.focus) {
             .status => return,
-            .files => self.moveFileUp(),
+            .files => if (self.tree_view) self.moveTreeCursor(-1) else self.moveFileUp(),
             .branches => switch (self.branches_tab) {
                 .local => self.branch_index -|= 1,
                 .remotes => self.remote_index -|= 1,
@@ -802,7 +938,7 @@ pub const App = struct {
     fn moveDown(self: *App) !void {
         switch (self.focus) {
             .status => return,
-            .files => self.moveFileDown(),
+            .files => if (self.tree_view) self.moveTreeCursor(1) else self.moveFileDown(),
             .branches => switch (self.branches_tab) {
                 .local => if (self.branch_index + 1 < self.data.branches.len) {
                     self.branch_index += 1;
@@ -840,6 +976,17 @@ pub const App = struct {
         } else {
             self.main_scroll += @intCast(amount);
         }
+    }
+
+    /// Space in the Files panel: stage/unstage a whole directory in tree view
+    /// when the cursor is on one, otherwise the selected file.
+    fn toggleSelectedFileStaged(self: *App) !void {
+        if (self.tree_view) {
+            if (self.treeSelectedRow()) |row| {
+                if (row.is_dir) return self.toggleDirStaged(row.path);
+            }
+        }
+        return self.toggleFileStaged();
     }
 
     fn toggleFileStaged(self: *App) !void {
@@ -1352,6 +1499,11 @@ pub const App = struct {
         self.diff = switch (self.contentFocus()) {
             .status => try self.statusPreview(),
             .files, .main => blk: {
+                if (self.tree_view) {
+                    if (self.treeSelectedRow()) |row| {
+                        if (row.is_dir) break :blk try std.fmt.allocPrint(self.allocator, "Directory {s}/\n\nSelect a file to view its diff.\n", .{row.path});
+                    }
+                }
                 if (self.selectedFile()) |file| break :blk try self.git.diffForFile(file, self.config.diff_context);
                 if (self.anyFileFilterActive() and self.data.files.len > 0) break :blk try self.allocator.dupe(u8, "No files match the active filter.\n");
                 break :blk try self.allocator.dupe(u8, "Working tree clean.\n");
@@ -1482,6 +1634,7 @@ pub const App = struct {
         self.allocator.free(self.file_filter);
         self.file_filter = next_filter;
         self.file_index = self.firstMatchingFileIndex() orelse 0;
+        if (self.tree_view) try self.rebuildTree(null);
         self.main_scroll = 0;
         try self.updatePreview();
     }
@@ -1490,12 +1643,25 @@ pub const App = struct {
         self.mode = .normal;
         self.file_display_filter = filter;
         self.file_index = self.firstMatchingFileIndex() orelse 0;
+        if (self.tree_view) try self.rebuildTree(null);
         self.main_scroll = 0;
         try self.updatePreview();
         if (filter == .all) {
             try self.setMessage("file status filter cleared", .{});
         } else {
             try self.setMessage("showing {s} files ({d}/{d})", .{ filter.label(), self.visibleFileCount(), self.data.files.len });
+        }
+    }
+
+    fn moveTreeCursor(self: *App, delta: i8) void {
+        if (self.tree_rows.len == 0) {
+            self.tree_cursor = 0;
+            return;
+        }
+        if (delta < 0) {
+            if (self.tree_cursor > 0) self.tree_cursor -= 1;
+        } else if (self.tree_cursor + 1 < self.tree_rows.len) {
+            self.tree_cursor += 1;
         }
     }
 
@@ -1680,6 +1846,7 @@ fn testApp(allocator: std.mem.Allocator, files: []model.FileStatus) !App {
         .message = try allocator.dupe(u8, ""),
         .file_filter = try allocator.dupe(u8, ""),
         .data = .{ .files = files },
+        .collapsed_dirs = std.BufSet.init(allocator),
     };
 }
 
@@ -1693,6 +1860,8 @@ fn deinitTestApp(app: *App) void {
     if (app.staging) |*parsed| parsed.deinit(app.allocator);
     app.allocator.free(app.staging_diff);
     app.allocator.free(app.staging_path);
+    app.allocator.free(app.tree_rows);
+    app.collapsed_dirs.deinit();
 }
 
 test "discard menu offers the unstaged option only when a file has both" {
@@ -1881,6 +2050,53 @@ test "staging cursor navigation clamps, ranges, and tears down cleanly" {
     try std.testing.expect(!app.staging_active);
     try std.testing.expect(app.staging == null);
     try std.testing.expectEqual(@as(usize, 0), app.staging_diff.len);
+}
+
+test "file tree builds rows, selects files, and collapses directories" {
+    const allocator = std.testing.allocator;
+
+    const mk = struct {
+        fn f(path: []const u8) model.FileStatus {
+            return .{
+                .path = @constCast(path),
+                .short_status = .{ ' ', 'M' },
+                .has_staged = false,
+                .has_unstaged = true,
+                .tracked = true,
+                .added = false,
+                .deleted = false,
+                .conflict = false,
+            };
+        }
+    }.f;
+    var files = [_]model.FileStatus{ mk("README.md"), mk("src/app.zig"), mk("src/sub/a.zig") };
+    var app = try testApp(allocator, &files);
+    defer deinitTestApp(&app);
+
+    app.tree_view = true;
+    try app.rebuildTree(null);
+    // README.md, src/, src/app.zig, src/sub/, src/sub/a.zig
+    try std.testing.expectEqual(@as(usize, 5), app.tree_rows.len);
+
+    app.tree_cursor = 1; // the "src" directory row
+    try std.testing.expect(app.treeSelectedRow().?.is_dir);
+    try std.testing.expect(app.selectedFile() == null);
+
+    app.tree_cursor = 2; // src/app.zig
+    try std.testing.expectEqualStrings("src/app.zig", app.selectedFile().?.path);
+
+    try app.collapsed_dirs.insert("src");
+    try app.rebuildTree(null);
+    try std.testing.expectEqual(@as(usize, 2), app.tree_rows.len); // README.md, src/ (collapsed)
+    try std.testing.expect(app.tree_rows[1].collapsed);
+
+    app.tree_cursor = 0;
+    app.moveTreeCursor(-1);
+    try std.testing.expectEqual(@as(usize, 0), app.tree_cursor);
+    app.moveTreeCursor(1);
+    try std.testing.expectEqual(@as(usize, 1), app.tree_cursor);
+    app.moveTreeCursor(1); // clamps at the last row
+    try std.testing.expectEqual(@as(usize, 1), app.tree_cursor);
 }
 
 test "rename prompt prefills the selected branch name" {

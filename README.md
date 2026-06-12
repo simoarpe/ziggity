@@ -17,6 +17,8 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 - Stash panel from `git stash list`.
 - Diff preview for selected files, commits, branches, and stash entries.
 - Keyboard navigation across side panels and the diff panel.
+- Files-panel directory-tree view (toggle with `` ` ``): collapsible directories
+  (`enter`), stage/unstage a whole directory (`space`).
 - Files-panel live path filtering using lazygit-style substring matching.
 - Files-panel status filtering for staged, unstaged, tracked, and untracked files.
 - Scoped periodic auto-refresh for external working tree changes.
@@ -83,6 +85,8 @@ Useful keys:
 - `q` or `ctrl+c`: quit
 - `R`: refresh
 - `/`: filter files by path live; enter accepts; esc clears
+- `` ` ``: toggle the files directory-tree view (collapse dirs with `enter`,
+  stage a whole dir with `space`)
 - `ctrl+b`: open files status filter menu
 - `j`/`k` or arrows: move selection
 - `h`/`l`, `tab`/`shift+tab`, or arrows: cycle focus between side panels

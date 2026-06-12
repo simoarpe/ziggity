@@ -118,8 +118,12 @@ construction + `git apply --cached [--reverse]`) are done.
 Branch fast-forward (`f` in the Branches panel: `git pull --ff-only` for the
 current branch, `git fetch <remote> <ref>:<local>` for others) is done.
 
+File-tree grouping in the Files panel (toggle with `` ` ``; collapsible
+directories via `src/filetree.zig`; `enter` collapses/expands, `space` stages a
+whole directory) is done.
+
 Next, resume feature breadth:
 
-1. Add file tree grouping in the Files panel.
-2. Merge/rebase conflict handling (resolve `U`-status files).
+1. Merge/rebase conflict handling (resolve `U`-status files).
+2. Tags/remotes management actions; worktrees; submodules.
 3. Re-run `zig fmt`, `zig build`, and `zig build test` after each step.

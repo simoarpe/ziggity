@@ -306,6 +306,7 @@ fn drawFiles(win: vaxis.Window, app: *const app_mod.App) void {
         print(win, 0, 0, "Working tree clean", styles().muted);
         return;
     }
+    if (app.tree_view) return drawFileTree(win, app);
     const visible_count = app.visibleFileCount();
     if (visible_count == 0) {
         print(win, 0, 0, "No files match filter", styles().muted);
@@ -330,6 +331,45 @@ fn drawFiles(win: vaxis.Window, app: *const app_mod.App) void {
         drawSelectable(win, row, line, style, idx == app.file_index and app.focus == .files);
         ordinal += 1;
         row += 1;
+    }
+}
+
+fn drawFileTree(win: vaxis.Window, app: *const app_mod.App) void {
+    if (app.tree_rows.len == 0) {
+        print(win, 0, 0, "No files match filter", styles().muted);
+        return;
+    }
+    const start = scrollStart(app.tree_cursor, app.tree_rows.len, win.height);
+    var row: u16 = 0;
+    var i = start;
+    while (i < app.tree_rows.len and row < win.height) : ({
+        i += 1;
+        row += 1;
+    }) {
+        const tr = app.tree_rows[i];
+        const selected = i == app.tree_cursor and app.focus == .files;
+        var base = styles().normal;
+        if (selected) {
+            base.bg = .{ .index = 4 };
+            base.bold = true;
+            fillRow(win, row, base);
+        }
+
+        const indent: usize = @min(@as(usize, tr.depth) * 2, indent_spaces.len);
+        var col = printSpan(win, row, 0, indent_spaces[0..indent], base);
+        const name = std.fs.path.basename(tr.path);
+        if (tr.is_dir) {
+            col = printGlyph(win, row, col, if (tr.collapsed) glyph_collapsed else glyph_expanded, withFg(base, 12));
+            col = printSpan(win, row, col, " ", base);
+            col = printSpan(win, row, col, name, withFg(base, 12));
+            _ = printSpan(win, row, col, "/", withFg(base, 12));
+        } else {
+            const file = app.data.files[tr.file_index];
+            const fg: u8 = if (file.conflict) 11 else if (file.has_unstaged) 9 else 10;
+            var prefix: [3]u8 = .{ file.short_status[0], file.short_status[1], ' ' };
+            col = printSpan(win, row, col, &prefix, withFg(base, fg));
+            _ = printSpan(win, row, col, name, withFg(base, fg));
+        }
     }
 }
 
@@ -553,7 +593,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
     }
     return switch (app.focus) {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push" ++ global,
-        .files => "space stage  a stage-all  c commit  d discard  / filter  ^b status  enter stage-hunks" ++ global,
+        .files => "space stage  a all  c commit  d discard  / filter  ` tree  enter stage-hunks" ++ global,
         .branches => "space checkout  n new  R rename  d delete  M merge  r rebase  f ff  [ ]" ++ global,
         .commits => "enter files  g reset  t revert  [ ] commits/reflog" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
@@ -697,6 +737,9 @@ const glyph_to_branch = "→"; // U+2192
 const glyph_ahead = "↑"; // U+2191 (commits to push)
 const glyph_behind = "↓"; // U+2193 (commits to pull)
 const glyph_uptodate = "✓"; // U+2713
+const glyph_collapsed = "▸"; // U+25B8
+const glyph_expanded = "▾"; // U+25BE
+const indent_spaces = " " ** 32;
 
 /// Render lazygit-style ahead/behind status: `↓2↑3`, `✓` when in sync, or a
 /// note when there is no upstream. Returns the next column.

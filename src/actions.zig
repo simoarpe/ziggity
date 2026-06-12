@@ -18,6 +18,7 @@ pub const Action = enum {
     start_file_filter,
     open_status_filter,
     start_commit,
+    toggle_tree,
     new_branch,
     delete_branch,
     merge_branch,
@@ -85,6 +86,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
         .files => {
             if (keymap.select.matches(key)) return .select;
             if (keymap.stage_all.matches(key)) return .stage_all;
+            if (keymap.toggle_tree.matches(key)) return .toggle_tree;
             if (keymap.open_status_filter.matches(key)) return .open_status_filter;
             if (keymap.discard.matches(key)) return .discard_selected;
             if (keymap.discard_all.matches(key)) return .discard_all;
