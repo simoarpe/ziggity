@@ -279,8 +279,12 @@ fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
     col = printSpan(win, 0, col, " ", st.muted);
     _ = drawBranchStatus(win, 0, col, st.muted, app.data.upstream != null, app.data.ahead orelse 0, app.data.behind orelse 0);
 
-    // Line 1: working tree summary.
-    if (app.data.files.len == 0) {
+    // Line 1: in-progress merge/rebase takes priority, else a worktree summary.
+    if (app.data.state != .clean) {
+        var buf: [128]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{s} - m: continue / abort", .{app.data.state.label()}) catch app.data.state.label();
+        print(win, 1, 0, line, st.warning);
+    } else if (app.data.files.len == 0) {
         print(win, 1, 0, "working tree clean", st.muted);
     } else {
         var buf: [128]u8 = undefined;
@@ -590,6 +594,9 @@ fn contextHints(app: *const app_mod.App) []const u8 {
     }
     if (app.commit_files_active and app.focus == .commits) {
         return "j/k file  enter diff  esc back" ++ global;
+    }
+    if (app.data.state != .clean and app.focus == .files) {
+        return "space resolve (ours/theirs)  m continue/abort  d discard  esc back" ++ global;
     }
     return switch (app.focus) {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push" ++ global,

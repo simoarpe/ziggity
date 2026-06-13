@@ -129,8 +129,47 @@ pub const Git = struct {
         data.commits = try self.loadCommits("HEAD", 100);
         data.reflog = try self.loadReflog(100);
         data.stash = try self.loadStash();
+        data.state = self.detectState();
 
         return data;
+    }
+
+    fn gitPathExists(self: *Git, rel: []const u8) bool {
+        const path = std.fmt.allocPrint(self.allocator, "{s}/.git/{s}", .{ self.root, rel }) catch return false;
+        defer self.allocator.free(path);
+        std.Io.Dir.access(.cwd(), self.io, path, .{}) catch return false;
+        return true;
+    }
+
+    pub fn detectState(self: *Git) model.RepoState {
+        if (self.gitPathExists("rebase-merge") or self.gitPathExists("rebase-apply")) return .rebasing;
+        if (self.gitPathExists("MERGE_HEAD")) return .merging;
+        return .clean;
+    }
+
+    /// Resolve a conflicted file by keeping our side (or theirs), then stage it.
+    pub fn resolveConflict(self: *Git, path: []const u8, take_theirs: bool) !ExecResult {
+        const side = if (take_theirs) "--theirs" else "--ours";
+        if (try self.runStep(&.{ "checkout", side, "--", path })) |failure| return failure;
+        if (try self.runStep(&.{ "add", "--", path })) |failure| return failure;
+        return self.successResult();
+    }
+
+    pub fn mergeContinue(self: *Git) !ExecResult {
+        return self.exec(&.{ "commit", "--no-edit" });
+    }
+
+    pub fn mergeAbort(self: *Git) !ExecResult {
+        return self.exec(&.{ "merge", "--abort" });
+    }
+
+    pub fn rebaseContinue(self: *Git) !ExecResult {
+        // core.editor=true accepts the existing message without opening an editor.
+        return self.exec(&.{ "-c", "core.editor=true", "rebase", "--continue" });
+    }
+
+    pub fn rebaseAbort(self: *Git) !ExecResult {
+        return self.exec(&.{ "rebase", "--abort" });
     }
 
     pub fn loadStatusSummary(self: *Git) !model.StatusSummary {

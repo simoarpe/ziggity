@@ -75,6 +75,10 @@ pub const MenuAction = enum {
     reset_soft,
     reset_mixed,
     reset_hard,
+    take_ours,
+    take_theirs,
+    conflict_continue,
+    conflict_abort,
 };
 
 pub const MenuItem = struct {
@@ -108,6 +112,16 @@ const commit_reset_menu = [_]MenuItem{
     .{ .label = "Soft reset (keep staged changes)", .action = .reset_soft },
     .{ .label = "Mixed reset (keep working tree)", .action = .reset_mixed },
     .{ .label = "Hard reset (discard changes)", .action = .reset_hard },
+};
+
+const conflict_resolve_menu = [_]MenuItem{
+    .{ .label = "Take ours (keep current branch's version)", .action = .take_ours },
+    .{ .label = "Take theirs (keep incoming version)", .action = .take_theirs },
+};
+
+const conflict_actions_menu = [_]MenuItem{
+    .{ .label = "Continue", .action = .conflict_continue },
+    .{ .label = "Abort", .action = .conflict_abort },
 };
 
 /// Order of entries shown in the status-filter menu popup.
@@ -237,6 +251,7 @@ pub const App = struct {
         status = .{};
         self.data.replaceFiles(self.allocator, files);
         files = &.{};
+        self.data.state = self.git.detectState();
 
         self.restoreFileSelection(selected_path);
         self.clampSelections();
@@ -331,6 +346,7 @@ pub const App = struct {
                 }
             },
             .toggle_tree => try self.toggleTreeView(),
+            .conflict_menu => try self.startConflictActionsMenu(),
             .stage_all => try self.toggleAllStaged(),
             .discard_selected => try self.startDiscardMenu(),
             .discard_all => try self.startDiscardAllConfirmation(),
@@ -471,6 +487,7 @@ pub const App = struct {
         for (self.data.files) |file| {
             if (!self.fileMatchesFilter(file)) continue;
             if (!filetree.underDir(file.path, dir)) continue;
+            if (file.conflict) continue; // resolve conflicts individually
             if (file.has_unstaged) any_unstaged = true;
             if (file.has_staged) any_staged = true;
         }
@@ -485,6 +502,7 @@ pub const App = struct {
         for (self.data.files) |file| {
             if (!self.fileMatchesFilter(file)) continue;
             if (!filetree.underDir(file.path, dir)) continue;
+            if (file.conflict) continue;
             const include = if (want_staged) file.has_unstaged else file.has_staged;
             if (include) try paths.append(self.allocator, file.path);
         }
@@ -994,6 +1012,7 @@ pub const App = struct {
             try self.setMessage("no file selected", .{});
             return;
         };
+        if (file.conflict) return self.startConflictResolveMenu();
         if (file.has_unstaged) {
             return self.runMutation(try self.git.stageFile(file.path), "staged {s}", .{file.path});
         }
@@ -1151,6 +1170,30 @@ pub const App = struct {
         try self.setMessage("discard changes", .{});
     }
 
+    fn startConflictResolveMenu(self: *App) !void {
+        const file = self.selectedFile() orelse {
+            try self.setMessage("no file selected", .{});
+            return;
+        };
+        if (!file.conflict) {
+            try self.setMessage("{s} is not conflicted", .{file.path});
+            return;
+        }
+        self.mode = .menu;
+        self.active_menu = .{ .title = "Resolve conflict", .items = &conflict_resolve_menu, .index = 0 };
+        try self.setMessage("resolve {s}", .{file.path});
+    }
+
+    fn startConflictActionsMenu(self: *App) !void {
+        if (self.data.state == .clean) {
+            try self.setMessage("no merge or rebase in progress", .{});
+            return;
+        }
+        self.mode = .menu;
+        self.active_menu = .{ .title = self.data.state.label(), .items = &conflict_actions_menu, .index = 0 };
+        try self.setMessage("{s} in progress", .{self.data.state.label()});
+    }
+
     fn handleMenuKey(self: *App, key: vaxis.Key) !void {
         const menu = &(self.active_menu orelse {
             self.mode = .normal;
@@ -1218,6 +1261,24 @@ pub const App = struct {
                     else => unreachable,
                 };
                 return self.runMutation(try self.git.resetTo(commit.hash, mode), "reset to {s}", .{commit.short_hash});
+            },
+            .take_ours, .take_theirs => {
+                const file = self.selectedFile() orelse {
+                    try self.setMessage("no file selected", .{});
+                    return;
+                };
+                const theirs = action == .take_theirs;
+                return self.runMutation(try self.git.resolveConflict(file.path, theirs), "resolved {s}", .{file.path});
+            },
+            .conflict_continue => switch (self.data.state) {
+                .merging => return self.runMutation(try self.git.mergeContinue(), "merge continued", .{}),
+                .rebasing => return self.runMutation(try self.git.rebaseContinue(), "rebase continued", .{}),
+                .clean => try self.setMessage("nothing to continue", .{}),
+            },
+            .conflict_abort => switch (self.data.state) {
+                .merging => return self.runMutation(try self.git.mergeAbort(), "merge aborted", .{}),
+                .rebasing => return self.runMutation(try self.git.rebaseAbort(), "rebase aborted", .{}),
+                .clean => try self.setMessage("nothing to abort", .{}),
             },
         }
     }

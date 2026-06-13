@@ -34,6 +34,7 @@ pub const KeyMap = struct {
     discard: Binding = .{ .codepoint = 'd' },
     discard_all: Binding = .{ .codepoint = 'D' },
     commit: Binding = .{ .codepoint = 'c' },
+    conflict_menu: Binding = .{ .codepoint = 'm' },
     new_branch: Binding = .{ .codepoint = 'n' },
     merge: Binding = .{ .codepoint = 'M' },
     rebase: Binding = .{ .codepoint = 'r' },

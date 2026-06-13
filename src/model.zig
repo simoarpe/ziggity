@@ -1,5 +1,20 @@
 const std = @import("std");
 
+/// Whether an interrupted merge or rebase is in progress (conflicts pending).
+pub const RepoState = enum {
+    clean,
+    merging,
+    rebasing,
+
+    pub fn label(self: RepoState) []const u8 {
+        return switch (self) {
+            .clean => "",
+            .merging => "MERGING",
+            .rebasing => "REBASING",
+        };
+    }
+};
+
 pub const Focus = enum {
     status,
     files,
@@ -177,6 +192,7 @@ pub const RepoData = struct {
     upstream: ?[]u8 = null,
     ahead: ?usize = null,
     behind: ?usize = null,
+    state: RepoState = .clean,
     files: []FileStatus = &.{},
     branches: []Branch = &.{},
     remote_branches: []Branch = &.{},
