@@ -28,8 +28,9 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 - Hunk- and line-level staging: `enter` on a file opens a staging view to
   stage/unstage individual lines (`v` for a range) or whole hunks (`tab`
   switches between the unstaged and staged sides).
-- Branches panel tabs (Local/Remotes/Tags) and Commits panel tabs
+- Branches panel tabs (Local/Remotes/Tags/Worktrees) and Commits panel tabs
   (Commits/Reflog), switched with `[`/`]`.
+- Worktrees tab: list worktrees (current marked) and remove one (`d`, confirmed).
 - Branch workflows: new, rename, delete, merge, rebase, fast-forward,
   remote/tag checkout.
 - Tag actions (Tags tab): create (`n`), delete (`d`). Remote-branch delete

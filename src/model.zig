@@ -118,6 +118,18 @@ pub const Tag = struct {
     }
 };
 
+pub const Worktree = struct {
+    path: []u8,
+    branch: []u8, // short branch name, or "(detached)" / "(bare)"
+    is_current: bool = false,
+
+    pub fn deinit(self: *Worktree, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        allocator.free(self.branch);
+        self.* = undefined;
+    }
+};
+
 /// A file changed by a single commit, from `git diff-tree --name-status`.
 pub const CommitFile = struct {
     status: u8,
@@ -197,6 +209,7 @@ pub const RepoData = struct {
     branches: []Branch = &.{},
     remote_branches: []Branch = &.{},
     tags: []Tag = &.{},
+    worktrees: []Worktree = &.{},
     commits: []Commit = &.{},
     reflog: []Commit = &.{},
     stash: []StashEntry = &.{},
@@ -215,6 +228,8 @@ pub const RepoData = struct {
         allocator.free(self.remote_branches);
         for (self.tags) |*tag| tag.deinit(allocator);
         allocator.free(self.tags);
+        for (self.worktrees) |*wt| wt.deinit(allocator);
+        allocator.free(self.worktrees);
         for (self.commits) |*commit| commit.deinit(allocator);
         allocator.free(self.commits);
         for (self.reflog) |*entry| entry.deinit(allocator);

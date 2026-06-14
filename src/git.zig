@@ -184,6 +184,7 @@ pub const Git = struct {
         data.branches = try self.loadBranches();
         data.remote_branches = try self.loadRemoteBranches();
         data.tags = try self.loadTags();
+        data.worktrees = try self.loadWorktrees();
         data.commits = try self.loadCommits("HEAD", 100);
         data.reflog = try self.loadReflog(100);
         data.stash = try self.loadStash();
@@ -333,6 +334,17 @@ pub const Git = struct {
         defer result.deinit(self.allocator);
         if (!result.ok()) return self.allocator.alloc(model.Tag, 0);
         return parseTags(self.allocator, result.stdout);
+    }
+
+    pub fn loadWorktrees(self: *Git) ![]model.Worktree {
+        var result = try self.exec(&.{ "worktree", "list", "--porcelain" });
+        defer result.deinit(self.allocator);
+        if (!result.ok()) return self.allocator.alloc(model.Worktree, 0);
+        return parseWorktrees(self.allocator, result.stdout, self.root);
+    }
+
+    pub fn removeWorktree(self: *Git, path: []const u8) !ExecResult {
+        return self.exec(&.{ "worktree", "remove", "--", path });
     }
 
     pub fn loadCommits(self: *Git, ref_name: []const u8, limit: usize) ![]model.Commit {
@@ -755,6 +767,45 @@ pub fn parseTags(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Tag {
     return tags.toOwnedSlice(allocator);
 }
 
+pub fn parseWorktrees(allocator: std.mem.Allocator, bytes: []const u8, current_root: []const u8) ![]model.Worktree {
+    var worktrees: std.ArrayList(model.Worktree) = .empty;
+    errdefer {
+        for (worktrees.items) |*wt| wt.deinit(allocator);
+        worktrees.deinit(allocator);
+    }
+
+    // `--porcelain` emits one blank-line-separated block per worktree.
+    var blocks = std.mem.splitSequence(u8, bytes, "\n\n");
+    while (blocks.next()) |block| {
+        var path: ?[]const u8 = null;
+        var branch: []const u8 = "(detached)";
+        var lines = std.mem.splitScalar(u8, block, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "worktree ")) {
+                path = line["worktree ".len..];
+            } else if (std.mem.eql(u8, line, "bare")) {
+                branch = "(bare)";
+            } else if (std.mem.eql(u8, line, "detached")) {
+                branch = "(detached)";
+            } else if (std.mem.startsWith(u8, line, "branch ")) {
+                const ref = line["branch ".len..];
+                branch = if (std.mem.startsWith(u8, ref, "refs/heads/")) ref["refs/heads/".len..] else ref;
+            }
+        }
+        const wt_path = path orelse continue;
+        if (wt_path.len == 0) continue;
+        var wt = model.Worktree{
+            .path = try allocator.dupe(u8, wt_path),
+            .branch = try allocator.dupe(u8, branch),
+            .is_current = std.mem.eql(u8, wt_path, current_root),
+        };
+        errdefer wt.deinit(allocator);
+        try worktrees.append(allocator, wt);
+    }
+
+    return worktrees.toOwnedSlice(allocator);
+}
+
 pub fn parseCommits(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Commit {
     var commits: std.ArrayList(model.Commit) = .empty;
     errdefer {
@@ -955,6 +1006,26 @@ test "parse stash entries extracts selector index" {
     try std.testing.expectEqualSlices(u8, "WIP on main", entries[0].message);
     try std.testing.expectEqual(@as(usize, 12), entries[1].index);
     try std.testing.expectEqualSlices(u8, "Saved work", entries[1].message);
+}
+
+test "parse worktrees marks the current one and shortens branches" {
+    const bytes =
+        "worktree /repo\nHEAD aaaa\nbranch refs/heads/main\n\n" ++
+        "worktree /repo-wt\nHEAD bbbb\nbranch refs/heads/feature\n\n" ++
+        "worktree /repo-detached\nHEAD cccc\ndetached\n";
+    const worktrees = try parseWorktrees(std.testing.allocator, bytes, "/repo");
+    defer {
+        for (worktrees) |*wt| wt.deinit(std.testing.allocator);
+        std.testing.allocator.free(worktrees);
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), worktrees.len);
+    try std.testing.expectEqualStrings("/repo", worktrees[0].path);
+    try std.testing.expectEqualStrings("main", worktrees[0].branch);
+    try std.testing.expect(worktrees[0].is_current);
+    try std.testing.expectEqualStrings("feature", worktrees[1].branch);
+    try std.testing.expect(!worktrees[1].is_current);
+    try std.testing.expectEqualStrings("(detached)", worktrees[2].branch);
 }
 
 test "parse commit files handles modifications and renames" {

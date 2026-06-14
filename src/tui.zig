@@ -128,6 +128,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         .local => "Branches [3]",
         .remotes => "Remotes [3]",
         .tags => "Tags [3]",
+        .worktrees => "Worktrees [3]",
     };
     drawBranches(panel(root, 0, y, side_w, branches_h, branches_title, app.focus == .branches), app);
     y += branches_h;
@@ -267,6 +268,7 @@ fn drawConfirmPopup(root: vaxis.Window, app: *const app_mod.App) void {
         .rebase_branch => "Rebase branch",
         .delete_tag => "Delete tag",
         .delete_remote_branch => "Delete remote branch",
+        .remove_worktree => "Remove worktree",
     };
     const w: u16 = @intCast(@min(@as(usize, 72), @max(text.len, 34) + 4));
     const win = popup(root, w, 5, title);
@@ -408,6 +410,7 @@ fn drawFileTree(win: vaxis.Window, app: *const app_mod.App) void {
 
 fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
     if (app.branches_tab == .tags) return drawTags(win, app);
+    if (app.branches_tab == .worktrees) return drawWorktrees(win, app);
 
     const branches = switch (app.branches_tab) {
         .remotes => app.data.remote_branches,
@@ -474,6 +477,27 @@ fn drawTags(win: vaxis.Window, app: *const app_mod.App) void {
         else
             tag.name;
         drawSelectable(win, row, line, styles().normal, idx == app.tag_index and app.focus == .branches);
+    }
+}
+
+fn drawWorktrees(win: vaxis.Window, app: *const app_mod.App) void {
+    if (app.data.worktrees.len == 0) {
+        print(win, 0, 0, "No worktrees", styles().muted);
+        return;
+    }
+    const start = scrollStart(app.worktree_index, app.data.worktrees.len, win.height);
+    var row: u16 = 0;
+    var idx = start;
+    while (idx < app.data.worktrees.len and row < win.height) : ({
+        idx += 1;
+        row += 1;
+    }) {
+        const wt = app.data.worktrees[idx];
+        var buf: [512]u8 = undefined;
+        const marker: u8 = if (wt.is_current) '*' else ' ';
+        const name = std.fs.path.basename(wt.path);
+        const line = std.fmt.bufPrint(&buf, "{c} {s} [{s}]", .{ marker, name, wt.branch }) catch wt.path;
+        drawSelectable(win, row, line, if (wt.is_current) styles().staged else styles().normal, idx == app.worktree_index and app.focus == .branches);
     }
 }
 
@@ -636,6 +660,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
             .local => "space checkout  n new  R rename  d delete  M merge  r rebase  f ff  [ ]" ++ global,
             .remotes => "space checkout  d delete-remote  [ ] tabs" ++ global,
             .tags => "space checkout  n new-tag  d delete-tag  [ ] tabs" ++ global,
+            .worktrees => "d remove  [ ] tabs" ++ global,
         };
     }
     return switch (app.focus) {

@@ -41,6 +41,7 @@ pub const Confirmation = enum {
     rebase_branch,
     delete_tag,
     delete_remote_branch,
+    remove_worktree,
 };
 
 /// Tabs within the Branches panel, switched with [ and ] (lazygit).
@@ -48,12 +49,14 @@ pub const BranchesTab = enum {
     local,
     remotes,
     tags,
+    worktrees,
 
     pub fn label(self: BranchesTab) []const u8 {
         return switch (self) {
             .local => "Branches",
             .remotes => "Remotes",
             .tags => "Tags",
+            .worktrees => "Worktrees",
         };
     }
 };
@@ -154,6 +157,7 @@ pub const App = struct {
     branch_index: usize = 0,
     remote_index: usize = 0,
     tag_index: usize = 0,
+    worktree_index: usize = 0,
     commit_index: usize = 0,
     reflog_index: usize = 0,
     stash_index: usize = 0,
@@ -588,13 +592,20 @@ pub const App = struct {
         return self.data.tags[@min(self.tag_index, self.data.tags.len - 1)];
     }
 
+    pub fn selectedWorktree(self: *const App) ?model.Worktree {
+        if (self.data.worktrees.len == 0) return null;
+        return self.data.worktrees[@min(self.worktree_index, self.data.worktrees.len - 1)];
+    }
+
     /// The ref name selected in the Branches panel, whichever tab is active.
-    /// Used to drive the main-panel preview.
+    /// Used to drive the main-panel preview. Null for the Worktrees tab, which
+    /// has no ref to show.
     pub fn selectedBranchRefName(self: *const App) ?[]const u8 {
         return switch (self.branches_tab) {
             .local => if (self.selectedBranch()) |branch| branch.name else null,
             .remotes => if (self.selectedRemoteBranch()) |branch| branch.name else null,
             .tags => if (self.selectedTag()) |tag| tag.name else null,
+            .worktrees => null,
         };
     }
 
@@ -846,12 +857,14 @@ pub const App = struct {
                     .next => switch (self.branches_tab) {
                         .local => .remotes,
                         .remotes => .tags,
-                        .tags => .local,
+                        .tags => .worktrees,
+                        .worktrees => .local,
                     },
                     .prev => switch (self.branches_tab) {
-                        .local => .tags,
+                        .local => .worktrees,
                         .remotes => .local,
                         .tags => .remotes,
+                        .worktrees => .tags,
                     },
                 };
                 self.main_scroll = 0;
@@ -904,6 +917,12 @@ pub const App = struct {
                     break :blk std.fmt.bufPrint(buf, "Delete remote branch {s}? This pushes a deletion.", .{branch.name}) catch "Delete the selected remote branch?";
                 }
                 break :blk "Delete the selected remote branch?";
+            },
+            .remove_worktree => blk: {
+                if (self.selectedWorktree()) |wt| {
+                    break :blk std.fmt.bufPrint(buf, "Remove worktree {s}?", .{wt.path}) catch "Remove the selected worktree?";
+                }
+                break :blk "Remove the selected worktree?";
             },
         };
     }
@@ -969,6 +988,7 @@ pub const App = struct {
                 .local => self.branch_index -|= 1,
                 .remotes => self.remote_index -|= 1,
                 .tags => self.tag_index -|= 1,
+                .worktrees => self.worktree_index -|= 1,
             },
             .commits => {
                 if (self.commit_files_active) {
@@ -997,6 +1017,9 @@ pub const App = struct {
                 },
                 .tags => if (self.tag_index + 1 < self.data.tags.len) {
                     self.tag_index += 1;
+                },
+                .worktrees => if (self.worktree_index + 1 < self.data.worktrees.len) {
+                    self.worktree_index += 1;
                 },
             },
             .commits => {
@@ -1363,6 +1386,19 @@ pub const App = struct {
                 self.pending_confirmation = .delete_remote_branch;
                 try self.setMessage("confirm delete remote {s}", .{branch.name});
             },
+            .worktrees => {
+                const wt = self.selectedWorktree() orelse {
+                    try self.setMessage("no worktree selected", .{});
+                    return;
+                };
+                if (wt.is_current) {
+                    try self.setMessage("cannot remove the current worktree", .{});
+                    return;
+                }
+                self.mode = .confirmation;
+                self.pending_confirmation = .remove_worktree;
+                try self.setMessage("confirm remove worktree {s}", .{wt.path});
+            },
         }
     }
 
@@ -1474,6 +1510,15 @@ pub const App = struct {
                     return;
                 };
                 return self.runMutation(try self.git.checkout(tag.name), "checked out {s} (detached)", .{tag.name});
+            },
+            .worktrees => {
+                // Switching the active worktree would re-root the app; instead
+                // tell the user to open ziggity in that directory.
+                if (self.selectedWorktree()) |wt| {
+                    try self.setMessage("open ziggity in {s} to use that worktree", .{wt.path});
+                } else {
+                    try self.setMessage("no worktree selected", .{});
+                }
             },
         }
     }
@@ -1636,6 +1681,13 @@ pub const App = struct {
                 const remote_branch = branch.name[slash + 1 ..];
                 return self.runMutation(try self.git.deleteRemoteBranch(remote, remote_branch), "deleted remote {s}", .{branch.name});
             },
+            .remove_worktree => {
+                const wt = self.selectedWorktree() orelse {
+                    try self.setMessage("no worktree selected", .{});
+                    return;
+                };
+                return self.runMutation(try self.git.removeWorktree(wt.path), "removed worktree {s}", .{wt.path});
+            },
         }
     }
 
@@ -1663,6 +1715,12 @@ pub const App = struct {
                 break :blk try self.allocator.dupe(u8, "Working tree clean.\n");
             },
             .branches => blk: {
+                if (self.branches_tab == .worktrees) {
+                    if (self.selectedWorktree()) |wt| {
+                        break :blk try std.fmt.allocPrint(self.allocator, "Worktree{s}\nPath:   {s}\nBranch: {s}\n", .{ if (wt.is_current) " (current)" else "", wt.path, wt.branch });
+                    }
+                    break :blk try self.allocator.dupe(u8, "No worktrees.\n");
+                }
                 if (self.selectedBranchRefName()) |name| break :blk try self.git.showBranch(name);
                 break :blk try self.allocator.dupe(u8, "Nothing to show in this tab.\n");
             },
@@ -1757,6 +1815,7 @@ pub const App = struct {
         if (self.data.branches.len == 0) self.branch_index = 0 else self.branch_index = @min(self.branch_index, self.data.branches.len - 1);
         if (self.data.remote_branches.len == 0) self.remote_index = 0 else self.remote_index = @min(self.remote_index, self.data.remote_branches.len - 1);
         if (self.data.tags.len == 0) self.tag_index = 0 else self.tag_index = @min(self.tag_index, self.data.tags.len - 1);
+        if (self.data.worktrees.len == 0) self.worktree_index = 0 else self.worktree_index = @min(self.worktree_index, self.data.worktrees.len - 1);
         if (self.data.commits.len == 0) self.commit_index = 0 else self.commit_index = @min(self.commit_index, self.data.commits.len - 1);
         if (self.data.reflog.len == 0) self.reflog_index = 0 else self.reflog_index = @min(self.reflog_index, self.data.reflog.len - 1);
         if (self.data.stash.len == 0) self.stash_index = 0 else self.stash_index = @min(self.stash_index, self.data.stash.len - 1);
