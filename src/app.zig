@@ -50,6 +50,7 @@ pub const BranchesTab = enum {
     remotes,
     tags,
     worktrees,
+    submodules,
 
     pub fn label(self: BranchesTab) []const u8 {
         return switch (self) {
@@ -57,6 +58,7 @@ pub const BranchesTab = enum {
             .remotes => "Remotes",
             .tags => "Tags",
             .worktrees => "Worktrees",
+            .submodules => "Submodules",
         };
     }
 };
@@ -158,6 +160,7 @@ pub const App = struct {
     remote_index: usize = 0,
     tag_index: usize = 0,
     worktree_index: usize = 0,
+    submodule_index: usize = 0,
     commit_index: usize = 0,
     reflog_index: usize = 0,
     stash_index: usize = 0,
@@ -597,6 +600,11 @@ pub const App = struct {
         return self.data.worktrees[@min(self.worktree_index, self.data.worktrees.len - 1)];
     }
 
+    pub fn selectedSubmodule(self: *const App) ?model.Submodule {
+        if (self.data.submodules.len == 0) return null;
+        return self.data.submodules[@min(self.submodule_index, self.data.submodules.len - 1)];
+    }
+
     /// The ref name selected in the Branches panel, whichever tab is active.
     /// Used to drive the main-panel preview. Null for the Worktrees tab, which
     /// has no ref to show.
@@ -605,7 +613,7 @@ pub const App = struct {
             .local => if (self.selectedBranch()) |branch| branch.name else null,
             .remotes => if (self.selectedRemoteBranch()) |branch| branch.name else null,
             .tags => if (self.selectedTag()) |tag| tag.name else null,
-            .worktrees => null,
+            .worktrees, .submodules => null,
         };
     }
 
@@ -858,13 +866,15 @@ pub const App = struct {
                         .local => .remotes,
                         .remotes => .tags,
                         .tags => .worktrees,
-                        .worktrees => .local,
+                        .worktrees => .submodules,
+                        .submodules => .local,
                     },
                     .prev => switch (self.branches_tab) {
-                        .local => .worktrees,
+                        .local => .submodules,
                         .remotes => .local,
                         .tags => .remotes,
                         .worktrees => .tags,
+                        .submodules => .worktrees,
                     },
                 };
                 self.main_scroll = 0;
@@ -989,6 +999,7 @@ pub const App = struct {
                 .remotes => self.remote_index -|= 1,
                 .tags => self.tag_index -|= 1,
                 .worktrees => self.worktree_index -|= 1,
+                .submodules => self.submodule_index -|= 1,
             },
             .commits => {
                 if (self.commit_files_active) {
@@ -1020,6 +1031,9 @@ pub const App = struct {
                 },
                 .worktrees => if (self.worktree_index + 1 < self.data.worktrees.len) {
                     self.worktree_index += 1;
+                },
+                .submodules => if (self.submodule_index + 1 < self.data.submodules.len) {
+                    self.submodule_index += 1;
                 },
             },
             .commits => {
@@ -1399,6 +1413,7 @@ pub const App = struct {
                 self.pending_confirmation = .remove_worktree;
                 try self.setMessage("confirm remove worktree {s}", .{wt.path});
             },
+            .submodules => try self.setMessage("no delete action for submodules", .{}),
         }
     }
 
@@ -1519,6 +1534,13 @@ pub const App = struct {
                 } else {
                     try self.setMessage("no worktree selected", .{});
                 }
+            },
+            .submodules => {
+                const sm = self.selectedSubmodule() orelse {
+                    try self.setMessage("no submodule selected", .{});
+                    return;
+                };
+                return self.runMutation(try self.git.updateSubmodule(sm.path), "updated {s}", .{sm.path});
             },
         }
     }
@@ -1721,6 +1743,12 @@ pub const App = struct {
                     }
                     break :blk try self.allocator.dupe(u8, "No worktrees.\n");
                 }
+                if (self.branches_tab == .submodules) {
+                    if (self.selectedSubmodule()) |sm| {
+                        break :blk try std.fmt.allocPrint(self.allocator, "Submodule ({s})\nPath: {s}\nSHA:  {s}\n\nspace to init/update.\n", .{ sm.stateLabel(), sm.path, sm.sha });
+                    }
+                    break :blk try self.allocator.dupe(u8, "No submodules.\n");
+                }
                 if (self.selectedBranchRefName()) |name| break :blk try self.git.showBranch(name);
                 break :blk try self.allocator.dupe(u8, "Nothing to show in this tab.\n");
             },
@@ -1816,6 +1844,7 @@ pub const App = struct {
         if (self.data.remote_branches.len == 0) self.remote_index = 0 else self.remote_index = @min(self.remote_index, self.data.remote_branches.len - 1);
         if (self.data.tags.len == 0) self.tag_index = 0 else self.tag_index = @min(self.tag_index, self.data.tags.len - 1);
         if (self.data.worktrees.len == 0) self.worktree_index = 0 else self.worktree_index = @min(self.worktree_index, self.data.worktrees.len - 1);
+        if (self.data.submodules.len == 0) self.submodule_index = 0 else self.submodule_index = @min(self.submodule_index, self.data.submodules.len - 1);
         if (self.data.commits.len == 0) self.commit_index = 0 else self.commit_index = @min(self.commit_index, self.data.commits.len - 1);
         if (self.data.reflog.len == 0) self.reflog_index = 0 else self.reflog_index = @min(self.reflog_index, self.data.reflog.len - 1);
         if (self.data.stash.len == 0) self.stash_index = 0 else self.stash_index = @min(self.stash_index, self.data.stash.len - 1);

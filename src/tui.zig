@@ -129,6 +129,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         .remotes => "Remotes [3]",
         .tags => "Tags [3]",
         .worktrees => "Worktrees [3]",
+        .submodules => "Submodules [3]",
     };
     drawBranches(panel(root, 0, y, side_w, branches_h, branches_title, app.focus == .branches), app);
     y += branches_h;
@@ -411,6 +412,7 @@ fn drawFileTree(win: vaxis.Window, app: *const app_mod.App) void {
 fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
     if (app.branches_tab == .tags) return drawTags(win, app);
     if (app.branches_tab == .worktrees) return drawWorktrees(win, app);
+    if (app.branches_tab == .submodules) return drawSubmodules(win, app);
 
     const branches = switch (app.branches_tab) {
         .remotes => app.data.remote_branches,
@@ -498,6 +500,30 @@ fn drawWorktrees(win: vaxis.Window, app: *const app_mod.App) void {
         const name = std.fs.path.basename(wt.path);
         const line = std.fmt.bufPrint(&buf, "{c} {s} [{s}]", .{ marker, name, wt.branch }) catch wt.path;
         drawSelectable(win, row, line, if (wt.is_current) styles().staged else styles().normal, idx == app.worktree_index and app.focus == .branches);
+    }
+}
+
+fn drawSubmodules(win: vaxis.Window, app: *const app_mod.App) void {
+    if (app.data.submodules.len == 0) {
+        print(win, 0, 0, "No submodules", styles().muted);
+        return;
+    }
+    const start = scrollStart(app.submodule_index, app.data.submodules.len, win.height);
+    var row: u16 = 0;
+    var idx = start;
+    while (idx < app.data.submodules.len and row < win.height) : ({
+        idx += 1;
+        row += 1;
+    }) {
+        const sm = app.data.submodules[idx];
+        var buf: [512]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{c} {s}", .{ sm.status, sm.path }) catch sm.path;
+        const style = switch (sm.status) {
+            '-' => styles().muted,
+            '+', 'U' => styles().warning,
+            else => styles().normal,
+        };
+        drawSelectable(win, row, line, style, idx == app.submodule_index and app.focus == .branches);
     }
 }
 
@@ -661,6 +687,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
             .remotes => "space checkout  d delete-remote  [ ] tabs" ++ global,
             .tags => "space checkout  n new-tag  d delete-tag  [ ] tabs" ++ global,
             .worktrees => "d remove  [ ] tabs" ++ global,
+            .submodules => "space init/update  [ ] tabs" ++ global,
         };
     }
     return switch (app.focus) {

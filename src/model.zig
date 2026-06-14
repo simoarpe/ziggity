@@ -130,6 +130,29 @@ pub const Worktree = struct {
     }
 };
 
+pub const Submodule = struct {
+    path: []u8,
+    sha: []u8,
+    /// Leading char from `git submodule status`: ' ' ok, '+' out of date,
+    /// '-' uninitialized, 'U' conflicts.
+    status: u8,
+
+    pub fn deinit(self: *Submodule, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        allocator.free(self.sha);
+        self.* = undefined;
+    }
+
+    pub fn stateLabel(self: Submodule) []const u8 {
+        return switch (self.status) {
+            '-' => "uninitialized",
+            '+' => "out of date",
+            'U' => "conflicts",
+            else => "ok",
+        };
+    }
+};
+
 /// A file changed by a single commit, from `git diff-tree --name-status`.
 pub const CommitFile = struct {
     status: u8,
@@ -210,6 +233,7 @@ pub const RepoData = struct {
     remote_branches: []Branch = &.{},
     tags: []Tag = &.{},
     worktrees: []Worktree = &.{},
+    submodules: []Submodule = &.{},
     commits: []Commit = &.{},
     reflog: []Commit = &.{},
     stash: []StashEntry = &.{},
@@ -230,6 +254,8 @@ pub const RepoData = struct {
         allocator.free(self.tags);
         for (self.worktrees) |*wt| wt.deinit(allocator);
         allocator.free(self.worktrees);
+        for (self.submodules) |*sm| sm.deinit(allocator);
+        allocator.free(self.submodules);
         for (self.commits) |*commit| commit.deinit(allocator);
         allocator.free(self.commits);
         for (self.reflog) |*entry| entry.deinit(allocator);

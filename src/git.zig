@@ -185,6 +185,7 @@ pub const Git = struct {
         data.remote_branches = try self.loadRemoteBranches();
         data.tags = try self.loadTags();
         data.worktrees = try self.loadWorktrees();
+        data.submodules = try self.loadSubmodules();
         data.commits = try self.loadCommits("HEAD", 100);
         data.reflog = try self.loadReflog(100);
         data.stash = try self.loadStash();
@@ -345,6 +346,17 @@ pub const Git = struct {
 
     pub fn removeWorktree(self: *Git, path: []const u8) !ExecResult {
         return self.exec(&.{ "worktree", "remove", "--", path });
+    }
+
+    pub fn loadSubmodules(self: *Git) ![]model.Submodule {
+        var result = try self.exec(&.{ "submodule", "status" });
+        defer result.deinit(self.allocator);
+        if (!result.ok()) return self.allocator.alloc(model.Submodule, 0);
+        return parseSubmodules(self.allocator, result.stdout);
+    }
+
+    pub fn updateSubmodule(self: *Git, path: []const u8) !ExecResult {
+        return self.exec(&.{ "submodule", "update", "--init", "--", path });
     }
 
     pub fn loadCommits(self: *Git, ref_name: []const u8, limit: usize) ![]model.Commit {
@@ -806,6 +818,34 @@ pub fn parseWorktrees(allocator: std.mem.Allocator, bytes: []const u8, current_r
     return worktrees.toOwnedSlice(allocator);
 }
 
+pub fn parseSubmodules(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Submodule {
+    var submodules: std.ArrayList(model.Submodule) = .empty;
+    errdefer {
+        for (submodules.items) |*sm| sm.deinit(allocator);
+        submodules.deinit(allocator);
+    }
+
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |line| {
+        if (line.len < 2) continue;
+        // Format: "<status><sha> <path> [(describe)]"; the status char (which
+        // may be a space) is attached to the SHA, so read it before tokenizing.
+        const status = line[0];
+        var fields = std.mem.tokenizeScalar(u8, line[1..], ' ');
+        const sha = fields.next() orelse continue;
+        const path = fields.next() orelse continue;
+        var sm = model.Submodule{
+            .path = try allocator.dupe(u8, path),
+            .sha = try allocator.dupe(u8, sha),
+            .status = status,
+        };
+        errdefer sm.deinit(allocator);
+        try submodules.append(allocator, sm);
+    }
+
+    return submodules.toOwnedSlice(allocator);
+}
+
 pub fn parseCommits(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Commit {
     var commits: std.ArrayList(model.Commit) = .empty;
     errdefer {
@@ -1026,6 +1066,28 @@ test "parse worktrees marks the current one and shortens branches" {
     try std.testing.expectEqualStrings("feature", worktrees[1].branch);
     try std.testing.expect(!worktrees[1].is_current);
     try std.testing.expectEqualStrings("(detached)", worktrees[2].branch);
+}
+
+test "parse submodules reads the status char, sha and path" {
+    const bytes =
+        " cd8600b5b4b075bae86b0e3b66a133c687d65716 libs/sub (heads/main)\n" ++
+        "-aaaa000000000000000000000000000000000000 vendor/x\n" ++
+        "+bbbb000000000000000000000000000000000000 vendor/y (v1.2-3-gabc)\n";
+    const subs = try parseSubmodules(std.testing.allocator, bytes);
+    defer {
+        for (subs) |*sm| sm.deinit(std.testing.allocator);
+        std.testing.allocator.free(subs);
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), subs.len);
+    try std.testing.expectEqual(@as(u8, ' '), subs[0].status);
+    try std.testing.expectEqualStrings("libs/sub", subs[0].path);
+    try std.testing.expectEqualStrings("ok", subs[0].stateLabel());
+    try std.testing.expectEqual(@as(u8, '-'), subs[1].status);
+    try std.testing.expectEqualStrings("vendor/x", subs[1].path);
+    try std.testing.expectEqualStrings("uninitialized", subs[1].stateLabel());
+    try std.testing.expectEqual(@as(u8, '+'), subs[2].status);
+    try std.testing.expectEqualStrings("vendor/y", subs[2].path);
 }
 
 test "parse commit files handles modifications and renames" {
