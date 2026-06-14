@@ -226,7 +226,69 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         .commit_prompt => drawCommitPopup(root, app),
         .text_prompt => drawTextPromptPopup(root, app),
         .command_log => drawCommandLogPopup(root, app),
+        .help => drawHelpPopup(root, app),
         else => {},
+    }
+}
+
+const help_lines = [_][]const u8{
+    "Global",
+    "  q / ctrl+c     quit",
+    "  R              refresh",
+    "  1-5            focus Status/Files/Branches/Commits/Stash",
+    "  h/l, tab       move between side panels",
+    "  j/k, arrows    move selection",
+    "  [ / ]          switch panel tabs",
+    "  enter / esc    inspect in main panel / go back",
+    "  @ / ?          command log / this help",
+    "  f / p / P      fetch / pull / push (async)",
+    "",
+    "Files",
+    "  space          stage/unstage (whole dir in tree view)",
+    "  a              stage/unstage all",
+    "  c              commit (popup editor)",
+    "  d / D          discard menu / discard all",
+    "  / / ctrl+b     filter by path / status filter",
+    "  `              toggle directory tree",
+    "  enter          open the hunk/line staging view",
+    "  m              conflict actions (while merging/rebasing)",
+    "",
+    "Staging view",
+    "  j/k            move by line",
+    "  v              toggle range selection",
+    "  space          stage/unstage line(s); on @@ the whole hunk",
+    "  tab            switch unstaged / staged side",
+    "",
+    "Branches  (tabs: Local / Remotes / Tags / Worktrees / Submodules)",
+    "  space          checkout / apply / init-update",
+    "  n              new branch (new tag on the Tags tab)",
+    "  R              rename branch",
+    "  d              delete branch / tag / remote / worktree",
+    "  M / r / f      merge / rebase / fast-forward",
+    "",
+    "Commits  (tabs: Commits / Reflog)",
+    "  enter          view the commit's changed files",
+    "  g / t          reset menu / revert",
+    "",
+    "Stash",
+    "  space / g / d  apply / pop / drop",
+};
+
+fn drawHelpPopup(root: vaxis.Window, app: *const app_mod.App) void {
+    const st = styles();
+    const w: u16 = @min(@as(u16, 70), root.width -| 2);
+    const h: u16 = @min(@as(u16, help_lines.len + 2), root.height -| 1);
+    const win = popup(root, w, h, "Keybindings");
+
+    const max_scroll = if (help_lines.len > win.height) help_lines.len - win.height else 0;
+    const start = @min(app.help_scroll, max_scroll);
+    var row: u16 = 0;
+    for (help_lines[start..]) |line| {
+        if (row >= win.height) break;
+        // Section headers (no leading indent) are accented.
+        const style = if (line.len > 0 and line[0] != ' ') st.bottom_accent else st.normal;
+        print(win, row, 0, line, style);
+        row += 1;
     }
 }
 
@@ -733,6 +795,10 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
         print(win, 0, 0, "command log  -  press any key to close", st.bottom_accent);
         return;
     }
+    if (app.mode == .help) {
+        print(win, 0, 0, "help  -  j/k scroll  -  any other key closes", st.bottom_accent);
+        return;
+    }
 
     var buf: [1024]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "{s}  |  {s}", .{ app.message, contextHints(app) }) catch app.message;
@@ -742,7 +808,7 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
 /// Keybinding hints for the focused panel only, lazygit-style. A short global
 /// suffix (refresh/quit) is appended since those apply everywhere.
 fn contextHints(app: *const app_mod.App) []const u8 {
-    const global = "  -  R refresh  q quit";
+    const global = "  -  ? help  R refresh  q quit";
     if (app.staging_active) {
         return "j/k line  v range  space stage/unstage (@@=hunk)  tab side  esc back" ++ global;
     }

@@ -17,6 +17,7 @@ pub const Mode = enum {
     text_prompt,
     confirmation,
     command_log,
+    help,
 };
 
 /// A reusable single-line text-input popup. Each kind knows its title and what
@@ -220,6 +221,7 @@ pub const App = struct {
     text_prompt_kind: ?TextPromptKind = null,
     mode: Mode = .normal,
     status_filter_index: usize = 0,
+    help_scroll: usize = 0,
     active_menu: ?Menu = null,
     pending_confirmation: ?Confirmation = null,
     terminal_focused: bool = true,
@@ -343,6 +345,16 @@ pub const App = struct {
             self.mode = .normal;
             return;
         }
+        if (self.mode == .help) {
+            if (self.config.keymap.down.matches(key) or key.matches(vaxis.Key.down, .{})) {
+                self.help_scroll += 1;
+            } else if (self.config.keymap.up.matches(key) or key.matches(vaxis.Key.up, .{})) {
+                self.help_scroll -|= 1;
+            } else {
+                self.mode = .normal;
+            }
+            return;
+        }
 
         if (key.matches(vaxis.Key.page_up, .{})) return self.scrollMain(-10);
         if (key.matches(vaxis.Key.page_down, .{})) return self.scrollMain(10);
@@ -408,6 +420,11 @@ pub const App = struct {
             .command_log => {
                 self.mode = .command_log;
                 try self.setMessage("command log", .{});
+            },
+            .help => {
+                self.mode = .help;
+                self.help_scroll = 0;
+                try self.setMessage("help", .{});
             },
             .conflict_menu => try self.startConflictActionsMenu(),
             .stage_all => try self.toggleAllStaged(),

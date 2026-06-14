@@ -91,6 +91,7 @@ Useful keys:
 
 - `q` or `ctrl+c`: quit
 - `R`: refresh
+- `?`: keybindings help overlay (`j`/`k` to scroll)
 - `@`: show the command log (recent git commands ziggity ran)
 - `/`: filter files by path live; enter accepts; esc clears
 - `` ` ``: toggle the files directory-tree view (collapse dirs with `enter`,
