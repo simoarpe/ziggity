@@ -310,6 +310,9 @@ pub const App = struct {
     // readable minimum instead of letting it flash by.
     op_started_at: ?std.Io.Timestamp = null,
     render_hook: ?RenderHook = null,
+    // Text the TUI loop should copy to the system clipboard (OSC 52), owned;
+    // set by a copy action, consumed and freed by the loop.
+    clipboard_request: ?[]u8 = null,
     commit_buffer: std.ArrayList(u8) = .empty,
     file_filter_buffer: std.ArrayList(u8) = .empty,
     filter_history: std.ArrayList([]u8) = .empty,
@@ -375,6 +378,7 @@ pub const App = struct {
         for (self.copied_commits.items) |entry| self.allocator.free(entry);
         self.copied_commits.deinit(self.allocator);
         if (self.marked_base) |b| self.allocator.free(b);
+        if (self.clipboard_request) |c| self.allocator.free(c);
         self.input_buffer.deinit(self.allocator);
         self.git.deinit();
         self.* = undefined;
@@ -552,6 +556,7 @@ pub const App = struct {
                 try self.setMessage("help", .{});
             },
             .undo => try self.startUndoConfirm(),
+            .copy_to_clipboard => try self.requestClipboardCopy(),
             .conflict_menu => try self.startConflictActionsMenu(),
             .stage_all => try self.toggleAllStaged(),
             .discard_selected => try self.startDiscardMenu(),
@@ -1486,6 +1491,25 @@ pub const App = struct {
             if (std.mem.eql(u8, h, hash)) return true;
         }
         return false;
+    }
+
+    /// Queue the focused item's identifier for the system clipboard: a commit
+    /// hash, branch/tag/remote ref, or stash selector, depending on the panel.
+    /// The TUI loop performs the OSC 52 copy.
+    fn requestClipboardCopy(self: *App) !void {
+        const text: []const u8 = switch (self.focus) {
+            .commits => if (self.selectedCommit()) |commit| commit.hash else "",
+            .branches => self.selectedBranchRefName() orelse "",
+            .stash => if (self.selectedStash()) |entry| entry.selector else "",
+            .status, .files, .main => "",
+        };
+        if (text.len == 0) {
+            try self.setMessage("nothing to copy here", .{});
+            return;
+        }
+        if (self.clipboard_request) |old| self.allocator.free(old);
+        self.clipboard_request = try self.allocator.dupe(u8, text);
+        try self.setMessage("copied to clipboard: {s}", .{text});
     }
 
     /// Toggle the selected commit in the cherry-pick clipboard.
@@ -2863,6 +2887,30 @@ test "cherry-pick clipboard toggles copied commits" {
     try std.testing.expectEqual(@as(usize, 1), app.copied_commits.items.len);
 }
 
+test "clipboard copy picks the focused panel's identifier" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("aaaaaaa"), .short_hash = @constCast("aaa"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("first") },
+    };
+    app.data.commits = &commits;
+
+    // Commits panel copies the full hash.
+    app.focus = .commits;
+    app.commit_index = 0;
+    try app.requestClipboardCopy();
+    try std.testing.expectEqualStrings("aaaaaaa", app.clipboard_request.?);
+
+    // Status panel has nothing to copy and leaves the request untouched.
+    app.focus = .status;
+    try app.requestClipboardCopy();
+    try std.testing.expectEqualStrings("aaaaaaa", app.clipboard_request.?);
+    try std.testing.expectEqualStrings("nothing to copy here", app.message);
+}
+
 test "mark base toggles the rebase-onto base commit" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -2984,6 +3032,7 @@ fn deinitTestApp(app: *App) void {
     app.allocator.free(app.op_command);
     app.allocator.free(app.op_summary);
     app.allocator.free(app.op_output);
+    if (app.clipboard_request) |c| app.allocator.free(c);
     app.commit_buffer.deinit(app.allocator);
     app.commit_body_buffer.deinit(app.allocator);
     app.file_filter_buffer.deinit(app.allocator);

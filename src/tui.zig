@@ -134,6 +134,13 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             },
         }
 
+        // Push any queued text to the system clipboard (OSC 52).
+        if (app.clipboard_request) |text| {
+            vx.copyToSystemClipboard(writer, text, allocator) catch {};
+            allocator.free(text);
+            app.clipboard_request = null;
+        }
+
         // Start a queued network op once nothing else is in flight.
         if (async_future == null) {
             if (app.async_requested) |op| {
@@ -278,6 +285,7 @@ const help_lines = [_][]const u8{
     "  enter / esc    inspect in main panel / go back",
     "  @ / ?          command log / this help",
     "  z              undo the last operation (reflog reset)",
+    "  ctrl+o         copy selected hash / branch / tag to the clipboard",
     "  f / p / P      fetch / pull / push (async)",
     "",
     "Files",

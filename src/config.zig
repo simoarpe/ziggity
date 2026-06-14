@@ -22,6 +22,7 @@ pub const KeyMap = struct {
     command_log: Binding = .{ .codepoint = '@' },
     help: Binding = .{ .codepoint = '?' },
     undo: Binding = .{ .codepoint = 'z' },
+    copy_clipboard: Binding = .{ .codepoint = 'o', .ctrl = true },
     up: Binding = .{ .codepoint = 'k' },
     down: Binding = .{ .codepoint = 'j' },
     left: Binding = .{ .codepoint = 'h' },

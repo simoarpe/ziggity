@@ -24,6 +24,7 @@ pub const Action = enum {
     command_log,
     help,
     undo,
+    copy_to_clipboard,
     toggle_tree,
     new_branch,
     delete_branch,
@@ -91,6 +92,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     if (keymap.command_log.matches(key)) return .command_log;
     if (keymap.help.matches(key)) return .help;
     if (keymap.undo.matches(key)) return .undo;
+    if (keymap.copy_clipboard.matches(key)) return .copy_to_clipboard;
     if (keymap.refresh.matches(key)) return .refresh;
     if (keymap.file_filter.matches(key)) return .start_file_filter;
     if (keymap.fetch.matches(key)) return .fetch;
