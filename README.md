@@ -172,6 +172,17 @@ Key values may be a single character or one of `space`, `enter`, `tab`, `esc`,
 `backspace`, `ctrl+x`, or `alt+x`. Every binding in the keymap is remappable
 via `key.<name>`, and every theme color via `color.<name>`.
 
+Custom commands bind a key to a shell command run in the repo root (output and
+status surfaced in the message line; the view refreshes afterward):
+
+```ini
+command.C = git commit --amend --no-edit
+command.ctrl+t = ctags -R .
+```
+
+Custom commands take precedence over built-in bindings and only run when you
+press their key, so a repo-local `.ziggity.ini` cannot run anything on its own.
+
 ## libvaxis Usage
 
 The TUI layer uses libvaxis' low-level API:

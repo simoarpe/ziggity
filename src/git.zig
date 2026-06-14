@@ -98,6 +98,25 @@ pub const Git = struct {
         self.command_log.append(self.allocator, entry) catch self.allocator.free(entry);
     }
 
+    /// Run an arbitrary shell command in the repository root (for user-defined
+    /// custom commands). Recorded in the command log.
+    pub fn runShell(self: *Git, command: []const u8) !ExecResult {
+        const entry = std.fmt.allocPrint(self.allocator, "$ {s}", .{command}) catch null;
+        if (entry) |e| {
+            if (self.command_log.items.len >= command_log_cap) {
+                self.allocator.free(self.command_log.orderedRemove(0));
+            }
+            self.command_log.append(self.allocator, e) catch self.allocator.free(e);
+        }
+        const result = try std.process.run(self.allocator, self.io, .{
+            .argv = &.{ "sh", "-c", command },
+            .cwd = .{ .path = self.root },
+            .stdout_limit = .limited(16 * 1024 * 1024),
+            .stderr_limit = .limited(4 * 1024 * 1024),
+        });
+        return .{ .stdout = result.stdout, .stderr = result.stderr, .term = result.term };
+    }
+
     pub fn exec(self: *Git, args: []const []const u8) !ExecResult {
         self.recordCommand(args);
         var argv: std.ArrayList([]const u8) = .empty;

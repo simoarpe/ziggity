@@ -77,11 +77,27 @@ pub const Theme = struct {
     header: u8 = 13,
 };
 
+/// A user-defined shell command bound to a key (`command.<key>` in config).
+/// Stored in a fixed buffer so Config needs no allocation or teardown.
+pub const CustomCommand = struct {
+    binding: Binding,
+    buf: [256]u8 = undefined,
+    len: usize = 0,
+
+    pub fn command(self: *const CustomCommand) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+pub const max_custom_commands = 16;
+
 pub const Config = struct {
     side_panel_width_percent: u8 = 34,
     diff_context: u8 = 3,
     keymap: KeyMap = .{},
     theme: Theme = .{},
+    custom_commands: [max_custom_commands]CustomCommand = undefined,
+    custom_count: usize = 0,
 
     pub fn load(
         allocator: std.mem.Allocator,
@@ -133,6 +149,17 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "diff_context")) {
             self.diff_context = std.fmt.parseInt(u8, value, 10) catch self.diff_context;
+            return;
+        }
+
+        if (std.mem.startsWith(u8, key, "command.")) {
+            if (self.custom_count >= max_custom_commands) return;
+            if (value.len == 0 or value.len > 256) return;
+            const binding = parseBinding(key["command.".len..]) orelse return;
+            var cc = CustomCommand{ .binding = binding, .len = value.len };
+            @memcpy(cc.buf[0..value.len], value);
+            self.custom_commands[self.custom_count] = cc;
+            self.custom_count += 1;
             return;
         }
 
@@ -207,4 +234,17 @@ test "config parser applies theme colors and newer keybindings" {
     try std.testing.expectEqual(@as(u8, 11), cfg.theme.warning); // default preserved
     try std.testing.expectEqual(@as(u21, 'F'), cfg.keymap.fast_forward.codepoint);
     try std.testing.expectEqual(@as(u21, 'L'), cfg.keymap.command_log.codepoint);
+}
+
+test "config parser stores custom commands bound to keys" {
+    var cfg: Config = .{};
+    cfg.applyBytes(
+        \\command.C = git commit --amend --no-edit
+        \\command.ctrl+t = ctags -R .
+    );
+    try std.testing.expectEqual(@as(usize, 2), cfg.custom_count);
+    try std.testing.expectEqual(@as(u21, 'C'), cfg.custom_commands[0].binding.codepoint);
+    try std.testing.expectEqualStrings("git commit --amend --no-edit", cfg.custom_commands[0].command());
+    try std.testing.expect(cfg.custom_commands[1].binding.ctrl);
+    try std.testing.expectEqualStrings("ctags -R .", cfg.custom_commands[1].command());
 }

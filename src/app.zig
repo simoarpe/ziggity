@@ -307,6 +307,11 @@ pub const App = struct {
             return;
         }
 
+        // User-defined custom commands take precedence over built-in bindings.
+        for (self.config.custom_commands[0..self.config.custom_count]) |*cc| {
+            if (cc.binding.matches(key)) return self.runCustomCommand(cc.command());
+        }
+
         const action = actions.fromNormalKey(key, self.config.keymap, self.focus) orelse return;
         switch (action) {
             .quit => self.running = false,
@@ -1721,6 +1726,22 @@ pub const App = struct {
             try self.setMessage("{s}", .{stderr});
         } else {
             try self.setMessage("git command failed", .{});
+        }
+        self.refresh() catch {};
+    }
+
+    fn runCustomCommand(self: *App, command: []const u8) !void {
+        var result = try self.git.runShell(command);
+        defer result.deinit(self.allocator);
+        if (result.ok()) {
+            try self.setMessage("ran: {s}", .{command});
+        } else {
+            const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
+            if (stderr.len > 0) {
+                try self.setMessage("{s}", .{stderr});
+            } else {
+                try self.setMessage("command failed: {s}", .{command});
+            }
         }
         self.refresh() catch {};
     }
