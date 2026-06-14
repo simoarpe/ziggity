@@ -290,6 +290,15 @@ pub const Git = struct {
         return self.exec(&.{ "rebase", "--abort" });
     }
 
+    /// Amend the commit a rebase has stopped at (the `edit` step) with whatever
+    /// is currently staged, keeping its message, then resume the rebase.
+    pub fn amendAndContinueRebase(self: *Git) !ExecResult {
+        var amend = try self.exec(&.{ "commit", "--amend", "--no-edit" });
+        if (!amend.ok()) return amend;
+        amend.deinit(self.allocator);
+        return self.rebaseContinue();
+    }
+
     pub fn loadStatusSummary(self: *Git) !model.StatusSummary {
         var status = model.StatusSummary{
             .current_branch = try self.currentBranch(),

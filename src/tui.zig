@@ -298,7 +298,7 @@ const help_lines = [_][]const u8{
     "  / / ctrl+b     filter by path / status filter",
     "  `              toggle directory tree",
     "  enter          open the hunk/line staging view",
-    "  m              conflict actions (while merging/rebasing)",
+    "  m              merge/rebase actions: continue, amend+continue, abort",
     "",
     "Staging view",
     "  j/k            move by line",

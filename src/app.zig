@@ -199,6 +199,7 @@ pub const MenuAction = enum {
     take_theirs,
     conflict_continue,
     conflict_abort,
+    rebase_amend_continue,
     stash_all,
     stash_untracked,
     stash_staged,
@@ -245,6 +246,14 @@ const conflict_resolve_menu = [_]MenuItem{
 
 const conflict_actions_menu = [_]MenuItem{
     .{ .label = "Continue", .action = .conflict_continue },
+    .{ .label = "Abort", .action = .conflict_abort },
+};
+
+/// Shown for an in-progress rebase: an `edit` stop additionally offers
+/// amending the stopped commit with the staged changes before continuing.
+const rebase_actions_menu = [_]MenuItem{
+    .{ .label = "Continue", .action = .conflict_continue },
+    .{ .label = "Amend this commit, then continue", .action = .rebase_amend_continue },
     .{ .label = "Abort", .action = .conflict_abort },
 };
 
@@ -1938,8 +1947,12 @@ pub const App = struct {
             try self.setMessage("no merge or rebase in progress", .{});
             return;
         }
+        const items: []const MenuItem = if (self.data.state == .rebasing)
+            &rebase_actions_menu
+        else
+            &conflict_actions_menu;
         self.mode = .menu;
-        self.active_menu = .{ .title = self.data.state.label(), .items = &conflict_actions_menu, .index = 0 };
+        self.active_menu = .{ .title = self.data.state.label(), .items = items, .index = 0 };
         try self.setMessage("{s} in progress", .{self.data.state.label()});
     }
 
@@ -2030,6 +2043,14 @@ pub const App = struct {
                 .rebasing => return self.runMutation(try self.git.rebaseAbort(), "rebase aborted", .{}),
                 .cherry_picking => return self.runMutation(try self.git.cherryPickAbort(), "cherry-pick aborted", .{}),
                 .clean => try self.setMessage("nothing to abort", .{}),
+            },
+            .rebase_amend_continue => {
+                if (self.data.state != .rebasing) {
+                    try self.setMessage("no rebase in progress to amend", .{});
+                    return;
+                }
+                try self.beginOp("git commit --amend --no-edit && git rebase --continue");
+                return self.runMutation(try self.git.amendAndContinueRebase(), "amended and continued", .{});
             },
             .stash_all => return self.runMutation(try self.git.stashAll(), "stashed all changes", .{}),
             .stash_untracked => return self.runMutation(try self.git.stashIncludingUntracked(), "stashed (incl. untracked)", .{}),
