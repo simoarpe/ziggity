@@ -2,7 +2,11 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 
 const app_mod = @import("app.zig");
+const config_mod = @import("config.zig");
 const model = @import("model.zig");
+
+/// Active theme, set from config at startup and read by `styles()`.
+var ui_theme: config_mod.Theme = .{};
 
 const Event = union(enum) {
     key_press: vaxis.Key,
@@ -25,6 +29,7 @@ const RefreshTicker = struct {
 pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     const io = init.io;
     const allocator = init.gpa;
+    ui_theme = app.config.theme;
 
     var tty_buffer: [1024]u8 = undefined;
     var tty = try vaxis.Tty.init(io, &tty_buffer);
@@ -378,7 +383,7 @@ fn drawFileTree(win: vaxis.Window, app: *const app_mod.App) void {
         const selected = i == app.tree_cursor and app.focus == .files;
         var base = styles().normal;
         if (selected) {
-            base.bg = .{ .index = 4 };
+            base.bg = selectedBg();
             base.bold = true;
             fillRow(win, row, base);
         }
@@ -435,7 +440,7 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
         const base = blk: {
             var s = if (branch.current) styles().staged else styles().normal;
             if (idx == selected and app.focus == .branches) {
-                s.bg = .{ .index = 4 };
+                s.bg = selectedBg();
                 s.bold = true;
                 fillRow(win, row, s);
             }
@@ -646,7 +651,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
 fn drawSelectable(win: vaxis.Window, row: u16, text: []const u8, style: vaxis.Style, selected: bool) void {
     var draw_style = style;
     if (selected) {
-        draw_style.bg = .{ .index = 4 };
+        draw_style.bg = selectedBg();
         draw_style.bold = true;
         fillRow(win, row, draw_style);
     }
@@ -740,23 +745,28 @@ const StyleSet = struct {
 };
 
 fn styles() StyleSet {
+    const t = ui_theme;
     return .{
         .normal = .{ .fg = .default },
-        .muted = .{ .fg = .{ .index = 8 } },
-        .title = .{ .fg = .{ .index = 7 } },
-        .active_title = .{ .fg = .{ .index = 10 }, .bold = true },
-        .active_border = .{ .fg = .{ .index = 10 }, .bold = true },
-        .inactive_border = .{ .fg = .{ .index = 8 } },
-        .staged = .{ .fg = .{ .index = 10 } },
-        .unstaged = .{ .fg = .{ .index = 9 } },
-        .warning = .{ .fg = .{ .index = 11 }, .bold = true },
-        .added = .{ .fg = .{ .index = 10 } },
-        .removed = .{ .fg = .{ .index = 9 } },
-        .hunk = .{ .fg = .{ .index = 14 } },
-        .header = .{ .fg = .{ .index = 13 }, .bold = true },
+        .muted = .{ .fg = .{ .index = t.muted } },
+        .title = .{ .fg = .{ .index = t.title } },
+        .active_title = .{ .fg = .{ .index = t.active }, .bold = true },
+        .active_border = .{ .fg = .{ .index = t.active }, .bold = true },
+        .inactive_border = .{ .fg = .{ .index = t.inactive_border } },
+        .staged = .{ .fg = .{ .index = t.staged } },
+        .unstaged = .{ .fg = .{ .index = t.unstaged } },
+        .warning = .{ .fg = .{ .index = t.warning }, .bold = true },
+        .added = .{ .fg = .{ .index = t.added } },
+        .removed = .{ .fg = .{ .index = t.removed } },
+        .hunk = .{ .fg = .{ .index = t.hunk } },
+        .header = .{ .fg = .{ .index = t.header }, .bold = true },
         .bottom = .{ .fg = .{ .index = 15 }, .bg = .{ .index = 0 } },
-        .bottom_accent = .{ .fg = .{ .index = 14 }, .bg = .{ .index = 0 }, .bold = true },
+        .bottom_accent = .{ .fg = .{ .index = t.accent }, .bg = .{ .index = 0 }, .bold = true },
     };
+}
+
+fn selectedBg() vaxis.Color {
+    return .{ .index = ui_theme.selected_bg };
 }
 
 const ascii_table: [128][1]u8 = initAsciiTable();

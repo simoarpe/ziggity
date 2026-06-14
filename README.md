@@ -136,19 +136,41 @@ Supported settings:
 side_panel_width_percent = 34
 diff_context = 3
 
+# Any keymap field can be remapped with key.<name>:
 key.quit = q
 key.refresh = R
 key.file_filter = /
 key.open_status_filter = ctrl+b
 key.discard = d
-key.discard_all = D
 key.commit = c
 key.push = P
 key.select = space
+key.rename = R
+key.fast_forward = f
+key.reset = g
+key.revert = t
+key.range_select = v
+key.toggle_tree = `
+key.conflict_menu = m
+key.command_log = @
+
+# Theme colors are terminal palette indices (0-255):
+color.selected_bg = 4
+color.active = 10
+color.added = 10
+color.removed = 9
+color.staged = 10
+color.unstaged = 9
+color.warning = 11
+color.hunk = 14
+color.header = 13
+color.accent = 14
+color.muted = 8
 ```
 
 Key values may be a single character or one of `space`, `enter`, `tab`, `esc`,
-`backspace`, `ctrl+x`, or `alt+x`.
+`backspace`, `ctrl+x`, or `alt+x`. Every binding in the keymap is remappable
+via `key.<name>`, and every theme color via `color.<name>`.
 
 ## libvaxis Usage
 

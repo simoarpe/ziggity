@@ -59,10 +59,29 @@ pub const KeyMap = struct {
     next_tab: Binding = .{ .codepoint = ']' },
 };
 
+/// Terminal color indices (0-255) for UI elements, set via `color.<name>` in
+/// the config. Defaults match the built-in palette.
+pub const Theme = struct {
+    selected_bg: u8 = 4,
+    active: u8 = 10,
+    inactive_border: u8 = 8,
+    muted: u8 = 8,
+    title: u8 = 7,
+    accent: u8 = 14,
+    staged: u8 = 10,
+    unstaged: u8 = 9,
+    warning: u8 = 11,
+    added: u8 = 10,
+    removed: u8 = 9,
+    hunk: u8 = 14,
+    header: u8 = 13,
+};
+
 pub const Config = struct {
     side_panel_width_percent: u8 = 34,
     diff_context: u8 = 3,
     keymap: KeyMap = .{},
+    theme: Theme = .{},
 
     pub fn load(
         allocator: std.mem.Allocator,
@@ -117,6 +136,18 @@ pub const Config = struct {
             return;
         }
 
+        if (std.mem.startsWith(u8, key, "color.")) {
+            const color_name = key["color.".len..];
+            const parsed = std.fmt.parseInt(u8, value, 10) catch return;
+            inline for (std.meta.fields(Theme)) |field| {
+                if (std.mem.eql(u8, color_name, field.name)) {
+                    @field(self.theme, field.name) = parsed;
+                    return;
+                }
+            }
+            return;
+        }
+
         const key_name = if (std.mem.startsWith(u8, key, "key.")) key["key.".len..] else return;
         const binding = parseBinding(value) orelse return;
         inline for (std.meta.fields(KeyMap)) |field| {
@@ -161,4 +192,19 @@ test "config parser applies key overrides and bounded layout" {
     try std.testing.expectEqual(@as(u21, 'x'), cfg.keymap.quit.codepoint);
     try std.testing.expectEqual(@as(u21, 'p'), cfg.keymap.push.codepoint);
     try std.testing.expect(cfg.keymap.push.ctrl);
+}
+
+test "config parser applies theme colors and newer keybindings" {
+    var cfg: Config = .{};
+    cfg.applyBytes(
+        \\color.selected_bg = 5
+        \\color.added = 2
+        \\key.fast_forward = F
+        \\key.command_log = L
+    );
+    try std.testing.expectEqual(@as(u8, 5), cfg.theme.selected_bg);
+    try std.testing.expectEqual(@as(u8, 2), cfg.theme.added);
+    try std.testing.expectEqual(@as(u8, 11), cfg.theme.warning); // default preserved
+    try std.testing.expectEqual(@as(u21, 'F'), cfg.keymap.fast_forward.codepoint);
+    try std.testing.expectEqual(@as(u21, 'L'), cfg.keymap.command_log.codepoint);
 }
