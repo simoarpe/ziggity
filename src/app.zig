@@ -518,7 +518,10 @@ pub const App = struct {
         if (mouse.col < 0 or mouse.row < 0) return false;
         const rect = self.panelAt(@intCast(mouse.col), @intCast(mouse.row)) orelse return false;
         switch (mouse.button) {
-            .left => try self.focusPanel(rect.focus),
+            .left => {
+                try self.focusPanel(rect.focus);
+                try self.clickSelectInPanel(rect, @intCast(mouse.row));
+            },
             .wheel_up => {
                 try self.focusPanel(rect.focus);
                 if (rect.focus == .main) try self.scrollMain(-1) else try self.moveUp();
@@ -545,6 +548,73 @@ pub const App = struct {
         } else {
             try self.setFocus(focus);
         }
+    }
+
+    /// Scroll offset a list panel uses for a given selection (mirrors the
+    /// renderer's scrollStart) — used to map a clicked row back to an item.
+    fn listScrollStart(selected: usize, len: usize, visible: usize) usize {
+        if (len == 0 or visible == 0) return 0;
+        if (selected < visible) return 0;
+        return selected - visible + 1;
+    }
+
+    /// Resolve a clicked content row to an item index in a flat list.
+    fn rowToIndex(current: usize, len: usize, visible: usize, rel: usize) usize {
+        if (len == 0) return 0;
+        const start = listScrollStart(@min(current, len - 1), len, visible);
+        return @min(start + rel, len - 1);
+    }
+
+    /// Select the item under a left-click in a list panel.
+    fn clickSelectInPanel(self: *App, rect: PanelRect, row: u16) !void {
+        if (rect.h < 3) return; // border-only, no content
+        const content_top = rect.y + 1;
+        if (row < content_top) return;
+        const rel: usize = row - content_top;
+        const visible: usize = rect.h - 2;
+        if (rel >= visible) return;
+
+        switch (rect.focus) {
+            .files => {
+                if (self.tree_view) {
+                    self.tree_cursor = rowToIndex(self.tree_cursor, self.tree_rows.len, visible, rel);
+                } else {
+                    const vis = self.visibleFileCount();
+                    if (vis == 0) return;
+                    const start = listScrollStart(@min(self.selectedFileVisibleOrdinal(), vis - 1), vis, visible);
+                    if (self.fileIndexAtVisibleOrdinal(@min(start + rel, vis - 1))) |idx| self.file_index = idx;
+                }
+            },
+            .branches => switch (self.branches_tab) {
+                .local => self.branch_index = rowToIndex(self.branch_index, self.data.branches.len, visible, rel),
+                .remotes => self.remote_index = rowToIndex(self.remote_index, self.data.remote_branches.len, visible, rel),
+                .tags => self.tag_index = rowToIndex(self.tag_index, self.data.tags.len, visible, rel),
+                .worktrees => self.worktree_index = rowToIndex(self.worktree_index, self.data.worktrees.len, visible, rel),
+                .submodules => self.submodule_index = rowToIndex(self.submodule_index, self.data.submodules.len, visible, rel),
+            },
+            .commits => {
+                if (self.commit_files_active) {
+                    self.commit_file_index = rowToIndex(self.commit_file_index, self.commit_files.len, visible, rel);
+                } else switch (self.commits_tab) {
+                    .commits => self.commit_index = rowToIndex(self.commit_index, self.data.commits.len, visible, rel),
+                    .reflog => self.reflog_index = rowToIndex(self.reflog_index, self.data.reflog.len, visible, rel),
+                }
+            },
+            .stash => self.stash_index = rowToIndex(self.stash_index, self.data.stash.len, visible, rel),
+            .status, .main => return,
+        }
+        try self.updatePreview();
+    }
+
+    /// The file index shown at a given visible (filtered) ordinal, or null.
+    fn fileIndexAtVisibleOrdinal(self: *const App, ordinal: usize) ?usize {
+        var count: usize = 0;
+        for (self.data.files, 0..) |file, idx| {
+            if (!self.fileMatchesFilter(file)) continue;
+            if (count == ordinal) return idx;
+            count += 1;
+        }
+        return null;
     }
 
     pub fn handleRefreshTick(self: *App) !void {
@@ -2375,6 +2445,17 @@ pub const App = struct {
 
 test "action enum is referenced" {
     try std.testing.expect(actions.Action.quit == .quit);
+}
+
+test "click row maps to the list item under the cursor" {
+    // No scroll: row N selects item N.
+    try std.testing.expectEqual(@as(usize, 2), App.rowToIndex(0, 5, 3, 2));
+    // Selection at the bottom scrolls the window; row 0 is item 2 of 5.
+    try std.testing.expectEqual(@as(usize, 2), App.rowToIndex(4, 5, 3, 0));
+    try std.testing.expectEqual(@as(usize, 4), App.rowToIndex(4, 5, 3, 2));
+    // Clamps to the last item and handles empty lists.
+    try std.testing.expectEqual(@as(usize, 4), App.rowToIndex(0, 5, 10, 9));
+    try std.testing.expectEqual(@as(usize, 0), App.rowToIndex(0, 0, 3, 1));
 }
 
 test "escape clears active file filter before quitting" {
