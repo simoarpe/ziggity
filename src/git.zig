@@ -538,6 +538,18 @@ pub const Git = struct {
         return result.stdout;
     }
 
+    /// Unified diff between two refs (two-dot: the literal difference, base →
+    /// target), with a `--stat` header. Drives the diffing-mode preview.
+    pub fn diffRefs(self: *Git, base: []const u8, target: []const u8, diff_context: u8) ![]u8 {
+        const context_arg = try std.fmt.allocPrint(self.allocator, "--unified={d}", .{diff_context});
+        defer self.allocator.free(context_arg);
+        var result = try self.exec(&.{ "diff", "--no-ext-diff", "--no-color", "--stat", "--patch", context_arg, base, target });
+        errdefer result.deinit(self.allocator);
+        if (!result.ok()) return GitError.CommandFailed;
+        self.allocator.free(result.stderr);
+        return result.stdout;
+    }
+
     pub fn showBranch(self: *Git, name: []const u8) ![]u8 {
         var result = try self.exec(&.{ "log", "--oneline", "--decorate", "-30", name });
         errdefer result.deinit(self.allocator);

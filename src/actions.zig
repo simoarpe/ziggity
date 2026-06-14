@@ -27,6 +27,7 @@ pub const Action = enum {
     undo,
     copy_to_clipboard,
     open_browser,
+    diff_mark,
     toggle_tree,
     new_branch,
     delete_branch,
@@ -99,6 +100,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     if (keymap.undo.matches(key)) return .undo;
     if (keymap.copy_clipboard.matches(key)) return .copy_to_clipboard;
     if (keymap.open_browser.matches(key)) return .open_browser;
+    if (keymap.diff_mark.matches(key)) return .diff_mark;
     if (keymap.refresh.matches(key)) return .refresh;
     if (keymap.file_filter.matches(key)) return .start_file_filter;
     if (keymap.fetch.matches(key)) return .fetch;

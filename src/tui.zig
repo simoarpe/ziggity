@@ -251,8 +251,11 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     y += commits_h;
     drawStash(panel(root, 0, y, side_w, stash_h, "Stash [5]", app.focus == .stash), app);
 
+    var title_buf: [64]u8 = undefined;
     const main_title = if (app.staging_active)
         (if (app.staging_staged_view) "Staging - staged" else "Staging - unstaged")
+    else if (app.diff_base) |diff_ref|
+        (std.fmt.bufPrint(&title_buf, "Diff [base {s}]", .{diff_ref[0..@min(diff_ref.len, 16)]}) catch "Diff [diffing]")
     else
         "Diff";
     const main = panel(root, side_w, 0, main_w, body_h, main_title, app.focus == .main);
@@ -287,6 +290,7 @@ const help_lines = [_][]const u8{
     "  z              undo the last operation (reflog reset)",
     "  ctrl+o         copy selected hash / branch / tag to the clipboard",
     "  o              open the selected commit / branch on its remote host",
+    "  W              diff mode: mark a ref, then select another to compare",
     "  f / p / P      fetch / pull / push (async)",
     "",
     "Files",
@@ -953,7 +957,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
     if (app.focus == .branches) {
         return switch (app.branches_tab) {
             .local => "space checkout  n new  R rename  d delete  M merge  r rebase  f ff  [ ]" ++ global,
-            .remotes => "space checkout  d delete-remote  [ ] tabs" ++ global,
+            .remotes => "space checkout  n add  e edit  x remove  u upstream  d del-branch  [ ]" ++ global,
             .tags => "space checkout  n new-tag  d delete-tag  [ ] tabs" ++ global,
             .worktrees => "d remove  [ ] tabs" ++ global,
             .submodules => "space init/update  [ ] tabs" ++ global,
@@ -963,7 +967,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push  @ log" ++ global,
         .files => "space stage  a all  c commit  A amend  d discard  s stash  / filter  ` tree  enter hunks" ++ global,
         .branches => unreachable,
-        .commits => "g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  ^j/^k move" ++ global,
+        .commits => "g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  W diff  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => "j/k scroll  PgUp/PgDn page  esc back" ++ global,
     };

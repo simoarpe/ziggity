@@ -24,6 +24,7 @@ pub const KeyMap = struct {
     undo: Binding = .{ .codepoint = 'z' },
     copy_clipboard: Binding = .{ .codepoint = 'o', .ctrl = true },
     open_browser: Binding = .{ .codepoint = 'o' },
+    diff_mark: Binding = .{ .codepoint = 'W' },
     up: Binding = .{ .codepoint = 'k' },
     down: Binding = .{ .codepoint = 'j' },
     left: Binding = .{ .codepoint = 'h' },

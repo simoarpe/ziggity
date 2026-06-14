@@ -340,6 +340,9 @@ pub const App = struct {
     // Text the TUI loop should copy to the system clipboard (OSC 52), owned;
     // set by a copy action, consumed and freed by the loop.
     clipboard_request: ?[]u8 = null,
+    // Diffing mode: the ref (commit hash or branch) marked as the diff base.
+    // When set, the main panel shows `git diff <base> <selected ref>`.
+    diff_base: ?[]u8 = null,
     commit_buffer: std.ArrayList(u8) = .empty,
     file_filter_buffer: std.ArrayList(u8) = .empty,
     filter_history: std.ArrayList([]u8) = .empty,
@@ -410,6 +413,7 @@ pub const App = struct {
         self.copied_commits.deinit(self.allocator);
         if (self.marked_base) |b| self.allocator.free(b);
         if (self.clipboard_request) |c| self.allocator.free(c);
+        if (self.diff_base) |b| self.allocator.free(b);
         self.input_buffer.deinit(self.allocator);
         self.git.deinit();
         self.* = undefined;
@@ -526,6 +530,12 @@ pub const App = struct {
         switch (action) {
             .quit => self.running = false,
             .cancel => {
+                if (self.diff_base != null) {
+                    self.clearDiffBase();
+                    try self.setMessage("exited diffing mode", .{});
+                    try self.updatePreview();
+                    return;
+                }
                 if (self.fileFilterActive()) {
                     try self.clearFileFilter();
                     return;
@@ -589,6 +599,7 @@ pub const App = struct {
             .undo => try self.startUndoConfirm(),
             .copy_to_clipboard => try self.requestClipboardCopy(),
             .open_browser => try self.openSelectionInBrowser(),
+            .diff_mark => try self.toggleDiffMark(),
             .conflict_menu => try self.startConflictActionsMenu(),
             .stage_all => try self.toggleAllStaged(),
             .discard_selected => try self.startDiscardMenu(),
@@ -1552,6 +1563,43 @@ pub const App = struct {
         if (self.clipboard_request) |old| self.allocator.free(old);
         self.clipboard_request = try self.allocator.dupe(u8, text);
         try self.setMessage("copied to clipboard: {s}", .{text});
+    }
+
+    /// The ref the focused panel contributes to a diff: a commit hash in the
+    /// Commits panel or a branch/tag ref in the Branches panel; null otherwise.
+    fn selectedRefForDiff(self: *const App) ?[]const u8 {
+        return switch (self.contentFocus()) {
+            .commits => if (self.selectedCommit()) |commit| commit.hash else null,
+            .branches => self.selectedBranchRefName(),
+            .status, .files, .stash, .main => null,
+        };
+    }
+
+    fn clearDiffBase(self: *App) void {
+        if (self.diff_base) |b| self.allocator.free(b);
+        self.diff_base = null;
+    }
+
+    /// Mark the focused ref as the diff base (entering diffing mode); pressing
+    /// it again on that same ref exits. While active, the main panel shows the
+    /// diff from the base to whatever ref is selected. Esc also exits.
+    fn toggleDiffMark(self: *App) !void {
+        const ref = self.selectedRefForDiff() orelse {
+            try self.setMessage("select a commit or branch to diff", .{});
+            return;
+        };
+        if (self.diff_base) |base| {
+            if (std.mem.eql(u8, base, ref)) {
+                self.clearDiffBase();
+                try self.setMessage("exited diffing mode", .{});
+                try self.updatePreview();
+                return;
+            }
+        }
+        self.clearDiffBase();
+        self.diff_base = try self.allocator.dupe(u8, ref);
+        try self.setMessage("diffing from {s} - select another ref (esc to exit)", .{ref});
+        try self.updatePreview();
     }
 
     /// Open the focused commit or branch on its remote's web host. Derives an
@@ -2701,6 +2749,22 @@ pub const App = struct {
         // While staging, the main panel renders the raw staging diff instead of
         // self.diff, so there is nothing to recompute here.
         if (self.staging_active) return;
+
+        // Diffing mode overrides the normal preview with a ref-to-ref diff.
+        if (self.diff_base) |base| {
+            self.allocator.free(self.diff);
+            const target = self.selectedRefForDiff();
+            if (target == null) {
+                self.diff = try std.fmt.allocPrint(self.allocator, "Diffing from {s}.\n\nSelect a commit or branch to compare against.\n", .{base});
+            } else if (std.mem.eql(u8, base, target.?)) {
+                self.diff = try std.fmt.allocPrint(self.allocator, "Diffing from {s}.\n\nThat is the base itself - move to another ref.\n", .{base});
+            } else {
+                self.diff = self.git.diffRefs(base, target.?, self.config.diff_context) catch
+                    try std.fmt.allocPrint(self.allocator, "Could not diff {s}..{s}.\n", .{ base, target.? });
+            }
+            return;
+        }
+
         self.allocator.free(self.diff);
         self.diff = switch (self.contentFocus()) {
             .status => try self.statusPreview(),
@@ -3171,6 +3235,32 @@ test "webUrlFromRemote normalizes the common remote URL forms" {
     try std.testing.expect((try webUrlFromRemote(allocator, "not-a-url")) == null);
 }
 
+test "diffing mode marks a ref base and clears cleanly" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // A panel without a ref refuses to start diffing.
+    app.focus = .status;
+    try app.toggleDiffMark();
+    try std.testing.expect(app.diff_base == null);
+    try std.testing.expectEqualStrings("select a commit or branch to diff", app.message);
+
+    // The Commits panel exposes the selected hash as the diff ref.
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("aaaaaaa"), .short_hash = @constCast("aaa"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("first") },
+    };
+    app.data.commits = &commits;
+    app.focus = .commits;
+    app.commit_index = 0;
+    try std.testing.expectEqualStrings("aaaaaaa", app.selectedRefForDiff().?);
+
+    app.diff_base = try allocator.dupe(u8, "aaaaaaa");
+    app.clearDiffBase();
+    try std.testing.expect(app.diff_base == null);
+}
+
 test "clipboard copy picks the focused panel's identifier" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -3351,6 +3441,7 @@ fn deinitTestApp(app: *App) void {
     app.allocator.free(app.op_summary);
     app.allocator.free(app.op_output);
     if (app.clipboard_request) |c| app.allocator.free(c);
+    if (app.diff_base) |b| app.allocator.free(b);
     app.commit_buffer.deinit(app.allocator);
     app.commit_body_buffer.deinit(app.allocator);
     app.file_filter_buffer.deinit(app.allocator);
