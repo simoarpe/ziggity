@@ -122,8 +122,19 @@ File-tree grouping in the Files panel (toggle with `` ` ``; collapsible
 directories via `src/filetree.zig`; `enter` collapses/expands, `space` stages a
 whole directory) is done.
 
-Next, resume feature breadth:
+Also done since: merge/rebase **conflict resolution** (take ours/theirs,
+continue/abort, MERGING/REBASING in the status panel), **tag** create/delete and
+**remote-branch** delete (tab-aware `n`/`d`), a **command-log** overlay (`@`),
+configurable **theme colors** + fully remappable keys, and user-defined
+**custom commands** (`command.<key>` in config).
 
-1. Merge/rebase conflict handling (resolve `U`-status files).
-2. Tags/remotes management actions; worktrees; submodules.
+Remaining (large/architectural — scope before implementing):
+
+1. **Async / non-blocking command execution.** Today every git call runs
+   synchronously on the UI event loop. Making it non-blocking needs a job
+   system (worker spawn, completion events, in-flight/loading UI, cancellation)
+   touching the event loop and every mutation — a substantial rewrite.
+2. **Worktrees and submodules panels.** The layout is a fixed five-panel column;
+   adding these needs either a sixth panel (layout rework) or a new tabbed host,
+   plus new git loaders/actions.
 3. Re-run `zig fmt`, `zig build`, and `zig build test` after each step.
