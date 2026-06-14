@@ -7,6 +7,7 @@ const diff_mod = @import("diff.zig");
 const filetree = @import("filetree.zig");
 const git_mod = @import("git.zig");
 const model = @import("model.zig");
+const textmatch = @import("textmatch.zig");
 
 pub const Mode = enum {
     normal,
@@ -607,9 +608,9 @@ pub const App = struct {
     pub fn fileMatchesFilter(self: *const App, file: model.FileStatus) bool {
         if (!self.file_display_filter.matches(file)) return false;
         if (self.file_filter.len == 0) return true;
-        if (pathMatchesFilter(file.path, self.file_filter)) return true;
+        if (textmatch.pathMatchesFilter(file.path, self.file_filter)) return true;
         if (file.previous_path) |previous| {
-            return pathMatchesFilter(previous, self.file_filter);
+            return textmatch.pathMatchesFilter(previous, self.file_filter);
         }
         return false;
     }
@@ -1578,7 +1579,7 @@ pub const App = struct {
                 };
                 // git's DWIM checkout creates a local tracking branch from
                 // "<remote>/<name>" when "<name>" doesn't already exist locally.
-                const local_name = localNameForRemote(branch.name);
+                const local_name = textmatch.localNameForRemote(branch.name);
                 return self.runMutation(try self.git.checkout(local_name), "checked out {s}", .{local_name});
             },
             .tags => {
@@ -2108,68 +2109,8 @@ pub const App = struct {
     }
 };
 
-/// Strip the remote prefix from a remote-tracking branch name so git's DWIM
-/// checkout can create a local tracking branch: "origin/feature" -> "feature".
-pub fn localNameForRemote(remote_name: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, remote_name, '/')) |slash| {
-        return remote_name[slash + 1 ..];
-    }
-    return remote_name;
-}
-
-pub fn pathMatchesFilter(path: []const u8, filter: []const u8) bool {
-    var terms = std.mem.tokenizeAny(u8, filter, " \t\r\n");
-    while (terms.next()) |term| {
-        if (!caseAwareContains(path, term)) return false;
-    }
-    return true;
-}
-
-fn caseAwareContains(haystack: []const u8, needle: []const u8) bool {
-    if (containsAsciiUppercase(needle)) {
-        return std.mem.indexOf(u8, haystack, needle) != null;
-    }
-    return containsIgnoreCaseAscii(haystack, needle);
-}
-
-fn containsAsciiUppercase(bytes: []const u8) bool {
-    for (bytes) |byte| {
-        if (byte >= 'A' and byte <= 'Z') return true;
-    }
-    return false;
-}
-
-fn containsIgnoreCaseAscii(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (needle.len > haystack.len) return false;
-    var idx: usize = 0;
-    while (idx + needle.len <= haystack.len) : (idx += 1) {
-        if (std.ascii.eqlIgnoreCase(haystack[idx .. idx + needle.len], needle)) return true;
-    }
-    return false;
-}
-
 test "action enum is referenced" {
     try std.testing.expect(actions.Action.quit == .quit);
-}
-
-test "path filter follows lazygit substring matching" {
-    try std.testing.expect(pathMatchesFilter("src/App.zig", "app"));
-    try std.testing.expect(pathMatchesFilter("src/App.zig", "App"));
-    try std.testing.expect(!pathMatchesFilter("src/App.zig", "APP"));
-    try std.testing.expect(pathMatchesFilter("README.md", "read"));
-    try std.testing.expect(pathMatchesFilter("integration-testing", "int test"));
-    try std.testing.expect(pathMatchesFilter("integration-testing", "test int"));
-    try std.testing.expect(!pathMatchesFilter("integration-testing", "int missing"));
-    try std.testing.expect(!pathMatchesFilter("src/main.zig", "model"));
-    try std.testing.expect(pathMatchesFilter("src/main.zig", ""));
-    try std.testing.expect(pathMatchesFilter("src/main.zig", "  \t  "));
-}
-
-test "local name for remote strips the remote prefix" {
-    try std.testing.expectEqualStrings("feature", localNameForRemote("origin/feature"));
-    try std.testing.expectEqualStrings("feat/x", localNameForRemote("origin/feat/x"));
-    try std.testing.expectEqualStrings("solo", localNameForRemote("solo"));
 }
 
 test "escape clears active file filter before quitting" {

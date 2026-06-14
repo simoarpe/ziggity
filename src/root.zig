@@ -6,6 +6,7 @@ pub const filetree = @import("filetree.zig");
 pub const git = @import("git.zig");
 pub const log = @import("log.zig");
 pub const model = @import("model.zig");
+pub const textmatch = @import("textmatch.zig");
 pub const tui = @import("tui.zig");
 
 test {
