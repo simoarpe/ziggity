@@ -500,6 +500,18 @@ pub const Git = struct {
         return self.exec(&.{ "branch", "-m", old_name, new_name });
     }
 
+    pub fn createTag(self: *Git, name: []const u8) !ExecResult {
+        return self.exec(&.{ "tag", "--", name });
+    }
+
+    pub fn deleteTag(self: *Git, name: []const u8) !ExecResult {
+        return self.exec(&.{ "tag", "-d", "--", name });
+    }
+
+    pub fn deleteRemoteBranch(self: *Git, remote: []const u8, branch: []const u8) !ExecResult {
+        return self.exec(&.{ "push", remote, "--delete", branch });
+    }
+
     /// Fast-forward the checked-out branch to its upstream.
     pub fn fastForwardCurrent(self: *Git) !ExecResult {
         return self.exec(&.{ "pull", "--ff-only" });

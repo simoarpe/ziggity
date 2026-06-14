@@ -32,6 +32,10 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
   (Commits/Reflog), switched with `[`/`]`.
 - Branch workflows: new, rename, delete, merge, rebase, fast-forward,
   remote/tag checkout.
+- Tag actions (Tags tab): create (`n`), delete (`d`). Remote-branch delete
+  (`d` on the Remotes tab).
+- Merge/rebase conflict resolution: take ours/theirs on conflicted files and
+  continue/abort (`m`); MERGING/REBASING shown in the status panel.
 - Commit workflows: reset (soft/mixed/hard), revert, and a navigable
   changed-file list per commit.
 - Discard selected file via a lazygit-style menu (all changes / unstaged only).

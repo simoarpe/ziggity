@@ -23,11 +23,13 @@ pub const Mode = enum {
 pub const TextPromptKind = enum {
     new_branch,
     rename_branch,
+    new_tag,
 
     pub fn title(self: TextPromptKind) []const u8 {
         return switch (self) {
             .new_branch => "New branch name",
             .rename_branch => "Rename branch",
+            .new_tag => "New tag name",
         };
     }
 };
@@ -36,6 +38,8 @@ pub const Confirmation = enum {
     discard_all,
     merge_branch,
     rebase_branch,
+    delete_tag,
+    delete_remote_branch,
 };
 
 /// Tabs within the Branches panel, switched with [ and ] (lazygit).
@@ -353,8 +357,8 @@ pub const App = struct {
             .start_file_filter => try self.startFileFilterPrompt(),
             .open_status_filter => try self.startStatusFilterMenu(),
             .start_commit => try self.startCommitPrompt(),
-            .new_branch => try self.startTextPrompt(.new_branch),
-            .delete_branch => try self.startBranchDeleteMenu(),
+            .new_branch => try self.startNewForBranchTab(),
+            .delete_branch => try self.startDeleteForBranchTab(),
             .merge_branch => try self.startBranchConfirm(.merge_branch),
             .rebase_branch => try self.startBranchConfirm(.rebase_branch),
             .rename_branch => try self.startTextPrompt(.rename_branch),
@@ -874,6 +878,18 @@ pub const App = struct {
                 }
                 break :blk "Rebase the current branch onto the selected one?";
             },
+            .delete_tag => blk: {
+                if (self.selectedTag()) |tag| {
+                    break :blk std.fmt.bufPrint(buf, "Delete tag {s}?", .{tag.name}) catch "Delete the selected tag?";
+                }
+                break :blk "Delete the selected tag?";
+            },
+            .delete_remote_branch => blk: {
+                if (self.selectedRemoteBranch()) |branch| {
+                    break :blk std.fmt.bufPrint(buf, "Delete remote branch {s}? This pushes a deletion.", .{branch.name}) catch "Delete the selected remote branch?";
+                }
+                break :blk "Delete the selected remote branch?";
+            },
         };
     }
 
@@ -1066,6 +1082,10 @@ pub const App = struct {
                 self.focus = .branches;
                 prefill = branch.name;
             },
+            .new_tag => {
+                if (self.branches_tab != .tags) self.branches_tab = .tags;
+                self.focus = .branches;
+            },
         }
         self.mode = .text_prompt;
         self.text_prompt_kind = kind;
@@ -1133,6 +1153,13 @@ pub const App = struct {
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
                 return self.runMutation(result, "renamed to {s}", .{value});
+            },
+            .new_tag => {
+                const result = try self.git.createTag(value);
+                self.mode = .normal;
+                self.text_prompt_kind = null;
+                self.input_buffer.clearRetainingCapacity();
+                return self.runMutation(result, "created tag {s}", .{value});
             },
         }
     }
@@ -1291,6 +1318,37 @@ pub const App = struct {
         self.mode = .confirmation;
         self.pending_confirmation = .discard_all;
         try self.setMessage("confirm discard all changes", .{});
+    }
+
+    /// `n` in the Branches panel creates a branch, or a tag on the Tags tab.
+    fn startNewForBranchTab(self: *App) !void {
+        if (self.branches_tab == .tags) return self.startTextPrompt(.new_tag);
+        return self.startTextPrompt(.new_branch);
+    }
+
+    /// `d` in the Branches panel deletes by tab: local branch / tag / remote.
+    fn startDeleteForBranchTab(self: *App) !void {
+        switch (self.branches_tab) {
+            .local => return self.startBranchDeleteMenu(),
+            .tags => {
+                const tag = self.selectedTag() orelse {
+                    try self.setMessage("no tag selected", .{});
+                    return;
+                };
+                self.mode = .confirmation;
+                self.pending_confirmation = .delete_tag;
+                try self.setMessage("confirm delete tag {s}", .{tag.name});
+            },
+            .remotes => {
+                const branch = self.selectedRemoteBranch() orelse {
+                    try self.setMessage("no remote branch selected", .{});
+                    return;
+                };
+                self.mode = .confirmation;
+                self.pending_confirmation = .delete_remote_branch;
+                try self.setMessage("confirm delete remote {s}", .{branch.name});
+            },
+        }
     }
 
     fn startBranchDeleteMenu(self: *App) !void {
@@ -1542,6 +1600,26 @@ pub const App = struct {
                     return;
                 };
                 return self.runMutation(try self.git.rebaseOnto(branch.name), "rebased onto {s}", .{branch.name});
+            },
+            .delete_tag => {
+                const tag = self.selectedTag() orelse {
+                    try self.setMessage("no tag selected", .{});
+                    return;
+                };
+                return self.runMutation(try self.git.deleteTag(tag.name), "deleted tag {s}", .{tag.name});
+            },
+            .delete_remote_branch => {
+                const branch = self.selectedRemoteBranch() orelse {
+                    try self.setMessage("no remote branch selected", .{});
+                    return;
+                };
+                const slash = std.mem.indexOfScalar(u8, branch.name, '/') orelse {
+                    try self.setMessage("cannot parse remote {s}", .{branch.name});
+                    return;
+                };
+                const remote = branch.name[0..slash];
+                const remote_branch = branch.name[slash + 1 ..];
+                return self.runMutation(try self.git.deleteRemoteBranch(remote, remote_branch), "deleted remote {s}", .{branch.name});
             },
         }
     }

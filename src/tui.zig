@@ -238,6 +238,8 @@ fn drawConfirmPopup(root: vaxis.Window, app: *const app_mod.App) void {
         .discard_all => "Discard all changes",
         .merge_branch => "Merge branch",
         .rebase_branch => "Rebase branch",
+        .delete_tag => "Delete tag",
+        .delete_remote_branch => "Delete remote branch",
     };
     const w: u16 = @intCast(@min(@as(usize, 72), @max(text.len, 34) + 4));
     const win = popup(root, w, 5, title);
@@ -598,10 +600,17 @@ fn contextHints(app: *const app_mod.App) []const u8 {
     if (app.data.state != .clean and app.focus == .files) {
         return "space resolve (ours/theirs)  m continue/abort  d discard  esc back" ++ global;
     }
+    if (app.focus == .branches) {
+        return switch (app.branches_tab) {
+            .local => "space checkout  n new  R rename  d delete  M merge  r rebase  f ff  [ ]" ++ global,
+            .remotes => "space checkout  d delete-remote  [ ] tabs" ++ global,
+            .tags => "space checkout  n new-tag  d delete-tag  [ ] tabs" ++ global,
+        };
+    }
     return switch (app.focus) {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push" ++ global,
         .files => "space stage  a all  c commit  d discard  / filter  ` tree  enter stage-hunks" ++ global,
-        .branches => "space checkout  n new  R rename  d delete  M merge  r rebase  f ff  [ ]" ++ global,
+        .branches => unreachable,
         .commits => "enter files  g reset  t revert  [ ] commits/reflog" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => "j/k scroll  PgUp/PgDn page  esc back" ++ global,
