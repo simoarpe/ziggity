@@ -47,12 +47,18 @@ pub const TextPromptKind = enum {
     new_branch,
     rename_branch,
     new_tag,
+    add_remote_name,
+    add_remote_url,
+    edit_remote_url,
 
     pub fn title(self: TextPromptKind) []const u8 {
         return switch (self) {
             .new_branch => "New branch name",
             .rename_branch => "Rename branch",
             .new_tag => "New tag name",
+            .add_remote_name => "New remote name",
+            .add_remote_url => "New remote URL",
+            .edit_remote_url => "Remote URL",
         };
     }
 };
@@ -64,6 +70,7 @@ pub const Confirmation = enum {
     delete_tag,
     delete_remote_branch,
     remove_worktree,
+    remove_remote,
     undo,
 };
 
@@ -319,6 +326,10 @@ pub const App = struct {
     filter_history_index: ?usize = null,
     input_buffer: std.ArrayList(u8) = .empty,
     text_prompt_kind: ?TextPromptKind = null,
+    // Holds the remote name between the two-step add-remote prompt (name → URL)
+    // and the remote acted on by edit/remove. No allocation needed.
+    remote_name_buf: [128]u8 = undefined,
+    remote_name_len: usize = 0,
     mode: Mode = .normal,
     status_filter_index: usize = 0,
     help_scroll: usize = 0,
@@ -573,6 +584,9 @@ pub const App = struct {
             .rebase_branch => try self.startBranchConfirm(.rebase_branch),
             .rename_branch => try self.startTextPrompt(.rename_branch),
             .fast_forward_branch => try self.fastForwardSelectedBranch(),
+            .edit_remote => try self.startEditRemote(),
+            .remove_remote => try self.startRemoveRemote(),
+            .set_upstream => try self.setUpstreamToSelected(),
             .reset_commit => try self.startCommitResetMenu(),
             .revert_commit => try self.revertSelectedCommit(),
             .rebase_drop => try self.rebaseSelectedCommit(.drop),
@@ -1247,6 +1261,12 @@ pub const App = struct {
                 }
                 break :blk "Remove the selected worktree?";
             },
+            .remove_remote => blk: {
+                if (self.remote_name_len > 0) {
+                    break :blk std.fmt.bufPrint(buf, "Remove remote {s}? Local tracking refs are deleted.", .{self.remote_name_buf[0..self.remote_name_len]}) catch "Remove the selected remote?";
+                }
+                break :blk "Remove the selected remote?";
+            },
             .undo => blk: {
                 if (self.undo_label_len > 0) {
                     break :blk std.fmt.bufPrint(buf, "Undo \"{s}\"? Resets HEAD to before it.", .{self.undo_label_buf[0..self.undo_label_len]}) catch "Undo the last operation?";
@@ -1690,6 +1710,10 @@ pub const App = struct {
                 if (self.branches_tab != .tags) self.branches_tab = .tags;
                 self.focus = .branches;
             },
+            .add_remote_name, .add_remote_url, .edit_remote_url => {
+                if (self.branches_tab != .remotes) self.branches_tab = .remotes;
+                self.focus = .branches;
+            },
         }
         self.mode = .text_prompt;
         self.text_prompt_kind = kind;
@@ -1764,6 +1788,32 @@ pub const App = struct {
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
                 return self.runMutation(result, "created tag {s}", .{value});
+            },
+            .add_remote_name => {
+                // Stash the name and ask for the URL in a second prompt.
+                const n = @min(value.len, self.remote_name_buf.len);
+                @memcpy(self.remote_name_buf[0..n], value[0..n]);
+                self.remote_name_len = n;
+                self.text_prompt_kind = .add_remote_url;
+                self.input_buffer.clearRetainingCapacity();
+                try self.setMessage("URL for remote {s}", .{self.remote_name_buf[0..n]});
+                return;
+            },
+            .add_remote_url => {
+                const name = self.remote_name_buf[0..self.remote_name_len];
+                const result = try self.git.addRemote(name, value);
+                self.mode = .normal;
+                self.text_prompt_kind = null;
+                self.input_buffer.clearRetainingCapacity();
+                return self.runMutation(result, "added remote {s}", .{name});
+            },
+            .edit_remote_url => {
+                const name = self.remote_name_buf[0..self.remote_name_len];
+                const result = try self.git.setRemoteUrl(name, value);
+                self.mode = .normal;
+                self.text_prompt_kind = null;
+                self.input_buffer.clearRetainingCapacity();
+                return self.runMutation(result, "set URL for {s}", .{name});
             },
         }
     }
@@ -1997,7 +2047,68 @@ pub const App = struct {
     /// `n` in the Branches panel creates a branch, or a tag on the Tags tab.
     fn startNewForBranchTab(self: *App) !void {
         if (self.branches_tab == .tags) return self.startTextPrompt(.new_tag);
+        if (self.branches_tab == .remotes) return self.startTextPrompt(.add_remote_name);
         return self.startTextPrompt(.new_branch);
+    }
+
+    /// The remote name implied by the selected Remotes-tab entry (the prefix of
+    /// a `remote/branch` ref), stashed into remote_name_buf. Null off-tab/empty.
+    fn selectedRemoteName(self: *App) ?[]const u8 {
+        if (self.branches_tab != .remotes) return null;
+        const branch = self.selectedRemoteBranch() orelse return null;
+        const slash = std.mem.indexOfScalar(u8, branch.name, '/') orelse return null;
+        const name = branch.name[0..slash];
+        if (name.len == 0 or name.len > self.remote_name_buf.len) return null;
+        @memcpy(self.remote_name_buf[0..name.len], name);
+        self.remote_name_len = name.len;
+        return self.remote_name_buf[0..name.len];
+    }
+
+    fn startEditRemote(self: *App) !void {
+        if (self.branches_tab != .remotes) {
+            try self.setMessage("switch to the Remotes tab to edit a remote", .{});
+            return;
+        }
+        const name = self.selectedRemoteName() orelse {
+            try self.setMessage("no remote selected", .{});
+            return;
+        };
+        // Prefill the current URL so the user edits rather than retypes.
+        const current = self.git.remoteUrl(name) catch null;
+        defer if (current) |c| self.allocator.free(c);
+        self.mode = .text_prompt;
+        self.text_prompt_kind = .edit_remote_url;
+        self.focus = .branches;
+        self.input_buffer.clearRetainingCapacity();
+        if (current) |c| try self.input_buffer.appendSlice(self.allocator, std.mem.trim(u8, c, " \t\r\n"));
+        try self.setMessage("edit URL for {s}", .{name});
+    }
+
+    fn startRemoveRemote(self: *App) !void {
+        if (self.branches_tab != .remotes) {
+            try self.setMessage("switch to the Remotes tab to remove a remote", .{});
+            return;
+        }
+        const name = self.selectedRemoteName() orelse {
+            try self.setMessage("no remote selected", .{});
+            return;
+        };
+        self.mode = .confirmation;
+        self.pending_confirmation = .remove_remote;
+        try self.setMessage("confirm remove remote {s}", .{name});
+    }
+
+    fn setUpstreamToSelected(self: *App) !void {
+        if (self.branches_tab != .remotes) {
+            try self.setMessage("select a remote branch (Remotes tab) to track", .{});
+            return;
+        }
+        const branch = self.selectedRemoteBranch() orelse {
+            try self.setMessage("no remote branch selected", .{});
+            return;
+        };
+        try self.beginOpFmt("git branch --set-upstream-to={s}", .{branch.name});
+        return self.runMutation(try self.git.setUpstream(branch.name), "tracking {s}", .{branch.name});
     }
 
     /// `d` in the Branches panel deletes by tab: local branch / tag / remote.
@@ -2514,6 +2625,14 @@ pub const App = struct {
                 };
                 return self.runMutation(try self.git.removeWorktree(wt.path), "removed worktree {s}", .{wt.path});
             },
+            .remove_remote => {
+                const name = self.remote_name_buf[0..self.remote_name_len];
+                if (name.len == 0) {
+                    try self.setMessage("no remote selected", .{});
+                    return;
+                }
+                return self.runMutation(try self.git.removeRemote(name), "removed remote {s}", .{name});
+            },
             .undo => return self.runMutation(try self.git.undoLastOperation(), "undone", .{}),
         }
     }
@@ -2947,6 +3066,39 @@ test "cherry-pick clipboard toggles copied commits" {
     try std.testing.expect(!app.isCommitCopied("aaaaaaa"));
     try std.testing.expect(app.isCommitCopied("bbbbbbb"));
     try std.testing.expectEqual(@as(usize, 1), app.copied_commits.items.len);
+}
+
+test "add-remote prompt stashes the name and asks for the URL" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.mode = .text_prompt;
+    app.text_prompt_kind = .add_remote_name;
+    try app.input_buffer.appendSlice(allocator, "upstream");
+    try app.submitTextPrompt();
+
+    // Transitions to the URL step with the name stashed and input cleared.
+    try std.testing.expectEqual(TextPromptKind.add_remote_url, app.text_prompt_kind.?);
+    try std.testing.expectEqualStrings("upstream", app.remote_name_buf[0..app.remote_name_len]);
+    try std.testing.expectEqual(@as(usize, 0), app.input_buffer.items.len);
+}
+
+test "selectedRemoteName extracts the remote from the selected ref" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var remotes = [_]model.Branch{.{ .name = @constCast("origin/main") }};
+    app.data.remote_branches = &remotes;
+    app.branches_tab = .remotes;
+    app.remote_index = 0;
+
+    try std.testing.expectEqualStrings("origin", app.selectedRemoteName().?);
+    app.branches_tab = .local;
+    try std.testing.expect(app.selectedRemoteName() == null);
 }
 
 test "webUrlFromRemote normalizes the common remote URL forms" {

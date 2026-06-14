@@ -307,10 +307,11 @@ const help_lines = [_][]const u8{
     "",
     "Branches  (tabs: Local / Remotes / Tags / Worktrees / Submodules)",
     "  space          checkout / apply / init-update",
-    "  n              new branch (new tag on the Tags tab)",
+    "  n              new branch (new tag / add remote by tab)",
     "  R              rename branch",
-    "  d              delete branch / tag / remote / worktree",
+    "  d              delete branch / tag / remote branch / worktree",
     "  M / r / f      merge / rebase / fast-forward",
+    "  Remotes tab    e edit URL   x remove remote   u set upstream",
     "",
     "Commits  (tabs: Commits / Reflog)",
     "  enter          view the commit's changed files",
@@ -520,6 +521,7 @@ fn drawConfirmPopup(root: vaxis.Window, app: *const app_mod.App) void {
         .delete_tag => "Delete tag",
         .delete_remote_branch => "Delete remote branch",
         .remove_worktree => "Remove worktree",
+        .remove_remote => "Remove remote",
         .undo => "Undo",
     };
     const w: u16 = @intCast(@min(@as(usize, 72), @max(text.len, 34) + 4));

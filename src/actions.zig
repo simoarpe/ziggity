@@ -33,6 +33,9 @@ pub const Action = enum {
     rebase_branch,
     rename_branch,
     fast_forward_branch,
+    edit_remote,
+    remove_remote,
+    set_upstream,
     reset_commit,
     revert_commit,
     rebase_drop,
@@ -125,6 +128,9 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
             if (keymap.discard.matches(key)) return .delete_branch;
             if (keymap.merge.matches(key)) return .merge_branch;
             if (keymap.rebase.matches(key)) return .rebase_branch;
+            if (keymap.edit_remote.matches(key)) return .edit_remote;
+            if (keymap.remove_remote.matches(key)) return .remove_remote;
+            if (keymap.set_upstream.matches(key)) return .set_upstream;
         },
         .commits => {
             if (keymap.reset.matches(key)) return .reset_commit;

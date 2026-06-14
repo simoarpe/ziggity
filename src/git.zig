@@ -657,6 +657,25 @@ pub const Git = struct {
         return self.output(&.{ "remote", "get-url", remote });
     }
 
+    pub fn addRemote(self: *Git, name: []const u8, url: []const u8) !ExecResult {
+        return self.exec(&.{ "remote", "add", name, url });
+    }
+
+    pub fn setRemoteUrl(self: *Git, name: []const u8, url: []const u8) !ExecResult {
+        return self.exec(&.{ "remote", "set-url", name, url });
+    }
+
+    pub fn removeRemote(self: *Git, name: []const u8) !ExecResult {
+        return self.exec(&.{ "remote", "remove", name });
+    }
+
+    /// Set the current branch's upstream tracking ref (e.g. `origin/main`).
+    pub fn setUpstream(self: *Git, ref: []const u8) !ExecResult {
+        const arg = try std.fmt.allocPrint(self.allocator, "--set-upstream-to={s}", .{ref});
+        defer self.allocator.free(arg);
+        return self.exec(&.{ "branch", arg });
+    }
+
     /// Open `url` in the user's default browser via the platform opener. Returns
     /// quickly; the browser launch is fire-and-forget.
     pub fn openUrl(self: *Git, url: []const u8) !void {
