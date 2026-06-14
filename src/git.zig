@@ -82,6 +82,11 @@ pub const Git = struct {
         return false;
     }
 
+    /// Record a command run outside `exec` (e.g. an async network op) in the log.
+    pub fn recordExternal(self: *Git, args: []const []const u8) void {
+        self.recordCommand(args);
+    }
+
     fn recordCommand(self: *Git, args: []const []const u8) void {
         if (isReadOnly(args)) return;
         var buf: std.Io.Writer.Allocating = .init(self.allocator);

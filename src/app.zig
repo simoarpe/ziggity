@@ -44,6 +44,38 @@ pub const Confirmation = enum {
     remove_worktree,
 };
 
+/// Network operations that run off the UI loop so they don't freeze it.
+pub const AsyncOp = enum {
+    fetch,
+    pull,
+    push,
+
+    pub fn label(self: AsyncOp) []const u8 {
+        return switch (self) {
+            .fetch => "fetch",
+            .pull => "pull",
+            .push => "push",
+        };
+    }
+
+    pub fn gerund(self: AsyncOp) []const u8 {
+        return switch (self) {
+            .fetch => "fetching",
+            .pull => "pulling",
+            .push => "pushing",
+        };
+    }
+
+    /// Git args (without the leading "git") run for this operation.
+    pub fn argv(self: AsyncOp) []const []const u8 {
+        return switch (self) {
+            .fetch => &.{ "fetch", "--all", "--no-write-fetch-head" },
+            .pull => &.{ "pull", "--no-edit" },
+            .push => &.{"push"},
+        };
+    }
+};
+
 /// Tabs within the Branches panel, switched with [ and ] (lazygit).
 pub const BranchesTab = enum {
     local,
@@ -192,6 +224,11 @@ pub const App = struct {
     pending_confirmation: ?Confirmation = null,
     terminal_focused: bool = true,
     running: bool = true,
+    /// A network op the TUI loop should start; cleared once it spawns the worker.
+    async_requested: ?AsyncOp = null,
+    /// True while a network op is running off-loop (single in-flight).
+    async_active: bool = false,
+    async_op: AsyncOp = .fetch,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -349,9 +386,9 @@ pub const App = struct {
                 try self.refresh();
                 try self.setMessage("refreshed", .{});
             },
-            .fetch => try self.runMutation(try self.git.fetch(), "fetch complete", .{}),
-            .pull => try self.runMutation(try self.git.pull(), "pull complete", .{}),
-            .push => try self.runMutation(try self.git.push(), "push complete", .{}),
+            .fetch => try self.requestAsync(.fetch),
+            .pull => try self.requestAsync(.pull),
+            .push => try self.requestAsync(.push),
             .move_up => if (self.staging_active) self.moveStagingCursor(-1) else try self.moveUp(),
             .move_down => if (self.staging_active) self.moveStagingCursor(1) else try self.moveDown(),
             .range_select => if (self.staging_active) self.toggleStagingRange(),
@@ -1795,6 +1832,42 @@ pub const App = struct {
             self.data.stash.len,
         });
         return aw.toOwnedSlice();
+    }
+
+    /// Queue a network op for the TUI loop to run off-thread. Single in-flight.
+    fn requestAsync(self: *App, op: AsyncOp) !void {
+        if (self.async_active or self.async_requested != null) {
+            try self.setMessage("a network operation is already running", .{});
+            return;
+        }
+        self.git.recordExternal(op.argv());
+        self.async_requested = op;
+        self.async_op = op;
+        try self.setMessage("{s}...", .{op.gerund()});
+    }
+
+    /// Called on the UI thread when an async op finishes. `result` is owned by
+    /// `result_allocator` (the async path's allocator); null means the command
+    /// failed to even start.
+    pub fn completeAsync(self: *App, op: AsyncOp, result_opt: ?git_mod.ExecResult, result_allocator: std.mem.Allocator) !void {
+        self.async_active = false;
+        if (result_opt) |result| {
+            var mutable = result;
+            defer mutable.deinit(result_allocator);
+            if (mutable.ok()) {
+                try self.setMessage("{s} complete", .{op.label()});
+            } else {
+                const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
+                if (stderr.len > 0) {
+                    try self.setMessage("{s}", .{stderr});
+                } else {
+                    try self.setMessage("{s} failed", .{op.label()});
+                }
+            }
+        } else {
+            try self.setMessage("{s} failed to start", .{op.label()});
+        }
+        self.refresh() catch {};
     }
 
     fn runMutation(self: *App, result: git_mod.ExecResult, comptime success_fmt: []const u8, args: anytype) !void {

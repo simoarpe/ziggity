@@ -47,19 +47,20 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
   panel, a context-sensitive bottom bar, and centered popups for menus and
   confirmations.
 - Checkout selected branch.
-- Fetch, pull, and push.
-- Basic repo-local and environment-selected config file support.
+- Non-blocking fetch, pull, and push: they run off the UI loop (the status
+  panel shows a "fetching…/pulling…/pushing…" indicator) so the UI stays
+  responsive.
+- Command-log overlay (`@`), configurable theme colors, fully remappable keys,
+  and user-defined custom commands.
+- Repo-local and environment-selected config file support.
 
 ## Missing
 
-This is an MVP. Large lazygit workflows are intentionally not implemented yet:
+Large lazygit workflows still not implemented:
 
 - Interactive rebase, squash/fixup flows, cherry-pick flows, and undo/redo.
-- Merge/rebase conflict helpers.
-- Custom commands and custom command menus.
-- Worktree and submodule panels.
 - Mouse handling.
-- Nonblocking async command execution.
+- Async for all mutations (currently only network ops run off-loop).
 - Full lazygit config compatibility.
 - File tree grouping, fuzzy filtering, and filter history.
 

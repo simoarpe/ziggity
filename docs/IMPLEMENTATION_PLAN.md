@@ -129,14 +129,13 @@ configurable **theme colors** + fully remappable keys, user-defined
 **custom commands** (`command.<key>`), and **Worktrees** + **Submodules** tabs on
 the Branches panel (list, remove worktree, init/update submodule).
 
-Remaining — one item, needs a design decision:
+**Async network ops are done.** Fetch/pull/push run off the UI loop on a worker
+that allocates via `std.heap.page_allocator` (thread-safe, independent of the
+main gpa — no cross-thread allocator race), single in-flight, with a status-panel
+"fetching…/pulling…/pushing…" indicator; completion is posted back to the event
+loop as a `command_done` event and processed on the UI thread. See
+`src/tui.zig` (asyncWorker / run loop) and `App.requestAsync`/`completeAsync`.
 
-1. **Async / non-blocking command execution.** Every git call runs
-   synchronously on the UI event loop, so slow network ops (fetch/pull/push)
-   freeze the UI. Making them non-blocking needs a worker that runs the command
-   off-loop and posts a completion event — but `std.process.run` allocates, so
-   it needs a thread-safe allocator strategy (e.g. a dedicated
-   `ThreadSafeAllocator` for the async path) plus a single-in-flight/loading-UI
-   policy. This introduces concurrency into the codebase; pick the allocator
-   approach and queueing policy before implementing.
-2. Re-run `zig fmt`, `zig build`, and `zig build test` after each step.
+The original lazygit-alignment backlog is now complete. Possible future work:
+async for all mutations (not just network ops), interactive rebase, mouse
+support. Re-run `zig fmt`, `zig build`, `zig build test` after each step.

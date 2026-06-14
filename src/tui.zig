@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 
 const app_mod = @import("app.zig");
 const config_mod = @import("config.zig");
+const git_mod = @import("git.zig");
 const model = @import("model.zig");
 
 /// Active theme, set from config at startup and read by `styles()`.
@@ -14,7 +15,42 @@ const Event = union(enum) {
     focus_in,
     focus_out,
     refresh_tick,
+    command_done,
 };
+
+/// A network op run off the UI loop. Allocations use the page allocator (which
+/// is thread-safe and independent of the main gpa), so there is no cross-thread
+/// allocator race with the rest of the app.
+const async_allocator = std.heap.page_allocator;
+
+const AsyncJob = struct {
+    io: std.Io,
+    loop: *vaxis.Loop(Event),
+    root: []const u8,
+    op: app_mod.AsyncOp,
+    result: ?git_mod.ExecResult = null,
+};
+
+fn asyncWorker(job: *AsyncJob) void {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(async_allocator);
+    argv.append(async_allocator, "git") catch return postDone(job);
+    argv.appendSlice(async_allocator, job.op.argv()) catch return postDone(job);
+
+    const result = std.process.run(async_allocator, job.io, .{
+        .argv = argv.items,
+        .cwd = .{ .path = job.root },
+        .stdout_limit = .limited(16 * 1024 * 1024),
+        .stderr_limit = .limited(4 * 1024 * 1024),
+    }) catch return postDone(job);
+
+    job.result = .{ .stdout = result.stdout, .stderr = result.stderr, .term = result.term };
+    postDone(job);
+}
+
+fn postDone(job: *AsyncJob) void {
+    _ = job.loop.tryPostEvent(.command_done) catch false;
+}
 
 const refresh_interval = std.Io.Duration.fromMilliseconds(1500);
 const focus_events_set = "\x1b[?1004h";
@@ -62,6 +98,13 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     }
     try vx.queryTerminal(writer, .fromSeconds(1));
 
+    var async_job: AsyncJob = undefined;
+    var async_future: ?std.Io.Future(void) = null;
+    defer if (async_future) |*f| {
+        f.await(io);
+        if (async_job.result) |*r| r.deinit(async_allocator);
+    };
+
     try renderAndFlush(&vx, writer, app);
     while (app.running) {
         const event = try loop.nextEvent();
@@ -71,7 +114,30 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             .refresh_tick => try app.handleRefreshTick(),
             .focus_in => try app.handleFocusIn(),
             .focus_out => app.handleFocusOut(),
+            .command_done => {
+                if (async_future) |*f| {
+                    f.await(io);
+                    async_future = null;
+                    try app.completeAsync(async_job.op, async_job.result, async_allocator);
+                    async_job.result = null;
+                }
+            },
         }
+
+        // Start a queued network op once nothing else is in flight.
+        if (async_future == null) {
+            if (app.async_requested) |op| {
+                app.async_requested = null;
+                app.async_active = true;
+                async_job = .{ .io = io, .loop = &loop, .root = app.git.root, .op = op };
+                async_future = io.concurrent(asyncWorker, .{&async_job}) catch blk: {
+                    app.async_active = false;
+                    try app.completeAsync(op, null, async_allocator);
+                    break :blk null;
+                };
+            }
+        }
+
         try renderAndFlush(&vx, writer, app);
     }
 }
@@ -311,8 +377,13 @@ fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
     col = printSpan(win, 0, col, " ", st.muted);
     _ = drawBranchStatus(win, 0, col, st.muted, app.data.upstream != null, app.data.ahead orelse 0, app.data.behind orelse 0);
 
-    // Line 1: in-progress merge/rebase takes priority, else a worktree summary.
-    if (app.data.state != .clean) {
+    // Line 1: a running network op takes priority, then merge/rebase state,
+    // then a worktree summary.
+    if (app.async_active) {
+        var buf: [64]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{s}...", .{app.async_op.gerund()}) catch "working...";
+        print(win, 1, 0, line, st.bottom_accent);
+    } else if (app.data.state != .clean) {
         var buf: [128]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, "{s} - m: continue / abort", .{app.data.state.label()}) catch app.data.state.label();
         print(win, 1, 0, line, st.warning);
