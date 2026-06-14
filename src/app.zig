@@ -531,6 +531,8 @@ pub const App = struct {
             .rebase_reword => try self.startReword(),
             .rebase_move_down => try self.rebaseSelectedCommit(.move_down),
             .rebase_move_up => try self.rebaseSelectedCommit(.move_up),
+            .rebase_create_fixup => try self.createFixupCommit(),
+            .rebase_autosquash => try self.autosquashFixups(),
             .stash_pop => try self.popSelectedStash(),
             .stash_drop => try self.dropSelectedStash(),
             .confirm, .backspace => {},
@@ -2052,6 +2054,32 @@ pub const App = struct {
             try self.setMessage("no commit selected", .{});
             return null;
         };
+    }
+
+    /// Commit the staged changes as a `fixup!` of the selected commit.
+    fn createFixupCommit(self: *App) !void {
+        if (self.data.state != .clean) {
+            try self.setMessage("finish the in-progress operation first (m)", .{});
+            return;
+        }
+        const commit = try self.commitForAction() orelse return;
+        if (self.data.stagedCount() == 0) {
+            try self.setMessage("stage changes to create a fixup commit", .{});
+            return;
+        }
+        return self.runMutation(try self.git.createFixup(commit.hash), "created fixup! for {s}", .{commit.short_hash});
+    }
+
+    /// Autosquash fixup!/squash! commits above (and including) the selected one.
+    fn autosquashFixups(self: *App) !void {
+        if (self.data.state != .clean) {
+            try self.setMessage("finish the in-progress operation first (m)", .{});
+            return;
+        }
+        const commit = try self.commitForAction() orelse return;
+        const base = try std.fmt.allocPrint(self.allocator, "{s}^", .{commit.hash});
+        defer self.allocator.free(base);
+        return self.runMutation(try self.git.autosquashRebase(base), "autosquashed fixups", .{});
     }
 
     fn checkoutSelectedBranch(self: *App) !void {

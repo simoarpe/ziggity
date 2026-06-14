@@ -291,6 +291,7 @@ const help_lines = [_][]const u8{
     "  c / v          copy commit to clipboard / paste (cherry-pick) onto HEAD",
     "  d / s / f      drop / squash-down / fixup-down (interactive rebase)",
     "  e / r          edit (stop here) / reword",
+    "  F / S          create fixup! commit / autosquash fixups above",
     "  ctrl+j/ctrl+k  move commit down / up",
     "",
     "Stash",
@@ -886,7 +887,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push  @ log" ++ global,
         .files => "space stage  a all  c commit  A amend  d discard  / filter  ` tree  enter hunks" ++ global,
         .branches => unreachable,
-        .commits => "g reset  t revert  c copy  v paste  d/s/f/e/r drop/squash/fixup/edit/reword  ^j/^k move" ++ global,
+        .commits => "g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => "j/k scroll  PgUp/PgDn page  esc back" ++ global,
     };

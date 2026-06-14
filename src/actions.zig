@@ -40,6 +40,8 @@ pub const Action = enum {
     rebase_reword,
     rebase_move_down,
     rebase_move_up,
+    rebase_create_fixup,
+    rebase_autosquash,
     range_select,
     fetch,
     pull,
@@ -128,6 +130,8 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
             if (keymap.commit_reword.matches(key)) return .rebase_reword;
             if (keymap.commit_move_down.matches(key)) return .rebase_move_down;
             if (keymap.commit_move_up.matches(key)) return .rebase_move_up;
+            if (keymap.commit_create_fixup.matches(key)) return .rebase_create_fixup;
+            if (keymap.commit_autosquash.matches(key)) return .rebase_autosquash;
             if (keymap.cherry_pick.matches(key)) return .cherry_pick;
         },
         .stash => {

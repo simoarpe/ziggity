@@ -43,7 +43,7 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
   cherry-pick copy/paste (`c` copies commits to a clipboard, `v` pastes them
   onto HEAD), a navigable changed-file list per commit, and interactive rebase
   actions (drop `d`, squash `s`, fixup `f`, edit `e`, reword `r`,
-  move `ctrl+j`/`ctrl+k`).
+  move `ctrl+j`/`ctrl+k`, create `fixup!` commit `F`, autosquash `S`).
 - Discard selected file via a lazygit-style menu (all changes / unstaged only).
 - Discard all working tree changes with a confirmation popup.
 - Commit staged changes in a centered editor with a summary line and an optional

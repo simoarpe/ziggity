@@ -55,6 +55,8 @@ pub const KeyMap = struct {
     commit_reword: Binding = .{ .codepoint = 'r' },
     commit_move_down: Binding = .{ .codepoint = 'j', .ctrl = true },
     commit_move_up: Binding = .{ .codepoint = 'k', .ctrl = true },
+    commit_create_fixup: Binding = .{ .codepoint = 'F' },
+    commit_autosquash: Binding = .{ .codepoint = 'S' },
     fetch: Binding = .{ .codepoint = 'f' },
     pull: Binding = .{ .codepoint = 'p' },
     push: Binding = .{ .codepoint = 'P' },

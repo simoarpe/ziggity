@@ -704,6 +704,32 @@ pub const Git = struct {
         return self.exec(&.{ "cherry-pick", hash });
     }
 
+    /// Commit the staged changes as a `fixup! <subject of hash>` commit.
+    pub fn createFixup(self: *Git, hash: []const u8) !ExecResult {
+        const arg = try std.fmt.allocPrint(self.allocator, "--fixup={s}", .{hash});
+        defer self.allocator.free(arg);
+        return self.exec(&.{ "commit", arg });
+    }
+
+    /// Autosquash fixup!/squash! commits in the range above `base`, accepting
+    /// git's reordered todo (both editors are no-ops via env vars).
+    pub fn autosquashRebase(self: *Git, base: []const u8) !ExecResult {
+        var env = try self.environ.clone(self.allocator);
+        defer env.deinit();
+        try env.put("GIT_SEQUENCE_EDITOR", "true");
+        try env.put("GIT_EDITOR", "true");
+        const argv = [_][]const u8{ "git", "rebase", "-i", "--autosquash", "--autostash", base };
+        self.recordCommand(argv[1..]);
+        const result = try std.process.run(self.allocator, self.io, .{
+            .argv = &argv,
+            .cwd = .{ .path = self.root },
+            .environ_map = &env,
+            .stdout_limit = .limited(16 * 1024 * 1024),
+            .stderr_limit = .limited(4 * 1024 * 1024),
+        });
+        return .{ .stdout = result.stdout, .stderr = result.stderr, .term = result.term };
+    }
+
     /// Cherry-pick several commits in one go (apply in the given order).
     pub fn cherryPickMany(self: *Git, hashes: []const []const u8) !ExecResult {
         if (hashes.len == 0) return self.successResult();
