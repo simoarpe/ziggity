@@ -306,6 +306,9 @@ pub const App = struct {
     op_ok: bool = true,
     op_running: bool = false,
     op_scroll: usize = 0,
+    // When the "running" frame was painted, so finishOp can hold it for a
+    // readable minimum instead of letting it flash by.
+    op_started_at: ?std.Io.Timestamp = null,
     render_hook: ?RenderHook = null,
     commit_buffer: std.ArrayList(u8) = .empty,
     file_filter_buffer: std.ArrayList(u8) = .empty,
@@ -2558,7 +2561,15 @@ pub const App = struct {
         self.op_running = true;
         self.op_scroll = 0;
         self.mode = .operation;
-        if (self.render_hook) |hook| hook.call();
+        // Paint the running frame, then time it so the result does not replace
+        // it before it has been visible long enough to read. Only when a hook
+        // is installed (the real TUI) — tests have none and stay instant.
+        if (self.render_hook) |hook| {
+            hook.call();
+            self.op_started_at = std.Io.Timestamp.now(self.git.io, .awake);
+        } else {
+            self.op_started_at = null;
+        }
     }
 
     fn beginOpFmt(self: *App, comptime fmt: []const u8, args: anytype) !void {
@@ -2569,7 +2580,24 @@ pub const App = struct {
 
     /// Populate and show the operation dialog's result. `summary` is a one-line
     /// outcome; `raw` is the command's stdout/stderr (trimmed for display).
+    /// Minimum time the "running" frame stays on screen before the result
+    /// replaces it, so quick operations do not flash by unreadably.
+    const min_running_ns: i96 = 2 * std.time.ns_per_s;
+
     fn finishOp(self: *App, ok: bool, summary: []const u8, raw: []const u8) !void {
+        // Hold the running frame for its minimum on-screen time. op_running is
+        // true here only when beginOp painted a frame for this op.
+        if (self.op_running) {
+            if (self.op_started_at) |started| {
+                const now = std.Io.Timestamp.now(self.git.io, .awake);
+                const elapsed = started.durationTo(now).nanoseconds;
+                if (elapsed < min_running_ns) {
+                    const remaining = std.Io.Duration.fromNanoseconds(min_running_ns - elapsed);
+                    std.Io.sleep(self.git.io, remaining, .awake) catch {};
+                }
+            }
+            self.op_started_at = null;
+        }
         // A slow op set op_command via beginOp; a fast op recovers the command
         // it just ran from the log so the dialog shows what executed.
         if (!self.op_running) {
