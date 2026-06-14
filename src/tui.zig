@@ -286,6 +286,7 @@ const help_lines = [_][]const u8{
     "  @ / ?          command log / this help",
     "  z              undo the last operation (reflog reset)",
     "  ctrl+o         copy selected hash / branch / tag to the clipboard",
+    "  o              open the selected commit / branch on its remote host",
     "  f / p / P      fetch / pull / push (async)",
     "",
     "Files",

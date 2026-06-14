@@ -23,6 +23,7 @@ pub const KeyMap = struct {
     help: Binding = .{ .codepoint = '?' },
     undo: Binding = .{ .codepoint = 'z' },
     copy_clipboard: Binding = .{ .codepoint = 'o', .ctrl = true },
+    open_browser: Binding = .{ .codepoint = 'o' },
     up: Binding = .{ .codepoint = 'k' },
     down: Binding = .{ .codepoint = 'j' },
     left: Binding = .{ .codepoint = 'h' },

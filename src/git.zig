@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const model = @import("model.zig");
 
 pub const GitError = error{
@@ -649,6 +650,25 @@ pub const Git = struct {
 
     pub fn deleteRemoteBranch(self: *Git, remote: []const u8, branch: []const u8) !ExecResult {
         return self.exec(&.{ "push", remote, "--delete", branch });
+    }
+
+    /// The configured fetch URL of `remote` (e.g. `git@github.com:owner/repo`).
+    pub fn remoteUrl(self: *Git, remote: []const u8) ![]u8 {
+        return self.output(&.{ "remote", "get-url", remote });
+    }
+
+    /// Open `url` in the user's default browser via the platform opener. Returns
+    /// quickly; the browser launch is fire-and-forget.
+    pub fn openUrl(self: *Git, url: []const u8) !void {
+        const opener = if (builtin.os.tag == .macos) "open" else "xdg-open";
+        const result = try std.process.run(self.allocator, self.io, .{
+            .argv = &.{ opener, url },
+            .cwd = .{ .path = self.root },
+            .stdout_limit = .limited(4096),
+            .stderr_limit = .limited(4096),
+        });
+        self.allocator.free(result.stdout);
+        self.allocator.free(result.stderr);
     }
 
     /// Fast-forward the checked-out branch to its upstream.

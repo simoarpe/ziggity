@@ -557,6 +557,7 @@ pub const App = struct {
             },
             .undo => try self.startUndoConfirm(),
             .copy_to_clipboard => try self.requestClipboardCopy(),
+            .open_browser => try self.openSelectionInBrowser(),
             .conflict_menu => try self.startConflictActionsMenu(),
             .stage_all => try self.toggleAllStaged(),
             .discard_selected => try self.startDiscardMenu(),
@@ -1510,6 +1511,67 @@ pub const App = struct {
         if (self.clipboard_request) |old| self.allocator.free(old);
         self.clipboard_request = try self.allocator.dupe(u8, text);
         try self.setMessage("copied to clipboard: {s}", .{text});
+    }
+
+    /// Open the focused commit or branch on its remote's web host. Derives an
+    /// https URL from the remote's fetch URL and launches the OS browser.
+    fn openSelectionInBrowser(self: *App) !void {
+        const remote = self.currentRemoteName();
+        const raw = self.git.remoteUrl(remote) catch {
+            try self.setMessage("no '{s}' remote to open", .{remote});
+            return;
+        };
+        defer self.allocator.free(raw);
+        const base = (try webUrlFromRemote(self.allocator, std.mem.trim(u8, raw, " \t\r\n"))) orelse {
+            try self.setMessage("cannot derive a web URL from {s}", .{std.mem.trim(u8, raw, " \t\r\n")});
+            return;
+        };
+        defer self.allocator.free(base);
+
+        const url = try self.selectionWebUrl(base);
+        defer self.allocator.free(url);
+        self.git.openUrl(url) catch {
+            try self.setMessage("failed to launch the browser", .{});
+            return;
+        };
+        try self.setMessage("opening {s}", .{url});
+    }
+
+    /// The remote whose web host we open: the current branch's upstream remote,
+    /// falling back to "origin".
+    fn currentRemoteName(self: *const App) []const u8 {
+        if (self.data.upstream) |upstream| {
+            if (std.mem.indexOfScalar(u8, upstream, '/')) |slash| return upstream[0..slash];
+        }
+        return "origin";
+    }
+
+    /// Append the path for the focused item to a repo web `base` URL.
+    fn selectionWebUrl(self: *const App, base: []const u8) ![]u8 {
+        switch (self.focus) {
+            .commits => if (self.selectedCommit()) |commit| {
+                return std.fmt.allocPrint(self.allocator, "{s}/commit/{s}", .{ base, commit.hash });
+            },
+            .branches => switch (self.branches_tab) {
+                .local => if (self.selectedBranch()) |branch| {
+                    return std.fmt.allocPrint(self.allocator, "{s}/tree/{s}", .{ base, branch.name });
+                },
+                .remotes => if (self.selectedRemoteBranch()) |branch| {
+                    // Strip the "<remote>/" prefix so the tree path is the branch.
+                    const name = if (std.mem.indexOfScalar(u8, branch.name, '/')) |slash|
+                        branch.name[slash + 1 ..]
+                    else
+                        branch.name;
+                    return std.fmt.allocPrint(self.allocator, "{s}/tree/{s}", .{ base, name });
+                },
+                .tags => if (self.selectedTag()) |tag| {
+                    return std.fmt.allocPrint(self.allocator, "{s}/tree/{s}", .{ base, tag.name });
+                },
+                .worktrees, .submodules => {},
+            },
+            .status, .files, .stash, .main => {},
+        }
+        return self.allocator.dupe(u8, base);
     }
 
     /// Toggle the selected commit in the cherry-pick clipboard.
@@ -2887,6 +2949,22 @@ test "cherry-pick clipboard toggles copied commits" {
     try std.testing.expectEqual(@as(usize, 1), app.copied_commits.items.len);
 }
 
+test "webUrlFromRemote normalizes the common remote URL forms" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { in: []const u8, want: []const u8 }{
+        .{ .in = "git@github.com:owner/repo.git", .want = "https://github.com/owner/repo" },
+        .{ .in = "https://github.com/owner/repo.git", .want = "https://github.com/owner/repo" },
+        .{ .in = "ssh://git@gitlab.com:22/group/sub/repo.git", .want = "https://gitlab.com/group/sub/repo" },
+        .{ .in = "https://github.com/owner/repo", .want = "https://github.com/owner/repo" },
+    };
+    for (cases) |c| {
+        const got = (try webUrlFromRemote(allocator, c.in)).?;
+        defer allocator.free(got);
+        try std.testing.expectEqualStrings(c.want, got);
+    }
+    try std.testing.expect((try webUrlFromRemote(allocator, "not-a-url")) == null);
+}
+
 test "clipboard copy picks the focused panel's identifier" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -3010,6 +3088,40 @@ test "operation dialog shows a running frame then its result" {
     // Enter dismisses the dialog.
     try app.handleKey(.{ .codepoint = vaxis.Key.enter });
     try std.testing.expectEqual(Mode.normal, app.mode);
+}
+
+/// Derive an https web URL (no scheme variants, no trailing `.git`) from a git
+/// remote URL. Handles scp-like (`git@host:owner/repo`), `https://…`, and
+/// `ssh://[user@]host[:port]/path` forms. Returns null if it cannot parse.
+fn webUrlFromRemote(allocator: std.mem.Allocator, remote: []const u8) !?[]u8 {
+    var url = std.mem.trim(u8, remote, " \t\r\n");
+    if (std.mem.endsWith(u8, url, ".git")) url = url[0 .. url.len - 4];
+    url = std.mem.trimEnd(u8, url, "/");
+    if (url.len == 0) return null;
+
+    var host: []const u8 = "";
+    var path: []const u8 = "";
+
+    if (std.mem.indexOf(u8, url, "://")) |scheme_end| {
+        // scheme://[user@]host[:port]/path
+        var after = url[scheme_end + 3 ..];
+        if (std.mem.indexOfScalar(u8, after, '@')) |at| after = after[at + 1 ..];
+        const slash = std.mem.indexOfScalar(u8, after, '/') orelse return null;
+        var hostport = after[0..slash];
+        if (std.mem.indexOfScalar(u8, hostport, ':')) |colon| hostport = hostport[0..colon];
+        host = hostport;
+        path = after[slash + 1 ..];
+    } else if (std.mem.indexOfScalar(u8, url, ':')) |colon| {
+        // scp-like [user@]host:path
+        var hostpart = url[0..colon];
+        if (std.mem.indexOfScalar(u8, hostpart, '@')) |at| hostpart = hostpart[at + 1 ..];
+        host = hostpart;
+        path = url[colon + 1 ..];
+    } else return null;
+
+    path = std.mem.trim(u8, path, "/");
+    if (host.len == 0 or path.len == 0) return null;
+    return try std.fmt.allocPrint(allocator, "https://{s}/{s}", .{ host, path });
 }
 
 fn testApp(allocator: std.mem.Allocator, files: []model.FileStatus) !App {
