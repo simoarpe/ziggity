@@ -292,6 +292,7 @@ const help_lines = [_][]const u8{
     "  d / s / f      drop / squash-down / fixup-down (interactive rebase)",
     "  e / r          edit (stop here) / reword",
     "  F / S          create fixup! commit / autosquash fixups above",
+    "  B              mark base, then rebase a branch to move commits onto it",
     "  ctrl+j/ctrl+k  move commit down / up",
     "",
     "Stash",
@@ -754,11 +755,13 @@ fn drawCommits(win: vaxis.Window, app: *const app_mod.App) void {
     }) {
         const commit = commits[idx];
         var buf: [512]u8 = undefined;
-        // A leading marker flags commits copied to the cherry-pick clipboard.
+        // A leading marker flags commits copied to the cherry-pick clipboard;
+        // a 'B' flags the commit marked as the base for a rebase --onto.
         const copied = app.isCommitCopied(commit.hash);
-        const marker: u8 = if (copied) '*' else ' ';
+        const marked = app.isMarkedBase(commit.hash);
+        const marker: u8 = if (marked) 'B' else if (copied) '*' else ' ';
         const line = std.fmt.bufPrint(&buf, "{c}{s} {s}", .{ marker, commit.short_hash, commit.subject }) catch commit.subject;
-        const style = if (copied) styles().staged else styles().normal;
+        const style = if (marked) styles().warning else if (copied) styles().staged else styles().normal;
         drawSelectable(win, row, line, style, idx == selected and app.focus == .commits);
     }
 }
@@ -887,7 +890,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push  @ log" ++ global,
         .files => "space stage  a all  c commit  A amend  d discard  / filter  ` tree  enter hunks" ++ global,
         .branches => unreachable,
-        .commits => "g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  ^j/^k move" ++ global,
+        .commits => "g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => "j/k scroll  PgUp/PgDn page  esc back" ++ global,
     };

@@ -255,6 +255,8 @@ pub const App = struct {
     stash_index: usize = 0,
     /// Cherry-pick clipboard: full SHAs of copied commits, applied on paste.
     copied_commits: std.ArrayList([]u8) = .empty,
+    /// A commit marked as the base for a `rebase --onto` (full SHA), or null.
+    marked_base: ?[]u8 = null,
     commit_files: []model.CommitFile = &.{},
     commit_file_index: usize = 0,
     commit_files_active: bool = false,
@@ -341,6 +343,7 @@ pub const App = struct {
         self.filter_history.deinit(self.allocator);
         for (self.copied_commits.items) |entry| self.allocator.free(entry);
         self.copied_commits.deinit(self.allocator);
+        if (self.marked_base) |b| self.allocator.free(b);
         self.input_buffer.deinit(self.allocator);
         self.git.deinit();
         self.* = undefined;
@@ -533,6 +536,7 @@ pub const App = struct {
             .rebase_move_up => try self.rebaseSelectedCommit(.move_up),
             .rebase_create_fixup => try self.createFixupCommit(),
             .rebase_autosquash => try self.autosquashFixups(),
+            .mark_base => try self.toggleMarkBase(),
             .stash_pop => try self.popSelectedStash(),
             .stash_drop => try self.dropSelectedStash(),
             .confirm, .backspace => {},
@@ -1464,6 +1468,34 @@ pub const App = struct {
         self.copied_commits.clearRetainingCapacity();
     }
 
+    pub fn isMarkedBase(self: *const App, hash: []const u8) bool {
+        const base = self.marked_base orelse return false;
+        return std.mem.eql(u8, base, hash);
+    }
+
+    fn clearMarkedBase(self: *App) void {
+        if (self.marked_base) |b| self.allocator.free(b);
+        self.marked_base = null;
+    }
+
+    /// Toggle the selected commit as the base for a `rebase --onto`. With a base
+    /// marked, rebasing onto a branch replays the marked commit (inclusive)
+    /// through HEAD onto that branch — see `Git.rebaseOntoMarked`.
+    fn toggleMarkBase(self: *App) !void {
+        const commit = self.selectedCommit() orelse {
+            try self.setMessage("no commit selected", .{});
+            return;
+        };
+        if (self.isMarkedBase(commit.hash)) {
+            self.clearMarkedBase();
+            try self.setMessage("unmarked base {s}", .{commit.short_hash});
+            return;
+        }
+        self.clearMarkedBase();
+        self.marked_base = try self.allocator.dupe(u8, commit.hash);
+        try self.setMessage("marked base {s} (rebase a branch to move commits)", .{commit.short_hash});
+    }
+
     /// Cherry-pick all copied commits onto HEAD, oldest-first, then clear.
     fn pasteCopiedCommits(self: *App) !void {
         if (self.copied_commits.items.len == 0) {
@@ -2306,6 +2338,11 @@ pub const App = struct {
                     try self.setMessage("no branch selected", .{});
                     return;
                 };
+                if (self.marked_base) |base| {
+                    const res = try self.git.rebaseOntoMarked(branch.name, base);
+                    self.clearMarkedBase();
+                    return self.runMutation(res, "rebased marked commits onto {s}", .{branch.name});
+                }
                 return self.runMutation(try self.git.rebaseOnto(branch.name), "rebased onto {s}", .{branch.name});
             },
             .delete_tag => {
@@ -2706,6 +2743,33 @@ test "cherry-pick clipboard toggles copied commits" {
     try std.testing.expectEqual(@as(usize, 1), app.copied_commits.items.len);
 }
 
+test "mark base toggles the rebase-onto base commit" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("aaaaaaa"), .short_hash = @constCast("aaa"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("first") },
+        .{ .hash = @constCast("bbbbbbb"), .short_hash = @constCast("bbb"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("second") },
+    };
+    app.data.commits = &commits;
+
+    app.commit_index = 0;
+    try app.toggleMarkBase();
+    try std.testing.expect(app.isMarkedBase("aaaaaaa"));
+
+    // Marking a different commit replaces the previous base (only one at a time).
+    app.commit_index = 1;
+    try app.toggleMarkBase();
+    try std.testing.expect(!app.isMarkedBase("aaaaaaa"));
+    try std.testing.expect(app.isMarkedBase("bbbbbbb"));
+
+    // Toggling the marked commit again clears it.
+    try app.toggleMarkBase();
+    try std.testing.expect(app.marked_base == null);
+}
+
 test "filter history dedups consecutive entries and ignores empties" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -2778,6 +2842,7 @@ fn deinitTestApp(app: *App) void {
     app.filter_history.deinit(app.allocator);
     for (app.copied_commits.items) |entry| app.allocator.free(entry);
     app.copied_commits.deinit(app.allocator);
+    if (app.marked_base) |b| app.allocator.free(b);
     app.input_buffer.deinit(app.allocator);
     if (app.staging) |*parsed| parsed.deinit(app.allocator);
     app.allocator.free(app.staging_diff);

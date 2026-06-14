@@ -672,6 +672,15 @@ pub const Git = struct {
         return self.exec(&.{ "rebase", name });
     }
 
+    /// Replay commits from `marked_base` (inclusive) through HEAD onto `newbase`,
+    /// dropping any commits before the marked base. Mirrors lazygit's "rebase
+    /// onto marked base" — `git rebase --onto <newbase> <marked_base>^`.
+    pub fn rebaseOntoMarked(self: *Git, newbase: []const u8, marked_base: []const u8) !ExecResult {
+        var buf: [80]u8 = undefined;
+        const upstream = try std.fmt.bufPrint(&buf, "{s}^", .{marked_base});
+        return self.exec(&.{ "rebase", "--onto", newbase, upstream });
+    }
+
     pub const ResetMode = enum {
         soft,
         mixed,
