@@ -176,6 +176,37 @@ pub const Git = struct {
         return self.exec(&.{ "apply", "--cached", "--whitespace=nowarn", "--", patch_path });
     }
 
+    /// Run a non-interactive `git rebase -i <base_ref>` with a caller-supplied
+    /// todo. The todo is written to a temp file and installed via a
+    /// `sequence.editor` that copies it over git's generated todo; messages are
+    /// accepted as-is (`core.editor=true`) unless `message` is given, in which
+    /// case it replaces the message git would have opened (used for reword).
+    pub fn rebaseTodo(self: *Git, base_ref: []const u8, todo: []const u8, message: ?[]const u8) !ExecResult {
+        const todo_path = try std.fmt.allocPrint(self.allocator, "{s}/.git/ziggity-rebase-todo", .{self.root});
+        defer self.allocator.free(todo_path);
+        try std.Io.Dir.writeFile(.cwd(), self.io, .{ .sub_path = todo_path, .data = todo });
+        defer std.Io.Dir.deleteFile(.cwd(), self.io, todo_path) catch {};
+
+        const seq_arg = try std.fmt.allocPrint(self.allocator, "sequence.editor=cp '{s}'", .{todo_path});
+        defer self.allocator.free(seq_arg);
+
+        var msg_path: ?[]u8 = null;
+        defer if (msg_path) |p| {
+            std.Io.Dir.deleteFile(.cwd(), self.io, p) catch {};
+            self.allocator.free(p);
+        };
+        const core_arg = if (message) |msg| blk: {
+            const mp = try std.fmt.allocPrint(self.allocator, "{s}/.git/ziggity-rebase-msg", .{self.root});
+            errdefer self.allocator.free(mp);
+            try std.Io.Dir.writeFile(.cwd(), self.io, .{ .sub_path = mp, .data = msg });
+            msg_path = mp;
+            break :blk try std.fmt.allocPrint(self.allocator, "core.editor=cp '{s}'", .{mp});
+        } else try self.allocator.dupe(u8, "core.editor=true");
+        defer self.allocator.free(core_arg);
+
+        return self.exec(&.{ "-c", seq_arg, "-c", core_arg, "rebase", "-i", "--autostash", base_ref });
+    }
+
     pub fn loadRepoData(self: *Git) !model.RepoData {
         var data = model.RepoData.empty();
         errdefer data.deinit(self.allocator);

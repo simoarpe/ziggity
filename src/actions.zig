@@ -30,6 +30,13 @@ pub const Action = enum {
     fast_forward_branch,
     reset_commit,
     revert_commit,
+    rebase_drop,
+    rebase_squash,
+    rebase_fixup,
+    rebase_edit,
+    rebase_reword,
+    rebase_move_down,
+    rebase_move_up,
     range_select,
     fetch,
     pull,
@@ -70,6 +77,8 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     // the global refresh/fetch there: R renames, f fast-forwards.
     if (focus == .branches and keymap.rename.matches(key)) return .rename_branch;
     if (focus == .branches and keymap.fast_forward.matches(key)) return .fast_forward_branch;
+    // In the Commits panel, f is fixup (shadows the global fetch there).
+    if (focus == .commits and keymap.commit_fixup.matches(key)) return .rebase_fixup;
 
     if (keymap.range_select.matches(key)) return .range_select;
 
@@ -108,6 +117,12 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
         .commits => {
             if (keymap.reset.matches(key)) return .reset_commit;
             if (keymap.revert.matches(key)) return .revert_commit;
+            if (keymap.commit_drop.matches(key)) return .rebase_drop;
+            if (keymap.commit_squash.matches(key)) return .rebase_squash;
+            if (keymap.commit_edit.matches(key)) return .rebase_edit;
+            if (keymap.commit_reword.matches(key)) return .rebase_reword;
+            if (keymap.commit_move_down.matches(key)) return .rebase_move_down;
+            if (keymap.commit_move_up.matches(key)) return .rebase_move_up;
         },
         .stash => {
             if (keymap.stash_apply.matches(key)) return .select;

@@ -269,6 +269,9 @@ const help_lines = [_][]const u8{
     "Commits  (tabs: Commits / Reflog)",
     "  enter          view the commit's changed files",
     "  g / t          reset menu / revert",
+    "  d / s / f      drop / squash-down / fixup-down (interactive rebase)",
+    "  e / r          edit (stop here) / reword",
+    "  ctrl+j/ctrl+k  move commit down / up",
     "",
     "Stash",
     "  space / g / d  apply / pop / drop",
@@ -831,7 +834,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push  @ log" ++ global,
         .files => "space stage  a all  c commit  d discard  / filter  ` tree  enter stage-hunks" ++ global,
         .branches => unreachable,
-        .commits => "enter files  g reset  t revert  [ ] commits/reflog" ++ global,
+        .commits => "enter files  g reset  t revert  d/s/f/e/r drop/squash/fixup/edit/reword  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => "j/k scroll  PgUp/PgDn page  esc back" ++ global,
     };
