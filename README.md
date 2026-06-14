@@ -19,7 +19,8 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 - Keyboard navigation across side panels and the diff panel.
 - Files-panel directory-tree view (toggle with `` ` ``): collapsible directories
   (`enter`), stage/unstage a whole directory (`space`).
-- Files-panel live path filtering using lazygit-style substring matching.
+- Files-panel live fuzzy path filtering (smart-case subsequence matching) with
+  recall of recent filters (`up`/`down` in the filter prompt).
 - Files-panel status filtering for staged, unstaged, tracked, and untracked files.
 - Scoped periodic auto-refresh for external working tree changes.
 - Full refresh when the terminal reports focus regain.
@@ -67,7 +68,7 @@ Large lazygit workflows still not implemented:
   scrolls).
 - Async for all mutations (currently only network ops run off-loop).
 - Full lazygit config compatibility.
-- Fuzzy filtering and filter history.
+- Score-based fuzzy ranking (current fuzzy filter matches but preserves order).
 
 ## Build
 

@@ -279,6 +279,8 @@ pub const App = struct {
     file_filter: []u8 = &.{},
     commit_buffer: std.ArrayList(u8) = .empty,
     file_filter_buffer: std.ArrayList(u8) = .empty,
+    filter_history: std.ArrayList([]u8) = .empty,
+    filter_history_index: ?usize = null,
     input_buffer: std.ArrayList(u8) = .empty,
     text_prompt_kind: ?TextPromptKind = null,
     mode: Mode = .normal,
@@ -330,6 +332,8 @@ pub const App = struct {
         self.commit_buffer.deinit(self.allocator);
         self.commit_body_buffer.deinit(self.allocator);
         self.file_filter_buffer.deinit(self.allocator);
+        for (self.filter_history.items) |entry| self.allocator.free(entry);
+        self.filter_history.deinit(self.allocator);
         self.input_buffer.deinit(self.allocator);
         self.git.deinit();
         self.* = undefined;
@@ -1521,8 +1525,53 @@ pub const App = struct {
         self.main_scroll = 0;
         self.mode = .file_filter_prompt;
         self.file_filter_buffer.clearRetainingCapacity();
+        self.filter_history_index = null;
         try self.updateFileFilterFromPrompt();
-        try self.setMessage("filter files", .{});
+        try self.setMessage("filter files (up/down for history)", .{});
+    }
+
+    /// Replace the filter prompt buffer with a value (used for history recall).
+    fn setFilterPromptBuffer(self: *App, value: []const u8) !void {
+        self.file_filter_buffer.clearRetainingCapacity();
+        try self.file_filter_buffer.appendSlice(self.allocator, value);
+        try self.updateFileFilterFromPrompt();
+    }
+
+    /// Recall an older (-1) or newer (+1) entry from the filter history.
+    fn recallFilterHistory(self: *App, direction: i8) !void {
+        const history = self.filter_history.items;
+        if (history.len == 0) return;
+        if (direction < 0) {
+            const next = if (self.filter_history_index) |idx|
+                (if (idx == 0) 0 else idx - 1)
+            else
+                history.len - 1;
+            self.filter_history_index = next;
+            try self.setFilterPromptBuffer(history[next]);
+        } else {
+            if (self.filter_history_index) |idx| {
+                if (idx + 1 < history.len) {
+                    self.filter_history_index = idx + 1;
+                    try self.setFilterPromptBuffer(history[idx + 1]);
+                } else {
+                    self.filter_history_index = null;
+                    try self.setFilterPromptBuffer("");
+                }
+            }
+        }
+    }
+
+    fn pushFilterHistory(self: *App, filter: []const u8) !void {
+        if (filter.len == 0) return;
+        if (self.filter_history.items.len > 0) {
+            const last = self.filter_history.items[self.filter_history.items.len - 1];
+            if (std.mem.eql(u8, last, filter)) return;
+        }
+        const entry = try self.allocator.dupe(u8, filter);
+        if (self.filter_history.items.len >= 20) {
+            self.allocator.free(self.filter_history.orderedRemove(0));
+        }
+        self.filter_history.append(self.allocator, entry) catch self.allocator.free(entry);
     }
 
     fn startStatusFilterMenu(self: *App) !void {
@@ -2037,6 +2086,14 @@ pub const App = struct {
             try self.clearFileFilter();
             return;
         }
+        if (self.config.keymap.up.matches(key) or key.matches(vaxis.Key.up, .{})) {
+            try self.recallFilterHistory(-1);
+            return;
+        }
+        if (self.config.keymap.down.matches(key) or key.matches(vaxis.Key.down, .{})) {
+            try self.recallFilterHistory(1);
+            return;
+        }
         if (self.isEnterKey(key)) {
             const filter = std.mem.trim(u8, self.file_filter_buffer.items, " \t\r\n");
             try self.applyFileFilter(filter);
@@ -2044,12 +2101,14 @@ pub const App = struct {
         }
         if (self.isBackspaceKey(key)) {
             if (self.file_filter_buffer.items.len > 0) self.file_filter_buffer.items.len -= 1;
+            self.filter_history_index = null;
             try self.updateFileFilterFromPrompt();
             return;
         }
         if (key.text) |text| {
             if (!key.mods.ctrl and !key.mods.alt and text.len > 0 and text[0] >= 0x20) {
                 try self.file_filter_buffer.appendSlice(self.allocator, text);
+                self.filter_history_index = null;
                 try self.updateFileFilterFromPrompt();
             }
         }
@@ -2332,6 +2391,8 @@ pub const App = struct {
 
     fn applyFileFilter(self: *App, filter: []const u8) !void {
         self.mode = .normal;
+        try self.pushFilterHistory(filter);
+        self.filter_history_index = null;
         try self.setFileFilter(filter);
         self.file_filter_buffer.clearRetainingCapacity();
         if (self.file_filter.len == 0) {
@@ -2484,6 +2545,22 @@ test "action enum is referenced" {
     try std.testing.expect(actions.Action.quit == .quit);
 }
 
+test "filter history dedups consecutive entries and ignores empties" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    try app.pushFilterHistory("app");
+    try app.pushFilterHistory("app"); // dedup of the most recent
+    try app.pushFilterHistory(""); // ignored
+    try app.pushFilterHistory("zig");
+
+    try std.testing.expectEqual(@as(usize, 2), app.filter_history.items.len);
+    try std.testing.expectEqualStrings("app", app.filter_history.items[0]);
+    try std.testing.expectEqualStrings("zig", app.filter_history.items[1]);
+}
+
 test "click row maps to the list item under the cursor" {
     // No scroll: row N selects item N.
     try std.testing.expectEqual(@as(usize, 2), App.rowToIndex(0, 5, 3, 2));
@@ -2534,7 +2611,10 @@ fn deinitTestApp(app: *App) void {
     app.allocator.free(app.message);
     app.allocator.free(app.file_filter);
     app.commit_buffer.deinit(app.allocator);
+    app.commit_body_buffer.deinit(app.allocator);
     app.file_filter_buffer.deinit(app.allocator);
+    for (app.filter_history.items) |entry| app.allocator.free(entry);
+    app.filter_history.deinit(app.allocator);
     app.input_buffer.deinit(app.allocator);
     if (app.staging) |*parsed| parsed.deinit(app.allocator);
     app.allocator.free(app.staging_diff);

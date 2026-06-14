@@ -9,22 +9,36 @@ pub fn localNameForRemote(remote_name: []const u8) []const u8 {
     return remote_name;
 }
 
-/// lazygit-style file filtering: whitespace-separated terms must all match as
-/// substrings, with smart case (a term is case-sensitive iff it has an
-/// uppercase letter).
+/// lazygit-style file filtering, made fuzzy: each whitespace-separated term
+/// must appear in the path as a smart-case subsequence (its characters in
+/// order, not necessarily contiguous). A term is case-sensitive iff it has an
+/// uppercase letter.
 pub fn pathMatchesFilter(path: []const u8, filter: []const u8) bool {
     var terms = std.mem.tokenizeAny(u8, filter, " \t\r\n");
     while (terms.next()) |term| {
-        if (!caseAwareContains(path, term)) return false;
+        if (!fuzzySubsequence(path, term)) return false;
     }
     return true;
 }
 
-fn caseAwareContains(haystack: []const u8, needle: []const u8) bool {
-    if (containsAsciiUppercase(needle)) {
-        return std.mem.indexOf(u8, haystack, needle) != null;
+fn fuzzySubsequence(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    const sensitive = containsAsciiUppercase(needle);
+    var h: usize = 0;
+    for (needle) |target| {
+        var found = false;
+        while (h < haystack.len) {
+            const c = haystack[h];
+            h += 1;
+            const eq = if (sensitive) c == target else std.ascii.toLower(c) == std.ascii.toLower(target);
+            if (eq) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
     }
-    return containsIgnoreCaseAscii(haystack, needle);
+    return true;
 }
 
 fn containsAsciiUppercase(bytes: []const u8) bool {
@@ -34,25 +48,23 @@ fn containsAsciiUppercase(bytes: []const u8) bool {
     return false;
 }
 
-fn containsIgnoreCaseAscii(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (needle.len > haystack.len) return false;
-    var idx: usize = 0;
-    while (idx + needle.len <= haystack.len) : (idx += 1) {
-        if (std.ascii.eqlIgnoreCase(haystack[idx .. idx + needle.len], needle)) return true;
-    }
-    return false;
-}
-
-test "path filter follows lazygit substring matching" {
+test "path filter matches fuzzy subsequences with smart case" {
+    // Contiguous substrings still match.
     try std.testing.expect(pathMatchesFilter("src/App.zig", "app"));
     try std.testing.expect(pathMatchesFilter("src/App.zig", "App"));
     try std.testing.expect(!pathMatchesFilter("src/App.zig", "APP"));
     try std.testing.expect(pathMatchesFilter("README.md", "read"));
+    // Whitespace-separated terms each match independently (any order).
     try std.testing.expect(pathMatchesFilter("integration-testing", "int test"));
     try std.testing.expect(pathMatchesFilter("integration-testing", "test int"));
     try std.testing.expect(!pathMatchesFilter("integration-testing", "int missing"));
+    // Non-contiguous subsequences now match (the fuzzy part).
+    try std.testing.expect(pathMatchesFilter("src/main.zig", "mnzig"));
+    try std.testing.expect(pathMatchesFilter("src/main.zig", "smz"));
+    // Characters must still appear in order.
+    try std.testing.expect(!pathMatchesFilter("src/main.zig", "zigm"));
     try std.testing.expect(!pathMatchesFilter("src/main.zig", "model"));
+    // Empty / whitespace filters match everything.
     try std.testing.expect(pathMatchesFilter("src/main.zig", ""));
     try std.testing.expect(pathMatchesFilter("src/main.zig", "  \t  "));
 }
