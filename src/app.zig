@@ -21,20 +21,24 @@ pub const Mode = enum {
     help,
 };
 
+/// Which field of the two-field commit editor has focus.
+pub const CommitField = enum { subject, body };
+
+/// Whether the commit editor creates a new commit or rewords an existing one.
+pub const CommitAction = enum { create, reword };
+
 /// A reusable single-line text-input popup. Each kind knows its title and what
 /// to do with the submitted text.
 pub const TextPromptKind = enum {
     new_branch,
     rename_branch,
     new_tag,
-    reword_commit,
 
     pub fn title(self: TextPromptKind) []const u8 {
         return switch (self) {
             .new_branch => "New branch name",
             .rename_branch => "Rename branch",
             .new_tag => "New tag name",
-            .reword_commit => "Reword commit",
         };
     }
 };
@@ -266,6 +270,10 @@ pub const App = struct {
     commits_tab: CommitsTab = .commits,
     main_scroll: usize = 0,
     file_display_filter: model.FileDisplayFilter = .all,
+    commit_body_buffer: std.ArrayList(u8) = .empty,
+    commit_field: CommitField = .subject,
+    commit_action: CommitAction = .create,
+    commit_reword_index: usize = 0,
     diff: []u8 = &.{},
     message: []u8 = &.{},
     file_filter: []u8 = &.{},
@@ -320,6 +328,7 @@ pub const App = struct {
         self.allocator.free(self.message);
         self.allocator.free(self.file_filter);
         self.commit_buffer.deinit(self.allocator);
+        self.commit_body_buffer.deinit(self.allocator);
         self.file_filter_buffer.deinit(self.allocator);
         self.input_buffer.deinit(self.allocator);
         self.git.deinit();
@@ -501,7 +510,7 @@ pub const App = struct {
             .rebase_squash => try self.rebaseSelectedCommit(.squash),
             .rebase_fixup => try self.rebaseSelectedCommit(.fixup),
             .rebase_edit => try self.rebaseSelectedCommit(.edit),
-            .rebase_reword => try self.startTextPrompt(.reword_commit),
+            .rebase_reword => try self.startReword(),
             .rebase_move_down => try self.rebaseSelectedCommit(.move_down),
             .rebase_move_up => try self.rebaseSelectedCommit(.move_up),
             .stash_pop => try self.popSelectedStash(),
@@ -1350,8 +1359,42 @@ pub const App = struct {
             return;
         }
         self.mode = .commit_prompt;
+        self.commit_action = .create;
+        self.commit_field = .subject;
         self.commit_buffer.clearRetainingCapacity();
+        self.commit_body_buffer.clearRetainingCapacity();
         try self.setMessage("enter commit message", .{});
+    }
+
+    /// Open the commit editor pre-filled with a commit's subject/body to reword
+    /// it (runs an interactive rebase on submit).
+    fn startReword(self: *App) !void {
+        if (self.commits_tab != .commits) {
+            try self.setMessage("reword applies to the Commits tab", .{});
+            return;
+        }
+        if (self.data.state != .clean) {
+            try self.setMessage("finish the in-progress operation first (m)", .{});
+            return;
+        }
+        if (self.data.commits.len == 0) {
+            try self.setMessage("no commit selected", .{});
+            return;
+        }
+        const i = @min(self.commit_index, self.data.commits.len - 1);
+        const commit = self.data.commits[i];
+        const body = self.git.commitBody(commit.hash) catch try self.allocator.alloc(u8, 0);
+        defer self.allocator.free(body);
+
+        self.mode = .commit_prompt;
+        self.commit_action = .reword;
+        self.commit_reword_index = i;
+        self.commit_field = .subject;
+        self.commit_buffer.clearRetainingCapacity();
+        try self.commit_buffer.appendSlice(self.allocator, commit.subject);
+        self.commit_body_buffer.clearRetainingCapacity();
+        try self.commit_body_buffer.appendSlice(self.allocator, body);
+        try self.setMessage("reword commit", .{});
     }
 
     fn amendLastCommit(self: *App) !void {
@@ -1394,22 +1437,6 @@ pub const App = struct {
             .new_tag => {
                 if (self.branches_tab != .tags) self.branches_tab = .tags;
                 self.focus = .branches;
-            },
-            .reword_commit => {
-                if (self.commits_tab != .commits) {
-                    try self.setMessage("reword applies to the Commits tab", .{});
-                    return;
-                }
-                if (self.data.state != .clean) {
-                    try self.setMessage("finish the in-progress rebase/merge first (m)", .{});
-                    return;
-                }
-                const commit = self.selectedCommit() orelse {
-                    try self.setMessage("no commit selected", .{});
-                    return;
-                };
-                self.focus = .commits;
-                prefill = commit.subject;
             },
         }
         self.mode = .text_prompt;
@@ -1485,25 +1512,6 @@ pub const App = struct {
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
                 return self.runMutation(result, "created tag {s}", .{value});
-            },
-            .reword_commit => {
-                if (self.data.commits.len == 0) {
-                    self.cancelTextPrompt("no commit selected");
-                    return;
-                }
-                const i = @min(self.commit_index, self.data.commits.len - 1);
-                // Preserve the commit body so rewording the subject doesn't drop it.
-                const body = self.git.commitBody(self.data.commits[i].hash) catch try self.allocator.alloc(u8, 0);
-                defer self.allocator.free(body);
-                const msg = if (body.len > 0)
-                    try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}\n", .{ value, body })
-                else
-                    try std.fmt.allocPrint(self.allocator, "{s}\n", .{value});
-                defer self.allocator.free(msg);
-                self.mode = .normal;
-                self.text_prompt_kind = null;
-                self.input_buffer.clearRetainingCapacity();
-                return self.runRebase(.reword, i, msg);
             },
         }
     }
@@ -1970,28 +1978,57 @@ pub const App = struct {
         if (self.isEscapeKey(key)) {
             self.mode = .normal;
             self.commit_buffer.clearRetainingCapacity();
+            self.commit_body_buffer.clearRetainingCapacity();
             try self.setMessage("commit cancelled", .{});
             return;
         }
+        // Tab switches between the subject and body fields.
+        if (key.matches(vaxis.Key.tab, .{})) {
+            self.commit_field = if (self.commit_field == .subject) .body else .subject;
+            return;
+        }
+        // Enter submits from the subject; in the body it inserts a newline.
         if (self.isEnterKey(key)) {
-            const message = std.mem.trim(u8, self.commit_buffer.items, " \t\r\n");
-            if (message.len == 0) {
-                try self.setMessage("commit message cannot be empty", .{});
+            if (self.commit_field == .body) {
+                try self.commit_body_buffer.append(self.allocator, '\n');
                 return;
             }
-            self.mode = .normal;
-            const result = try self.git.commit(message);
-            self.commit_buffer.clearRetainingCapacity();
-            return self.runMutation(result, "commit created", .{});
+            return self.submitCommit();
         }
+        const buffer = if (self.commit_field == .subject) &self.commit_buffer else &self.commit_body_buffer;
         if (self.isBackspaceKey(key)) {
-            if (self.commit_buffer.items.len > 0) self.commit_buffer.items.len -= 1;
+            if (buffer.items.len > 0) buffer.items.len -= 1;
             return;
         }
         if (key.text) |text| {
             if (!key.mods.ctrl and !key.mods.alt and text.len > 0 and text[0] >= 0x20) {
-                try self.commit_buffer.appendSlice(self.allocator, text);
+                try buffer.appendSlice(self.allocator, text);
             }
+        }
+    }
+
+    fn submitCommit(self: *App) !void {
+        const subject = std.mem.trim(u8, self.commit_buffer.items, " \t\r\n");
+        if (subject.len == 0) {
+            try self.setMessage("commit message cannot be empty", .{});
+            return;
+        }
+        const body = std.mem.trim(u8, self.commit_body_buffer.items, " \t\r\n");
+        const message = if (body.len > 0)
+            try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ subject, body })
+        else
+            try self.allocator.dupe(u8, subject);
+        defer self.allocator.free(message);
+
+        const action = self.commit_action;
+        const reword_index = self.commit_reword_index;
+        self.mode = .normal;
+        self.commit_buffer.clearRetainingCapacity();
+        self.commit_body_buffer.clearRetainingCapacity();
+
+        switch (action) {
+            .create => return self.runMutation(try self.git.commit(message), "commit created", .{}),
+            .reword => return self.runRebase(.reword, reword_index, message),
         }
     }
 

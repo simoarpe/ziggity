@@ -44,7 +44,9 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
   move `ctrl+j`/`ctrl+k`).
 - Discard selected file via a lazygit-style menu (all changes / unstaged only).
 - Discard all working tree changes with a confirmation popup.
-- Commit staged changes in a centered commit-message popup.
+- Commit staged changes in a centered editor with a summary line and an optional
+  multi-line description (`tab` switches fields). Reword reuses the same editor,
+  prefilled from the commit.
 - Lazygit-style panel numbering (`1`-`5`), `enter`/`esc` to inspect the main
   panel, a context-sensitive bottom bar, and centered popups for menus and
   confirmations.

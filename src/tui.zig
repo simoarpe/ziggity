@@ -347,12 +347,39 @@ fn drawTextPromptPopup(root: vaxis.Window, app: *const app_mod.App) void {
 
 fn drawCommitPopup(root: vaxis.Window, app: *const app_mod.App) void {
     const st = styles();
+    const subject_focused = app.commit_field == .subject;
     const w: u16 = @min(@as(u16, 72), root.width -| 4);
-    const win = popup(root, w, 5, "Commit summary");
-    print(win, 0, 0, app.commit_buffer.items, st.normal);
-    print(win, 2, 0, "enter commit   esc cancel", st.bottom_accent);
-    const cursor_col: u16 = @min(win.width -| 1, @as(u16, @intCast(app.commit_buffer.items.len)));
-    win.showCursor(cursor_col, 0);
+    const title = if (app.commit_action == .reword) "Reword commit" else "Commit message";
+    const win = popup(root, w, 12, title);
+
+    // Field labels indicate which has focus.
+    print(win, 0, 0, "Summary", if (subject_focused) st.active_title else st.muted);
+    print(win, 1, 0, app.commit_buffer.items, st.normal);
+    print(win, 3, 0, "Description (optional)", if (subject_focused) st.muted else st.active_title);
+
+    // Body lines start at row 4.
+    const body_top: u16 = 4;
+    var lines = std.mem.splitScalar(u8, app.commit_body_buffer.items, '\n');
+    var row: u16 = body_top;
+    var body_rows: u16 = 0;
+    var last_line_len: usize = 0;
+    while (lines.next()) |line| {
+        if (row < win.height -| 1) print(win, row, 0, line, st.normal);
+        last_line_len = line.len;
+        row += 1;
+        body_rows += 1;
+    }
+
+    print(win, win.height -| 1, 0, "tab: switch field   enter: commit / newline   esc: cancel", st.bottom_accent);
+
+    if (subject_focused) {
+        const col: u16 = @min(win.width -| 1, @as(u16, @intCast(app.commit_buffer.items.len)));
+        win.showCursor(col, 1);
+    } else {
+        const cursor_row: u16 = @min(win.height -| 1, body_top + (body_rows -| 1));
+        const col: u16 = @min(win.width -| 1, @as(u16, @intCast(last_line_len)));
+        win.showCursor(col, cursor_row);
+    }
 }
 
 /// Centered, bordered, opaque popup window. Fills its region first so the
@@ -786,7 +813,7 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
     fillRow(win, 0, st.bottom);
     if (app.mode == .commit_prompt) {
-        print(win, 0, 0, "enter commit  -  esc cancel", st.bottom_accent);
+        print(win, 0, 0, "tab switch field  -  enter commit/newline  -  esc cancel", st.bottom_accent);
         return;
     }
     if (app.mode == .file_filter_prompt) {
