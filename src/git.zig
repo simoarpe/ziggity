@@ -704,6 +704,16 @@ pub const Git = struct {
         return self.exec(&.{ "cherry-pick", hash });
     }
 
+    /// Cherry-pick several commits in one go (apply in the given order).
+    pub fn cherryPickMany(self: *Git, hashes: []const []const u8) !ExecResult {
+        if (hashes.len == 0) return self.successResult();
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(self.allocator);
+        try args.append(self.allocator, "cherry-pick");
+        try args.appendSlice(self.allocator, hashes);
+        return self.exec(args.items);
+    }
+
     pub fn cherryPickContinue(self: *Git) !ExecResult {
         return self.exec(&.{ "-c", "core.editor=true", "cherry-pick", "--continue" });
     }

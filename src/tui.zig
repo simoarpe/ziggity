@@ -286,7 +286,8 @@ const help_lines = [_][]const u8{
     "",
     "Commits  (tabs: Commits / Reflog)",
     "  enter          view the commit's changed files",
-    "  g / t / c      reset menu / revert / cherry-pick onto HEAD",
+    "  g / t          reset menu / revert",
+    "  c / v          copy commit to clipboard / paste (cherry-pick) onto HEAD",
     "  d / s / f      drop / squash-down / fixup-down (interactive rebase)",
     "  e / r          edit (stop here) / reword",
     "  ctrl+j/ctrl+k  move commit down / up",
@@ -750,8 +751,12 @@ fn drawCommits(win: vaxis.Window, app: *const app_mod.App) void {
     }) {
         const commit = commits[idx];
         var buf: [512]u8 = undefined;
-        const line = std.fmt.bufPrint(&buf, "{s} {s}", .{ commit.short_hash, commit.subject }) catch commit.subject;
-        drawSelectable(win, row, line, styles().normal, idx == selected and app.focus == .commits);
+        // A leading marker flags commits copied to the cherry-pick clipboard.
+        const copied = app.isCommitCopied(commit.hash);
+        const marker: u8 = if (copied) '*' else ' ';
+        const line = std.fmt.bufPrint(&buf, "{c}{s} {s}", .{ marker, commit.short_hash, commit.subject }) catch commit.subject;
+        const style = if (copied) styles().staged else styles().normal;
+        drawSelectable(win, row, line, style, idx == selected and app.focus == .commits);
     }
 }
 
@@ -879,7 +884,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push  @ log" ++ global,
         .files => "space stage  a all  c commit  A amend  d discard  / filter  ` tree  enter hunks" ++ global,
         .branches => unreachable,
-        .commits => "g reset  t revert  c cherry-pick  d/s/f/e/r drop/squash/fixup/edit/reword  ^j/^k move" ++ global,
+        .commits => "g reset  t revert  c copy  v paste  d/s/f/e/r drop/squash/fixup/edit/reword  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => "j/k scroll  PgUp/PgDn page  esc back" ++ global,
     };

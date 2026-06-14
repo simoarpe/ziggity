@@ -252,6 +252,8 @@ pub const App = struct {
     commit_index: usize = 0,
     reflog_index: usize = 0,
     stash_index: usize = 0,
+    /// Cherry-pick clipboard: full SHAs of copied commits, applied on paste.
+    copied_commits: std.ArrayList([]u8) = .empty,
     commit_files: []model.CommitFile = &.{},
     commit_file_index: usize = 0,
     commit_files_active: bool = false,
@@ -334,6 +336,8 @@ pub const App = struct {
         self.file_filter_buffer.deinit(self.allocator);
         for (self.filter_history.items) |entry| self.allocator.free(entry);
         self.filter_history.deinit(self.allocator);
+        for (self.copied_commits.items) |entry| self.allocator.free(entry);
+        self.copied_commits.deinit(self.allocator);
         self.input_buffer.deinit(self.allocator);
         self.git.deinit();
         self.* = undefined;
@@ -470,7 +474,13 @@ pub const App = struct {
             .push => try self.requestAsync(.push),
             .move_up => if (self.staging_active) self.moveStagingCursor(-1) else try self.moveUp(),
             .move_down => if (self.staging_active) self.moveStagingCursor(1) else try self.moveDown(),
-            .range_select => if (self.staging_active) self.toggleStagingRange(),
+            .range_select => {
+                if (self.staging_active) {
+                    self.toggleStagingRange();
+                } else if (self.focus == .commits) {
+                    try self.pasteCopiedCommits();
+                }
+            },
             .focus_left => if (self.staging_active) try self.closeStaging() else try self.focusPrevious(),
             .focus_right => if (self.staging_active) try self.toggleStagingSide() else try self.focusNext(),
             .select => {
@@ -501,7 +511,7 @@ pub const App = struct {
             .open_status_filter => try self.startStatusFilterMenu(),
             .start_commit => try self.startCommitPrompt(),
             .amend_commit => try self.amendLastCommit(),
-            .cherry_pick => try self.cherryPickSelectedCommit(),
+            .cherry_pick => try self.toggleCommitCopy(),
             .new_branch => try self.startNewForBranchTab(),
             .delete_branch => try self.startDeleteForBranchTab(),
             .merge_branch => try self.startBranchConfirm(.merge_branch),
@@ -1413,17 +1423,78 @@ pub const App = struct {
         return self.runMutation(try self.git.amendCommit(), "amended last commit", .{});
     }
 
-    fn cherryPickSelectedCommit(self: *App) !void {
-        if (self.focus != .commits) return;
-        if (self.data.state != .clean) {
-            try self.setMessage("finish the in-progress operation first (m)", .{});
-            return;
+    pub fn isCommitCopied(self: *const App, hash: []const u8) bool {
+        for (self.copied_commits.items) |h| {
+            if (std.mem.eql(u8, h, hash)) return true;
         }
+        return false;
+    }
+
+    /// Toggle the selected commit in the cherry-pick clipboard.
+    fn toggleCommitCopy(self: *App) !void {
         const commit = self.selectedCommit() orelse {
             try self.setMessage("no commit selected", .{});
             return;
         };
-        return self.runMutation(try self.git.cherryPick(commit.hash), "cherry-picked {s}", .{commit.short_hash});
+        for (self.copied_commits.items, 0..) |h, idx| {
+            if (std.mem.eql(u8, h, commit.hash)) {
+                self.allocator.free(self.copied_commits.orderedRemove(idx));
+                try self.setMessage("uncopied {s} ({d} copied)", .{ commit.short_hash, self.copied_commits.items.len });
+                return;
+            }
+        }
+        try self.copied_commits.append(self.allocator, try self.allocator.dupe(u8, commit.hash));
+        try self.setMessage("copied {s} ({d} copied)", .{ commit.short_hash, self.copied_commits.items.len });
+    }
+
+    fn clearCopiedCommits(self: *App) void {
+        for (self.copied_commits.items) |h| self.allocator.free(h);
+        self.copied_commits.clearRetainingCapacity();
+    }
+
+    /// Cherry-pick all copied commits onto HEAD, oldest-first, then clear.
+    fn pasteCopiedCommits(self: *App) !void {
+        if (self.copied_commits.items.len == 0) {
+            try self.setMessage("no commits copied (c to copy)", .{});
+            return;
+        }
+        if (self.data.state != .clean) {
+            try self.setMessage("finish the in-progress operation first (m)", .{});
+            return;
+        }
+
+        // Order oldest-first: walk the commit list from the bottom, then append
+        // any copied commits not present in it (e.g. reflog-only) in copy order.
+        var ordered: std.ArrayList([]const u8) = .empty;
+        defer ordered.deinit(self.allocator);
+        var i = self.data.commits.len;
+        while (i > 0) {
+            i -= 1;
+            const hash = self.data.commits[i].hash;
+            if (self.isCommitCopied(hash)) try ordered.append(self.allocator, hash);
+        }
+        for (self.copied_commits.items) |h| {
+            var present = false;
+            for (ordered.items) |o| {
+                if (std.mem.eql(u8, o, h)) {
+                    present = true;
+                    break;
+                }
+            }
+            if (!present) try ordered.append(self.allocator, h);
+        }
+
+        const count = ordered.items.len;
+        var result = try self.git.cherryPickMany(ordered.items);
+        defer result.deinit(self.allocator);
+        if (result.ok()) {
+            self.clearCopiedCommits();
+            try self.setMessage("cherry-picked {d} commit(s)", .{count});
+        } else {
+            const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
+            try self.setMessage("cherry-pick failed: {s}", .{if (stderr.len > 0) stderr else "see command log"});
+        }
+        self.refresh() catch {};
     }
 
     fn startTextPrompt(self: *App, kind: TextPromptKind) !void {
@@ -2545,6 +2616,34 @@ test "action enum is referenced" {
     try std.testing.expect(actions.Action.quit == .quit);
 }
 
+test "cherry-pick clipboard toggles copied commits" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("aaaaaaa"), .short_hash = @constCast("aaa"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("first") },
+        .{ .hash = @constCast("bbbbbbb"), .short_hash = @constCast("bbb"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("second") },
+    };
+    app.data.commits = &commits;
+
+    app.commit_index = 0;
+    try app.toggleCommitCopy();
+    try std.testing.expect(app.isCommitCopied("aaaaaaa"));
+    try std.testing.expectEqual(@as(usize, 1), app.copied_commits.items.len);
+
+    app.commit_index = 1;
+    try app.toggleCommitCopy();
+    try std.testing.expectEqual(@as(usize, 2), app.copied_commits.items.len);
+
+    app.commit_index = 0;
+    try app.toggleCommitCopy(); // uncopy aaa
+    try std.testing.expect(!app.isCommitCopied("aaaaaaa"));
+    try std.testing.expect(app.isCommitCopied("bbbbbbb"));
+    try std.testing.expectEqual(@as(usize, 1), app.copied_commits.items.len);
+}
+
 test "filter history dedups consecutive entries and ignores empties" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -2615,6 +2714,8 @@ fn deinitTestApp(app: *App) void {
     app.file_filter_buffer.deinit(app.allocator);
     for (app.filter_history.items) |entry| app.allocator.free(entry);
     app.filter_history.deinit(app.allocator);
+    for (app.copied_commits.items) |entry| app.allocator.free(entry);
+    app.copied_commits.deinit(app.allocator);
     app.input_buffer.deinit(app.allocator);
     if (app.staging) |*parsed| parsed.deinit(app.allocator);
     app.allocator.free(app.staging_diff);
