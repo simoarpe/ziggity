@@ -11,6 +11,7 @@ var ui_theme: config_mod.Theme = .{};
 
 const Event = union(enum) {
     key_press: vaxis.Key,
+    mouse: vaxis.Mouse,
     winsize: vaxis.Winsize,
     focus_in,
     focus_out,
@@ -90,6 +91,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
 
     const writer = tty.writer();
     try vx.enterAltScreen(writer);
+    try vx.setMouseMode(writer, true);
     try writer.writeAll(focus_events_set);
     try writer.flush();
     defer {
@@ -108,8 +110,12 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     try renderAndFlush(&vx, writer, app);
     while (app.running) {
         const event = try loop.nextEvent();
+        // Motion mouse events flood with any-motion tracking; skip re-rendering
+        // when nothing changed.
+        var render_needed = true;
         switch (event) {
             .key_press => |key| try app.handleKey(key),
+            .mouse => |m| render_needed = try app.handleMouse(m),
             .winsize => |ws| try vx.resize(allocator, tty.writer(), ws),
             .refresh_tick => try app.handleRefreshTick(),
             .focus_in => try app.handleFocusIn(),
@@ -135,10 +141,11 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     try app.completeAsync(op, null, async_allocator);
                     break :blk null;
                 };
+                render_needed = true;
             }
         }
 
-        try renderAndFlush(&vx, writer, app);
+        if (render_needed) try renderAndFlush(&vx, writer, app);
     }
 }
 
@@ -185,6 +192,17 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     const branches_h = base + if (extra > 1) @as(u16, 1) else 0;
     const commits_h = base + if (extra > 2) @as(u16, 1) else 0;
     const stash_h = body_h - status_h - files_h - branches_h - commits_h;
+
+    // Capture panel hit-boxes for mouse handling.
+    app.panel_rects = .{
+        .{ .focus = .status, .x = 0, .y = 0, .w = side_w, .h = status_h },
+        .{ .focus = .files, .x = 0, .y = status_h, .w = side_w, .h = files_h },
+        .{ .focus = .branches, .x = 0, .y = status_h + files_h, .w = side_w, .h = branches_h },
+        .{ .focus = .commits, .x = 0, .y = status_h + files_h + branches_h, .w = side_w, .h = commits_h },
+        .{ .focus = .stash, .x = 0, .y = status_h + files_h + branches_h + commits_h, .w = side_w, .h = stash_h },
+        .{ .focus = .main, .x = side_w, .y = 0, .w = main_w, .h = body_h },
+    };
+    app.panel_rect_count = 6;
 
     drawStatus(panel(root, 0, y, side_w, status_h, "Status [1]", app.focus == .status), app);
     y += status_h;

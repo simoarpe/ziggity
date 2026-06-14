@@ -80,6 +80,19 @@ pub const AsyncOp = enum {
     }
 };
 
+/// A panel's screen rectangle, captured during render for mouse hit-testing.
+pub const PanelRect = struct {
+    focus: model.Focus,
+    x: u16,
+    y: u16,
+    w: u16,
+    h: u16,
+
+    pub fn contains(self: PanelRect, col: u16, row: u16) bool {
+        return col >= self.x and col < self.x + self.w and row >= self.y and row < self.y + self.h;
+    }
+};
+
 /// An interactive-rebase action applied to the selected commit.
 pub const RebaseAction = enum {
     drop,
@@ -246,6 +259,9 @@ pub const App = struct {
     staging_cursor: usize = 0,
     staging_anchor: ?usize = null,
     main_view_height: u16 = 0,
+    /// Panel hit-boxes captured by the renderer for mouse handling.
+    panel_rects: [6]PanelRect = undefined,
+    panel_rect_count: usize = 0,
     branches_tab: BranchesTab = .local,
     commits_tab: CommitsTab = .commits,
     main_scroll: usize = 0,
@@ -491,6 +507,43 @@ pub const App = struct {
             .stash_pop => try self.popSelectedStash(),
             .stash_drop => try self.dropSelectedStash(),
             .confirm, .backspace => {},
+        }
+    }
+
+    /// Returns true if the event changed state and a re-render is warranted.
+    /// Motion/drag events (which flood with any-motion tracking) return false.
+    pub fn handleMouse(self: *App, mouse: vaxis.Mouse) !bool {
+        if (mouse.type != .press) return false;
+        if (self.mode != .normal) return false;
+        if (mouse.col < 0 or mouse.row < 0) return false;
+        const rect = self.panelAt(@intCast(mouse.col), @intCast(mouse.row)) orelse return false;
+        switch (mouse.button) {
+            .left => try self.focusPanel(rect.focus),
+            .wheel_up => {
+                try self.focusPanel(rect.focus);
+                if (rect.focus == .main) try self.scrollMain(-1) else try self.moveUp();
+            },
+            .wheel_down => {
+                try self.focusPanel(rect.focus);
+                if (rect.focus == .main) try self.scrollMain(1) else try self.moveDown();
+            },
+            else => return false,
+        }
+        return true;
+    }
+
+    fn panelAt(self: *const App, col: u16, row: u16) ?PanelRect {
+        for (self.panel_rects[0..self.panel_rect_count]) |rect| {
+            if (rect.contains(col, row)) return rect;
+        }
+        return null;
+    }
+
+    fn focusPanel(self: *App, focus: model.Focus) !void {
+        if (focus == .main) {
+            if (self.focus != .main) try self.enterMain();
+        } else {
+            try self.setFocus(focus);
         }
     }
 

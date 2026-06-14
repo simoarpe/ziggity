@@ -61,7 +61,8 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 Large lazygit workflows still not implemented:
 
 - Cherry-pick of ranges / clipboard-style copy-paste; undo/redo.
-- Mouse handling.
+- Click-to-select individual list items (mouse currently focuses panels +
+  scrolls).
 - Async for all mutations (currently only network ops run off-loop).
 - Full lazygit config compatibility.
 - Fuzzy filtering and filter history.
@@ -95,6 +96,7 @@ Useful keys:
 - `R`: refresh
 - `?`: keybindings help overlay (`j`/`k` to scroll)
 - `@`: show the command log (recent git commands ziggity ran)
+- mouse: click a panel to focus it; scroll wheel to navigate/scroll
 - `/`: filter files by path live; enter accepts; esc clears
 - `` ` ``: toggle the files directory-tree view (collapse dirs with `enter`,
   stage a whole dir with `space`)
