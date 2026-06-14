@@ -848,6 +848,24 @@ pub const Git = struct {
         return self.exec(&.{ "stash", "drop", selector });
     }
 
+    pub fn stashAll(self: *Git) !ExecResult {
+        return self.exec(&.{ "stash", "push" });
+    }
+
+    /// Stash tracked changes plus untracked files (`-u`).
+    pub fn stashIncludingUntracked(self: *Git) !ExecResult {
+        return self.exec(&.{ "stash", "push", "--include-untracked" });
+    }
+
+    /// Stash only what is staged (`--staged`), leaving the working tree.
+    pub fn stashStaged(self: *Git) !ExecResult {
+        return self.exec(&.{ "stash", "push", "--staged" });
+    }
+
+    pub fn stashFile(self: *Git, path: []const u8) !ExecResult {
+        return self.exec(&.{ "stash", "push", "--", path });
+    }
+
     fn resetFilePaths(self: *Git, file: model.FileStatus) !?ExecResult {
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(self.allocator);

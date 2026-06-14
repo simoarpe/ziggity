@@ -15,6 +15,7 @@ pub const Action = enum {
     stage_all,
     discard_selected,
     discard_all,
+    stash_menu,
     start_file_filter,
     open_status_filter,
     start_commit,
@@ -118,6 +119,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
             if (keymap.open_status_filter.matches(key)) return .open_status_filter;
             if (keymap.discard.matches(key)) return .discard_selected;
             if (keymap.discard_all.matches(key)) return .discard_all;
+            if (keymap.stash_create.matches(key)) return .stash_menu;
             if (keymap.commit.matches(key)) return .start_commit;
             if (keymap.amend.matches(key)) return .amend_commit;
             if (keymap.conflict_menu.matches(key)) return .conflict_menu;

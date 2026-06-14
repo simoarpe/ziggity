@@ -199,6 +199,10 @@ pub const MenuAction = enum {
     take_theirs,
     conflict_continue,
     conflict_abort,
+    stash_all,
+    stash_untracked,
+    stash_staged,
+    stash_file,
 };
 
 pub const MenuItem = struct {
@@ -242,6 +246,13 @@ const conflict_resolve_menu = [_]MenuItem{
 const conflict_actions_menu = [_]MenuItem{
     .{ .label = "Continue", .action = .conflict_continue },
     .{ .label = "Abort", .action = .conflict_abort },
+};
+
+const stash_menu = [_]MenuItem{
+    .{ .label = "Stash all changes", .action = .stash_all },
+    .{ .label = "Stash including untracked files", .action = .stash_untracked },
+    .{ .label = "Stash staged changes only", .action = .stash_staged },
+    .{ .label = "Stash the selected file", .action = .stash_file },
 };
 
 /// Order of entries shown in the status-filter menu popup.
@@ -573,6 +584,7 @@ pub const App = struct {
             .stage_all => try self.toggleAllStaged(),
             .discard_selected => try self.startDiscardMenu(),
             .discard_all => try self.startDiscardAllConfirmation(),
+            .stash_menu => try self.startStashMenu(),
             .start_file_filter => try self.startFileFilterPrompt(),
             .open_status_filter => try self.startStatusFilterMenu(),
             .start_commit => try self.startCommitPrompt(),
@@ -1896,6 +1908,17 @@ pub const App = struct {
         try self.setMessage("discard changes", .{});
     }
 
+    fn startStashMenu(self: *App) !void {
+        if (self.data.files.len == 0) {
+            try self.setMessage("nothing to stash", .{});
+            return;
+        }
+        self.focus = .files;
+        self.mode = .menu;
+        self.active_menu = .{ .title = "Stash", .items = &stash_menu, .index = 0 };
+        try self.setMessage("stash changes", .{});
+    }
+
     fn startConflictResolveMenu(self: *App) !void {
         const file = self.selectedFile() orelse {
             try self.setMessage("no file selected", .{});
@@ -2007,6 +2030,16 @@ pub const App = struct {
                 .rebasing => return self.runMutation(try self.git.rebaseAbort(), "rebase aborted", .{}),
                 .cherry_picking => return self.runMutation(try self.git.cherryPickAbort(), "cherry-pick aborted", .{}),
                 .clean => try self.setMessage("nothing to abort", .{}),
+            },
+            .stash_all => return self.runMutation(try self.git.stashAll(), "stashed all changes", .{}),
+            .stash_untracked => return self.runMutation(try self.git.stashIncludingUntracked(), "stashed (incl. untracked)", .{}),
+            .stash_staged => return self.runMutation(try self.git.stashStaged(), "stashed staged changes", .{}),
+            .stash_file => {
+                const file = self.selectedFile() orelse {
+                    try self.setMessage("no file selected", .{});
+                    return;
+                };
+                return self.runMutation(try self.git.stashFile(file.path), "stashed {s}", .{file.path});
             },
         }
     }

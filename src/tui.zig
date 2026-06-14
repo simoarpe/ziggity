@@ -294,6 +294,7 @@ const help_lines = [_][]const u8{
     "  a              stage/unstage all",
     "  c / A          commit (popup) / amend last commit",
     "  d / D          discard menu / discard all",
+    "  s              stash menu (all / +untracked / staged / file)",
     "  / / ctrl+b     filter by path / status filter",
     "  `              toggle directory tree",
     "  enter          open the hunk/line staging view",
@@ -960,7 +961,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
     }
     return switch (app.focus) {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push  @ log" ++ global,
-        .files => "space stage  a all  c commit  A amend  d discard  / filter  ` tree  enter hunks" ++ global,
+        .files => "space stage  a all  c commit  A amend  d discard  s stash  / filter  ` tree  enter hunks" ++ global,
         .branches => unreachable,
         .commits => "g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,

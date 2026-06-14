@@ -42,6 +42,7 @@ pub const KeyMap = struct {
     amend: Binding = .{ .codepoint = 'A' },
     cherry_pick: Binding = .{ .codepoint = 'c' },
     conflict_menu: Binding = .{ .codepoint = 'm' },
+    stash_create: Binding = .{ .codepoint = 's' },
     new_branch: Binding = .{ .codepoint = 'n' },
     merge: Binding = .{ .codepoint = 'M' },
     rebase: Binding = .{ .codepoint = 'r' },
