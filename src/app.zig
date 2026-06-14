@@ -19,6 +19,20 @@ pub const Mode = enum {
     confirmation,
     command_log,
     help,
+    operation,
+};
+
+/// Lets App repaint the screen mid-handler. Synchronous git operations block
+/// the event loop while they run, so the operation dialog paints its "running"
+/// frame through this hook before the blocking call, then the loop paints the
+/// result once the handler returns. Installed by the TUI; null in tests.
+pub const RenderHook = struct {
+    ctx: *anyopaque,
+    func: *const fn (ctx: *anyopaque) void,
+
+    pub fn call(self: RenderHook) void {
+        self.func(self.ctx);
+    }
 };
 
 /// Which field of the two-field commit editor has focus.
@@ -282,6 +296,17 @@ pub const App = struct {
     diff: []u8 = &.{},
     message: []u8 = &.{},
     file_filter: []u8 = &.{},
+    // Operation dialog: the modal that shows a synchronous git op running and
+    // its result. `op_command` is the command line, `op_summary` a one-line
+    // outcome, `op_output` the raw stdout/stderr. `op_running` is true only
+    // while the pre-exec "running" frame is up.
+    op_command: []u8 = &.{},
+    op_summary: []u8 = &.{},
+    op_output: []u8 = &.{},
+    op_ok: bool = true,
+    op_running: bool = false,
+    op_scroll: usize = 0,
+    render_hook: ?RenderHook = null,
     commit_buffer: std.ArrayList(u8) = .empty,
     file_filter_buffer: std.ArrayList(u8) = .empty,
     filter_history: std.ArrayList([]u8) = .empty,
@@ -336,6 +361,9 @@ pub const App = struct {
         self.allocator.free(self.diff);
         self.allocator.free(self.message);
         self.allocator.free(self.file_filter);
+        self.allocator.free(self.op_command);
+        self.allocator.free(self.op_summary);
+        self.allocator.free(self.op_output);
         self.commit_buffer.deinit(self.allocator);
         self.commit_body_buffer.deinit(self.allocator);
         self.file_filter_buffer.deinit(self.allocator);
@@ -415,6 +443,17 @@ pub const App = struct {
         }
         if (self.mode == .confirmation) {
             try self.handleConfirmationKey(key);
+            return;
+        }
+        if (self.mode == .operation) {
+            // The result stays up until dismissed; arrows scroll long output.
+            if (self.config.keymap.down.matches(key) or key.matches(vaxis.Key.down, .{})) {
+                self.op_scroll += 1;
+            } else if (self.config.keymap.up.matches(key) or key.matches(vaxis.Key.up, .{})) {
+                self.op_scroll -|= 1;
+            } else if (self.isEnterKey(key) or self.isEscapeKey(key)) {
+                self.mode = .normal;
+            }
             return;
         }
         if (self.mode == .command_log) {
@@ -1529,14 +1568,19 @@ pub const App = struct {
         }
 
         const count = ordered.items.len;
+        var run_buf: [48]u8 = undefined;
+        const shown = std.fmt.bufPrint(&run_buf, "git cherry-pick ({d} commit(s))", .{count}) catch "git cherry-pick";
+        try self.beginOp(shown);
+
         var result = try self.git.cherryPickMany(ordered.items);
         defer result.deinit(self.allocator);
         if (result.ok()) {
             self.clearCopiedCommits();
-            try self.setMessage("cherry-picked {d} commit(s)", .{count});
+            const summary = try std.fmt.allocPrint(self.allocator, "cherry-picked {d} commit(s)", .{count});
+            defer self.allocator.free(summary);
+            try self.finishOp(true, summary, result.stdout);
         } else {
-            const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
-            try self.setMessage("cherry-pick failed: {s}", .{if (stderr.len > 0) stderr else "see command log"});
+            try self.finishOp(false, "cherry-pick failed", if (result.stderr.len > 0) result.stderr else result.stdout);
         }
         self.refresh() catch {};
     }
@@ -1935,6 +1979,7 @@ pub const App = struct {
             return;
         };
         if (branch.current) {
+            try self.beginOpFmt("git merge --ff-only {s}", .{upstream});
             return self.runMutation(try self.git.fastForwardCurrent(), "fast-forwarded {s}", .{branch.name});
         }
         const slash = std.mem.indexOfScalar(u8, upstream, '/') orelse {
@@ -1943,6 +1988,7 @@ pub const App = struct {
         };
         const remote = upstream[0..slash];
         const remote_ref = upstream[slash + 1 ..];
+        try self.beginOpFmt("git fetch {s} {s}:{s}", .{ remote, remote_ref, branch.name });
         return self.runMutation(try self.git.fastForwardBranch(remote, remote_ref, branch.name), "fast-forwarded {s}", .{branch.name});
     }
 
@@ -2018,13 +2064,16 @@ pub const App = struct {
         const todo = try aw.toOwnedSlice();
         defer self.allocator.free(todo);
 
+        var run_buf: [96]u8 = undefined;
+        const shown = std.fmt.bufPrint(&run_buf, "git rebase -i {s}", .{base_ref}) catch "git rebase -i";
+        try self.beginOp(shown);
+
         var result = try self.git.rebaseTodo(base_ref, todo, message);
         defer result.deinit(self.allocator);
         if (result.ok()) {
-            try self.setMessage("{s}", .{action.label()});
+            try self.finishOp(true, action.label(), result.stdout);
         } else {
-            const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
-            try self.setMessage("rebase failed: {s}", .{if (stderr.len > 0) stderr else "see command log"});
+            try self.finishOp(false, "rebase failed", if (result.stderr.len > 0) result.stderr else result.stdout);
         }
         self.refresh() catch {};
     }
@@ -2111,6 +2160,7 @@ pub const App = struct {
         const commit = try self.commitForAction() orelse return;
         const base = try std.fmt.allocPrint(self.allocator, "{s}^", .{commit.hash});
         defer self.allocator.free(base);
+        try self.beginOpFmt("git rebase -i --autosquash {s}", .{base});
         return self.runMutation(try self.git.autosquashRebase(base), "autosquashed fixups", .{});
     }
 
@@ -2331,6 +2381,7 @@ pub const App = struct {
                     try self.setMessage("no branch selected", .{});
                     return;
                 };
+                try self.beginOpFmt("git merge --no-edit {s}", .{branch.name});
                 return self.runMutation(try self.git.mergeBranch(branch.name), "merged {s}", .{branch.name});
             },
             .rebase_branch => {
@@ -2339,10 +2390,12 @@ pub const App = struct {
                     return;
                 };
                 if (self.marked_base) |base| {
+                    try self.beginOpFmt("git rebase --onto {s} {s}^", .{ branch.name, base });
                     const res = try self.git.rebaseOntoMarked(branch.name, base);
                     self.clearMarkedBase();
                     return self.runMutation(res, "rebased marked commits onto {s}", .{branch.name});
                 }
+                try self.beginOpFmt("git rebase {s}", .{branch.name});
                 return self.runMutation(try self.git.rebaseOnto(branch.name), "rebased onto {s}", .{branch.name});
             },
             .delete_tag => {
@@ -2496,37 +2549,76 @@ pub const App = struct {
         self.refresh() catch {};
     }
 
+    /// Paint the operation dialog's "running" frame for a slow op before it
+    /// blocks the loop. `command` is shown verbatim (e.g. "git rebase main").
+    /// Fast ops skip this; their command is recovered from the log on finish.
+    fn beginOp(self: *App, command: []const u8) !void {
+        self.allocator.free(self.op_command);
+        self.op_command = try self.allocator.dupe(u8, command);
+        self.op_running = true;
+        self.op_scroll = 0;
+        self.mode = .operation;
+        if (self.render_hook) |hook| hook.call();
+    }
+
+    fn beginOpFmt(self: *App, comptime fmt: []const u8, args: anytype) !void {
+        const command = try std.fmt.allocPrint(self.allocator, fmt, args);
+        defer self.allocator.free(command);
+        try self.beginOp(command);
+    }
+
+    /// Populate and show the operation dialog's result. `summary` is a one-line
+    /// outcome; `raw` is the command's stdout/stderr (trimmed for display).
+    fn finishOp(self: *App, ok: bool, summary: []const u8, raw: []const u8) !void {
+        // A slow op set op_command via beginOp; a fast op recovers the command
+        // it just ran from the log so the dialog shows what executed.
+        if (!self.op_running) {
+            self.allocator.free(self.op_command);
+            const log = self.git.command_log.items;
+            self.op_command = try self.allocator.dupe(u8, if (log.len > 0) log[log.len - 1] else "");
+        }
+        self.allocator.free(self.op_summary);
+        self.op_summary = try self.allocator.dupe(u8, summary);
+        self.allocator.free(self.op_output);
+        self.op_output = try self.allocator.dupe(u8, std.mem.trim(u8, raw, " \t\r\n"));
+        self.op_ok = ok;
+        self.op_running = false;
+        self.op_scroll = 0;
+        self.mode = .operation;
+        // Mirror the outcome in the bottom bar for a glance after dismissal.
+        self.allocator.free(self.message);
+        self.message = try std.fmt.allocPrint(self.allocator, "{s}", .{summary});
+    }
+
     fn runMutation(self: *App, result: git_mod.ExecResult, comptime success_fmt: []const u8, args: anytype) !void {
         var mutable = result;
         defer mutable.deinit(self.allocator);
         if (mutable.ok()) {
-            try self.setMessage(success_fmt, args);
+            const summary = try std.fmt.allocPrint(self.allocator, success_fmt, args);
+            defer self.allocator.free(summary);
+            try self.finishOp(true, summary, mutable.stdout);
             self.refresh() catch |err| {
                 try self.setMessage("git command succeeded; refresh failed: {s}", .{@errorName(err)});
             };
             return;
         }
         const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
-        if (stderr.len > 0) {
-            try self.setMessage("{s}", .{stderr});
-        } else {
-            try self.setMessage("git command failed", .{});
-        }
+        try self.finishOp(false, "command failed", if (stderr.len > 0) mutable.stderr else mutable.stdout);
         self.refresh() catch {};
     }
 
     fn runCustomCommand(self: *App, command: []const u8) !void {
+        var run_buf: [256]u8 = undefined;
+        const shown = std.fmt.bufPrint(&run_buf, "$ {s}", .{command}) catch command;
+        try self.beginOp(shown);
         var result = try self.git.runShell(command);
         defer result.deinit(self.allocator);
         if (result.ok()) {
-            try self.setMessage("ran: {s}", .{command});
+            const summary = try std.fmt.allocPrint(self.allocator, "ran: {s}", .{command});
+            defer self.allocator.free(summary);
+            try self.finishOp(true, summary, result.stdout);
         } else {
-            const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
-            if (stderr.len > 0) {
-                try self.setMessage("{s}", .{stderr});
-            } else {
-                try self.setMessage("command failed: {s}", .{command});
-            }
+            try self.finishOp(false, "command failed", if (result.stderr.len > 0) result.stderr else result.stdout);
         }
         self.refresh() catch {};
     }
@@ -2818,6 +2910,32 @@ test "escape clears active file filter before quitting" {
     try std.testing.expectEqualStrings("file filter cleared", app.message);
 }
 
+test "operation dialog shows a running frame then its result" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // A slow op paints its running frame first (no render hook in tests).
+    try app.beginOp("git rebase main");
+    try std.testing.expectEqual(Mode.operation, app.mode);
+    try std.testing.expect(app.op_running);
+    try std.testing.expectEqualStrings("git rebase main", app.op_command);
+
+    // Finishing flips to the result, preserving the running op's command.
+    try app.finishOp(true, "rebased onto main", "Successfully rebased.\n");
+    try std.testing.expect(!app.op_running);
+    try std.testing.expect(app.op_ok);
+    try std.testing.expectEqualStrings("git rebase main", app.op_command);
+    try std.testing.expectEqualStrings("rebased onto main", app.op_summary);
+    try std.testing.expectEqualStrings("Successfully rebased.", app.op_output);
+    try std.testing.expectEqualStrings("rebased onto main", app.message);
+
+    // Enter dismisses the dialog.
+    try app.handleKey(.{ .codepoint = vaxis.Key.enter });
+    try std.testing.expectEqual(Mode.normal, app.mode);
+}
+
 fn testApp(allocator: std.mem.Allocator, files: []model.FileStatus) !App {
     return App{
         .allocator = allocator,
@@ -2835,6 +2953,9 @@ fn deinitTestApp(app: *App) void {
     app.allocator.free(app.diff);
     app.allocator.free(app.message);
     app.allocator.free(app.file_filter);
+    app.allocator.free(app.op_command);
+    app.allocator.free(app.op_summary);
+    app.allocator.free(app.op_output);
     app.commit_buffer.deinit(app.allocator);
     app.commit_body_buffer.deinit(app.allocator);
     app.file_filter_buffer.deinit(app.allocator);

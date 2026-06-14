@@ -107,6 +107,10 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
         if (async_job.result) |*r| r.deinit(async_allocator);
     };
 
+    var render_ctx = RenderCtx{ .vx = &vx, .writer = writer, .app = app };
+    app.render_hook = .{ .ctx = &render_ctx, .func = renderHook };
+    defer app.render_hook = null;
+
     try renderAndFlush(&vx, writer, app);
     while (app.running) {
         const event = try loop.nextEvent();
@@ -161,6 +165,19 @@ fn renderAndFlush(vx: *vaxis.Vaxis, writer: anytype, app: *app_mod.App) !void {
     render(vx, app);
     try vx.render(writer);
     try writer.flush();
+}
+
+/// Backing context for `app.render_hook`, letting App repaint mid-handler so a
+/// synchronous operation's "running" frame is visible before it blocks.
+const RenderCtx = struct {
+    vx: *vaxis.Vaxis,
+    writer: *std.Io.Writer,
+    app: *app_mod.App,
+};
+
+fn renderHook(ctx: *anyopaque) void {
+    const rc: *RenderCtx = @ptrCast(@alignCast(ctx));
+    renderAndFlush(rc.vx, rc.writer, rc.app) catch {};
 }
 
 fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
@@ -245,6 +262,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         .text_prompt => drawTextPromptPopup(root, app),
         .command_log => drawCommandLogPopup(root, app),
         .help => drawHelpPopup(root, app),
+        .operation => drawOperationPopup(root, app),
         else => {},
     }
 }
@@ -297,6 +315,11 @@ const help_lines = [_][]const u8{
     "",
     "Stash",
     "  space / g / d  apply / pop / drop",
+    "",
+    "Operations",
+    "  git actions    run synchronously in a dialog showing the command,",
+    "                 its output and result; enter dismisses, up/down scroll",
+    "  fetch/pull/push run in the background (status in the bottom bar)",
 };
 
 fn drawHelpPopup(root: vaxis.Window, app: *const app_mod.App) void {
@@ -336,6 +359,44 @@ fn drawCommandLogPopup(root: vaxis.Window, app: *const app_mod.App) void {
         print(win, row, 0, entry, st.normal);
         row += 1;
     }
+}
+
+fn drawOperationPopup(root: vaxis.Window, app: *const app_mod.App) void {
+    const st = styles();
+    const w: u16 = @min(@as(u16, 86), root.width -| 4);
+    const h: u16 = @min(@as(u16, 20), root.height -| 2);
+    const title = if (app.op_running) "Running" else if (app.op_ok) "Done" else "Failed";
+    const win = popup(root, w, h, title);
+
+    // The command that is running / ran.
+    print(win, 0, 0, app.op_command, st.title);
+
+    if (app.op_running) {
+        print(win, 2, 0, "Running...", st.muted);
+        return;
+    }
+
+    // Outcome summary, colored by success.
+    print(win, 2, 0, app.op_summary, if (app.op_ok) st.normal else st.warning);
+
+    // Raw stdout/stderr below the summary, scrollable; last row is the footer.
+    const out_top: u16 = 4;
+    const footer_row: u16 = win.height -| 1;
+    if (app.op_output.len > 0 and out_top < footer_row) {
+        var lines = std.mem.splitScalar(u8, app.op_output, '\n');
+        var skipped: usize = 0;
+        while (skipped < app.op_scroll) : (skipped += 1) {
+            if (lines.next() == null) break;
+        }
+        var row: u16 = out_top;
+        while (lines.next()) |line| {
+            if (row >= footer_row) break;
+            print(win, row, 0, line, st.muted);
+            row += 1;
+        }
+    }
+
+    print(win, footer_row, 0, "enter dismiss   up/down scroll", st.bottom_accent);
 }
 
 fn drawTextPromptPopup(root: vaxis.Window, app: *const app_mod.App) void {
