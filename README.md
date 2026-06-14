@@ -64,7 +64,7 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 
 Large lazygit workflows still not implemented:
 
-- Undo/redo of the last operation (reflog-based).
+- Redo (undo is implemented; redo of an undo is not).
 - Click-to-select individual list items (mouse currently focuses panels +
   scrolls).
 - Async for all mutations (currently only network ops run off-loop).
@@ -99,6 +99,7 @@ Useful keys:
 - `q` or `ctrl+c`: quit
 - `R`: refresh
 - `?`: keybindings help overlay (`j`/`k` to scroll)
+- `z`: undo the last operation (reflog reset, after confirmation)
 - `@`: show the command log (recent git commands ziggity ran)
 - mouse: click a panel to focus it; scroll wheel to navigate/scroll
 - `/`: filter files by path live; enter accepts; esc clears

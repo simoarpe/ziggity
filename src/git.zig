@@ -722,6 +722,19 @@ pub const Git = struct {
         return self.exec(&.{ "cherry-pick", "--abort" });
     }
 
+    /// The subject of the most recent reflog entry (describes the last op).
+    pub fn reflogSubject(self: *Git) ![]u8 {
+        var result = try self.exec(&.{ "reflog", "-1", "--format=%gs" });
+        defer result.deinit(self.allocator);
+        if (!result.ok()) return self.allocator.alloc(u8, 0);
+        return self.allocator.dupe(u8, std.mem.trim(u8, result.stdout, " \t\r\n"));
+    }
+
+    /// Undo the last history operation by resetting HEAD to its prior position.
+    pub fn undoLastOperation(self: *Git) !ExecResult {
+        return self.exec(&.{ "reset", "--hard", "HEAD@{1}" });
+    }
+
     /// The body (message minus subject line) of a commit, trimmed. Empty if the
     /// commit has only a subject. Caller owns the returned slice.
     pub fn commitBody(self: *Git, hash: []const u8) ![]u8 {

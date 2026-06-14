@@ -50,6 +50,7 @@ pub const Confirmation = enum {
     delete_tag,
     delete_remote_branch,
     remove_worktree,
+    undo,
 };
 
 /// Network operations that run off the UI loop so they don't freeze it.
@@ -288,6 +289,8 @@ pub const App = struct {
     mode: Mode = .normal,
     status_filter_index: usize = 0,
     help_scroll: usize = 0,
+    undo_label_buf: [160]u8 = undefined,
+    undo_label_len: usize = 0,
     active_menu: ?Menu = null,
     pending_confirmation: ?Confirmation = null,
     terminal_focused: bool = true,
@@ -503,6 +506,7 @@ pub const App = struct {
                 self.help_scroll = 0;
                 try self.setMessage("help", .{});
             },
+            .undo => try self.startUndoConfirm(),
             .conflict_menu => try self.startConflictActionsMenu(),
             .stage_all => try self.toggleAllStaged(),
             .discard_selected => try self.startDiscardMenu(),
@@ -1189,6 +1193,12 @@ pub const App = struct {
                 }
                 break :blk "Remove the selected worktree?";
             },
+            .undo => blk: {
+                if (self.undo_label_len > 0) {
+                    break :blk std.fmt.bufPrint(buf, "Undo \"{s}\"? Resets HEAD to before it.", .{self.undo_label_buf[0..self.undo_label_len]}) catch "Undo the last operation?";
+                }
+                break :blk "Undo the last operation? Resets HEAD.";
+            },
         };
     }
 
@@ -1794,6 +1804,29 @@ pub const App = struct {
         try self.setMessage("confirm discard all changes", .{});
     }
 
+    /// Undo the last history operation by resetting HEAD to its prior reflog
+    /// position. Refused while an operation is in progress or when there are
+    /// tracked changes (which a hard reset would discard).
+    fn startUndoConfirm(self: *App) !void {
+        if (self.data.state != .clean) {
+            try self.setMessage("finish the in-progress operation first (m)", .{});
+            return;
+        }
+        if (self.data.stagedCount() + self.data.unstagedCount() > 0) {
+            try self.setMessage("commit or discard changes before undo", .{});
+            return;
+        }
+        const subject = self.git.reflogSubject() catch try self.allocator.alloc(u8, 0);
+        defer self.allocator.free(subject);
+        const n = @min(subject.len, self.undo_label_buf.len);
+        @memcpy(self.undo_label_buf[0..n], subject[0..n]);
+        self.undo_label_len = n;
+
+        self.mode = .confirmation;
+        self.pending_confirmation = .undo;
+        try self.setMessage("confirm undo", .{});
+    }
+
     /// `n` in the Branches panel creates a branch, or a tag on the Tags tab.
     fn startNewForBranchTab(self: *App) !void {
         if (self.branches_tab == .tags) return self.startTextPrompt(.new_tag);
@@ -2274,6 +2307,7 @@ pub const App = struct {
                 };
                 return self.runMutation(try self.git.removeWorktree(wt.path), "removed worktree {s}", .{wt.path});
             },
+            .undo => return self.runMutation(try self.git.undoLastOperation(), "undone", .{}),
         }
     }
 

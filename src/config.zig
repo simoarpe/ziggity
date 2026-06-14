@@ -21,6 +21,7 @@ pub const KeyMap = struct {
     refresh: Binding = .{ .codepoint = 'R' },
     command_log: Binding = .{ .codepoint = '@' },
     help: Binding = .{ .codepoint = '?' },
+    undo: Binding = .{ .codepoint = 'z' },
     up: Binding = .{ .codepoint = 'k' },
     down: Binding = .{ .codepoint = 'j' },
     left: Binding = .{ .codepoint = 'h' },

@@ -259,6 +259,7 @@ const help_lines = [_][]const u8{
     "  [ / ]          switch panel tabs",
     "  enter / esc    inspect in main panel / go back",
     "  @ / ?          command log / this help",
+    "  z              undo the last operation (reflog reset)",
     "  f / p / P      fetch / pull / push (async)",
     "",
     "Files",
@@ -447,6 +448,7 @@ fn drawConfirmPopup(root: vaxis.Window, app: *const app_mod.App) void {
         .delete_tag => "Delete tag",
         .delete_remote_branch => "Delete remote branch",
         .remove_worktree => "Remove worktree",
+        .undo => "Undo",
     };
     const w: u16 = @intCast(@min(@as(usize, 72), @max(text.len, 34) + 4));
     const win = popup(root, w, 5, title);
@@ -861,7 +863,7 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
 /// Keybinding hints for the focused panel only, lazygit-style. A short global
 /// suffix (refresh/quit) is appended since those apply everywhere.
 fn contextHints(app: *const app_mod.App) []const u8 {
-    const global = "  -  ? help  R refresh  q quit";
+    const global = "  -  ? help  z undo  R refresh  q quit";
     if (app.staging_active) {
         return "j/k line  v range  space stage/unstage (@@=hunk)  tab side  esc back" ++ global;
     }
