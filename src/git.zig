@@ -29,13 +29,14 @@ pub const ExecResult = struct {
 pub const Git = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    environ: *std.process.Environ.Map,
     root: []u8,
     /// Ring of recently-run mutating commands, for the command-log view.
     command_log: std.ArrayList([]u8) = .empty,
 
     const command_log_cap = 200;
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io) !Git {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map) !Git {
         var argv = [_][]const u8{ "git", "rev-parse", "--show-toplevel" };
         const result = try std.process.run(allocator, io, .{
             .argv = &argv,
@@ -55,6 +56,7 @@ pub const Git = struct {
         return .{
             .allocator = allocator,
             .io = io,
+            .environ = environ,
             .root = root,
         };
     }
@@ -187,24 +189,42 @@ pub const Git = struct {
         try std.Io.Dir.writeFile(.cwd(), self.io, .{ .sub_path = todo_path, .data = todo });
         defer std.Io.Dir.deleteFile(.cwd(), self.io, todo_path) catch {};
 
-        const seq_arg = try std.fmt.allocPrint(self.allocator, "sequence.editor=cp '{s}'", .{todo_path});
-        defer self.allocator.free(seq_arg);
+        // The sequence editor copies our todo over git's; the commit-message
+        // editor accepts the default (true) or, for reword, supplies our
+        // message. These must be set via env vars: `-c core.editor` does not
+        // reach the reword/squash message subprocess.
+        const seq_editor = try std.fmt.allocPrint(self.allocator, "cp '{s}'", .{todo_path});
+        defer self.allocator.free(seq_editor);
 
         var msg_path: ?[]u8 = null;
         defer if (msg_path) |p| {
             std.Io.Dir.deleteFile(.cwd(), self.io, p) catch {};
             self.allocator.free(p);
         };
-        const core_arg = if (message) |msg| blk: {
+        const msg_editor = if (message) |msg| blk: {
             const mp = try std.fmt.allocPrint(self.allocator, "{s}/.git/ziggity-rebase-msg", .{self.root});
             errdefer self.allocator.free(mp);
             try std.Io.Dir.writeFile(.cwd(), self.io, .{ .sub_path = mp, .data = msg });
             msg_path = mp;
-            break :blk try std.fmt.allocPrint(self.allocator, "core.editor=cp '{s}'", .{mp});
-        } else try self.allocator.dupe(u8, "core.editor=true");
-        defer self.allocator.free(core_arg);
+            break :blk try std.fmt.allocPrint(self.allocator, "cp '{s}'", .{mp});
+        } else try self.allocator.dupe(u8, "true");
+        defer self.allocator.free(msg_editor);
 
-        return self.exec(&.{ "-c", seq_arg, "-c", core_arg, "rebase", "-i", "--autostash", base_ref });
+        var env = try self.environ.clone(self.allocator);
+        defer env.deinit();
+        try env.put("GIT_SEQUENCE_EDITOR", seq_editor);
+        try env.put("GIT_EDITOR", msg_editor);
+
+        const argv = [_][]const u8{ "git", "rebase", "-i", "--autostash", base_ref };
+        self.recordCommand(argv[1..]);
+        const result = try std.process.run(self.allocator, self.io, .{
+            .argv = &argv,
+            .cwd = .{ .path = self.root },
+            .environ_map = &env,
+            .stdout_limit = .limited(16 * 1024 * 1024),
+            .stderr_limit = .limited(4 * 1024 * 1024),
+        });
+        return .{ .stdout = result.stdout, .stderr = result.stderr, .term = result.term };
     }
 
     pub fn loadRepoData(self: *Git) !model.RepoData {
@@ -671,6 +691,15 @@ pub const Git = struct {
 
     pub fn revertCommit(self: *Git, hash: []const u8) !ExecResult {
         return self.exec(&.{ "revert", "--no-edit", hash });
+    }
+
+    /// The body (message minus subject line) of a commit, trimmed. Empty if the
+    /// commit has only a subject. Caller owns the returned slice.
+    pub fn commitBody(self: *Git, hash: []const u8) ![]u8 {
+        var result = try self.exec(&.{ "log", "-1", "--format=%b", hash });
+        defer result.deinit(self.allocator);
+        if (!result.ok()) return self.allocator.alloc(u8, 0);
+        return self.allocator.dupe(u8, std.mem.trim(u8, result.stdout, " \t\r\n"));
     }
 
     pub fn fetch(self: *Git) !ExecResult {

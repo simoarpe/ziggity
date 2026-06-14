@@ -275,7 +275,7 @@ pub const App = struct {
         io: std.Io,
         env_map: *std.process.Environ.Map,
     ) !App {
-        var git = try git_mod.Git.init(allocator, io);
+        var git = try git_mod.Git.init(allocator, io, env_map);
         errdefer git.deinit();
 
         const cfg = try config_mod.Config.load(allocator, io, env_map, git.root);
@@ -1342,7 +1342,13 @@ pub const App = struct {
                     return;
                 }
                 const i = @min(self.commit_index, self.data.commits.len - 1);
-                const msg = try std.fmt.allocPrint(self.allocator, "{s}\n", .{value});
+                // Preserve the commit body so rewording the subject doesn't drop it.
+                const body = self.git.commitBody(self.data.commits[i].hash) catch try self.allocator.alloc(u8, 0);
+                defer self.allocator.free(body);
+                const msg = if (body.len > 0)
+                    try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}\n", .{ value, body })
+                else
+                    try std.fmt.allocPrint(self.allocator, "{s}\n", .{value});
                 defer self.allocator.free(msg);
                 self.mode = .normal;
                 self.text_prompt_kind = null;
