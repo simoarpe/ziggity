@@ -259,6 +259,7 @@ pub const Git = struct {
 
     pub fn detectState(self: *Git) model.RepoState {
         if (self.gitPathExists("rebase-merge") or self.gitPathExists("rebase-apply")) return .rebasing;
+        if (self.gitPathExists("CHERRY_PICK_HEAD")) return .cherry_picking;
         if (self.gitPathExists("MERGE_HEAD")) return .merging;
         return .clean;
     }
@@ -691,6 +692,24 @@ pub const Git = struct {
 
     pub fn revertCommit(self: *Git, hash: []const u8) !ExecResult {
         return self.exec(&.{ "revert", "--no-edit", hash });
+    }
+
+    /// Amend the last commit with the currently-staged changes, keeping its
+    /// message.
+    pub fn amendCommit(self: *Git) !ExecResult {
+        return self.exec(&.{ "commit", "--amend", "--no-edit" });
+    }
+
+    pub fn cherryPick(self: *Git, hash: []const u8) !ExecResult {
+        return self.exec(&.{ "cherry-pick", hash });
+    }
+
+    pub fn cherryPickContinue(self: *Git) !ExecResult {
+        return self.exec(&.{ "-c", "core.editor=true", "cherry-pick", "--continue" });
+    }
+
+    pub fn cherryPickAbort(self: *Git) !ExecResult {
+        return self.exec(&.{ "cherry-pick", "--abort" });
     }
 
     /// The body (message minus subject line) of a commit, trimmed. Empty if the

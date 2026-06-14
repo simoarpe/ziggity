@@ -471,6 +471,8 @@ pub const App = struct {
             .start_file_filter => try self.startFileFilterPrompt(),
             .open_status_filter => try self.startStatusFilterMenu(),
             .start_commit => try self.startCommitPrompt(),
+            .amend_commit => try self.amendLastCommit(),
+            .cherry_pick => try self.cherryPickSelectedCommit(),
             .new_branch => try self.startNewForBranchTab(),
             .delete_branch => try self.startDeleteForBranchTab(),
             .merge_branch => try self.startBranchConfirm(.merge_branch),
@@ -1229,6 +1231,31 @@ pub const App = struct {
         try self.setMessage("enter commit message", .{});
     }
 
+    fn amendLastCommit(self: *App) !void {
+        if (self.data.state != .clean) {
+            try self.setMessage("finish the in-progress operation first (m)", .{});
+            return;
+        }
+        if (self.data.stagedCount() == 0) {
+            try self.setMessage("stage changes to amend into the last commit", .{});
+            return;
+        }
+        return self.runMutation(try self.git.amendCommit(), "amended last commit", .{});
+    }
+
+    fn cherryPickSelectedCommit(self: *App) !void {
+        if (self.focus != .commits) return;
+        if (self.data.state != .clean) {
+            try self.setMessage("finish the in-progress operation first (m)", .{});
+            return;
+        }
+        const commit = self.selectedCommit() orelse {
+            try self.setMessage("no commit selected", .{});
+            return;
+        };
+        return self.runMutation(try self.git.cherryPick(commit.hash), "cherry-picked {s}", .{commit.short_hash});
+    }
+
     fn startTextPrompt(self: *App, kind: TextPromptKind) !void {
         var prefill: []const u8 = "";
         switch (kind) {
@@ -1494,11 +1521,13 @@ pub const App = struct {
             .conflict_continue => switch (self.data.state) {
                 .merging => return self.runMutation(try self.git.mergeContinue(), "merge continued", .{}),
                 .rebasing => return self.runMutation(try self.git.rebaseContinue(), "rebase continued", .{}),
+                .cherry_picking => return self.runMutation(try self.git.cherryPickContinue(), "cherry-pick continued", .{}),
                 .clean => try self.setMessage("nothing to continue", .{}),
             },
             .conflict_abort => switch (self.data.state) {
                 .merging => return self.runMutation(try self.git.mergeAbort(), "merge aborted", .{}),
                 .rebasing => return self.runMutation(try self.git.rebaseAbort(), "rebase aborted", .{}),
+                .cherry_picking => return self.runMutation(try self.git.cherryPickAbort(), "cherry-pick aborted", .{}),
                 .clean => try self.setMessage("nothing to abort", .{}),
             },
         }

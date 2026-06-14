@@ -38,9 +38,10 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
   (`d` on the Remotes tab).
 - Merge/rebase conflict resolution: take ours/theirs on conflicted files and
   continue/abort (`m`); MERGING/REBASING shown in the status panel.
-- Commit workflows: reset (soft/mixed/hard), revert, a navigable changed-file
-  list per commit, and interactive rebase actions (drop `d`, squash `s`,
-  fixup `f`, edit `e`, reword `r`, move `ctrl+j`/`ctrl+k`).
+- Commit workflows: commit, amend (`A`), reset (soft/mixed/hard), revert,
+  cherry-pick (`c`), a navigable changed-file list per commit, and interactive
+  rebase actions (drop `d`, squash `s`, fixup `f`, edit `e`, reword `r`,
+  move `ctrl+j`/`ctrl+k`).
 - Discard selected file via a lazygit-style menu (all changes / unstaged only).
 - Discard all working tree changes with a confirmation popup.
 - Commit staged changes in a centered commit-message popup.
@@ -59,7 +60,7 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 
 Large lazygit workflows still not implemented:
 
-- Cherry-pick flows and undo/redo.
+- Cherry-pick of ranges / clipboard-style copy-paste; undo/redo.
 - Mouse handling.
 - Async for all mutations (currently only network ops run off-loop).
 - Full lazygit config compatibility.

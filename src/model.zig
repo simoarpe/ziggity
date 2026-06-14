@@ -5,12 +5,14 @@ pub const RepoState = enum {
     clean,
     merging,
     rebasing,
+    cherry_picking,
 
     pub fn label(self: RepoState) []const u8 {
         return switch (self) {
             .clean => "",
             .merging => "MERGING",
             .rebasing => "REBASING",
+            .cherry_picking => "CHERRY-PICK",
         };
     }
 };

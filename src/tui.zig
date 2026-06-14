@@ -246,7 +246,7 @@ const help_lines = [_][]const u8{
     "Files",
     "  space          stage/unstage (whole dir in tree view)",
     "  a              stage/unstage all",
-    "  c              commit (popup editor)",
+    "  c / A          commit (popup) / amend last commit",
     "  d / D          discard menu / discard all",
     "  / / ctrl+b     filter by path / status filter",
     "  `              toggle directory tree",
@@ -268,7 +268,7 @@ const help_lines = [_][]const u8{
     "",
     "Commits  (tabs: Commits / Reflog)",
     "  enter          view the commit's changed files",
-    "  g / t          reset menu / revert",
+    "  g / t / c      reset menu / revert / cherry-pick onto HEAD",
     "  d / s / f      drop / squash-down / fixup-down (interactive rebase)",
     "  e / r          edit (stop here) / reword",
     "  ctrl+j/ctrl+k  move commit down / up",
@@ -832,9 +832,9 @@ fn contextHints(app: *const app_mod.App) []const u8 {
     }
     return switch (app.focus) {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push  @ log" ++ global,
-        .files => "space stage  a all  c commit  d discard  / filter  ` tree  enter stage-hunks" ++ global,
+        .files => "space stage  a all  c commit  A amend  d discard  / filter  ` tree  enter hunks" ++ global,
         .branches => unreachable,
-        .commits => "enter files  g reset  t revert  d/s/f/e/r drop/squash/fixup/edit/reword  ^j/^k move" ++ global,
+        .commits => "g reset  t revert  c cherry-pick  d/s/f/e/r drop/squash/fixup/edit/reword  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => "j/k scroll  PgUp/PgDn page  esc back" ++ global,
     };

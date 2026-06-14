@@ -18,6 +18,8 @@ pub const Action = enum {
     start_file_filter,
     open_status_filter,
     start_commit,
+    amend_commit,
+    cherry_pick,
     conflict_menu,
     command_log,
     help,
@@ -105,6 +107,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
             if (keymap.discard.matches(key)) return .discard_selected;
             if (keymap.discard_all.matches(key)) return .discard_all;
             if (keymap.commit.matches(key)) return .start_commit;
+            if (keymap.amend.matches(key)) return .amend_commit;
             if (keymap.conflict_menu.matches(key)) return .conflict_menu;
         },
         .branches => {
@@ -123,6 +126,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
             if (keymap.commit_reword.matches(key)) return .rebase_reword;
             if (keymap.commit_move_down.matches(key)) return .rebase_move_down;
             if (keymap.commit_move_up.matches(key)) return .rebase_move_up;
+            if (keymap.cherry_pick.matches(key)) return .cherry_pick;
         },
         .stash => {
             if (keymap.stash_apply.matches(key)) return .select;
