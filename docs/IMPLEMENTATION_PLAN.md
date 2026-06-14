@@ -125,16 +125,18 @@ whole directory) is done.
 Also done since: merge/rebase **conflict resolution** (take ours/theirs,
 continue/abort, MERGING/REBASING in the status panel), **tag** create/delete and
 **remote-branch** delete (tab-aware `n`/`d`), a **command-log** overlay (`@`),
-configurable **theme colors** + fully remappable keys, and user-defined
-**custom commands** (`command.<key>` in config).
+configurable **theme colors** + fully remappable keys, user-defined
+**custom commands** (`command.<key>`), and **Worktrees** + **Submodules** tabs on
+the Branches panel (list, remove worktree, init/update submodule).
 
-Remaining (large/architectural — scope before implementing):
+Remaining — one item, needs a design decision:
 
-1. **Async / non-blocking command execution.** Today every git call runs
-   synchronously on the UI event loop. Making it non-blocking needs a job
-   system (worker spawn, completion events, in-flight/loading UI, cancellation)
-   touching the event loop and every mutation — a substantial rewrite.
-2. **Worktrees and submodules panels.** The layout is a fixed five-panel column;
-   adding these needs either a sixth panel (layout rework) or a new tabbed host,
-   plus new git loaders/actions.
-3. Re-run `zig fmt`, `zig build`, and `zig build test` after each step.
+1. **Async / non-blocking command execution.** Every git call runs
+   synchronously on the UI event loop, so slow network ops (fetch/pull/push)
+   freeze the UI. Making them non-blocking needs a worker that runs the command
+   off-loop and posts a completion event — but `std.process.run` allocates, so
+   it needs a thread-safe allocator strategy (e.g. a dedicated
+   `ThreadSafeAllocator` for the async path) plus a single-in-flight/loading-UI
+   policy. This introduces concurrency into the codebase; pick the allocator
+   approach and queueing policy before implementing.
+2. Re-run `zig fmt`, `zig build`, and `zig build test` after each step.
