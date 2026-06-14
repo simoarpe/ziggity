@@ -39,7 +39,7 @@ pub fn build(allocator: std.mem.Allocator, entries: []const Entry, collapsed: *c
             const is_collapsed = collapsed.contains(dir_path);
             try rows.append(allocator, .{
                 .is_dir = true,
-                .depth = @intCast(d),
+                .depth = depthCast(d),
                 .path = dir_path,
                 .collapsed = is_collapsed,
             });
@@ -58,7 +58,7 @@ pub fn build(allocator: std.mem.Allocator, entries: []const Entry, collapsed: *c
 
         try rows.append(allocator, .{
             .is_dir = false,
-            .depth = @intCast(segs),
+            .depth = depthCast(segs),
             .path = entry.path,
             .file_index = entry.index,
         });
@@ -67,6 +67,12 @@ pub fn build(allocator: std.mem.Allocator, entries: []const Entry, collapsed: *c
     }
 
     return rows.toOwnedSlice(allocator);
+}
+
+/// Saturating narrow of a path-depth to the Row.depth width (only ever used for
+/// indentation, so clamping absurdly deep paths is harmless).
+fn depthCast(depth: usize) u16 {
+    return @intCast(@min(depth, std.math.maxInt(u16)));
 }
 
 /// The directory portion of a path ("src/a/b.zig" -> "src/a", "x" -> "").
