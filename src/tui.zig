@@ -152,7 +152,29 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         .confirmation => drawConfirmPopup(root, app),
         .commit_prompt => drawCommitPopup(root, app),
         .text_prompt => drawTextPromptPopup(root, app),
+        .command_log => drawCommandLogPopup(root, app),
         else => {},
+    }
+}
+
+fn drawCommandLogPopup(root: vaxis.Window, app: *const app_mod.App) void {
+    const st = styles();
+    const log = app.git.command_log.items;
+    const w: u16 = @min(@as(u16, 90), root.width -| 4);
+    const h: u16 = @min(@as(u16, 20), root.height -| 2);
+    const win = popup(root, w, h, "Command log");
+    if (log.len == 0) {
+        print(win, 0, 0, "No commands run yet.", st.muted);
+        return;
+    }
+    // Show the most recent commands that fit, oldest at the top.
+    const capacity: usize = win.height;
+    const start = if (log.len > capacity) log.len - capacity else 0;
+    var row: u16 = 0;
+    for (log[start..]) |entry| {
+        if (row >= win.height) break;
+        print(win, row, 0, entry, st.normal);
+        row += 1;
     }
 }
 
@@ -581,6 +603,10 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
         print(win, 0, 0, "y/enter confirm  -  n/esc cancel", st.bottom_accent);
         return;
     }
+    if (app.mode == .command_log) {
+        print(win, 0, 0, "command log  -  press any key to close", st.bottom_accent);
+        return;
+    }
 
     var buf: [1024]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "{s}  |  {s}", .{ app.message, contextHints(app) }) catch app.message;
@@ -608,7 +634,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
         };
     }
     return switch (app.focus) {
-        .status => "1-5 panels  enter inspect  f fetch  p pull  P push" ++ global,
+        .status => "1-5 panels  enter inspect  f fetch  p pull  P push  @ log" ++ global,
         .files => "space stage  a all  c commit  d discard  / filter  ` tree  enter stage-hunks" ++ global,
         .branches => unreachable,
         .commits => "enter files  g reset  t revert  [ ] commits/reflog" ++ global,

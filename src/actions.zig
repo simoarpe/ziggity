@@ -19,6 +19,7 @@ pub const Action = enum {
     open_status_filter,
     start_commit,
     conflict_menu,
+    command_log,
     toggle_tree,
     new_branch,
     delete_branch,
@@ -71,6 +72,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
 
     if (keymap.range_select.matches(key)) return .range_select;
 
+    if (keymap.command_log.matches(key)) return .command_log;
     if (keymap.refresh.matches(key)) return .refresh;
     if (keymap.file_filter.matches(key)) return .start_file_filter;
     if (keymap.fetch.matches(key)) return .fetch;

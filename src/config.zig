@@ -19,6 +19,7 @@ pub const KeyMap = struct {
     quit: Binding = .{ .codepoint = 'q' },
     quit_ctrl: Binding = .{ .codepoint = 'c', .ctrl = true },
     refresh: Binding = .{ .codepoint = 'R' },
+    command_log: Binding = .{ .codepoint = '@' },
     up: Binding = .{ .codepoint = 'k' },
     down: Binding = .{ .codepoint = 'j' },
     left: Binding = .{ .codepoint = 'h' },

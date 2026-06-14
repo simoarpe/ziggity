@@ -16,6 +16,7 @@ pub const Mode = enum {
     menu,
     text_prompt,
     confirmation,
+    command_log,
 };
 
 /// A reusable single-line text-input popup. Each kind knows its title and what
@@ -293,6 +294,11 @@ pub const App = struct {
             try self.handleConfirmationKey(key);
             return;
         }
+        if (self.mode == .command_log) {
+            // Any key closes the command-log overlay.
+            self.mode = .normal;
+            return;
+        }
 
         if (key.matches(vaxis.Key.page_up, .{})) return self.scrollMain(-10);
         if (key.matches(vaxis.Key.page_down, .{})) return self.scrollMain(10);
@@ -350,6 +356,10 @@ pub const App = struct {
                 }
             },
             .toggle_tree => try self.toggleTreeView(),
+            .command_log => {
+                self.mode = .command_log;
+                try self.setMessage("command log", .{});
+            },
             .conflict_menu => try self.startConflictActionsMenu(),
             .stage_all => try self.toggleAllStaged(),
             .discard_selected => try self.startDiscardMenu(),

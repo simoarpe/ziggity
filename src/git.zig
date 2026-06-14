@@ -30,6 +30,10 @@ pub const Git = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     root: []u8,
+    /// Ring of recently-run mutating commands, for the command-log view.
+    command_log: std.ArrayList([]u8) = .empty,
+
+    const command_log_cap = 200;
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !Git {
         var argv = [_][]const u8{ "git", "rev-parse", "--show-toplevel" };
@@ -57,10 +61,45 @@ pub const Git = struct {
 
     pub fn deinit(self: *Git) void {
         self.allocator.free(self.root);
+        for (self.command_log.items) |entry| self.allocator.free(entry);
+        self.command_log.deinit(self.allocator);
         self.* = undefined;
     }
 
+    /// Read-only invocations ziggity issues during loads/refreshes; these are
+    /// kept out of the command log so the auto-refresh does not flood it.
+    fn isReadOnly(args: []const []const u8) bool {
+        if (args.len == 0) return true;
+        const reads = [_][]const u8{ "status", "diff", "diff-tree", "log", "show", "rev-parse", "rev-list", "for-each-ref", "ls-files", "reflog", "cat-file" };
+        for (reads) |r| if (std.mem.eql(u8, args[0], r)) return true;
+        if (args.len >= 2) {
+            const second = args[1];
+            const long_flag = std.mem.startsWith(u8, second, "--") and second.len > 2;
+            if (std.mem.eql(u8, args[0], "branch") and long_flag) return true;
+            if (std.mem.eql(u8, args[0], "tag") and long_flag) return true;
+            if (std.mem.eql(u8, args[0], "stash") and std.mem.eql(u8, second, "list")) return true;
+        }
+        return false;
+    }
+
+    fn recordCommand(self: *Git, args: []const []const u8) void {
+        if (isReadOnly(args)) return;
+        var buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer buf.deinit();
+        buf.writer.writeAll("git") catch return;
+        for (args) |arg| {
+            buf.writer.writeByte(' ') catch return;
+            buf.writer.writeAll(arg) catch return;
+        }
+        const entry = buf.toOwnedSlice() catch return;
+        if (self.command_log.items.len >= command_log_cap) {
+            self.allocator.free(self.command_log.orderedRemove(0));
+        }
+        self.command_log.append(self.allocator, entry) catch self.allocator.free(entry);
+    }
+
     pub fn exec(self: *Git, args: []const []const u8) !ExecResult {
+        self.recordCommand(args);
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(self.allocator);
         try argv.append(self.allocator, "git");
@@ -827,6 +866,21 @@ test "parse branches captures current marker and upstream" {
     try std.testing.expect(!branches[1].current);
     try std.testing.expectEqualSlices(u8, "feature/demo", branches[1].name);
     try std.testing.expect(branches[2].upstream == null);
+}
+
+test "command log filters read-only invocations" {
+    // Read-only loads/refreshes are not logged.
+    try std.testing.expect(Git.isReadOnly(&.{ "status", "--porcelain" }));
+    try std.testing.expect(Git.isReadOnly(&.{ "diff", "--staged" }));
+    try std.testing.expect(Git.isReadOnly(&.{ "branch", "--format=%x00" }));
+    try std.testing.expect(Git.isReadOnly(&.{ "tag", "--sort=-creatordate" }));
+    try std.testing.expect(Git.isReadOnly(&.{ "stash", "list" }));
+    // Mutations are logged.
+    try std.testing.expect(!Git.isReadOnly(&.{ "commit", "-m", "x" }));
+    try std.testing.expect(!Git.isReadOnly(&.{ "branch", "-d", "--", "feat" }));
+    try std.testing.expect(!Git.isReadOnly(&.{ "tag", "--", "v1" }));
+    try std.testing.expect(!Git.isReadOnly(&.{ "stash", "pop" }));
+    try std.testing.expect(!Git.isReadOnly(&.{"push"}));
 }
 
 test "parse tags captures name and optional subject" {
