@@ -127,7 +127,6 @@ pub fn buildLinePatch(
     var old_count: usize = 0;
     var new_count: usize = 0;
     var changed = false;
-    var kept_prev = true;
 
     var lines = std.mem.splitScalar(u8, hunk_text[nl + 1 ..], '\n');
     var j: usize = 0;
@@ -139,7 +138,6 @@ pub fn buildLinePatch(
                 try w.print("{s}\n", .{line});
                 old_count += 1;
                 new_count += 1;
-                kept_prev = true;
             },
             '-' => {
                 if (selected) {
@@ -151,19 +149,20 @@ pub fn buildLinePatch(
                     old_count += 1;
                     new_count += 1;
                 }
-                kept_prev = true;
             },
             '+' => {
                 if (selected) {
                     try w.print("{s}\n", .{line});
                     new_count += 1;
                     changed = true;
-                    kept_prev = true;
-                } else {
-                    kept_prev = false;
                 }
+                // unselected additions are dropped
             },
-            '\\' => if (kept_prev) try w.print("{s}\n", .{line}),
+            // A `\ No newline at end of file` marker can't be re-placed
+            // correctly when only part of the hunk is taken; building a valid
+            // partial patch here is ambiguous, so refuse and let the caller
+            // suggest staging the whole hunk (which copies it verbatim).
+            '\\' => return error.NoNewlineHunk,
             else => try w.print("{s}\n", .{line}),
         }
     }
@@ -295,6 +294,22 @@ test "buildLinePatch turns an unselected deletion into context" {
         " b\n" ++
         " c\n";
     try std.testing.expectEqualStrings(expected, patch);
+}
+
+test "buildLinePatch refuses a hunk with a no-newline marker" {
+    const diff =
+        "diff --git a/f b/f\n" ++
+        "--- a/f\n" ++
+        "+++ b/f\n" ++
+        "@@ -1,2 +1,2 @@\n" ++
+        " a\n" ++
+        "-b\n" ++
+        "\\ No newline at end of file\n" ++
+        "+B\n" ++
+        "\\ No newline at end of file\n";
+    var parsed = try parse(std.testing.allocator, diff);
+    defer parsed.deinit(std.testing.allocator);
+    try std.testing.expectError(error.NoNewlineHunk, buildLinePatch(std.testing.allocator, diff, parsed, 0, 1, 1));
 }
 
 test "buildLinePatch rejects a selection with no change" {

@@ -811,6 +811,14 @@ pub const App = struct {
                     try self.setMessage("selection contains no change", .{});
                     return;
                 },
+                error.NoNewlineHunk => {
+                    try self.setMessage("stage the whole hunk for no-newline changes (enter on @@)", .{});
+                    return;
+                },
+                error.InvalidHunk => {
+                    try self.setMessage("could not build patch for this hunk", .{});
+                    return;
+                },
                 else => return err,
             };
         };
