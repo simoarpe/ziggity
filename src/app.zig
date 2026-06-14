@@ -50,6 +50,9 @@ pub const TextPromptKind = enum {
     add_remote_name,
     add_remote_url,
     edit_remote_url,
+    commit_grep,
+    commit_author,
+    commit_path,
 
     pub fn title(self: TextPromptKind) []const u8 {
         return switch (self) {
@@ -59,6 +62,9 @@ pub const TextPromptKind = enum {
             .add_remote_name => "New remote name",
             .add_remote_url => "New remote URL",
             .edit_remote_url => "Remote URL",
+            .commit_grep => "Filter commits by message",
+            .commit_author => "Filter commits by author",
+            .commit_path => "Filter commits by path",
         };
     }
 };
@@ -204,6 +210,10 @@ pub const MenuAction = enum {
     stash_untracked,
     stash_staged,
     stash_file,
+    filter_commits_message,
+    filter_commits_author,
+    filter_commits_path,
+    clear_commit_filter,
 };
 
 pub const MenuItem = struct {
@@ -262,6 +272,13 @@ const stash_menu = [_]MenuItem{
     .{ .label = "Stash including untracked files", .action = .stash_untracked },
     .{ .label = "Stash staged changes only", .action = .stash_staged },
     .{ .label = "Stash the selected file", .action = .stash_file },
+};
+
+const commit_filter_menu = [_]MenuItem{
+    .{ .label = "Filter by message (grep)", .action = .filter_commits_message },
+    .{ .label = "Filter by author", .action = .filter_commits_author },
+    .{ .label = "Filter by path", .action = .filter_commits_path },
+    .{ .label = "Clear filter", .action = .clear_commit_filter },
 };
 
 /// Order of entries shown in the status-filter menu popup.
@@ -540,6 +557,10 @@ pub const App = struct {
                     try self.clearFileFilter();
                     return;
                 }
+                if (self.focus == .commits and self.git.hasLogFilter()) {
+                    try self.clearCommitFilter();
+                    return;
+                }
                 if (self.staging_active) {
                     try self.closeStaging();
                 } else if (self.focus == .main) {
@@ -606,6 +627,7 @@ pub const App = struct {
             .discard_all => try self.startDiscardAllConfirmation(),
             .stash_menu => try self.startStashMenu(),
             .start_file_filter => try self.startFileFilterPrompt(),
+            .start_commit_filter => try self.startCommitFilterMenu(),
             .open_status_filter => try self.startStatusFilterMenu(),
             .start_commit => try self.startCommitPrompt(),
             .amend_commit => try self.amendLastCommit(),
@@ -966,6 +988,15 @@ pub const App = struct {
             .tags => if (self.selectedTag()) |tag| tag.name else null,
             .worktrees, .submodules => null,
         };
+    }
+
+    /// A short label for the active Commits-list filter, into `buf`, or null
+    /// when no filter is set. Drives the Commits panel title.
+    pub fn commitFilterLabel(self: *const App, buf: []u8) ?[]const u8 {
+        if (self.git.log_author) |a| return std.fmt.bufPrint(buf, "author:{s}", .{a}) catch "filtered";
+        if (self.git.log_grep) |g| return std.fmt.bufPrint(buf, "/{s}", .{g}) catch "filtered";
+        if (self.git.log_path) |p| return std.fmt.bufPrint(buf, "path:{s}", .{p}) catch "filtered";
+        return null;
     }
 
     /// The commit list backing the Commits panel for the active tab.
@@ -1783,6 +1814,7 @@ pub const App = struct {
                 if (self.branches_tab != .remotes) self.branches_tab = .remotes;
                 self.focus = .branches;
             },
+            .commit_grep, .commit_author, .commit_path => self.focus = .commits,
         }
         self.mode = .text_prompt;
         self.text_prompt_kind = kind;
@@ -1824,6 +1856,25 @@ pub const App = struct {
             return;
         };
         const value = std.mem.trim(u8, self.input_buffer.items, " \t\r\n");
+
+        // Commit filters accept an empty value (which clears that filter), so
+        // they are handled before the non-empty guard below.
+        switch (kind) {
+            .commit_grep, .commit_author, .commit_path => {
+                const which: git_mod.Git.LogFilter = switch (kind) {
+                    .commit_grep => .grep,
+                    .commit_author => .author,
+                    .commit_path => .path,
+                    else => unreachable,
+                };
+                self.mode = .normal;
+                self.text_prompt_kind = null;
+                self.input_buffer.clearRetainingCapacity();
+                return self.applyCommitFilter(which, value);
+            },
+            else => {},
+        }
+
         if (value.len == 0) {
             try self.setMessage("{s} cannot be empty", .{kind.title()});
             return;
@@ -1884,6 +1935,8 @@ pub const App = struct {
                 self.input_buffer.clearRetainingCapacity();
                 return self.runMutation(result, "set URL for {s}", .{name});
             },
+            // Handled before the non-empty guard above.
+            .commit_grep, .commit_author, .commit_path => unreachable,
         }
     }
 
@@ -1974,6 +2027,34 @@ pub const App = struct {
         self.mode = .menu;
         self.active_menu = .{ .title = "Stash", .items = &stash_menu, .index = 0 };
         try self.setMessage("stash changes", .{});
+    }
+
+    fn startCommitFilterMenu(self: *App) !void {
+        self.focus = .commits;
+        self.commits_tab = .commits;
+        self.mode = .menu;
+        self.active_menu = .{ .title = "Filter commits", .items = &commit_filter_menu, .index = 0 };
+        try self.setMessage("filter commits", .{});
+    }
+
+    /// Apply a Commits-list filter and reload. An empty value clears just that
+    /// filter. Selection resets to the top since the list changes.
+    fn applyCommitFilter(self: *App, which: git_mod.Git.LogFilter, value: []const u8) !void {
+        try self.git.setLogFilter(which, value);
+        self.commit_index = 0;
+        try self.refresh();
+        if (value.len == 0) {
+            try self.setMessage("commit filter cleared", .{});
+        } else {
+            try self.setMessage("filtered commits ({d} shown)", .{self.data.commits.len});
+        }
+    }
+
+    fn clearCommitFilter(self: *App) !void {
+        self.git.clearLogFilters();
+        self.commit_index = 0;
+        try self.refresh();
+        try self.setMessage("commit filter cleared", .{});
     }
 
     fn startConflictResolveMenu(self: *App) !void {
@@ -2110,7 +2191,31 @@ pub const App = struct {
                 };
                 return self.runMutation(try self.git.stashFile(file.path), "stashed {s}", .{file.path});
             },
+            .filter_commits_message => return self.startCommitFilterPrompt(.commit_grep),
+            .filter_commits_author => return self.startCommitFilterPrompt(.commit_author),
+            .filter_commits_path => return self.startCommitFilterPrompt(.commit_path),
+            .clear_commit_filter => return self.clearCommitFilter(),
         }
+    }
+
+    /// Open the text prompt for a commit filter, prefilling the existing value
+    /// (or, for a path filter, the selected file's path).
+    fn startCommitFilterPrompt(self: *App, kind: TextPromptKind) !void {
+        var prefill: []const u8 = switch (kind) {
+            .commit_grep => self.git.log_grep orelse "",
+            .commit_author => self.git.log_author orelse "",
+            .commit_path => self.git.log_path orelse "",
+            else => "",
+        };
+        if (kind == .commit_path and prefill.len == 0) {
+            if (self.selectedFile()) |file| prefill = file.path;
+        }
+        self.focus = .commits;
+        self.mode = .text_prompt;
+        self.text_prompt_kind = kind;
+        self.input_buffer.clearRetainingCapacity();
+        if (prefill.len > 0) try self.input_buffer.appendSlice(self.allocator, prefill);
+        try self.setMessage("{s} (empty to clear)", .{kind.title()});
     }
 
     fn startDiscardAllConfirmation(self: *App) !void {

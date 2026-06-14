@@ -34,6 +34,12 @@ pub const Git = struct {
     root: []u8,
     /// Ring of recently-run mutating commands, for the command-log view.
     command_log: std.ArrayList([]u8) = .empty,
+    // Active filters for the Commits list, applied on every load. Owned.
+    log_grep: ?[]u8 = null,
+    log_author: ?[]u8 = null,
+    log_path: ?[]u8 = null,
+
+    pub const LogFilter = enum { grep, author, path };
 
     const command_log_cap = 200;
 
@@ -66,7 +72,35 @@ pub const Git = struct {
         self.allocator.free(self.root);
         for (self.command_log.items) |entry| self.allocator.free(entry);
         self.command_log.deinit(self.allocator);
+        self.clearLogFilters();
         self.* = undefined;
+    }
+
+    fn logFilterSlot(self: *Git, which: LogFilter) *?[]u8 {
+        return switch (which) {
+            .grep => &self.log_grep,
+            .author => &self.log_author,
+            .path => &self.log_path,
+        };
+    }
+
+    /// Set one Commits-list filter (replacing any prior value for it). The next
+    /// load applies it. An empty value clears that filter.
+    pub fn setLogFilter(self: *Git, which: LogFilter, value: []const u8) !void {
+        const slot = self.logFilterSlot(which);
+        if (slot.*) |old| self.allocator.free(old);
+        slot.* = if (value.len == 0) null else try self.allocator.dupe(u8, value);
+    }
+
+    pub fn clearLogFilters(self: *Git) void {
+        inline for (.{ &self.log_grep, &self.log_author, &self.log_path }) |slot| {
+            if (slot.*) |old| self.allocator.free(old);
+            slot.* = null;
+        }
+    }
+
+    pub fn hasLogFilter(self: *const Git) bool {
+        return self.log_grep != null or self.log_author != null or self.log_path != null;
     }
 
     /// Read-only invocations ziggity issues during loads/refreshes; these are
@@ -429,7 +463,10 @@ pub const Git = struct {
     pub fn loadCommits(self: *Git, ref_name: []const u8, limit: usize) ![]model.Commit {
         const limit_arg = try std.fmt.allocPrint(self.allocator, "-{d}", .{limit});
         defer self.allocator.free(limit_arg);
-        const bytes = try self.output(&.{
+
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(self.allocator);
+        try argv.appendSlice(self.allocator, &.{
             "log",
             ref_name,
             "--date=relative",
@@ -437,6 +474,25 @@ pub const Git = struct {
             "--no-show-signature",
             limit_arg,
         });
+
+        // Optional Commits-list filters. The --grep/--author args own their
+        // formatted strings until the command runs.
+        var grep_arg: ?[]u8 = null;
+        defer if (grep_arg) |a| self.allocator.free(a);
+        if (self.log_grep) |g| {
+            grep_arg = try std.fmt.allocPrint(self.allocator, "--grep={s}", .{g});
+            try argv.appendSlice(self.allocator, &.{ "--regexp-ignore-case", grep_arg.? });
+        }
+        var author_arg: ?[]u8 = null;
+        defer if (author_arg) |a| self.allocator.free(a);
+        if (self.log_author) |a| {
+            author_arg = try std.fmt.allocPrint(self.allocator, "--author={s}", .{a});
+            try argv.append(self.allocator, author_arg.?);
+        }
+        // A pathspec must come last, after a `--` separator.
+        if (self.log_path) |p| try argv.appendSlice(self.allocator, &.{ "--", p });
+
+        const bytes = try self.output(argv.items);
         defer self.allocator.free(bytes);
 
         return parseCommits(self.allocator, bytes);
@@ -1160,6 +1216,27 @@ fn parseStashIndex(selector: []const u8) ?usize {
     const start = std.mem.indexOfScalar(u8, selector, '{') orelse return null;
     const end = std.mem.indexOfScalarPos(u8, selector, start, '}') orelse return null;
     return std.fmt.parseInt(usize, selector[start + 1 .. end], 10) catch null;
+}
+
+test "log filters set, report and clear" {
+    const allocator = std.testing.allocator;
+    var git = Git{ .allocator = allocator, .io = undefined, .environ = undefined, .root = undefined };
+
+    try std.testing.expect(!git.hasLogFilter());
+
+    try git.setLogFilter(.author, "alice");
+    try git.setLogFilter(.path, "src/app.zig");
+    try std.testing.expect(git.hasLogFilter());
+    try std.testing.expectEqualStrings("alice", git.log_author.?);
+    try std.testing.expectEqualStrings("src/app.zig", git.log_path.?);
+
+    // An empty value clears just that filter.
+    try git.setLogFilter(.author, "");
+    try std.testing.expect(git.log_author == null);
+    try std.testing.expect(git.hasLogFilter());
+
+    git.clearLogFilters();
+    try std.testing.expect(!git.hasLogFilter());
 }
 
 test "parse porcelain status including rename" {

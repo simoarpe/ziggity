@@ -17,6 +17,7 @@ pub const Action = enum {
     discard_all,
     stash_menu,
     start_file_filter,
+    start_commit_filter,
     open_status_filter,
     start_commit,
     amend_commit,
@@ -94,6 +95,9 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     if (focus == .commits and keymap.commit_fixup.matches(key)) return .rebase_fixup;
 
     if (keymap.range_select.matches(key)) return .range_select;
+
+    // In the Commits panel, `/` filters the log instead of the file list.
+    if (focus == .commits and keymap.file_filter.matches(key)) return .start_commit_filter;
 
     if (keymap.command_log.matches(key)) return .command_log;
     if (keymap.help.matches(key)) return .help;

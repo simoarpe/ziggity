@@ -241,10 +241,14 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     };
     drawBranches(panel(root, 0, y, side_w, branches_h, branches_title, app.focus == .branches), app);
     y += branches_h;
+    var commits_title_buf: [80]u8 = undefined;
+    var filter_label_buf: [64]u8 = undefined;
     const commits_title = if (app.commit_files_active)
         "Commit files [4]"
     else if (app.commits_tab == .reflog)
         "Reflog [4]"
+    else if (app.commitFilterLabel(&filter_label_buf)) |label|
+        (std.fmt.bufPrint(&commits_title_buf, "Commits [4] ({s})", .{label}) catch "Commits [4] (filtered)")
     else
         "Commits [4]";
     drawCommits(panel(root, 0, y, side_w, commits_h, commits_title, app.focus == .commits), app);
@@ -326,6 +330,8 @@ const help_lines = [_][]const u8{
     "  e / r          edit (stop here) / reword",
     "  F / S          create fixup! commit / autosquash fixups above",
     "  B              mark base, then rebase a branch to move commits onto it",
+    "  W              diff mode: compare against another ref",
+    "  /              filter the log by message / author / path (esc clears)",
     "  ctrl+j/ctrl+k  move commit down / up",
     "",
     "Stash",
@@ -967,7 +973,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push  @ log" ++ global,
         .files => "space stage  a all  c commit  A amend  d discard  s stash  / filter  ` tree  enter hunks" ++ global,
         .branches => unreachable,
-        .commits => "g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  W diff  ^j/^k move" ++ global,
+        .commits => "g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  W diff  / filter  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => "j/k scroll  PgUp/PgDn page  esc back" ++ global,
     };
