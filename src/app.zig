@@ -2582,7 +2582,7 @@ pub const App = struct {
     /// outcome; `raw` is the command's stdout/stderr (trimmed for display).
     /// Minimum time the "running" frame stays on screen before the result
     /// replaces it, so quick operations do not flash by unreadably.
-    const min_running_ns: i96 = 2 * std.time.ns_per_s;
+    const min_running_ns: i96 = 1 * std.time.ns_per_s;
 
     fn finishOp(self: *App, ok: bool, summary: []const u8, raw: []const u8) !void {
         // Hold the running frame for its minimum on-screen time. op_running is
