@@ -72,6 +72,46 @@ pub const Action = enum {
     stash_drop,
 };
 
+/// Whether an action starts or could lead to a git mutation. While a
+/// foreground op is in flight these are ignored (navigation stays live). Errs
+/// toward gating: menu-openers (which lead to mutations) and clipboard/cherry
+/// toggles count, since allowing them mid-op would be confusing. The allowed
+/// set is pure navigation/inspection/quit.
+pub fn isMutating(self: Action) bool {
+    return switch (self) {
+        // Navigation, inspection, and global view toggles — always allowed.
+        .quit,
+        .cancel,
+        .refresh,
+        .move_up,
+        .move_down,
+        .focus_left,
+        .focus_right,
+        .focus_status,
+        .focus_files,
+        .focus_branches,
+        .focus_commits,
+        .focus_stash,
+        .focus_main,
+        .prev_tab,
+        .next_tab,
+        .command_log,
+        .help,
+        .copy_to_clipboard,
+        .open_browser,
+        .diff_mark,
+        .toggle_tree,
+        .start_file_filter,
+        .start_commit_filter,
+        .open_status_filter,
+        .confirm,
+        .backspace,
+        => false,
+        // Everything else either mutates or opens a menu/prompt that does.
+        else => true,
+    };
+}
+
 pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Focus) ?Action {
     if (keymap.quit.matches(key) or keymap.quit_ctrl.matches(key)) return .quit;
     if (keymap.escape.matches(key)) return .cancel;

@@ -67,9 +67,14 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
   remove (`x`), and set the current branch's upstream (`u`).
 - Stash menu (`s` in the Files panel): stash all, including untracked,
   staged-only, or just the selected file — plus apply/pop/drop on the Stash panel.
-- Synchronous git operations run behind a modal result dialog that shows the
-  command, its output, and outcome (held briefly so it is readable); only
-  fetch/pull/push run off the UI loop.
+- lazygit-style action feedback: fast actions (stage, checkout, commit, reset,
+  stash apply/pop/drop, …) succeed silently with a one-line summary in the
+  bottom bar; only failures pop a dialog. Slow / multi-step actions (merge,
+  rebase, autosquash, interactive-rebase edits, custom-patch apply, fast-forward,
+  bisect) run off the UI loop with a spinner in the Status panel — navigation
+  stays live while they run, and other actions wait until they finish. Network
+  ops (fetch/pull/push) likewise run off the loop. See `result_dialog` /
+  `command_output` under Config to tune dialog behavior.
 - Discard selected file via a lazygit-style menu (all changes / unstaged only).
 - Discard all working tree changes with a confirmation popup.
 - Commit staged changes in a centered editor with a summary line and an optional

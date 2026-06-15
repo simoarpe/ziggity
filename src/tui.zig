@@ -19,6 +19,7 @@ const Event = union(enum) {
     command_done,
     preview_done,
     worktree_done,
+    mutation_done,
 };
 
 /// A network op run off the UI loop. Allocations use the page allocator (which
@@ -88,13 +89,32 @@ fn worktreeWorker(wr: *WorktreeRun) void {
     _ = wr.loop.tryPostEvent(.worktree_done) catch false;
 }
 
+/// A slow git mutation (merge/rebase/bisect/…) run off the UI loop on a
+/// page-allocator Git. Posts `.mutation_done` so the loop can surface the
+/// result and refresh on the UI thread.
+const MutationRun = struct {
+    io: std.Io,
+    loop: *vaxis.Loop(Event),
+    root: []u8,
+    environ: *std.process.Environ.Map,
+    mutation: app_mod.Mutation,
+    result: ?git_mod.ExecResult = null,
+};
+
+fn mutationWorker(mr: *MutationRun) void {
+    mr.result = mr.mutation.run(async_allocator, mr.io, mr.environ, mr.root) catch null;
+    _ = mr.loop.tryPostEvent(.mutation_done) catch false;
+}
+
 const refresh_interval = std.Io.Duration.fromMilliseconds(1500);
+const spinner_interval = std.Io.Duration.fromMilliseconds(120);
 const focus_events_set = "\x1b[?1004h";
 const focus_events_reset = "\x1b[?1004l";
 
 const RefreshTicker = struct {
     io: std.Io,
     loop: *vaxis.Loop(Event),
+    app: *app_mod.App,
     stop: std.atomic.Value(bool) = .init(false),
 };
 
@@ -116,7 +136,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     try loop.start();
     defer loop.stop();
 
-    var refresh_ticker: RefreshTicker = .{ .io = io, .loop = &loop };
+    var refresh_ticker: RefreshTicker = .{ .io = io, .loop = &loop, .app = app };
     var refresh_future = try io.concurrent(refreshTickerRun, .{&refresh_ticker});
     defer {
         refresh_ticker.stop.store(true, .release);
@@ -155,6 +175,14 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     defer if (worktree_future) |*f| {
         f.await(io);
         if (worktree_run.result) |*r| r.deinit(async_allocator);
+    };
+
+    var mutation_run: MutationRun = undefined;
+    var mutation_future: ?std.Io.Future(void) = null;
+    defer if (mutation_future) |*f| {
+        f.await(io);
+        if (mutation_run.result) |*r| r.deinit(async_allocator);
+        mutation_run.mutation.deinit(async_allocator);
     };
 
     var render_ctx = RenderCtx{ .vx = &vx, .writer = writer, .app = app };
@@ -198,6 +226,14 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     // retries. applyWorktreeSnapshot frees the snapshot either way.
                     app.applyWorktreeSnapshot(worktree_run.result, worktree_run.generation, async_allocator) catch {};
                     worktree_run.result = null;
+                }
+            },
+            .mutation_done => {
+                if (mutation_future) |*f| {
+                    f.await(io);
+                    mutation_future = null;
+                    try app.completeMutation(mutation_run.mutation, mutation_run.result, async_allocator);
+                    mutation_run.result = null;
                 }
             },
         }
@@ -257,13 +293,39 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             }
         }
 
+        // Start the queued slow mutation off the loop. Single in-flight; the
+        // input gate keeps another mutation from being requested meanwhile.
+        if (mutation_future == null) {
+            if (app.takeMutation()) |mutation| {
+                mutation_run = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ, .mutation = mutation, .result = null };
+                mutation_future = io.concurrent(mutationWorker, .{&mutation_run}) catch blk: {
+                    try app.completeMutation(mutation, null, async_allocator);
+                    break :blk null;
+                };
+                render_needed = true;
+            }
+        }
+
+        // Reflect foreground-busy state for the ticker (spinner animation speed).
+        app.busy_flag.store(app.foregroundBusy(), .release);
+
         if (render_needed) try renderAndFlush(&vx, writer, app);
     }
 }
 
+/// ASCII spinner frame for `frame` (the renderer maps non-ASCII bytes to '?',
+/// so the spinner stays ASCII).
+fn spinnerGlyph(frame: usize) []const u8 {
+    const frames = [_][]const u8{ "|", "/", "-", "\\" };
+    return frames[frame % frames.len];
+}
+
 fn refreshTickerRun(state: *RefreshTicker) void {
     while (!state.stop.load(.acquire)) {
-        std.Io.sleep(state.io, refresh_interval, .awake) catch return;
+        // Tick fast while a foreground op runs (to animate the spinner),
+        // slowly otherwise (just the periodic working-tree refresh).
+        const interval = if (state.app.busy_flag.load(.acquire)) spinner_interval else refresh_interval;
+        std.Io.sleep(state.io, interval, .awake) catch return;
         if (state.stop.load(.acquire)) return;
         _ = state.loop.tryPostEvent(.refresh_tick) catch false;
     }
@@ -448,6 +510,9 @@ const help_lines = [_][]const u8{
     "  git actions    succeed silently (summary in the bottom bar); only",
     "                 failures pop a dialog (enter dismisses, up/down scroll)",
     "                 config: result_dialog = on_error | always | never",
+    "  slow actions   merge/rebase/bisect/fast-forward/patch run in the",
+    "                 background (spinner in Status); navigation stays live",
+    "                 while they run, but other actions wait until they finish",
     "  fetch/pull/push run in the background (status in the bottom bar)",
 };
 
@@ -683,11 +748,13 @@ fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
     col = printSpan(win, 0, col, " ", st.muted);
     _ = drawBranchStatus(win, 0, col, st.muted, app.data.upstream != null, app.data.ahead orelse 0, app.data.behind orelse 0);
 
-    // Line 1: a running network op takes priority, then merge/rebase state,
-    // then a worktree summary.
-    if (app.async_active) {
-        var buf: [64]u8 = undefined;
-        const line = std.fmt.bufPrint(&buf, "{s}...", .{app.async_op.gerund()}) catch "working...";
+    // Line 1: a running foreground op (network or slow mutation) takes
+    // priority with an animated spinner, then merge/rebase state, then a
+    // worktree summary.
+    if (app.foregroundBusy()) {
+        const gerund = if (app.mutation_active or app.mutation_requested != null) app.mutation_gerund else app.async_op.gerund();
+        var buf: [80]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{s} {s}...", .{ spinnerGlyph(app.spinner_frame), gerund }) catch "working...";
         print(win, 1, 0, line, st.bottom_accent);
     } else if (app.data.state != .clean) {
         var buf: [128]u8 = undefined;

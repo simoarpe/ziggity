@@ -124,6 +124,16 @@ pub const Git = struct {
         self.recordCommand(args);
     }
 
+    /// Append a verbatim command line to the log (e.g. a slow mutation run on a
+    /// worker, whose own Git's log is discarded). Cap-aware, best-effort.
+    pub fn recordRaw(self: *Git, line: []const u8) void {
+        const entry = self.allocator.dupe(u8, line) catch return;
+        if (self.command_log.items.len >= command_log_cap) {
+            self.allocator.free(self.command_log.orderedRemove(0));
+        }
+        self.command_log.append(self.allocator, entry) catch self.allocator.free(entry);
+    }
+
     fn recordCommand(self: *Git, args: []const []const u8) void {
         if (isReadOnly(args)) return;
         var buf: std.Io.Writer.Allocating = .init(self.allocator);

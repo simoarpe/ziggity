@@ -324,10 +324,10 @@ pub const status_filter_options = [_]model.FileDisplayFilter{
     .conflicted,
 };
 
-/// Allocations shared with the preview worker thread use the page allocator,
-/// which is thread-safe and independent of the main gpa (mirrors the network
-/// async path in tui.zig). Job specs and their results live here.
-const preview_allocator = std.heap.page_allocator;
+/// Allocations shared with worker threads (preview, worktree, mutation jobs)
+/// use the page allocator, which is thread-safe and independent of the main gpa
+/// (mirrors the network async path in tui.zig). Job specs and results live here.
+const page_alloc = std.heap.page_allocator;
 
 /// One `git` invocation contributing a labeled section to a preview. `argv` is
 /// the argument vector after "git" (the worker prepends it). Every string is
@@ -396,14 +396,14 @@ pub const PreviewJob = struct {
 /// Copy an argument vector into the page allocator so a `PreviewSection` owns
 /// every string and can outlive the borrowed selection slices it was built from.
 fn dupArgv(parts: []const []const u8) ![]const []const u8 {
-    const out = try preview_allocator.alloc([]const u8, parts.len);
+    const out = try page_alloc.alloc([]const u8, parts.len);
     var filled: usize = 0;
     errdefer {
-        for (out[0..filled]) |a| preview_allocator.free(a);
-        preview_allocator.free(out);
+        for (out[0..filled]) |a| page_alloc.free(a);
+        page_alloc.free(out);
     }
     for (parts) |p| {
-        out[filled] = try preview_allocator.dupe(u8, p);
+        out[filled] = try page_alloc.dupe(u8, p);
         filled += 1;
     }
     return out;
@@ -536,6 +536,106 @@ pub const WorktreeSnapshot = struct {
     }
 };
 
+/// A slow / multi-step git mutation to run off the UI thread (merge, rebase,
+/// bisect, custom-patch, …). The worker runs it on a page-allocator `Git`,
+/// which reuses the real `Git` methods verbatim — so temp files, env vars and
+/// multi-step sequences all work. Fast/instant mutations (stage, checkout, …)
+/// stay synchronous so rapid input is never gated. Params are page-allocated
+/// copies so the job is self-contained across the thread boundary.
+pub const Mutation = union(enum) {
+    merge: []const u8,
+    rebase: []const u8,
+    rebase_onto_marked: struct { newbase: []const u8, marked_base: []const u8 },
+    autosquash: []const u8,
+    fast_forward_current,
+    fast_forward_branch: struct { remote: []const u8, remote_ref: []const u8, local: []const u8 },
+    bisect_start_mark: struct { good: bool, rev: []const u8 },
+    bisect_mark: struct { good: bool, rev: ?[]const u8 },
+    bisect_skip,
+    bisect_reset,
+    amend_continue_rebase,
+    apply_custom_patch: struct { patch: []const u8, reverse: bool },
+    remove_patch_from_commit: struct { base_ref: []const u8, todo: []const u8, patch: []const u8 },
+    rebase_todo: struct { base_ref: []const u8, todo: []const u8, message: ?[]const u8 },
+
+    /// Worker-thread entry point: run the mutation on a throwaway page-allocator
+    /// `Git`. The wgit's command log (mutations are recorded) is page-allocated
+    /// and freed here since the real app log is updated separately on request.
+    pub fn run(self: Mutation, gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8) !git_mod.ExecResult {
+        var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root };
+        defer {
+            for (wgit.command_log.items) |e| gpa.free(e);
+            wgit.command_log.deinit(gpa);
+        }
+        return switch (self) {
+            .merge => |b| wgit.mergeBranch(b),
+            .rebase => |b| wgit.rebaseOnto(b),
+            .rebase_onto_marked => |x| wgit.rebaseOntoMarked(x.newbase, x.marked_base),
+            .autosquash => |base| wgit.autosquashRebase(base),
+            .fast_forward_current => wgit.fastForwardCurrent(),
+            .fast_forward_branch => |x| wgit.fastForwardBranch(x.remote, x.remote_ref, x.local),
+            .bisect_start_mark => |x| wgit.bisectStartMark(x.good, x.rev),
+            .bisect_mark => |x| wgit.bisectMark(x.good, x.rev),
+            .bisect_skip => wgit.bisectSkip(),
+            .bisect_reset => wgit.bisectReset(),
+            .amend_continue_rebase => wgit.amendAndContinueRebase(),
+            .apply_custom_patch => |x| wgit.applyCustomPatch(x.patch, x.reverse),
+            .remove_patch_from_commit => |x| wgit.removePatchFromCommit(x.base_ref, x.todo, x.patch),
+            .rebase_todo => |x| wgit.rebaseTodo(x.base_ref, x.todo, x.message),
+        };
+    }
+
+    /// Deep copy into `gpa` (the page allocator) so the job outlives the
+    /// borrowed selection slices it was built from.
+    pub fn dupe(self: Mutation, gpa: std.mem.Allocator) !Mutation {
+        return switch (self) {
+            .merge => |b| .{ .merge = try gpa.dupe(u8, b) },
+            .rebase => |b| .{ .rebase = try gpa.dupe(u8, b) },
+            .rebase_onto_marked => |x| .{ .rebase_onto_marked = .{ .newbase = try gpa.dupe(u8, x.newbase), .marked_base = try gpa.dupe(u8, x.marked_base) } },
+            .autosquash => |base| .{ .autosquash = try gpa.dupe(u8, base) },
+            .fast_forward_current => .fast_forward_current,
+            .fast_forward_branch => |x| .{ .fast_forward_branch = .{ .remote = try gpa.dupe(u8, x.remote), .remote_ref = try gpa.dupe(u8, x.remote_ref), .local = try gpa.dupe(u8, x.local) } },
+            .bisect_start_mark => |x| .{ .bisect_start_mark = .{ .good = x.good, .rev = try gpa.dupe(u8, x.rev) } },
+            .bisect_mark => |x| .{ .bisect_mark = .{ .good = x.good, .rev = if (x.rev) |r| try gpa.dupe(u8, r) else null } },
+            .bisect_skip => .bisect_skip,
+            .bisect_reset => .bisect_reset,
+            .amend_continue_rebase => .amend_continue_rebase,
+            .apply_custom_patch => |x| .{ .apply_custom_patch = .{ .patch = try gpa.dupe(u8, x.patch), .reverse = x.reverse } },
+            .remove_patch_from_commit => |x| .{ .remove_patch_from_commit = .{ .base_ref = try gpa.dupe(u8, x.base_ref), .todo = try gpa.dupe(u8, x.todo), .patch = try gpa.dupe(u8, x.patch) } },
+            .rebase_todo => |x| .{ .rebase_todo = .{ .base_ref = try gpa.dupe(u8, x.base_ref), .todo = try gpa.dupe(u8, x.todo), .message = if (x.message) |m| try gpa.dupe(u8, m) else null } },
+        };
+    }
+
+    pub fn deinit(self: Mutation, gpa: std.mem.Allocator) void {
+        switch (self) {
+            .merge, .rebase, .autosquash => |s| gpa.free(s),
+            .rebase_onto_marked => |x| {
+                gpa.free(x.newbase);
+                gpa.free(x.marked_base);
+            },
+            .fast_forward_branch => |x| {
+                gpa.free(x.remote);
+                gpa.free(x.remote_ref);
+                gpa.free(x.local);
+            },
+            .bisect_start_mark => |x| gpa.free(x.rev),
+            .bisect_mark => |x| if (x.rev) |r| gpa.free(r),
+            .apply_custom_patch => |x| gpa.free(x.patch),
+            .remove_patch_from_commit => |x| {
+                gpa.free(x.base_ref);
+                gpa.free(x.todo);
+                gpa.free(x.patch);
+            },
+            .rebase_todo => |x| {
+                gpa.free(x.base_ref);
+                gpa.free(x.todo);
+                if (x.message) |m| gpa.free(m);
+            },
+            .fast_forward_current, .bisect_skip, .bisect_reset, .amend_continue_rebase => {},
+        }
+    }
+};
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     git: git_mod.Git,
@@ -650,6 +750,22 @@ pub const App = struct {
     worktree_refresh_active: bool = false,
     refresh_generation: u64 = 0,
 
+    // Async slow mutations (merge/rebase/bisect/…) run off the UI loop like the
+    // network ops: `mutation_requested` is a built job the loop starts (page-
+    // allocated), `mutation_active` is the in-flight guard. `mutation_msg` is
+    // the success summary (page-allocated), `mutation_echo` uses git's stdout
+    // first line instead (bisect), `mutation_gerund` labels the spinner. While
+    // any foreground op runs, mutating keys are ignored but navigation stays
+    // live. `busy_flag` lets the ticker speed up to animate the spinner.
+    mutation_requested: ?Mutation = null,
+    mutation_active: bool = false,
+    mutation_msg: []u8 = &.{},
+    mutation_echo: bool = false,
+    mutation_post: PostMutation = .none,
+    mutation_gerund: []const u8 = "working",
+    busy_flag: std.atomic.Value(bool) = .init(false),
+    spinner_frame: usize = 0,
+
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -703,7 +819,9 @@ pub const App = struct {
         self.preview_cache.deinit(self.allocator);
         self.allocator.free(self.preview_desired_key);
         self.allocator.free(self.preview_inflight_key);
-        if (self.preview_wanted) |job| job.deinit(preview_allocator);
+        if (self.preview_wanted) |job| job.deinit(page_alloc);
+        if (self.mutation_requested) |job| job.deinit(page_alloc);
+        page_alloc.free(self.mutation_msg);
         self.git.deinit();
         self.* = undefined;
     }
@@ -740,7 +858,7 @@ pub const App = struct {
     /// anyway. Synchronous mutations block the loop and keep `mode` non-normal,
     /// so the tick guard already covers them — this mainly catches network ops.
     fn backgroundRefreshPaused(self: *const App) bool {
-        return self.async_active or self.async_requested != null;
+        return self.foregroundBusy();
     }
 
     /// Queue a background working-tree refresh (status + file list) for the TUI
@@ -870,10 +988,18 @@ pub const App = struct {
 
         // User-defined custom commands take precedence over built-in bindings.
         for (self.config.custom_commands[0..self.config.custom_count]) |*cc| {
-            if (cc.binding.matches(key)) return self.runCustomCommand(cc.command());
+            if (cc.binding.matches(key)) {
+                if (self.foregroundBusy()) return self.setMessage("operation in progress...", .{});
+                return self.runCustomCommand(cc.command());
+            }
         }
 
         const action = actions.fromNormalKey(key, self.config.keymap, self.focus) orelse return;
+        // While a slow op runs, navigation/inspection stay live but mutating
+        // keys are ignored so a second git command can't race the first.
+        if (self.foregroundBusy() and actions.isMutating(action)) {
+            return self.setMessage("operation in progress...", .{});
+        }
         switch (action) {
             .quit => self.running = false,
             .cancel => {
@@ -1102,6 +1228,12 @@ pub const App = struct {
     }
 
     pub fn handleRefreshTick(self: *App) !void {
+        // While a foreground op runs the ticker fires fast to animate the
+        // spinner; advance it and skip the (paused) background refresh.
+        if (self.foregroundBusy()) {
+            self.spinner_frame +%= 1;
+            return;
+        }
         if (self.mode != .normal) return;
         if (self.staging_active) return;
         if (!self.terminal_focused) return;
@@ -1112,6 +1244,9 @@ pub const App = struct {
     pub fn handleFocusIn(self: *App) !void {
         self.terminal_focused = true;
         if (self.mode != .normal) return;
+        // Don't run a heavy reload alongside an in-flight op; it refreshes on
+        // completion anyway.
+        if (self.foregroundBusy()) return;
         self.refresh() catch |err| {
             try self.setMessage("focus refresh failed: {s}", .{@errorName(err)});
         };
@@ -2599,8 +2734,7 @@ pub const App = struct {
                     try self.setMessage("no rebase in progress to amend", .{});
                     return;
                 }
-                try self.beginOp("git commit --amend --no-edit && git rebase --continue");
-                return self.runMutation(try self.git.amendAndContinueRebase(), "amended and continued", .{});
+                return self.requestMutation(.amend_continue_rebase, .{ .gerund = "rebasing", .command = "git commit --amend --no-edit && git rebase --continue" }, "amended and continued", .{});
             },
             .stash_all => return self.runMutation(try self.git.stashAll(), "stashed all changes", .{}),
             .stash_untracked => return self.runMutation(try self.git.stashIncludingUntracked(), "stashed (incl. untracked)", .{}),
@@ -2622,17 +2756,18 @@ pub const App = struct {
                     return;
                 };
                 const good = action == .bisect_start_good;
-                try self.beginOpFmt("git bisect start && git bisect {s} {s}", .{ if (good) "good" else "bad", commit.short_hash });
-                return self.runMutationEcho(try self.git.bisectStartMark(good, commit.hash), "bisect started");
+                var cmd_buf: [128]u8 = undefined;
+                const cmd = std.fmt.bufPrint(&cmd_buf, "git bisect start && git bisect {s} {s}", .{ if (good) "good" else "bad", commit.short_hash }) catch "git bisect start";
+                return self.requestMutation(.{ .bisect_start_mark = .{ .good = good, .rev = commit.hash } }, .{ .gerund = "bisecting", .command = cmd, .echo = true }, "bisect started", .{});
             },
             .bisect_good_current, .bisect_bad_current => {
                 const good = action == .bisect_good_current;
-                try self.beginOpFmt("git bisect {s}", .{if (good) "good" else "bad"});
-                return self.runMutationEcho(try self.git.bisectMark(good, null), "bisect marked");
+                var cmd_buf: [64]u8 = undefined;
+                const cmd = std.fmt.bufPrint(&cmd_buf, "git bisect {s}", .{if (good) "good" else "bad"}) catch "git bisect";
+                return self.requestMutation(.{ .bisect_mark = .{ .good = good, .rev = null } }, .{ .gerund = "bisecting", .command = cmd, .echo = true }, "bisect marked", .{});
             },
             .bisect_skip => {
-                try self.beginOp("git bisect skip");
-                return self.runMutationEcho(try self.git.bisectSkip(), "bisect skipped");
+                return self.requestMutation(.bisect_skip, .{ .gerund = "bisecting", .command = "git bisect skip", .echo = true }, "bisect skipped", .{});
             },
             .bisect_good_selected, .bisect_bad_selected => {
                 const commit = self.selectedCommit() orelse {
@@ -2640,12 +2775,12 @@ pub const App = struct {
                     return;
                 };
                 const good = action == .bisect_good_selected;
-                try self.beginOpFmt("git bisect {s} {s}", .{ if (good) "good" else "bad", commit.short_hash });
-                return self.runMutationEcho(try self.git.bisectMark(good, commit.hash), "bisect marked");
+                var cmd_buf: [96]u8 = undefined;
+                const cmd = std.fmt.bufPrint(&cmd_buf, "git bisect {s} {s}", .{ if (good) "good" else "bad", commit.short_hash }) catch "git bisect";
+                return self.requestMutation(.{ .bisect_mark = .{ .good = good, .rev = commit.hash } }, .{ .gerund = "bisecting", .command = cmd, .echo = true }, "bisect marked", .{});
             },
             .bisect_reset => {
-                try self.beginOp("git bisect reset");
-                return self.runMutationEcho(try self.git.bisectReset(), "bisect reset");
+                return self.requestMutation(.bisect_reset, .{ .gerund = "resetting bisect", .command = "git bisect reset", .echo = true }, "bisect reset", .{});
             },
             .patch_apply, .patch_apply_reverse => {
                 const reverse = action == .patch_apply_reverse;
@@ -2654,9 +2789,9 @@ pub const App = struct {
                     return;
                 };
                 defer self.allocator.free(patch);
-                try self.beginOp(if (reverse) "git apply --reverse" else "git apply");
+                const cmd = if (reverse) "git apply --reverse" else "git apply";
                 const summary = if (reverse) "applied patch in reverse" else "applied patch to working tree";
-                return self.runMutation(try self.git.applyCustomPatch(patch, reverse), "{s}", .{summary});
+                return self.requestMutation(.{ .apply_custom_patch = .{ .patch = patch, .reverse = reverse } }, .{ .gerund = "applying patch", .command = cmd }, "{s}", .{summary});
             },
             .patch_remove_from_commit => return self.removePatchFromSourceCommit(),
             .patch_reset => {
@@ -2706,17 +2841,14 @@ pub const App = struct {
         const todo = try aw.toOwnedSlice();
         defer self.allocator.free(todo);
 
-        try self.beginOpFmt("git rebase -i {s} (remove patch, amend)", .{base_ref});
-        const result = try self.git.removePatchFromCommit(base_ref, todo, patch);
-        var mutable = result;
-        defer mutable.deinit(self.allocator);
-        if (mutable.ok()) {
-            self.clearPatch();
-            try self.finishOp(true, "removed patch from commit", mutable.stdout);
-        } else {
-            try self.finishOp(false, "remove failed (resolve with m if rebasing)", if (mutable.stderr.len > 0) mutable.stderr else mutable.stdout);
-        }
-        self.refresh() catch {};
+        var cmd_buf: [128]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&cmd_buf, "git rebase -i {s} (remove patch, amend)", .{base_ref}) catch "git rebase -i";
+        return self.requestMutation(
+            .{ .remove_patch_from_commit = .{ .base_ref = base_ref, .todo = todo, .patch = patch } },
+            .{ .gerund = "removing patch", .command = cmd, .post = .clear_patch },
+            "removed patch from commit",
+            .{},
+        );
     }
 
     /// Open the text prompt for a commit filter, prefilling the existing value
@@ -2893,8 +3025,9 @@ pub const App = struct {
             return;
         };
         if (branch.current) {
-            try self.beginOpFmt("git merge --ff-only {s}", .{upstream});
-            return self.runMutation(try self.git.fastForwardCurrent(), "fast-forwarded {s}", .{branch.name});
+            var cmd_buf: [160]u8 = undefined;
+            const cmd = std.fmt.bufPrint(&cmd_buf, "git merge --ff-only {s}", .{upstream}) catch "git merge --ff-only";
+            return self.requestMutation(.fast_forward_current, .{ .gerund = "fast-forwarding", .command = cmd }, "fast-forwarded {s}", .{branch.name});
         }
         const slash = std.mem.indexOfScalar(u8, upstream, '/') orelse {
             try self.setMessage("cannot parse upstream {s}", .{upstream});
@@ -2902,8 +3035,9 @@ pub const App = struct {
         };
         const remote = upstream[0..slash];
         const remote_ref = upstream[slash + 1 ..];
-        try self.beginOpFmt("git fetch {s} {s}:{s}", .{ remote, remote_ref, branch.name });
-        return self.runMutation(try self.git.fastForwardBranch(remote, remote_ref, branch.name), "fast-forwarded {s}", .{branch.name});
+        var cmd_buf: [192]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&cmd_buf, "git fetch {s} {s}:{s}", .{ remote, remote_ref, branch.name }) catch "git fetch";
+        return self.requestMutation(.{ .fast_forward_branch = .{ .remote = remote, .remote_ref = remote_ref, .local = branch.name } }, .{ .gerund = "fast-forwarding", .command = cmd }, "fast-forwarded {s}", .{branch.name});
     }
 
     /// Validate that a branch action can run: the Branches panel must be on the
@@ -2980,16 +3114,12 @@ pub const App = struct {
 
         var run_buf: [96]u8 = undefined;
         const shown = std.fmt.bufPrint(&run_buf, "git rebase -i {s}", .{base_ref}) catch "git rebase -i";
-        try self.beginOp(shown);
-
-        var result = try self.git.rebaseTodo(base_ref, todo, message);
-        defer result.deinit(self.allocator);
-        if (result.ok()) {
-            try self.finishOp(true, action.label(), result.stdout);
-        } else {
-            try self.finishOp(false, "rebase failed", if (result.stderr.len > 0) result.stderr else result.stdout);
-        }
-        self.refresh() catch {};
+        return self.requestMutation(
+            .{ .rebase_todo = .{ .base_ref = base_ref, .todo = todo, .message = message } },
+            .{ .gerund = "rebasing", .command = shown },
+            "{s}",
+            .{action.label()},
+        );
     }
 
     /// Emit a git-rebase-todo (oldest-first) for `action` on commit index `i`.
@@ -3074,8 +3204,9 @@ pub const App = struct {
         const commit = try self.commitForAction() orelse return;
         const base = try std.fmt.allocPrint(self.allocator, "{s}^", .{commit.hash});
         defer self.allocator.free(base);
-        try self.beginOpFmt("git rebase -i --autosquash {s}", .{base});
-        return self.runMutation(try self.git.autosquashRebase(base), "autosquashed fixups", .{});
+        var cmd_buf: [128]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&cmd_buf, "git rebase -i --autosquash {s}", .{base}) catch "git rebase -i --autosquash";
+        return self.requestMutation(.{ .autosquash = base }, .{ .gerund = "autosquashing", .command = cmd }, "autosquashed fixups", .{});
     }
 
     fn checkoutSelectedBranch(self: *App) !void {
@@ -3295,8 +3426,9 @@ pub const App = struct {
                     try self.setMessage("no branch selected", .{});
                     return;
                 };
-                try self.beginOpFmt("git merge --no-edit {s}", .{branch.name});
-                return self.runMutation(try self.git.mergeBranch(branch.name), "merged {s}", .{branch.name});
+                var cmd_buf: [160]u8 = undefined;
+                const cmd = std.fmt.bufPrint(&cmd_buf, "git merge --no-edit {s}", .{branch.name}) catch "git merge --no-edit";
+                return self.requestMutation(.{ .merge = branch.name }, .{ .gerund = "merging", .command = cmd }, "merged {s}", .{branch.name});
             },
             .rebase_branch => {
                 const branch = self.selectedBranch() orelse {
@@ -3304,13 +3436,16 @@ pub const App = struct {
                     return;
                 };
                 if (self.marked_base) |base| {
-                    try self.beginOpFmt("git rebase --onto {s} {s}^", .{ branch.name, base });
-                    const res = try self.git.rebaseOntoMarked(branch.name, base);
+                    var cmd_buf: [192]u8 = undefined;
+                    const cmd = std.fmt.bufPrint(&cmd_buf, "git rebase --onto {s} {s}^", .{ branch.name, base }) catch "git rebase --onto";
+                    // requestMutation dupes the marked base before we clear it.
+                    try self.requestMutation(.{ .rebase_onto_marked = .{ .newbase = branch.name, .marked_base = base } }, .{ .gerund = "rebasing", .command = cmd }, "rebased marked commits onto {s}", .{branch.name});
                     self.clearMarkedBase();
-                    return self.runMutation(res, "rebased marked commits onto {s}", .{branch.name});
+                    return;
                 }
-                try self.beginOpFmt("git rebase {s}", .{branch.name});
-                return self.runMutation(try self.git.rebaseOnto(branch.name), "rebased onto {s}", .{branch.name});
+                var cmd_buf: [160]u8 = undefined;
+                const cmd = std.fmt.bufPrint(&cmd_buf, "git rebase {s}", .{branch.name}) catch "git rebase";
+                return self.requestMutation(.{ .rebase = branch.name }, .{ .gerund = "rebasing", .command = cmd }, "rebased onto {s}", .{branch.name});
             },
             .delete_tag => {
                 const tag = self.selectedTag() orelse {
@@ -3477,7 +3612,7 @@ pub const App = struct {
         }
 
         const job = try self.buildPreviewJob(kind, key);
-        if (self.preview_wanted) |w| w.deinit(preview_allocator);
+        if (self.preview_wanted) |w| w.deinit(page_alloc);
         self.preview_wanted = job;
         self.preview_loading = true;
         // Avoid a blank panel on the very first preview; thereafter we keep the
@@ -3519,7 +3654,7 @@ pub const App = struct {
         }
         if (self.preview_wanted) |w| {
             if (!std.mem.eql(u8, w.key, key)) {
-                w.deinit(preview_allocator);
+                w.deinit(page_alloc);
                 self.preview_wanted = null;
             }
         }
@@ -3534,10 +3669,10 @@ pub const App = struct {
         var sections: std.ArrayList(PreviewSection) = .empty;
         errdefer {
             for (sections.items) |sec| {
-                for (sec.argv) |a| preview_allocator.free(a);
-                preview_allocator.free(sec.argv);
+                for (sec.argv) |a| page_alloc.free(a);
+                page_alloc.free(sec.argv);
             }
-            sections.deinit(preview_allocator);
+            sections.deinit(page_alloc);
         }
         var empty_msg: []const u8 = "No preview available.\n";
 
@@ -3546,20 +3681,20 @@ pub const App = struct {
                 empty_msg = "No diff for selected file.\n";
                 if (f.has_unstaged) {
                     if (!f.tracked and !f.has_staged) {
-                        try sections.append(preview_allocator, .{
+                        try sections.append(page_alloc, .{
                             .argv = try dupArgv(&.{ "diff", "--no-index", "--no-color", "--", "/dev/null", f.path }),
                             .label = "Untracked\n\n",
                             .keep_on_error = true,
                         });
                     } else {
-                        try sections.append(preview_allocator, .{
+                        try sections.append(page_alloc, .{
                             .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--no-color", ctx_arg, "--", f.path }),
                             .label = "Unstaged\n\n",
                         });
                     }
                 }
                 if (f.has_staged) {
-                    try sections.append(preview_allocator, .{
+                    try sections.append(page_alloc, .{
                         .argv = try dupArgv(&.{ "diff", "--staged", "--no-ext-diff", "--no-color", ctx_arg, "--", f.path }),
                         .label = "Staged\n\n",
                     });
@@ -3567,19 +3702,19 @@ pub const App = struct {
             },
             .branch => |name| {
                 empty_msg = "No commits.\n";
-                try sections.append(preview_allocator, .{
+                try sections.append(page_alloc, .{
                     .argv = try dupArgv(&.{ "log", "--oneline", "--decorate", "-30", name }),
                 });
             },
             .commit => |hash| {
                 empty_msg = "Could not load commit.\n";
-                try sections.append(preview_allocator, .{
+                try sections.append(page_alloc, .{
                     .argv = try dupArgv(&.{ "show", "--no-ext-diff", "--no-color", "--stat", "--patch", ctx_arg, hash }),
                 });
             },
             .commit_file => |cf| {
                 empty_msg = "No changes for this file.\n";
-                try sections.append(preview_allocator, .{
+                try sections.append(page_alloc, .{
                     .argv = try dupArgv(&.{ "show", cf.hash, "--no-ext-diff", "--no-color", ctx_arg, "--format=", "--", cf.path }),
                 });
             },
@@ -3587,21 +3722,21 @@ pub const App = struct {
                 empty_msg = "No changes in stash.\n";
                 var sel_buf: [32]u8 = undefined;
                 const selector = try std.fmt.bufPrint(&sel_buf, "stash@{{{d}}}", .{idx});
-                try sections.append(preview_allocator, .{
+                try sections.append(page_alloc, .{
                     .argv = try dupArgv(&.{ "stash", "show", "-p", "--stat", "-u", "--no-ext-diff", "--no-color", ctx_arg, selector }),
                 });
             },
             .diff_refs => |dr| {
                 empty_msg = "No differences.\n";
-                try sections.append(preview_allocator, .{
+                try sections.append(page_alloc, .{
                     .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--no-color", "--stat", "--patch", ctx_arg, dr.base, dr.target }),
                 });
             },
         }
 
-        const key_copy = try preview_allocator.dupe(u8, key);
-        errdefer preview_allocator.free(key_copy);
-        const sec_slice = try sections.toOwnedSlice(preview_allocator);
+        const key_copy = try page_alloc.dupe(u8, key);
+        errdefer page_alloc.free(key_copy);
+        const sec_slice = try sections.toOwnedSlice(page_alloc);
         return .{ .key = key_copy, .sections = sec_slice, .empty_msg = empty_msg };
     }
 
@@ -3803,22 +3938,80 @@ pub const App = struct {
         self.refresh() catch {};
     }
 
-    /// Like `runMutation`, but on success uses the command's first stdout line
-    /// as the bottom-bar summary when present (bisect prints its progress
-    /// there, e.g. "Bisecting: 5 revisions left…"), falling back to `fallback`.
-    fn runMutationEcho(self: *App, result: git_mod.ExecResult, fallback: []const u8) !void {
-        var mutable = result;
-        defer mutable.deinit(self.allocator);
-        if (mutable.ok()) {
-            const line = firstLine(mutable.stdout);
-            try self.reportSuccess(if (line.len > 0) line else fallback, mutable.stdout);
-            self.refresh() catch |err| {
-                try self.setMessage("git command succeeded; refresh failed: {s}", .{@errorName(err)});
-            };
+    /// True while a foreground git op (network or slow mutation) is queued or
+    /// running. Used to gate mutating keybindings and to animate the spinner.
+    pub fn foregroundBusy(self: *const App) bool {
+        return self.async_active or self.async_requested != null or
+            self.mutation_active or self.mutation_requested != null;
+    }
+
+    /// UI-thread side effect to run when a mutation succeeds.
+    const PostMutation = enum { none, clear_patch };
+
+    const MutationMeta = struct {
+        gerund: []const u8 = "working",
+        command: []const u8 = "",
+        echo: bool = false,
+        post: PostMutation = .none,
+    };
+
+    /// Queue a slow mutation for the TUI loop to run off-thread. Refused if a
+    /// foreground op is already in flight. `command` (if any) is recorded in the
+    /// command log now, since the worker's log is discarded. On completion the
+    /// result is surfaced via reportSuccess/reportFailure + refresh.
+    fn requestMutation(self: *App, mutation: Mutation, meta: MutationMeta, comptime success_fmt: []const u8, args: anytype) !void {
+        if (self.foregroundBusy()) {
+            try self.setMessage("operation in progress...", .{});
             return;
         }
-        const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
-        try self.reportFailure("command failed", if (stderr.len > 0) mutable.stderr else mutable.stdout);
+        const job = try mutation.dupe(page_alloc);
+        errdefer job.deinit(page_alloc);
+        const msg = try std.fmt.allocPrint(page_alloc, success_fmt, args);
+        errdefer page_alloc.free(msg);
+        if (meta.command.len > 0) self.git.recordRaw(meta.command);
+
+        if (self.mutation_requested) |old| old.deinit(page_alloc);
+        page_alloc.free(self.mutation_msg);
+        self.mutation_requested = job;
+        self.mutation_msg = msg;
+        self.mutation_echo = meta.echo;
+        self.mutation_post = meta.post;
+        self.mutation_gerund = meta.gerund;
+        self.spinner_frame = 0;
+        try self.setMessage("{s}...", .{meta.gerund});
+    }
+
+    /// TUI loop hook: claim the queued mutation to run off-thread.
+    pub fn takeMutation(self: *App) ?Mutation {
+        const job = self.mutation_requested orelse return null;
+        self.mutation_requested = null;
+        self.mutation_active = true;
+        return job;
+    }
+
+    /// TUI loop hook: a mutation worker finished. `result_opt` (owned by `gpa`,
+    /// the page allocator) is null if it could not run. Surfaces success/failure
+    /// like the synchronous path, then refreshes. Frees the job and result.
+    pub fn completeMutation(self: *App, job: Mutation, result_opt: ?git_mod.ExecResult, gpa: std.mem.Allocator) !void {
+        self.mutation_active = false;
+        defer job.deinit(gpa);
+        if (result_opt) |result| {
+            var mutable = result;
+            defer mutable.deinit(gpa);
+            if (mutable.ok()) {
+                switch (self.mutation_post) {
+                    .none => {},
+                    .clear_patch => self.clearPatch(),
+                }
+                const line = if (self.mutation_echo) firstLine(mutable.stdout) else "";
+                try self.reportSuccess(if (line.len > 0) line else self.mutation_msg, mutable.stdout);
+            } else {
+                const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
+                try self.reportFailure("command failed", if (stderr.len > 0) mutable.stderr else mutable.stdout);
+            }
+        } else {
+            try self.reportFailure("command failed to start", "");
+        }
         self.refresh() catch {};
     }
 
@@ -4227,7 +4420,7 @@ test "preview pipeline queues a git job, caches it, and serves repeats instantly
     try app.updatePreview();
     try std.testing.expect(app.preview_wanted != null); // commit b not cached yet
     const job_b = app.takePreviewJob().?;
-    job_b.deinit(preview_allocator);
+    job_b.deinit(page_alloc);
     app.allocator.free(app.preview_inflight_key);
     app.preview_inflight_key = "";
 
@@ -4476,6 +4669,60 @@ test "skip-confirm flag controls whether the confirm prompt is shown" {
     try std.testing.expectEqual(Confirmation.discard_all, app.pending_confirmation.?);
 }
 
+test "slow mutation queues off-thread, marks busy, and refuses a second op" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    try std.testing.expect(!app.foregroundBusy());
+    // command = "" so we don't touch git (undefined in tests).
+    try app.requestMutation(.bisect_skip, .{ .gerund = "bisecting", .echo = true }, "bisect skipped", .{});
+    try std.testing.expect(app.foregroundBusy());
+    try std.testing.expect(app.mutation_requested != null);
+    try std.testing.expect(!app.mutation_active);
+    try std.testing.expect(app.mutation_echo);
+    try std.testing.expectEqualStrings("bisecting", app.mutation_gerund);
+    try std.testing.expectEqualStrings("bisect skipped", app.mutation_msg);
+    try std.testing.expectEqualStrings("bisecting...", app.message);
+
+    // The loop claims the job to run it.
+    const job = app.takeMutation().?;
+    defer job.deinit(page_alloc);
+    try std.testing.expect(app.mutation_requested == null);
+    try std.testing.expect(app.mutation_active);
+
+    // A second request is refused while one is in flight.
+    try app.requestMutation(.bisect_reset, .{ .gerund = "x" }, "y", .{});
+    try std.testing.expect(app.mutation_requested == null);
+    try std.testing.expectEqualStrings("operation in progress...", app.message);
+
+    app.mutation_active = false;
+}
+
+test "input gate ignores mutating keys while a foreground op runs" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.mutation_active = true; // simulate an op in flight
+    try app.handleKey(.{ .codepoint = 'a' }); // stage_all — mutating, must be ignored
+    try std.testing.expectEqualStrings("operation in progress...", app.message);
+    app.mutation_active = false;
+}
+
+test "isMutating classifies actions for the input gate" {
+    try std.testing.expect(actions.isMutating(.stage_all));
+    try std.testing.expect(actions.isMutating(.merge_branch));
+    try std.testing.expect(actions.isMutating(.fetch));
+    try std.testing.expect(actions.isMutating(.select));
+    try std.testing.expect(!actions.isMutating(.move_down));
+    try std.testing.expect(!actions.isMutating(.focus_files));
+    try std.testing.expect(!actions.isMutating(.quit));
+    try std.testing.expect(!actions.isMutating(.refresh));
+}
+
 test "operation dialog shows a running frame then its result" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -4577,7 +4824,9 @@ fn deinitTestApp(app: *App) void {
     app.preview_cache.deinit(app.allocator);
     app.allocator.free(app.preview_desired_key);
     app.allocator.free(app.preview_inflight_key);
-    if (app.preview_wanted) |job| job.deinit(preview_allocator);
+    if (app.preview_wanted) |job| job.deinit(page_alloc);
+    if (app.mutation_requested) |job| job.deinit(page_alloc);
+    page_alloc.free(app.mutation_msg);
     app.collapsed_dirs.deinit();
 }
 
