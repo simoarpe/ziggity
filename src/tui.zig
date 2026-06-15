@@ -165,8 +165,12 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
 
     var preview_run: PreviewRun = undefined;
     var preview_future: ?std.Io.Future(void) = null;
+    // Preview and worktree workers are read-only (git diff/show/status), so on
+    // quit we cancel them — interrupting their git call so a large-diff preview
+    // or status read doesn't delay shutdown. (cancel still awaits the worker's
+    // return, so freeing its run struct stays safe.)
     defer if (preview_future) |*f| {
-        f.await(io);
+        f.cancel(io);
         if (preview_run.result) |r| async_allocator.free(r);
         preview_run.job.deinit(async_allocator);
     };
@@ -174,7 +178,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     var worktree_run: WorktreeRun = undefined;
     var worktree_future: ?std.Io.Future(void) = null;
     defer if (worktree_future) |*f| {
-        f.await(io);
+        f.cancel(io);
         if (worktree_run.result) |*r| r.deinit(async_allocator);
     };
 
