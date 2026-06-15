@@ -230,6 +230,7 @@ pub const RepoData = struct {
     ahead: ?usize = null,
     behind: ?usize = null,
     state: RepoState = .clean,
+    bisecting: bool = false,
     files: []FileStatus = &.{},
     branches: []Branch = &.{},
     remote_branches: []Branch = &.{},

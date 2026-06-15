@@ -214,6 +214,14 @@ pub const MenuAction = enum {
     filter_commits_author,
     filter_commits_path,
     clear_commit_filter,
+    bisect_start_bad,
+    bisect_start_good,
+    bisect_good_current,
+    bisect_bad_current,
+    bisect_skip,
+    bisect_good_selected,
+    bisect_bad_selected,
+    bisect_reset,
 };
 
 pub const MenuItem = struct {
@@ -279,6 +287,20 @@ const commit_filter_menu = [_]MenuItem{
     .{ .label = "Filter by author", .action = .filter_commits_author },
     .{ .label = "Filter by path", .action = .filter_commits_path },
     .{ .label = "Clear filter", .action = .clear_commit_filter },
+};
+
+const bisect_start_menu = [_]MenuItem{
+    .{ .label = "Mark selected commit bad, start bisecting", .action = .bisect_start_bad },
+    .{ .label = "Mark selected commit good, start bisecting", .action = .bisect_start_good },
+};
+
+const bisect_actions_menu = [_]MenuItem{
+    .{ .label = "Mark current commit good", .action = .bisect_good_current },
+    .{ .label = "Mark current commit bad", .action = .bisect_bad_current },
+    .{ .label = "Skip current commit", .action = .bisect_skip },
+    .{ .label = "Mark selected commit good", .action = .bisect_good_selected },
+    .{ .label = "Mark selected commit bad", .action = .bisect_bad_selected },
+    .{ .label = "Reset bisect", .action = .bisect_reset },
 };
 
 /// Order of entries shown in the status-filter menu popup.
@@ -653,6 +675,7 @@ pub const App = struct {
             .rebase_create_fixup => try self.createFixupCommit(),
             .rebase_autosquash => try self.autosquashFixups(),
             .mark_base => try self.toggleMarkBase(),
+            .bisect_menu => try self.startBisectMenu(),
             .stash_pop => try self.popSelectedStash(),
             .stash_drop => try self.dropSelectedStash(),
             .confirm, .backspace => {},
@@ -2029,6 +2052,19 @@ pub const App = struct {
         try self.setMessage("stash changes", .{});
     }
 
+    fn startBisectMenu(self: *App) !void {
+        self.focus = .commits;
+        self.commits_tab = .commits;
+        const items: []const MenuItem = if (self.data.bisecting)
+            &bisect_actions_menu
+        else
+            &bisect_start_menu;
+        const title = if (self.data.bisecting) "Bisect in progress" else "Start bisect";
+        self.mode = .menu;
+        self.active_menu = .{ .title = title, .items = items, .index = 0 };
+        try self.setMessage("bisect", .{});
+    }
+
     fn startCommitFilterMenu(self: *App) !void {
         self.focus = .commits;
         self.commits_tab = .commits;
@@ -2195,6 +2231,37 @@ pub const App = struct {
             .filter_commits_author => return self.startCommitFilterPrompt(.commit_author),
             .filter_commits_path => return self.startCommitFilterPrompt(.commit_path),
             .clear_commit_filter => return self.clearCommitFilter(),
+            .bisect_start_bad, .bisect_start_good => {
+                const commit = self.selectedCommit() orelse {
+                    try self.setMessage("no commit selected", .{});
+                    return;
+                };
+                const good = action == .bisect_start_good;
+                try self.beginOpFmt("git bisect start && git bisect {s} {s}", .{ if (good) "good" else "bad", commit.short_hash });
+                return self.runMutation(try self.git.bisectStartMark(good, commit.hash), "bisect started", .{});
+            },
+            .bisect_good_current, .bisect_bad_current => {
+                const good = action == .bisect_good_current;
+                try self.beginOpFmt("git bisect {s}", .{if (good) "good" else "bad"});
+                return self.runMutation(try self.git.bisectMark(good, null), "bisect marked", .{});
+            },
+            .bisect_skip => {
+                try self.beginOp("git bisect skip");
+                return self.runMutation(try self.git.bisectSkip(), "bisect skipped", .{});
+            },
+            .bisect_good_selected, .bisect_bad_selected => {
+                const commit = self.selectedCommit() orelse {
+                    try self.setMessage("no commit selected", .{});
+                    return;
+                };
+                const good = action == .bisect_good_selected;
+                try self.beginOpFmt("git bisect {s} {s}", .{ if (good) "good" else "bad", commit.short_hash });
+                return self.runMutation(try self.git.bisectMark(good, commit.hash), "bisect marked", .{});
+            },
+            .bisect_reset => {
+                try self.beginOp("git bisect reset");
+                return self.runMutation(try self.git.bisectReset(), "bisect reset", .{});
+            },
         }
     }
 
@@ -3338,6 +3405,21 @@ test "webUrlFromRemote normalizes the common remote URL forms" {
         try std.testing.expectEqualStrings(c.want, got);
     }
     try std.testing.expect((try webUrlFromRemote(allocator, "not-a-url")) == null);
+}
+
+test "bisect menu reflects whether a bisect is in progress" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.data.bisecting = false;
+    try app.startBisectMenu();
+    try std.testing.expectEqual(@as(usize, bisect_start_menu.len), app.active_menu.?.items.len);
+
+    app.data.bisecting = true;
+    try app.startBisectMenu();
+    try std.testing.expectEqual(@as(usize, bisect_actions_menu.len), app.active_menu.?.items.len);
 }
 
 test "diffing mode marks a ref base and clears cleanly" {

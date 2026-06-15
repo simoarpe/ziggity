@@ -332,6 +332,7 @@ const help_lines = [_][]const u8{
     "  B              mark base, then rebase a branch to move commits onto it",
     "  W              diff mode: compare against another ref",
     "  /              filter the log by message / author / path (esc clears)",
+    "  b              bisect menu (start, then mark good/bad/skip/reset)",
     "  ctrl+j/ctrl+k  move commit down / up",
     "",
     "Stash",
@@ -585,6 +586,8 @@ fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
         var buf: [128]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, "{s} - m: continue / abort", .{app.data.state.label()}) catch app.data.state.label();
         print(win, 1, 0, line, st.warning);
+    } else if (app.data.bisecting) {
+        print(win, 1, 0, "BISECTING - b: mark good/bad/skip/reset", st.warning);
     } else if (app.data.files.len == 0) {
         print(win, 1, 0, "working tree clean", st.muted);
     } else {
@@ -973,7 +976,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push  @ log" ++ global,
         .files => "space stage  a all  c commit  A amend  d discard  s stash  / filter  ` tree  enter hunks" ++ global,
         .branches => unreachable,
-        .commits => "g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  W diff  / filter  ^j/^k move" ++ global,
+        .commits => "g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  W diff  / filter  b bisect  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => "j/k scroll  PgUp/PgDn page  esc back" ++ global,
     };

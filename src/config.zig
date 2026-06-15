@@ -65,6 +65,7 @@ pub const KeyMap = struct {
     commit_create_fixup: Binding = .{ .codepoint = 'F' },
     commit_autosquash: Binding = .{ .codepoint = 'S' },
     commit_mark_base: Binding = .{ .codepoint = 'B' },
+    bisect: Binding = .{ .codepoint = 'b' },
     fetch: Binding = .{ .codepoint = 'f' },
     pull: Binding = .{ .codepoint = 'p' },
     push: Binding = .{ .codepoint = 'P' },

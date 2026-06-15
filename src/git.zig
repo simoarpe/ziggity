@@ -281,6 +281,7 @@ pub const Git = struct {
         data.reflog = try self.loadReflog(100);
         data.stash = try self.loadStash();
         data.state = self.detectState();
+        data.bisecting = self.gitPathExists("BISECT_LOG");
 
         return data;
     }
@@ -322,6 +323,34 @@ pub const Git = struct {
 
     pub fn rebaseAbort(self: *Git) !ExecResult {
         return self.exec(&.{ "rebase", "--abort" });
+    }
+
+    pub fn bisectStart(self: *Git) !ExecResult {
+        return self.exec(&.{ "bisect", "start" });
+    }
+
+    /// Begin a bisect and mark `rev` as the first good/bad endpoint.
+    pub fn bisectStartMark(self: *Git, good: bool, rev: []const u8) !ExecResult {
+        var start = try self.exec(&.{ "bisect", "start" });
+        if (!start.ok()) return start;
+        start.deinit(self.allocator);
+        return self.bisectMark(good, rev);
+    }
+
+    /// Mark a commit good/bad during a bisect. With no `rev` the current
+    /// checkout (HEAD) is marked, which is how the search narrows.
+    pub fn bisectMark(self: *Git, good: bool, rev: ?[]const u8) !ExecResult {
+        const word = if (good) "good" else "bad";
+        if (rev) |r| return self.exec(&.{ "bisect", word, r });
+        return self.exec(&.{ "bisect", word });
+    }
+
+    pub fn bisectSkip(self: *Git) !ExecResult {
+        return self.exec(&.{ "bisect", "skip" });
+    }
+
+    pub fn bisectReset(self: *Git) !ExecResult {
+        return self.exec(&.{ "bisect", "reset" });
     }
 
     /// Amend the commit a rebase has stopped at (the `edit` step) with whatever
