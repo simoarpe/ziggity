@@ -186,6 +186,23 @@ Supported settings:
 side_panel_width_percent = 34
 diff_context = 3
 
+# Action feedback (lazygit-style). Default: actions succeed silently with a
+# one-line summary in the bottom bar, and only failures pop a dialog.
+result_dialog = on_error    # on_error (default) | always | never
+command_output = show       # show (default) custom-command output in a dialog,
+                            # or `silent` to follow result_dialog instead
+
+# Skip the confirm-before prompt for individual destructive actions (all
+# default false, i.e. confirmations stay on). Names match the action:
+skip_confirm.discard_all = false
+skip_confirm.merge_branch = false
+skip_confirm.rebase_branch = false
+skip_confirm.delete_tag = false
+skip_confirm.delete_remote_branch = false
+skip_confirm.remove_worktree = false
+skip_confirm.remove_remote = false
+skip_confirm.undo = false
+
 # Any keymap field can be remapped with key.<name>:
 key.quit = q
 key.refresh = R
@@ -222,8 +239,9 @@ Key values may be a single character or one of `space`, `enter`, `tab`, `esc`,
 `backspace`, `ctrl+x`, or `alt+x`. Every binding in the keymap is remappable
 via `key.<name>`, and every theme color via `color.<name>`.
 
-Custom commands bind a key to a shell command run in the repo root (output and
-status surfaced in the message line; the view refreshes afterward):
+Custom commands bind a key to a shell command run in the repo root (output
+shown in a dialog by default, or in the message line when `command_output =
+silent`; the view refreshes afterward):
 
 ```ini
 command.C = git commit --amend --no-edit

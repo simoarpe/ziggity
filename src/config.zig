@@ -114,9 +114,36 @@ pub const CustomCommand = struct {
 
 pub const max_custom_commands = 16;
 
+/// When the operation result dialog appears after a git action.
+/// `on_error` (default) mirrors lazygit: silent on success, dialog on failure.
+pub const ResultDialog = enum { on_error, always, never };
+
+/// Whether a custom shell command's output pops a dialog (`show`, the default,
+/// since custom commands are usually run to read output) or follows
+/// `result_dialog` like any other action (`silent`).
+pub const CommandOutput = enum { show, silent };
+
+/// Per-action toggles to skip the confirm-before prompt for destructive
+/// actions. Field names match the `Confirmation` enum tags in app.zig so the
+/// lookup is a direct `@field`. All default to false (confirmations stay on).
+/// Set via `skip_confirm.<name> = true` in the config.
+pub const ConfirmSkips = struct {
+    discard_all: bool = false,
+    merge_branch: bool = false,
+    rebase_branch: bool = false,
+    delete_tag: bool = false,
+    delete_remote_branch: bool = false,
+    remove_worktree: bool = false,
+    remove_remote: bool = false,
+    undo: bool = false,
+};
+
 pub const Config = struct {
     side_panel_width_percent: u8 = 34,
     diff_context: u8 = 3,
+    result_dialog: ResultDialog = .on_error,
+    command_output: CommandOutput = .show,
+    skip_confirm: ConfirmSkips = .{},
     keymap: KeyMap = .{},
     theme: Theme = .{},
     custom_commands: [max_custom_commands]CustomCommand = undefined,
@@ -174,6 +201,25 @@ pub const Config = struct {
             self.diff_context = std.fmt.parseInt(u8, value, 10) catch self.diff_context;
             return;
         }
+        if (std.mem.eql(u8, key, "result_dialog")) {
+            if (std.meta.stringToEnum(ResultDialog, value)) |v| self.result_dialog = v;
+            return;
+        }
+        if (std.mem.eql(u8, key, "command_output")) {
+            if (std.meta.stringToEnum(CommandOutput, value)) |v| self.command_output = v;
+            return;
+        }
+        if (std.mem.startsWith(u8, key, "skip_confirm.")) {
+            const name = key["skip_confirm.".len..];
+            const on = parseBool(value) orelse return;
+            inline for (std.meta.fields(ConfirmSkips)) |field| {
+                if (std.mem.eql(u8, name, field.name)) {
+                    @field(self.skip_confirm, field.name) = on;
+                    return;
+                }
+            }
+            return;
+        }
 
         if (std.mem.startsWith(u8, key, "command.")) {
             if (self.custom_count >= max_custom_commands) return;
@@ -208,6 +254,12 @@ pub const Config = struct {
         }
     }
 };
+
+pub fn parseBool(value: []const u8) ?bool {
+    if (std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1") or std.mem.eql(u8, value, "yes") or std.mem.eql(u8, value, "on")) return true;
+    if (std.mem.eql(u8, value, "false") or std.mem.eql(u8, value, "0") or std.mem.eql(u8, value, "no") or std.mem.eql(u8, value, "off")) return false;
+    return null;
+}
 
 pub fn parseBinding(raw: []const u8) ?Binding {
     const value = std.mem.trim(u8, raw, " \t");
@@ -257,6 +309,29 @@ test "config parser applies theme colors and newer keybindings" {
     try std.testing.expectEqual(@as(u8, 11), cfg.theme.warning); // default preserved
     try std.testing.expectEqual(@as(u21, 'F'), cfg.keymap.fast_forward.codepoint);
     try std.testing.expectEqual(@as(u21, 'L'), cfg.keymap.command_log.codepoint);
+}
+
+test "config parser applies result-dialog, command-output, and skip-confirm flags" {
+    var cfg: Config = .{};
+    // Defaults match lazygit: dialog only on error, custom output shown,
+    // confirmations on.
+    try std.testing.expectEqual(ResultDialog.on_error, cfg.result_dialog);
+    try std.testing.expectEqual(CommandOutput.show, cfg.command_output);
+    try std.testing.expect(!cfg.skip_confirm.discard_all);
+
+    cfg.applyBytes(
+        \\result_dialog = always
+        \\command_output = silent
+        \\skip_confirm.discard_all = true
+        \\skip_confirm.undo = yes
+        \\skip_confirm.bogus = true
+        \\result_dialog = nonsense
+    );
+    try std.testing.expectEqual(ResultDialog.always, cfg.result_dialog); // valid set; bad value ignored
+    try std.testing.expectEqual(CommandOutput.silent, cfg.command_output);
+    try std.testing.expect(cfg.skip_confirm.discard_all);
+    try std.testing.expect(cfg.skip_confirm.undo);
+    try std.testing.expect(!cfg.skip_confirm.merge_branch); // untouched
 }
 
 test "config parser stores custom commands bound to keys" {

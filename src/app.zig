@@ -409,6 +409,18 @@ fn dupArgv(parts: []const []const u8) ![]const []const u8 {
     return out;
 }
 
+/// The first non-blank line of `text`, trimmed, or "" if there is none. Used to
+/// surface a one-line summary (e.g. bisect progress, an error's first line) in
+/// the bottom bar.
+fn firstLine(text: []const u8) []const u8 {
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len > 0) return trimmed;
+    }
+    return "";
+}
+
 /// Describes the preview the current selection wants, independent of how it is
 /// fetched. Translated into a `PreviewJob` and a cache key on the UI thread.
 const PreviewKind = union(enum) {
@@ -583,9 +595,6 @@ pub const App = struct {
     op_ok: bool = true,
     op_running: bool = false,
     op_scroll: usize = 0,
-    // When the "running" frame was painted, so finishOp can hold it for a
-    // readable minimum instead of letting it flash by.
-    op_started_at: ?std.Io.Timestamp = null,
     render_hook: ?RenderHook = null,
     // Text the TUI loop should copy to the system clipboard (OSC 52), owned;
     // set by a copy action, consumed and freed by the loop.
@@ -2614,16 +2623,16 @@ pub const App = struct {
                 };
                 const good = action == .bisect_start_good;
                 try self.beginOpFmt("git bisect start && git bisect {s} {s}", .{ if (good) "good" else "bad", commit.short_hash });
-                return self.runMutation(try self.git.bisectStartMark(good, commit.hash), "bisect started", .{});
+                return self.runMutationEcho(try self.git.bisectStartMark(good, commit.hash), "bisect started");
             },
             .bisect_good_current, .bisect_bad_current => {
                 const good = action == .bisect_good_current;
                 try self.beginOpFmt("git bisect {s}", .{if (good) "good" else "bad"});
-                return self.runMutation(try self.git.bisectMark(good, null), "bisect marked", .{});
+                return self.runMutationEcho(try self.git.bisectMark(good, null), "bisect marked");
             },
             .bisect_skip => {
                 try self.beginOp("git bisect skip");
-                return self.runMutation(try self.git.bisectSkip(), "bisect skipped", .{});
+                return self.runMutationEcho(try self.git.bisectSkip(), "bisect skipped");
             },
             .bisect_good_selected, .bisect_bad_selected => {
                 const commit = self.selectedCommit() orelse {
@@ -2632,11 +2641,11 @@ pub const App = struct {
                 };
                 const good = action == .bisect_good_selected;
                 try self.beginOpFmt("git bisect {s} {s}", .{ if (good) "good" else "bad", commit.short_hash });
-                return self.runMutation(try self.git.bisectMark(good, commit.hash), "bisect marked", .{});
+                return self.runMutationEcho(try self.git.bisectMark(good, commit.hash), "bisect marked");
             },
             .bisect_reset => {
                 try self.beginOp("git bisect reset");
-                return self.runMutation(try self.git.bisectReset(), "bisect reset", .{});
+                return self.runMutationEcho(try self.git.bisectReset(), "bisect reset");
             },
             .patch_apply, .patch_apply_reverse => {
                 const reverse = action == .patch_apply_reverse;
@@ -2735,9 +2744,7 @@ pub const App = struct {
             try self.setMessage("no files to discard", .{});
             return;
         }
-        self.mode = .confirmation;
-        self.pending_confirmation = .discard_all;
-        try self.setMessage("confirm discard all changes", .{});
+        return self.requestConfirmation(.discard_all, "confirm discard all changes", .{});
     }
 
     /// Undo the last history operation by resetting HEAD to its prior reflog
@@ -2758,9 +2765,7 @@ pub const App = struct {
         @memcpy(self.undo_label_buf[0..n], subject[0..n]);
         self.undo_label_len = n;
 
-        self.mode = .confirmation;
-        self.pending_confirmation = .undo;
-        try self.setMessage("confirm undo", .{});
+        return self.requestConfirmation(.undo, "confirm undo", .{});
     }
 
     /// `n` in the Branches panel creates a branch, or a tag on the Tags tab.
@@ -2812,9 +2817,7 @@ pub const App = struct {
             try self.setMessage("no remote selected", .{});
             return;
         };
-        self.mode = .confirmation;
-        self.pending_confirmation = .remove_remote;
-        try self.setMessage("confirm remove remote {s}", .{name});
+        return self.requestConfirmation(.remove_remote, "confirm remove remote {s}", .{name});
     }
 
     fn setUpstreamToSelected(self: *App) !void {
@@ -2839,18 +2842,14 @@ pub const App = struct {
                     try self.setMessage("no tag selected", .{});
                     return;
                 };
-                self.mode = .confirmation;
-                self.pending_confirmation = .delete_tag;
-                try self.setMessage("confirm delete tag {s}", .{tag.name});
+                return self.requestConfirmation(.delete_tag, "confirm delete tag {s}", .{tag.name});
             },
             .remotes => {
                 const branch = self.selectedRemoteBranch() orelse {
                     try self.setMessage("no remote branch selected", .{});
                     return;
                 };
-                self.mode = .confirmation;
-                self.pending_confirmation = .delete_remote_branch;
-                try self.setMessage("confirm delete remote {s}", .{branch.name});
+                return self.requestConfirmation(.delete_remote_branch, "confirm delete remote {s}", .{branch.name});
             },
             .worktrees => {
                 const wt = self.selectedWorktree() orelse {
@@ -2861,9 +2860,7 @@ pub const App = struct {
                     try self.setMessage("cannot remove the current worktree", .{});
                     return;
                 }
-                self.mode = .confirmation;
-                self.pending_confirmation = .remove_worktree;
-                try self.setMessage("confirm remove worktree {s}", .{wt.path});
+                return self.requestConfirmation(.remove_worktree, "confirm remove worktree {s}", .{wt.path});
             },
             .submodules => try self.setMessage("no delete action for submodules", .{}),
         }
@@ -2886,9 +2883,7 @@ pub const App = struct {
             try self.setMessage("select a branch other than the current one", .{});
             return;
         }
-        self.mode = .confirmation;
-        self.pending_confirmation = kind;
-        try self.setMessage("confirm action on {s}", .{branch.name});
+        return self.requestConfirmation(kind, "confirm action on {s}", .{branch.name});
     }
 
     fn fastForwardSelectedBranch(self: *App) !void {
@@ -3356,6 +3351,26 @@ pub const App = struct {
         }
     }
 
+    /// Whether the confirm-before prompt for `kind` is disabled in config. Field
+    /// names in `ConfirmSkips` match the `Confirmation` tags, so the lookup is a
+    /// direct comptime `@field`.
+    fn shouldSkipConfirm(self: *const App, kind: Confirmation) bool {
+        return switch (kind) {
+            inline else => |k| @field(self.config.skip_confirm, @tagName(k)),
+        };
+    }
+
+    /// Begin a confirm-before-destructive action. If its skip flag is set the
+    /// action runs immediately (no prompt); otherwise the confirmation prompt is
+    /// shown with `prompt_fmt`/`prompt_args` in the bottom bar. The prompt text
+    /// is irrelevant when skipping, since the action sets its own message.
+    fn requestConfirmation(self: *App, kind: Confirmation, comptime prompt_fmt: []const u8, prompt_args: anytype) !void {
+        self.pending_confirmation = kind;
+        if (self.shouldSkipConfirm(kind)) return self.confirmPendingAction();
+        self.mode = .confirmation;
+        try self.setMessage(prompt_fmt, prompt_args);
+    }
+
     /// The panel whose selection drives the main-panel content. When the main
     /// panel is focused we keep showing the side panel we descended from.
     fn contentFocus(self: *const App) model.Focus {
@@ -3677,14 +3692,14 @@ pub const App = struct {
             var mutable = result;
             defer mutable.deinit(result_allocator);
             if (mutable.ok()) {
+                // Network success stays silent (bottom bar), like lazygit.
                 try self.setMessage("{s} complete", .{op.label()});
             } else {
+                // Failures follow result_dialog so a rejected push/pull is seen.
+                var label_buf: [64]u8 = undefined;
+                const summary = std.fmt.bufPrint(&label_buf, "{s} failed", .{op.label()}) catch "command failed";
                 const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
-                if (stderr.len > 0) {
-                    try self.setMessage("{s}", .{stderr});
-                } else {
-                    try self.setMessage("{s} failed", .{op.label()});
-                }
+                try self.reportFailure(summary, if (stderr.len > 0) mutable.stderr else mutable.stdout);
             }
         } else {
             try self.setMessage("{s} failed to start", .{op.label()});
@@ -3701,15 +3716,10 @@ pub const App = struct {
         self.op_running = true;
         self.op_scroll = 0;
         self.mode = .operation;
-        // Paint the running frame, then time it so the result does not replace
-        // it before it has been visible long enough to read. Only when a hook
-        // is installed (the real TUI) — tests have none and stay instant.
-        if (self.render_hook) |hook| {
-            hook.call();
-            self.op_started_at = std.Io.Timestamp.now(self.git.io, .awake);
-        } else {
-            self.op_started_at = null;
-        }
+        // Paint the "Running…" frame so it is visible while the (blocking) git
+        // call runs; it lasts only as long as the op. Only when a hook is
+        // installed (the real TUI) — tests have none and stay instant.
+        if (self.render_hook) |hook| hook.call();
     }
 
     fn beginOpFmt(self: *App, comptime fmt: []const u8, args: anytype) !void {
@@ -3718,26 +3728,11 @@ pub const App = struct {
         try self.beginOp(command);
     }
 
-    /// Populate and show the operation dialog's result. `summary` is a one-line
+    /// Populate and show the operation result dialog. `summary` is a one-line
     /// outcome; `raw` is the command's stdout/stderr (trimmed for display).
-    /// Minimum time the "running" frame stays on screen before the result
-    /// replaces it, so quick operations do not flash by unreadably.
-    const min_running_ns: i96 = 1 * std.time.ns_per_s;
-
+    /// Used for failures (always) and for successes only when
+    /// `result_dialog = always`.
     fn finishOp(self: *App, ok: bool, summary: []const u8, raw: []const u8) !void {
-        // Hold the running frame for its minimum on-screen time. op_running is
-        // true here only when beginOp painted a frame for this op.
-        if (self.op_running) {
-            if (self.op_started_at) |started| {
-                const now = std.Io.Timestamp.now(self.git.io, .awake);
-                const elapsed = started.durationTo(now).nanoseconds;
-                if (elapsed < min_running_ns) {
-                    const remaining = std.Io.Duration.fromNanoseconds(min_running_ns - elapsed);
-                    std.Io.sleep(self.git.io, remaining, .awake) catch {};
-                }
-            }
-            self.op_started_at = null;
-        }
         // A slow op set op_command via beginOp; a fast op recovers the command
         // it just ran from the log so the dialog shows what executed.
         if (!self.op_running) {
@@ -3758,20 +3753,72 @@ pub const App = struct {
         self.message = try std.fmt.allocPrint(self.allocator, "{s}", .{summary});
     }
 
+    /// Tear down a pending "Running…" frame (from beginOp) without showing a
+    /// result dialog, returning to the normal view.
+    fn dismissOpFrame(self: *App) void {
+        self.op_running = false;
+        if (self.mode == .operation) self.mode = .normal;
+    }
+
+    /// Surface a successful op (lazygit-style). Under `result_dialog = always`
+    /// the legacy result dialog is shown; otherwise it is silent — a one-line
+    /// bottom-bar summary, tearing down any "Running…" frame. `raw` is the
+    /// command's stdout, shown only in the dialog.
+    fn reportSuccess(self: *App, summary: []const u8, raw: []const u8) !void {
+        if (self.config.result_dialog == .always) {
+            try self.finishOp(true, summary, raw);
+            return;
+        }
+        self.dismissOpFrame();
+        try self.setMessage("{s}", .{summary});
+    }
+
+    /// Surface a failed op. Under `result_dialog = never` the error stays in the
+    /// bottom bar (its first line); otherwise the error dialog pops so the
+    /// failure is not missed.
+    fn reportFailure(self: *App, summary: []const u8, raw: []const u8) !void {
+        if (self.config.result_dialog == .never) {
+            self.dismissOpFrame();
+            const line = firstLine(raw);
+            try self.setMessage("{s}", .{if (line.len > 0) line else summary});
+            return;
+        }
+        try self.finishOp(false, summary, raw);
+    }
+
     fn runMutation(self: *App, result: git_mod.ExecResult, comptime success_fmt: []const u8, args: anytype) !void {
         var mutable = result;
         defer mutable.deinit(self.allocator);
         if (mutable.ok()) {
             const summary = try std.fmt.allocPrint(self.allocator, success_fmt, args);
             defer self.allocator.free(summary);
-            try self.finishOp(true, summary, mutable.stdout);
+            try self.reportSuccess(summary, mutable.stdout);
             self.refresh() catch |err| {
                 try self.setMessage("git command succeeded; refresh failed: {s}", .{@errorName(err)});
             };
             return;
         }
         const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
-        try self.finishOp(false, "command failed", if (stderr.len > 0) mutable.stderr else mutable.stdout);
+        try self.reportFailure("command failed", if (stderr.len > 0) mutable.stderr else mutable.stdout);
+        self.refresh() catch {};
+    }
+
+    /// Like `runMutation`, but on success uses the command's first stdout line
+    /// as the bottom-bar summary when present (bisect prints its progress
+    /// there, e.g. "Bisecting: 5 revisions left…"), falling back to `fallback`.
+    fn runMutationEcho(self: *App, result: git_mod.ExecResult, fallback: []const u8) !void {
+        var mutable = result;
+        defer mutable.deinit(self.allocator);
+        if (mutable.ok()) {
+            const line = firstLine(mutable.stdout);
+            try self.reportSuccess(if (line.len > 0) line else fallback, mutable.stdout);
+            self.refresh() catch |err| {
+                try self.setMessage("git command succeeded; refresh failed: {s}", .{@errorName(err)});
+            };
+            return;
+        }
+        const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
+        try self.reportFailure("command failed", if (stderr.len > 0) mutable.stderr else mutable.stdout);
         self.refresh() catch {};
     }
 
@@ -3781,12 +3828,23 @@ pub const App = struct {
         try self.beginOp(shown);
         var result = try self.git.runShell(command);
         defer result.deinit(self.allocator);
-        if (result.ok()) {
+        // Custom commands are usually run to read output, so by default show it
+        // in the dialog; `command_output = silent` makes them follow the same
+        // result_dialog policy as git actions.
+        if (self.config.command_output == .show) {
+            if (result.ok()) {
+                const summary = try std.fmt.allocPrint(self.allocator, "ran: {s}", .{command});
+                defer self.allocator.free(summary);
+                try self.finishOp(true, summary, result.stdout);
+            } else {
+                try self.finishOp(false, "command failed", if (result.stderr.len > 0) result.stderr else result.stdout);
+            }
+        } else if (result.ok()) {
             const summary = try std.fmt.allocPrint(self.allocator, "ran: {s}", .{command});
             defer self.allocator.free(summary);
-            try self.finishOp(true, summary, result.stdout);
+            try self.reportSuccess(summary, result.stdout);
         } else {
-            try self.finishOp(false, "command failed", if (result.stderr.len > 0) result.stderr else result.stdout);
+            try self.reportFailure("command failed", if (result.stderr.len > 0) result.stderr else result.stdout);
         }
         self.refresh() catch {};
     }
@@ -4344,6 +4402,78 @@ test "escape clears active file filter before quitting" {
     try std.testing.expect(app.running);
     try std.testing.expectEqual(@as(usize, 0), app.file_filter.len);
     try std.testing.expectEqualStrings("file filter cleared", app.message);
+}
+
+test "result feedback: success is silent by default, failure pops a dialog" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    // default result_dialog == .on_error
+
+    // Success: no dialog, just a bottom-bar summary.
+    try app.reportSuccess("staged main.zig", "");
+    try std.testing.expectEqual(Mode.normal, app.mode);
+    try std.testing.expectEqualStrings("staged main.zig", app.message);
+
+    // A slow op's "Running…" frame is torn down on silent success.
+    app.op_running = true;
+    app.mode = .operation;
+    try app.reportSuccess("merged feature", "Merge made.\n");
+    try std.testing.expectEqual(Mode.normal, app.mode);
+    try std.testing.expect(!app.op_running);
+
+    // Failure pops the error dialog (op_running set so finishOp skips the log).
+    app.op_running = true;
+    app.mode = .operation;
+    try app.reportFailure("command failed", "fatal: boom\n");
+    try std.testing.expectEqual(Mode.operation, app.mode);
+    try std.testing.expect(!app.op_ok);
+    try std.testing.expectEqualStrings("fatal: boom", app.op_output);
+}
+
+test "result feedback: always shows on success, never suppresses error dialogs" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // always: success enters the dialog (op_running set so finishOp skips log).
+    app.config.result_dialog = .always;
+    app.op_running = true;
+    try app.reportSuccess("did a thing", "some output\n");
+    try std.testing.expectEqual(Mode.operation, app.mode);
+    try std.testing.expect(app.op_ok);
+
+    // never: failure stays in the bottom bar (first line), no dialog.
+    app.config.result_dialog = .never;
+    app.mode = .normal;
+    try app.reportFailure("command failed", "first error line\nsecond\n");
+    try std.testing.expectEqual(Mode.normal, app.mode);
+    try std.testing.expectEqualStrings("first error line", app.message);
+}
+
+test "firstLine returns the first non-blank trimmed line" {
+    try std.testing.expectEqualStrings("hello", firstLine("\n  \n  hello \nworld"));
+    try std.testing.expectEqualStrings("", firstLine("   \n\t\n"));
+    try std.testing.expectEqualStrings("Bisecting: 3 left", firstLine("Bisecting: 3 left\n[abc] x"));
+}
+
+test "skip-confirm flag controls whether the confirm prompt is shown" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    try std.testing.expect(!app.shouldSkipConfirm(.delete_tag));
+    app.config.skip_confirm.delete_tag = true;
+    try std.testing.expect(app.shouldSkipConfirm(.delete_tag));
+    try std.testing.expect(!app.shouldSkipConfirm(.discard_all)); // independent
+
+    // With the flag off, the prompt is shown (no git touched on this path).
+    try app.requestConfirmation(.discard_all, "confirm discard", .{});
+    try std.testing.expectEqual(Mode.confirmation, app.mode);
+    try std.testing.expectEqual(Confirmation.discard_all, app.pending_confirmation.?);
 }
 
 test "operation dialog shows a running frame then its result" {

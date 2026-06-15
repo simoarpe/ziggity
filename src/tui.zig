@@ -445,8 +445,9 @@ const help_lines = [_][]const u8{
     "  space / g / d  apply / pop / drop",
     "",
     "Operations",
-    "  git actions    run synchronously in a dialog showing the command,",
-    "                 its output and result; enter dismisses, up/down scroll",
+    "  git actions    succeed silently (summary in the bottom bar); only",
+    "                 failures pop a dialog (enter dismisses, up/down scroll)",
+    "                 config: result_dialog = on_error | always | never",
     "  fetch/pull/push run in the background (status in the bottom bar)",
 };
 
