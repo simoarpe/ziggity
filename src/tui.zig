@@ -189,6 +189,10 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     app.render_hook = .{ .ctx = &render_ctx, .func = renderHook };
     defer app.render_hook = null;
 
+    // Paint the skeleton immediately, then do the first (potentially slow) repo
+    // load so startup is not a frozen screen, then paint the populated UI.
+    try renderAndFlush(&vx, writer, app);
+    app.loadInitial();
     try renderAndFlush(&vx, writer, app);
     while (app.running) {
         const event = try loop.nextEvent();
@@ -804,16 +808,40 @@ fn drawFiles(win: vaxis.Window, app: *const app_mod.App) void {
             continue;
         }
         if (row >= win.height) break;
-        var buf: [512]u8 = undefined;
-        const line = if (file.previous_path) |previous|
-            std.fmt.bufPrint(&buf, "{c}{c} {s} -> {s}", .{ file.short_status[0], file.short_status[1], previous, file.path }) catch file.path
-        else
-            std.fmt.bufPrint(&buf, "{c}{c} {s}", .{ file.short_status[0], file.short_status[1], file.path }) catch file.path;
-        const style = if (file.conflict) styles().warning else if (file.has_unstaged) styles().unstaged else if (file.has_staged) styles().staged else styles().normal;
-        drawSelectable(win, row, line, style, idx == app.file_index and app.focus == .files);
+        var base = styles().normal;
+        if (idx == app.file_index and app.focus == .files) {
+            base.bg = selectedBg();
+            base.bold = true;
+            fillRow(win, row, base);
+        }
+        // The two short-status columns are colored independently (lazygit-style):
+        // the index/staged column green, the worktree/unstaged column red — so a
+        // half-staged "MM" shows one green M and one red M.
+        var col = printSpan(win, row, 0, file.short_status[0..1], statusCharStyle(file.short_status[0], true, file.conflict, base));
+        col = printSpan(win, row, col, file.short_status[1..2], statusCharStyle(file.short_status[1], false, file.conflict, base));
+        col = printSpan(win, row, col, " ", base);
+        const path_style = if (file.conflict) withFg(base, ui_theme.warning) else if (file.has_unstaged) withFg(base, ui_theme.unstaged) else if (file.has_staged) withFg(base, ui_theme.staged) else base;
+        if (file.previous_path) |previous| {
+            col = printSpan(win, row, col, previous, path_style);
+            col = printSpan(win, row, col, " -> ", base);
+            _ = printSpan(win, row, col, file.path, path_style);
+        } else {
+            _ = printSpan(win, row, col, file.path, path_style);
+        }
         ordinal += 1;
         row += 1;
     }
+}
+
+/// Style for one of the two `git status` short-status columns. The index
+/// (staged) column is green, the worktree (unstaged) column red; untracked '?'
+/// is red, a blank is muted, and a conflicted file is the warning color.
+/// Preserves `base`'s background/bold so selection highlighting is kept.
+fn statusCharStyle(c: u8, is_index: bool, conflict: bool, base: vaxis.Style) vaxis.Style {
+    if (conflict) return withFg(base, ui_theme.warning);
+    if (c == ' ') return withFg(base, ui_theme.muted);
+    if (c == '?') return withFg(base, ui_theme.unstaged);
+    return withFg(base, if (is_index) ui_theme.staged else ui_theme.unstaged);
 }
 
 fn drawFileTree(win: vaxis.Window, app: *const app_mod.App) void {
@@ -847,10 +875,12 @@ fn drawFileTree(win: vaxis.Window, app: *const app_mod.App) void {
             _ = printSpan(win, row, col, "/", withFg(base, 12));
         } else {
             const file = app.data.files[tr.file_index];
-            const fg: u8 = if (file.conflict) 11 else if (file.has_unstaged) 9 else 10;
-            var prefix: [3]u8 = .{ file.short_status[0], file.short_status[1], ' ' };
-            col = printSpan(win, row, col, &prefix, withFg(base, fg));
-            _ = printSpan(win, row, col, name, withFg(base, fg));
+            // Two status columns colored independently, like the flat list.
+            col = printSpan(win, row, col, file.short_status[0..1], statusCharStyle(file.short_status[0], true, file.conflict, base));
+            col = printSpan(win, row, col, file.short_status[1..2], statusCharStyle(file.short_status[1], false, file.conflict, base));
+            col = printSpan(win, row, col, " ", base);
+            const name_fg: u8 = if (file.conflict) ui_theme.warning else if (file.has_unstaged) ui_theme.unstaged else ui_theme.staged;
+            _ = printSpan(win, row, col, name, withFg(base, name_fg));
         }
     }
 }

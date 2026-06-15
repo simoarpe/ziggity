@@ -112,6 +112,11 @@ pub fn buildLinePatch(
     hunk_index: usize,
     sel_first: usize,
     sel_last: usize,
+    /// True when building a patch to *unstage* (reverse-apply to the index)
+    /// rather than stage. The unselected-line handling is mirrored: against the
+    /// index, unselected additions are present (become context) and unselected
+    /// deletions are absent (dropped) — the opposite of the staging direction.
+    reverse: bool,
 ) ![]u8 {
     if (hunk_index >= parsed.hunks.len) return error.InvalidHunk;
     const hunk = parsed.hunks[hunk_index];
@@ -144,7 +149,10 @@ pub fn buildLinePatch(
                     try w.print("{s}\n", .{line});
                     old_count += 1;
                     changed = true;
+                } else if (reverse) {
+                    // Unstaging: this deletion is not in the index — drop it.
                 } else {
+                    // Staging: keep the unselected deletion as context.
                     try w.print(" {s}\n", .{line[1..]});
                     old_count += 1;
                     new_count += 1;
@@ -155,8 +163,13 @@ pub fn buildLinePatch(
                     try w.print("{s}\n", .{line});
                     new_count += 1;
                     changed = true;
+                } else if (reverse) {
+                    // Unstaging: this addition is in the index — keep as context.
+                    try w.print(" {s}\n", .{line[1..]});
+                    old_count += 1;
+                    new_count += 1;
                 }
-                // unselected additions are dropped
+                // Staging: unselected additions are dropped.
             },
             // A `\ No newline at end of file` marker can't be re-placed
             // correctly when only part of the hunk is taken; building a valid
@@ -252,7 +265,7 @@ test "buildLinePatch keeps a selected addition and drops the rest" {
     defer parsed.deinit(std.testing.allocator);
 
     // Body line 1 is "+X" (0-based: " a"=0, "+X"=1, "+Y"=2, ...). Select only it.
-    const patch = try buildLinePatch(std.testing.allocator, diff, parsed, 0, 1, 1);
+    const patch = try buildLinePatch(std.testing.allocator, diff, parsed, 0, 1, 1, false);
     defer std.testing.allocator.free(patch);
 
     const expected =
@@ -282,7 +295,7 @@ test "buildLinePatch turns an unselected deletion into context" {
     defer parsed.deinit(std.testing.allocator);
 
     // Select only "-a" (body index 0); "-b" must become context " b".
-    const patch = try buildLinePatch(std.testing.allocator, diff, parsed, 0, 0, 0);
+    const patch = try buildLinePatch(std.testing.allocator, diff, parsed, 0, 0, 0, false);
     defer std.testing.allocator.free(patch);
 
     const expected =
@@ -292,6 +305,70 @@ test "buildLinePatch turns an unselected deletion into context" {
         "@@ -1,3 +1,2 @@\n" ++
         "-a\n" ++
         " b\n" ++
+        " c\n";
+    try std.testing.expectEqualStrings(expected, patch);
+}
+
+test "buildLinePatch reverse (unstage) keeps unselected additions as context" {
+    // Staged diff with two additions; unstaging only the first must keep the
+    // second as context (it is still in the index) — the mirror of staging,
+    // which would drop it.
+    const diff =
+        "diff --git a/f.txt b/f.txt\n" ++
+        "index d68dd40..e5cc6e6 100644\n" ++
+        "--- a/f.txt\n" ++
+        "+++ b/f.txt\n" ++
+        "@@ -1,4 +1,6 @@\n" ++
+        " a\n" ++
+        "+X\n" ++
+        "+Y\n" ++
+        " b\n" ++
+        " c\n" ++
+        " d\n";
+    var parsed = try parse(std.testing.allocator, diff);
+    defer parsed.deinit(std.testing.allocator);
+
+    const patch = try buildLinePatch(std.testing.allocator, diff, parsed, 0, 1, 1, true);
+    defer std.testing.allocator.free(patch);
+
+    const expected =
+        "diff --git a/f.txt b/f.txt\n" ++
+        "index d68dd40..e5cc6e6 100644\n" ++
+        "--- a/f.txt\n" ++
+        "+++ b/f.txt\n" ++
+        "@@ -1,5 +1,6 @@\n" ++
+        " a\n" ++
+        "+X\n" ++
+        " Y\n" ++
+        " b\n" ++
+        " c\n" ++
+        " d\n";
+    try std.testing.expectEqualStrings(expected, patch);
+}
+
+test "buildLinePatch reverse (unstage) drops unselected deletions" {
+    // Staged diff with two deletions; unstaging only the first must drop the
+    // second (it is absent from the index), the opposite of the staging case.
+    const diff =
+        "diff --git a/f b/f\n" ++
+        "--- a/f\n" ++
+        "+++ b/f\n" ++
+        "@@ -1,3 +1,1 @@\n" ++
+        "-a\n" ++
+        "-b\n" ++
+        " c\n";
+    var parsed = try parse(std.testing.allocator, diff);
+    defer parsed.deinit(std.testing.allocator);
+
+    const patch = try buildLinePatch(std.testing.allocator, diff, parsed, 0, 0, 0, true);
+    defer std.testing.allocator.free(patch);
+
+    const expected =
+        "diff --git a/f b/f\n" ++
+        "--- a/f\n" ++
+        "+++ b/f\n" ++
+        "@@ -1,2 +1,1 @@\n" ++
+        "-a\n" ++
         " c\n";
     try std.testing.expectEqualStrings(expected, patch);
 }
@@ -309,7 +386,7 @@ test "buildLinePatch refuses a hunk with a no-newline marker" {
         "\\ No newline at end of file\n";
     var parsed = try parse(std.testing.allocator, diff);
     defer parsed.deinit(std.testing.allocator);
-    try std.testing.expectError(error.NoNewlineHunk, buildLinePatch(std.testing.allocator, diff, parsed, 0, 1, 1));
+    try std.testing.expectError(error.NoNewlineHunk, buildLinePatch(std.testing.allocator, diff, parsed, 0, 1, 1, false));
 }
 
 test "buildLinePatch rejects a selection with no change" {
@@ -323,5 +400,5 @@ test "buildLinePatch rejects a selection with no change" {
     var parsed = try parse(std.testing.allocator, diff);
     defer parsed.deinit(std.testing.allocator);
     // Body index 0 is the context " a"; selecting only it yields no change.
-    try std.testing.expectError(error.EmptySelection, buildLinePatch(std.testing.allocator, diff, parsed, 0, 0, 0));
+    try std.testing.expectError(error.EmptySelection, buildLinePatch(std.testing.allocator, diff, parsed, 0, 0, 0, false));
 }

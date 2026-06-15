@@ -783,8 +783,10 @@ pub const App = struct {
         app.collapsed_dirs = std.BufSet.init(allocator);
         errdefer app.deinit();
 
-        try app.refresh();
-        try app.setMessage("ready", .{});
+        // The initial repo load is deferred to the TUI loop (see `loadInitial`)
+        // so the UI paints immediately instead of blocking on a large-repo load
+        // before the alt-screen is even entered.
+        try app.setMessage("loading...", .{});
         return app;
     }
 
@@ -826,6 +828,16 @@ pub const App = struct {
         self.* = undefined;
     }
 
+    /// First full repo load, run by the TUI loop after the initial paint so a
+    /// large repo does not freeze startup. Errors surface in the status bar.
+    pub fn loadInitial(self: *App) void {
+        self.refresh() catch |err| {
+            self.setMessage("load failed: {s}", .{@errorName(err)}) catch return;
+            return;
+        };
+        self.setMessage("ready", .{}) catch {};
+    }
+
     pub fn refresh(self: *App) !void {
         const tree_path = try self.captureTreePath();
         defer if (tree_path) |p| self.allocator.free(p);
@@ -848,6 +860,36 @@ pub const App = struct {
         self.updatePreview() catch |err| {
             try self.setMessage("preview failed: {s}", .{@errorName(err)});
         };
+    }
+
+    /// Fast, scoped reload of just the working tree (status + file list), the
+    /// lazygit "FILES scope" refresh. Used after stage/unstage/discard/resolve,
+    /// which change only the working tree — reloading the whole repo (branches,
+    /// 100 commits, reflog, tags, …) on every such keypress is what made staging
+    /// slow and clunky. Keeps the cursor on the same file.
+    pub fn refreshFiles(self: *App) !void {
+        const selected_path = if (self.selectedFile()) |file| try self.allocator.dupe(u8, file.path) else null;
+        defer if (selected_path) |p| self.allocator.free(p);
+        const tree_path = try self.captureTreePath();
+        defer if (tree_path) |p| self.allocator.free(p);
+
+        var files = try self.git.loadFiles();
+        errdefer model.deinitFileStatuses(self.allocator, files);
+        self.data.replaceFiles(self.allocator, files);
+        files = &.{};
+        self.data.state = self.git.detectState();
+        // Only working-tree file diffs can have changed.
+        self.preview_cache.invalidatePrefix(self.allocator, "f:");
+
+        self.restoreFileSelection(selected_path);
+        self.clampSelections();
+        if (self.tree_view) try self.rebuildTree(tree_path);
+        const content = self.contentFocus();
+        if (content == .files or content == .status) {
+            self.updatePreview() catch |err| {
+                try self.setMessage("preview failed: {s}", .{@errorName(err)});
+            };
+        }
     }
 
     /// True while a foreground git operation is in progress, during which the
@@ -1375,9 +1417,9 @@ pub const App = struct {
             if (include) try paths.append(self.allocator, file.path);
         }
         if (want_staged) {
-            return self.runMutation(try self.git.stagePaths(paths.items), "staged {s}/", .{dir});
+            return self.runMutationFiles(try self.git.stagePaths(paths.items), "staged {s}/", .{dir});
         }
-        return self.runMutation(try self.git.unstagePaths(paths.items), "unstaged {s}/", .{dir});
+        return self.runMutationFiles(try self.git.unstagePaths(paths.items), "unstaged {s}/", .{dir});
     }
 
     pub fn fileFilterActive(self: *const App) bool {
@@ -1593,11 +1635,15 @@ pub const App = struct {
         self.main_origin = .files;
         self.focus = .main;
         self.staging_active = true;
-        try self.loadStaging();
+        try self.loadStaging(false);
         try self.setMessage("staging {s}", .{file.path});
     }
 
-    fn loadStaging(self: *App) !void {
+    /// Reload the staging diff for the current side. `keep_cursor` preserves the
+    /// cursor position (clamped) instead of resetting to the first change — used
+    /// after staging/unstaging a line so the cursor stays put and repeated space
+    /// keeps applying the lines that shift up into it.
+    fn loadStaging(self: *App, keep_cursor: bool) !void {
         if (self.staging) |*parsed| parsed.deinit(self.allocator);
         self.staging = null;
         self.allocator.free(self.staging_diff);
@@ -1607,13 +1653,17 @@ pub const App = struct {
             try self.allocator.dupe(u8, "");
         self.staging = try diff_mod.parse(self.allocator, self.staging_diff);
         self.staging_anchor = null;
-        self.staging_cursor = self.stagingFirstLine();
+        if (keep_cursor) {
+            self.staging_cursor = @min(@max(self.staging_cursor, self.stagingFirstLine()), self.stagingLastLine());
+        } else {
+            self.staging_cursor = self.stagingFirstLine();
+        }
         self.scrollToStagingCursor();
     }
 
     fn toggleStagingSide(self: *App) !void {
         self.staging_staged_view = !self.staging_staged_view;
-        try self.loadStaging();
+        try self.loadStaging(false);
         try self.setMessage("{s} changes", .{if (self.staging_staged_view) "staged" else "unstaged"});
     }
 
@@ -1684,7 +1734,7 @@ pub const App = struct {
             const body_first = hunk.start_line + 1;
             const lo = (@max(lo_abs, body_first)) - body_first;
             const hi = (@min(hi_abs, hunk.end_line - 1)) - body_first;
-            break :blk diff_mod.buildLinePatch(self.allocator, self.staging_diff, parsed, hunk_index, lo, hi) catch |err| switch (err) {
+            break :blk diff_mod.buildLinePatch(self.allocator, self.staging_diff, parsed, hunk_index, lo, hi, self.staging_staged_view) catch |err| switch (err) {
                 error.EmptySelection => {
                     try self.setMessage("selection contains no change", .{});
                     return;
@@ -1713,8 +1763,11 @@ pub const App = struct {
         const scope = if (self.staging_cursor == hunk.start_line) "hunk" else "selection";
         try self.setMessage("{s} {s}", .{ verb, scope });
         self.staging_anchor = null;
-        self.refresh() catch {};
-        try self.loadStaging();
+        // Staging a line only touches the index — scoped (fast) reload. Keep
+        // the cursor where it is so repeated space keeps staging the lines that
+        // shift up into its position.
+        self.refreshScope(.files);
+        try self.loadStaging(true);
     }
 
     fn closeStaging(self: *App) !void {
@@ -2017,10 +2070,10 @@ pub const App = struct {
         };
         if (file.conflict) return self.startConflictResolveMenu();
         if (file.has_unstaged) {
-            return self.runMutation(try self.git.stageFile(file.path), "staged {s}", .{file.path});
+            return self.runMutationFiles(try self.git.stageFile(file.path), "staged {s}", .{file.path});
         }
         if (file.has_staged) {
-            return self.runMutation(try self.git.unstageFile(file), "unstaged {s}", .{file.path});
+            return self.runMutationFiles(try self.git.unstageFile(file), "unstaged {s}", .{file.path});
         }
         try self.setMessage("file has no staged or unstaged changes", .{});
     }
@@ -2031,18 +2084,18 @@ pub const App = struct {
                 var paths: std.ArrayList([]const u8) = .empty;
                 defer paths.deinit(self.allocator);
                 try self.collectVisiblePaths(&paths, .unstaged);
-                return self.runMutation(try self.git.stagePaths(paths.items), "staged visible files", .{});
+                return self.runMutationFiles(try self.git.stagePaths(paths.items), "staged visible files", .{});
             }
-            return self.runMutation(try self.git.stageAll(), "staged all files", .{});
+            return self.runMutationFiles(try self.git.stageAll(), "staged all files", .{});
         }
         if (self.visibleStagedCount() > 0) {
             if (self.anyFileFilterActive()) {
                 var paths: std.ArrayList([]const u8) = .empty;
                 defer paths.deinit(self.allocator);
                 try self.collectVisiblePaths(&paths, .staged);
-                return self.runMutation(try self.git.unstagePaths(paths.items), "unstaged visible files", .{});
+                return self.runMutationFiles(try self.git.unstagePaths(paths.items), "unstaged visible files", .{});
             }
-            return self.runMutation(try self.git.unstageAll(), "unstaged all files", .{});
+            return self.runMutationFiles(try self.git.unstageAll(), "unstaged all files", .{});
         }
         try self.setMessage("no visible files to stage", .{});
     }
@@ -2679,14 +2732,14 @@ pub const App = struct {
                     try self.setMessage("no file selected", .{});
                     return;
                 };
-                return self.runMutation(try self.git.discardFile(file), "discarded {s}", .{file.path});
+                return self.runMutationFiles(try self.git.discardFile(file), "discarded {s}", .{file.path});
             },
             .discard_file_unstaged => {
                 const file = self.selectedFile() orelse {
                     try self.setMessage("no file selected", .{});
                     return;
                 };
-                return self.runMutation(try self.git.discardUnstaged(file), "discarded unstaged changes in {s}", .{file.path});
+                return self.runMutationFiles(try self.git.discardUnstaged(file), "discarded unstaged changes in {s}", .{file.path});
             },
             .delete_branch, .force_delete_branch => {
                 const branch = self.selectedBranch() orelse {
@@ -2715,7 +2768,7 @@ pub const App = struct {
                     return;
                 };
                 const theirs = action == .take_theirs;
-                return self.runMutation(try self.git.resolveConflict(file.path, theirs), "resolved {s}", .{file.path});
+                return self.runMutationFiles(try self.git.resolveConflict(file.path, theirs), "resolved {s}", .{file.path});
             },
             .conflict_continue => switch (self.data.state) {
                 .merging => return self.runMutation(try self.git.mergeContinue(), "merge continued", .{}),
@@ -3420,7 +3473,7 @@ pub const App = struct {
         self.mode = .normal;
         self.pending_confirmation = null;
         switch (pending) {
-            .discard_all => return self.runMutation(try self.git.discardAll(), "discarded all changes", .{}),
+            .discard_all => return self.runMutationFiles(try self.git.discardAll(), "discarded all changes", .{}),
             .merge_branch => {
                 const branch = self.selectedBranch() orelse {
                     try self.setMessage("no branch selected", .{});
@@ -3921,21 +3974,40 @@ pub const App = struct {
         try self.finishOp(false, summary, raw);
     }
 
+    /// How much to reload after a mutation. `.files` is the fast working-tree
+    /// scope (lazygit's FILES scope); `.full` reloads the whole repo.
+    const RefreshScope = enum { files, full };
+
+    fn refreshScope(self: *App, scope: RefreshScope) void {
+        switch (scope) {
+            .files => self.refreshFiles() catch self.refresh() catch {},
+            .full => self.refresh() catch {},
+        }
+    }
+
+    /// Run a mutation that touched only the working tree (stage/unstage/discard/
+    /// resolve) — refreshes just the file list, so it stays snappy on big repos.
+    fn runMutationFiles(self: *App, result: git_mod.ExecResult, comptime success_fmt: []const u8, args: anytype) !void {
+        return self.runMutationScoped(result, .files, success_fmt, args);
+    }
+
     fn runMutation(self: *App, result: git_mod.ExecResult, comptime success_fmt: []const u8, args: anytype) !void {
+        return self.runMutationScoped(result, .full, success_fmt, args);
+    }
+
+    fn runMutationScoped(self: *App, result: git_mod.ExecResult, scope: RefreshScope, comptime success_fmt: []const u8, args: anytype) !void {
         var mutable = result;
         defer mutable.deinit(self.allocator);
         if (mutable.ok()) {
             const summary = try std.fmt.allocPrint(self.allocator, success_fmt, args);
             defer self.allocator.free(summary);
             try self.reportSuccess(summary, mutable.stdout);
-            self.refresh() catch |err| {
-                try self.setMessage("git command succeeded; refresh failed: {s}", .{@errorName(err)});
-            };
+            self.refreshScope(scope);
             return;
         }
         const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
         try self.reportFailure("command failed", if (stderr.len > 0) mutable.stderr else mutable.stdout);
-        self.refresh() catch {};
+        self.refreshScope(scope);
     }
 
     /// True while a foreground git op (network or slow mutation) is queued or

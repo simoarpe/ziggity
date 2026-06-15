@@ -160,9 +160,15 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     if (keymap.left.matches(key) or key.matches(vaxis.Key.left, .{})) return .focus_left;
     if (keymap.right.matches(key) or key.matches(vaxis.Key.right, .{}) or key.matches(vaxis.Key.tab, .{})) return .focus_right;
 
+    // `select` (space) is valid in every focus — the handler branches by focus
+    // and staging state (stage a file, checkout a branch, apply a stash, stage
+    // a line in the staging view, toggle a commit file into the patch). Match it
+    // globally so it works in the main/staging and commits focuses too, not just
+    // the side panels.
+    if (keymap.select.matches(key)) return .select;
+
     switch (focus) {
         .files => {
-            if (keymap.select.matches(key)) return .select;
             if (keymap.stage_all.matches(key)) return .stage_all;
             if (keymap.toggle_tree.matches(key)) return .toggle_tree;
             if (keymap.open_status_filter.matches(key)) return .open_status_filter;
@@ -174,7 +180,6 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
             if (keymap.conflict_menu.matches(key)) return .conflict_menu;
         },
         .branches => {
-            if (keymap.select.matches(key)) return .select;
             if (keymap.new_branch.matches(key)) return .new_branch;
             if (keymap.discard.matches(key)) return .delete_branch;
             if (keymap.merge.matches(key)) return .merge_branch;
@@ -243,6 +248,13 @@ test "normal key mapping handles global and focused actions" {
     try std.testing.expectEqual(Action.focus_main, fromNormalKey(enter, keymap, .commits).?);
     try std.testing.expect(fromNormalKey(enter, keymap, .main) == null);
 
-    // <space> on branches/stash is the primary action, not enter.
-    try std.testing.expectEqual(Action.select, fromNormalKey(testKey(' '), keymap, .branches).?);
+    // <space> is the primary action (select) in every focus — including the
+    // main/staging focus (stage a line) and commits (toggle a patch file),
+    // which previously fell through to null and made line-staging do nothing.
+    const space = testKey(' ');
+    try std.testing.expectEqual(Action.select, fromNormalKey(space, keymap, .files).?);
+    try std.testing.expectEqual(Action.select, fromNormalKey(space, keymap, .branches).?);
+    try std.testing.expectEqual(Action.select, fromNormalKey(space, keymap, .stash).?);
+    try std.testing.expectEqual(Action.select, fromNormalKey(space, keymap, .commits).?);
+    try std.testing.expectEqual(Action.select, fromNormalKey(space, keymap, .main).?);
 }
