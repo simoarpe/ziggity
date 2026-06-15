@@ -136,6 +136,23 @@ main gpa — no cross-thread allocator race), single in-flight, with a status-pa
 loop as a `command_done` event and processed on the UI thread. See
 `src/tui.zig` (asyncWorker / run loop) and `App.requestAsync`/`completeAsync`.
 
-The original lazygit-alignment backlog is now complete. Possible future work:
-async for all mutations (not just network ops), interactive rebase, mouse
-support. Re-run `zig fmt`, `zig build`, `zig build test` after each step.
+The original lazygit-alignment backlog is now complete, and so is the wider
+lazygit feature roadmap that followed it. Done since the async work:
+
+- Interactive rebase (drop/squash/fixup/edit/reword/move), create-`fixup!` +
+  autosquash, and rebase onto a marked base (`B` → `git rebase --onto`).
+- Mid-rebase amend (amend the `edit`-stopped commit and continue, via the `m`
+  menu).
+- Safe undo of the last operation (`z`, reflog hard-reset after confirmation).
+- A modal result dialog for synchronous git operations (shows the command, its
+  output, and outcome); fetch/pull/push remain the only off-loop ops.
+- Mouse click-to-select within panels.
+- System-clipboard copy (`ctrl+o`, OSC 52) and open-in-browser (`o`).
+- Remote management (Remotes tab: add/edit/remove, set upstream).
+- A Files-panel stash menu (all / +untracked / staged / selected file).
+- Diffing mode (`W`, ref-to-ref diff), commit log filtering (`/`, grep/author/
+  path), git bisect (`b`), and custom patch building (`ctrl+p`).
+
+Remaining smaller gaps: redo, moving a custom patch to a different commit, full
+lazygit config compatibility, and score-based fuzzy ranking. Re-run `zig fmt`,
+`zig build`, `zig build test` after each step.

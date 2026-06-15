@@ -54,15 +54,21 @@ Each iteration ends with `zig fmt`, `zig build`, `zig build test`, and a commit.
 - Single line first; leave multi-line description as a later enhancement.
 
 ## Backlog (after fidelity pass) — tracked in IMPLEMENTATION_PLAN.md
-- ~~Panel tabs (`[`/`]`): Branches→Local/Remotes/Tags, Commits→Commits/Reflog.~~ **DONE**
-- New/delete/rename branch; merge/rebase. Remote/tag checkout (deferred from the
-  branches-tabs work — `space` is currently guarded to the Local tab).
-- Commit amend/reword/reset/revert; view commit/branch/stash file lists.
-- Hunk/line staging.
-- Command log panel; async command execution.
 
-A reusable **text-input popup** (for branch name / rename / amend) is the next
-natural primitive; the commit-message popup can be generalized into it.
+This backlog is now **complete** — see `docs/IMPLEMENTATION_PLAN.md` and git
+history for the full feature list. For the record:
+
+- ~~Panel tabs (`[`/`]`): Branches→Local/Remotes/Tags, Commits→Commits/Reflog.~~ **DONE**
+- ~~New/delete/rename branch; merge/rebase; remote/tag checkout.~~ **DONE**
+- ~~Commit amend/reword/reset/revert; view commit/branch/stash file lists.~~ **DONE**
+- ~~Hunk/line staging.~~ **DONE**
+- ~~Command log panel; async command execution.~~ **DONE**
+
+Beyond the original backlog, the wider lazygit feature set is also implemented:
+interactive rebase (incl. marked-base and mid-rebase amend), undo, diffing mode,
+commit log filtering, bisect, custom patch building, remote management,
+clipboard/open-in-browser, a stash menu, and a modal result dialog for
+synchronous operations.
 
 ## Lazygit references (default keybindings)
 - Universal: `q` quit, `<esc>` back, `<tab>`/`<backtab>` next/prev block,

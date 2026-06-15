@@ -44,6 +44,32 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
   onto HEAD), a navigable changed-file list per commit, and interactive rebase
   actions (drop `d`, squash `s`, fixup `f`, edit `e`, reword `r`,
   move `ctrl+j`/`ctrl+k`, create `fixup!` commit `F`, autosquash `S`).
+- Rebase onto a marked base (`B` marks a commit; rebasing a branch then replays
+  the marked commit through HEAD onto it via `git rebase --onto`).
+- Mid-rebase amend: when a rebase stops at an `edit` step, the `m` actions menu
+  can amend the stopped commit with the staged changes and continue.
+- Safe undo of the last operation (`z`, reflog hard-reset after confirmation).
+- Diffing mode (`W`): mark a commit/branch, then select another to view
+  `git diff` between the two refs in the main panel.
+- Commit log filtering (`/` in the Commits panel): filter by message (`--grep`),
+  author, or path; the filter persists across refreshes and is shown in the
+  panel title (`esc` clears it).
+- Git bisect (`b` in the Commits panel): start by marking the selected commit
+  good/bad, then mark the current checkout good/bad/skip until the first bad
+  commit is found; reset when done.
+- Custom patch building (`ctrl+p`): in a commit's file list, `space` toggles
+  files into a patch; then apply it to the working tree (forward/reverse),
+  remove it from its source commit (rebase + amend), or reset it.
+- Copy the selected commit hash / branch / tag to the system clipboard
+  (`ctrl+o`, via OSC 52) and open the selected commit or branch on its remote
+  host in a browser (`o`).
+- Remote management (Branches panel, Remotes tab): add (`n`), edit URL (`e`),
+  remove (`x`), and set the current branch's upstream (`u`).
+- Stash menu (`s` in the Files panel): stash all, including untracked,
+  staged-only, or just the selected file — plus apply/pop/drop on the Stash panel.
+- Synchronous git operations run behind a modal result dialog that shows the
+  command, its output, and outcome (held briefly so it is readable); only
+  fetch/pull/push run off the UI loop.
 - Discard selected file via a lazygit-style menu (all changes / unstaged only).
 - Discard all working tree changes with a confirmation popup.
 - Commit staged changes in a centered editor with a summary line and an optional
@@ -62,12 +88,11 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 
 ## Missing
 
-Large lazygit workflows still not implemented:
+The lazygit-parity feature roadmap is complete. Smaller gaps that remain:
 
 - Redo (undo is implemented; redo of an undo is not).
-- Click-to-select individual list items (mouse currently focuses panels +
-  scrolls).
-- Async for all mutations (currently only network ops run off-loop).
+- Moving a custom patch to a *different* commit (only apply / remove-from-commit
+  are implemented).
 - Full lazygit config compatibility.
 - Score-based fuzzy ranking (current fuzzy filter matches but preserves order).
 
@@ -101,6 +126,9 @@ Useful keys:
 - `?`: keybindings help overlay (`j`/`k` to scroll)
 - `z`: undo the last operation (reflog reset, after confirmation)
 - `@`: show the command log (recent git commands ziggity ran)
+- `ctrl+o`: copy the selected hash / branch / tag to the system clipboard
+- `o`: open the selected commit or branch on its remote host
+- `W`: diffing mode — mark a ref, then select another to diff (esc exits)
 - mouse: click a panel to focus it; scroll wheel to navigate/scroll
 - `/`: filter files by path live; enter accepts; esc clears
 - `` ` ``: toggle the files directory-tree view (collapse dirs with `enter`,
@@ -127,14 +155,23 @@ Useful keys:
 - `space` on the Remotes/Tags tab: check out the remote branch or tag
 - `g`: reset to the selected commit (menu: soft / mixed / hard)
 - `t`: revert the selected commit
+- `B`: mark the selected commit as the base for a `rebase --onto`
+- `W`: diff the selected commit/branch against another marked ref
+- `/` (Commits panel): filter the log by message / author / path
+- `b` (Commits panel): bisect menu (start, then mark good/bad/skip/reset)
+- `ctrl+p`: custom patch menu (apply / remove from commit / reset); in a
+  commit's file list, `space` adds the selected file to the patch
 - `a`: stage all if there are unstaged files, otherwise unstage all
+- `s` (Files panel): stash menu (all / +untracked / staged / selected file)
 - `d`: open the discard menu for the selected file (all changes, or unstaged only)
 - `D`: discard all working tree changes after confirmation
 - `c`: commit staged changes
+- `e`/`x`/`u` (Remotes tab): edit remote URL / remove remote / set upstream
+- `m`: merge/rebase actions (continue, amend+continue, abort) while in progress
 - `f`: fetch
 - `p`: pull
 - `P`: push
-- `esc`: clear active file filter, cancel prompts, or leave the diff panel
+- `esc`: clear active filter, exit diffing mode, cancel prompts, or leave the diff panel
 
 ## Config
 
