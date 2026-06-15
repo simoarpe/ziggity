@@ -981,9 +981,15 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
         };
         const end = printSpan(win, row, 0, line, base);
 
-        // The current branch shows its push/pull status (others lack the data).
-        if (branch.current and app.branches_tab == .local) {
-            _ = drawBranchStatus(win, row, end, base, app.data.upstream != null, app.data.ahead orelse 0, app.data.behind orelse 0);
+        if (app.branches_tab == .local) {
+            if (branch.upstream_gone) {
+                // The tracked remote branch was deleted — flag it in red, in
+                // place of the (now meaningless) ahead/behind status.
+                _ = printSpan(win, row, end, "(upstream gone)", withFg(base, ui_theme.unstaged));
+            } else if (branch.current) {
+                // The current branch shows its push/pull status (others lack it).
+                _ = drawBranchStatus(win, row, end, base, app.data.upstream != null, app.data.ahead orelse 0, app.data.behind orelse 0);
+            }
         }
     }
 }

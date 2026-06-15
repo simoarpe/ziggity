@@ -504,7 +504,7 @@ pub const Git = struct {
     }
 
     pub fn loadBranches(self: *Git) ![]model.Branch {
-        const bytes = try self.output(&.{ "branch", "--format=%(HEAD)%00%(refname:short)%00%(upstream:short)" });
+        const bytes = try self.output(&.{ "branch", "--format=%(HEAD)%00%(refname:short)%00%(upstream:short)%00%(upstream:track)" });
         defer self.allocator.free(bytes);
         return parseBranches(self.allocator, bytes);
     }
@@ -1121,9 +1121,13 @@ pub fn parseBranches(allocator: std.mem.Allocator, bytes: []const u8) ![]model.B
         const head = fields.next() orelse continue;
         const name = fields.next() orelse continue;
         const upstream = fields.next() orelse "";
+        // `%(upstream:track)` is "[gone]" when the tracked remote branch was
+        // deleted, or "[ahead N, behind M]" / "" otherwise.
+        const track = fields.next() orelse "";
         var branch = model.Branch{
             .name = try allocator.dupe(u8, name),
             .current = head.len > 0 and head[0] == '*',
+            .upstream_gone = std.mem.eql(u8, track, "[gone]"),
         };
         errdefer branch.deinit(allocator);
         if (upstream.len > 0) branch.upstream = try allocator.dupe(u8, upstream);
@@ -1358,24 +1362,33 @@ test "parse porcelain status including rename" {
     try std.testing.expect(!files[2].tracked);
 }
 
-test "parse branches captures current marker and upstream" {
+test "parse branches captures current marker, upstream, and gone upstream" {
+    // Fields per line: HEAD, refname:short, upstream:short, upstream:track.
     const input =
-        "*\x00main\x00origin/main\n" ++
-        " \x00feature/demo\x00origin/feature/demo\n" ++
-        " \x00local-only\x00\n";
+        "*\x00main\x00origin/main\x00[ahead 1]\n" ++
+        " \x00feature/demo\x00origin/feature/demo\x00\n" ++
+        " \x00merged\x00origin/merged\x00[gone]\n" ++
+        " \x00local-only\x00\x00\n";
     const branches = try parseBranches(std.testing.allocator, input);
     defer {
         for (branches) |*branch| branch.deinit(std.testing.allocator);
         std.testing.allocator.free(branches);
     }
 
-    try std.testing.expectEqual(@as(usize, 3), branches.len);
+    try std.testing.expectEqual(@as(usize, 4), branches.len);
     try std.testing.expect(branches[0].current);
     try std.testing.expectEqualSlices(u8, "main", branches[0].name);
     try std.testing.expectEqualSlices(u8, "origin/main", branches[0].upstream.?);
+    try std.testing.expect(!branches[0].upstream_gone);
     try std.testing.expect(!branches[1].current);
     try std.testing.expectEqualSlices(u8, "feature/demo", branches[1].name);
-    try std.testing.expect(branches[2].upstream == null);
+    try std.testing.expect(!branches[1].upstream_gone);
+    // The "[gone]" track marks the upstream as deleted.
+    try std.testing.expectEqualSlices(u8, "merged", branches[2].name);
+    try std.testing.expectEqualSlices(u8, "origin/merged", branches[2].upstream.?);
+    try std.testing.expect(branches[2].upstream_gone);
+    try std.testing.expect(branches[3].upstream == null);
+    try std.testing.expect(!branches[3].upstream_gone);
 }
 
 test "command log filters read-only invocations" {

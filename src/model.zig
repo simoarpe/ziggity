@@ -101,6 +101,9 @@ pub const Branch = struct {
     name: []u8,
     upstream: ?[]u8 = null,
     current: bool = false,
+    /// The branch tracks a remote branch that has been deleted ("[gone]" from
+    /// `%(upstream:track)`), e.g. after the upstream PR was merged and pruned.
+    upstream_gone: bool = false,
 
     pub fn deinit(self: *Branch, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
@@ -381,7 +384,7 @@ fn dupeBranch(a: std.mem.Allocator, b: Branch) std.mem.Allocator.Error!Branch {
     const name = try a.dupe(u8, b.name);
     errdefer a.free(name);
     const upstream = if (b.upstream) |u| try a.dupe(u8, u) else null;
-    return .{ .name = name, .upstream = upstream, .current = b.current };
+    return .{ .name = name, .upstream = upstream, .current = b.current, .upstream_gone = b.upstream_gone };
 }
 
 fn dupeTag(a: std.mem.Allocator, t: Tag) std.mem.Allocator.Error!Tag {
