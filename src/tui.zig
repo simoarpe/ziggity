@@ -20,6 +20,7 @@ const Event = union(enum) {
     preview_done,
     worktree_done,
     mutation_done,
+    repo_load_done,
 };
 
 /// A network op run off the UI loop. Allocations use the page allocator (which
@@ -104,6 +105,22 @@ const MutationRun = struct {
 fn mutationWorker(mr: *MutationRun) void {
     mr.result = mr.mutation.run(async_allocator, mr.io, mr.environ, mr.root) catch null;
     _ = mr.loop.tryPostEvent(.mutation_done) catch false;
+}
+
+/// The one-shot initial repo load (lazygit-style async startup). Loads the full
+/// repo off the UI loop on a page-allocator Git and posts `.repo_load_done` so
+/// the loop can deep-copy it into the gpa and paint the populated panels.
+const RepoLoadRun = struct {
+    io: std.Io,
+    loop: *vaxis.Loop(Event),
+    root: []u8,
+    environ: *std.process.Environ.Map,
+    result: ?model.RepoData = null,
+};
+
+fn repoLoadWorker(rl: *RepoLoadRun) void {
+    rl.result = app_mod.loadRepoDataAsync(async_allocator, rl.io, rl.environ, rl.root);
+    _ = rl.loop.tryPostEvent(.repo_load_done) catch false;
 }
 
 const refresh_interval = std.Io.Duration.fromMilliseconds(1500);
@@ -194,11 +211,28 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     app.render_hook = .{ .ctx = &render_ctx, .func = renderHook };
     defer app.render_hook = null;
 
-    // Paint the skeleton immediately, then do the first (potentially slow) repo
-    // load so startup is not a frozen screen, then paint the populated UI.
-    try renderAndFlush(&vx, writer, app);
-    app.loadInitial();
-    try renderAndFlush(&vx, writer, app);
+    // Load the repo off-thread (lazygit-style): the loop's initial winsize event
+    // paints the skeleton with "Loading…" placeholders right away, and the
+    // panels fill in when `repo_load_done` lands — no startup freeze, no flash.
+    var repo_load_run: RepoLoadRun = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ };
+    var repo_load_future: ?std.Io.Future(void) = null;
+    defer if (repo_load_future) |*f| {
+        f.cancel(io);
+        if (repo_load_run.result) |*r| r.deinit(async_allocator);
+    };
+    app.beginInitialLoad();
+    repo_load_future = io.concurrent(repoLoadWorker, .{&repo_load_run}) catch blk: {
+        app.applyRepoLoad(null, async_allocator);
+        break :blk null;
+    };
+
+    // Size the screen up front so the first in-loop render is correctly sized
+    // regardless of whether the initial winsize or the load-done event is
+    // processed first (a tiny repo can finish loading before the winsize).
+    if (tty.getWinsize()) |ws| {
+        vx.resize(allocator, writer, ws) catch {};
+    } else |_| {}
+
     while (app.running) {
         const event = try loop.nextEvent();
         // Motion mouse events flood with any-motion tracking; skip re-rendering
@@ -243,6 +277,14 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     mutation_future = null;
                     try app.completeMutation(mutation_run.mutation, mutation_run.result, async_allocator);
                     mutation_run.result = null;
+                }
+            },
+            .repo_load_done => {
+                if (repo_load_future) |*f| {
+                    f.await(io);
+                    repo_load_future = null;
+                    app.applyRepoLoad(repo_load_run.result, async_allocator);
+                    repo_load_run.result = null;
                 }
             },
         }
@@ -761,7 +803,12 @@ fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
     // priority with an animated spinner, then merge/rebase state, then a
     // worktree summary.
     if (app.foregroundBusy()) {
-        const gerund = if (app.mutation_active or app.mutation_requested != null) app.mutation_gerund else app.async_op.gerund();
+        const gerund = if (app.initial_load_pending)
+            "loading"
+        else if (app.mutation_active or app.mutation_requested != null)
+            app.mutation_gerund
+        else
+            app.async_op.gerund();
         var buf: [80]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, "{s} {s}...", .{ spinnerGlyph(app.spinner_frame), gerund }) catch "working...";
         print(win, 1, 0, line, st.bottom_accent);
@@ -794,7 +841,7 @@ fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
 
 fn drawFiles(win: vaxis.Window, app: *const app_mod.App) void {
     if (app.data.files.len == 0) {
-        print(win, 0, 0, "Working tree clean", styles().muted);
+        print(win, 0, 0, if (app.initial_load_pending) "Loading..." else "Working tree clean", styles().muted);
         return;
     }
     if (app.tree_view) return drawFileTree(win, app);
@@ -904,7 +951,7 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
         else => app.branch_index,
     };
     if (branches.len == 0) {
-        const empty_label = if (app.branches_tab == .remotes) "No remote branches" else "No branches";
+        const empty_label = if (app.initial_load_pending) "Loading..." else if (app.branches_tab == .remotes) "No remote branches" else "No branches";
         print(win, 0, 0, empty_label, styles().muted);
         return;
     }
@@ -1039,7 +1086,7 @@ fn drawCommits(win: vaxis.Window, app: *const app_mod.App) void {
     if (app.commit_files_active) return drawCommitFiles(win, app);
     const commits = app.activeCommits();
     if (commits.len == 0) {
-        const empty_label = if (app.commits_tab == .reflog) "No reflog entries" else "No commits";
+        const empty_label = if (app.initial_load_pending) "Loading..." else if (app.commits_tab == .reflog) "No reflog entries" else "No commits";
         print(win, 0, 0, empty_label, styles().muted);
         return;
     }
@@ -1066,7 +1113,7 @@ fn drawCommits(win: vaxis.Window, app: *const app_mod.App) void {
 
 fn drawStash(win: vaxis.Window, app: *const app_mod.App) void {
     if (app.data.stash.len == 0) {
-        print(win, 0, 0, "No stash entries", styles().muted);
+        print(win, 0, 0, if (app.initial_load_pending) "Loading..." else "No stash entries", styles().muted);
         return;
     }
     const start = scrollStart(app.stash_index, app.data.stash.len, win.height);

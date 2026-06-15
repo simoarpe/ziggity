@@ -536,6 +536,21 @@ pub const WorktreeSnapshot = struct {
     }
 };
 
+/// Worker-thread full repo load (lazygit-style async startup). Runs
+/// `git.loadRepoData` on a throwaway page-allocator `Git`; the result is
+/// page-owned and the UI thread deep-copies it into the gpa (see
+/// `App.applyRepoLoad`). Returns null on failure. `root`/`environ` are borrowed
+/// read-only. The throwaway Git's command log stays empty (loadRepoData is all
+/// read-only commands) but is freed defensively.
+pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8) ?model.RepoData {
+    var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root };
+    defer {
+        for (wgit.command_log.items) |e| gpa.free(e);
+        wgit.command_log.deinit(gpa);
+    }
+    return wgit.loadRepoData() catch null;
+}
+
 /// A slow / multi-step git mutation to run off the UI thread (merge, rebase,
 /// bisect, custom-patch, …). The worker runs it on a page-allocator `Git`,
 /// which reuses the real `Git` methods verbatim — so temp files, env vars and
@@ -749,6 +764,9 @@ pub const App = struct {
     worktree_refresh_requested: bool = false,
     worktree_refresh_active: bool = false,
     refresh_generation: u64 = 0,
+    /// True from startup until the first (async) repo load lands; panels show a
+    /// "Loading…" state and mutating input is gated meanwhile.
+    initial_load_pending: bool = false,
 
     // Async slow mutations (merge/rebase/bisect/…) run off the UI loop like the
     // network ops: `mutation_requested` is a built job the loop starts (page-
@@ -783,9 +801,9 @@ pub const App = struct {
         app.collapsed_dirs = std.BufSet.init(allocator);
         errdefer app.deinit();
 
-        // The initial repo load is deferred to the TUI loop (see `loadInitial`)
-        // so the UI paints immediately instead of blocking on a large-repo load
-        // before the alt-screen is even entered.
+        // The initial repo load runs off-thread, started by the TUI loop (see
+        // `beginInitialLoad`/`applyRepoLoad`), so the UI paints a "Loading…"
+        // skeleton immediately instead of blocking on a large-repo load.
         try app.setMessage("loading...", .{});
         return app;
     }
@@ -828,13 +846,35 @@ pub const App = struct {
         self.* = undefined;
     }
 
-    /// First full repo load, run by the TUI loop after the initial paint so a
-    /// large repo does not freeze startup. Errors surface in the status bar.
-    pub fn loadInitial(self: *App) void {
-        self.refresh() catch |err| {
-            self.setMessage("load failed: {s}", .{@errorName(err)}) catch return;
+    /// Mark the initial repo load as in progress. The TUI loop spawns the load
+    /// worker and paints the skeleton (panels show "Loading…") immediately;
+    /// `applyRepoLoad` lands the data when the worker finishes.
+    pub fn beginInitialLoad(self: *App) void {
+        self.initial_load_pending = true;
+        self.setMessage("loading repository...", .{}) catch {};
+    }
+
+    /// TUI loop hook: apply the finished async repo load. `page_data` (owned by
+    /// `gpa`, the page allocator) is null on failure. Deep-copies into the
+    /// gpa-owned `data` and frees the page version.
+    pub fn applyRepoLoad(self: *App, page_data_opt: ?model.RepoData, gpa: std.mem.Allocator) void {
+        self.initial_load_pending = false;
+        var page_data = page_data_opt orelse {
+            self.setMessage("repository load failed", .{}) catch {};
             return;
         };
+        defer page_data.deinit(gpa);
+        const gpa_data = page_data.dupe(self.allocator) catch {
+            self.setMessage("repository load failed (out of memory)", .{}) catch {};
+            return;
+        };
+        self.data.deinit(self.allocator);
+        self.data = gpa_data;
+        self.refresh_generation +%= 1;
+        self.preview_cache.clearAll(self.allocator);
+        self.clampSelections();
+        if (self.tree_view) self.rebuildTree(null) catch {};
+        self.updatePreview() catch {};
         self.setMessage("ready", .{}) catch {};
     }
 
@@ -4010,10 +4050,12 @@ pub const App = struct {
         self.refreshScope(scope);
     }
 
-    /// True while a foreground git op (network or slow mutation) is queued or
-    /// running. Used to gate mutating keybindings and to animate the spinner.
+    /// True while a foreground git op (the initial load, a network op, or a slow
+    /// mutation) is queued or running. Used to gate mutating keybindings, pause
+    /// the background refresh, and animate the spinner.
     pub fn foregroundBusy(self: *const App) bool {
-        return self.async_active or self.async_requested != null or
+        return self.initial_load_pending or
+            self.async_active or self.async_requested != null or
             self.mutation_active or self.mutation_requested != null;
     }
 
@@ -4739,6 +4781,33 @@ test "skip-confirm flag controls whether the confirm prompt is shown" {
     try app.requestConfirmation(.discard_all, "confirm discard", .{});
     try std.testing.expectEqual(Mode.confirmation, app.mode);
     try std.testing.expectEqual(Confirmation.discard_all, app.pending_confirmation.?);
+}
+
+test "async initial load deep-copies into gpa and clears the loading state" {
+    const allocator = std.testing.allocator;
+    const page = std.heap.page_allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer {
+        app.data.deinit(allocator); // applyRepoLoad makes data gpa-owned
+        deinitTestApp(&app);
+    }
+    app.initial_load_pending = true;
+    try std.testing.expect(app.foregroundBusy()); // gated while loading
+
+    // A page-allocated RepoData as the worker would produce.
+    var page_data = model.RepoData{};
+    page_data.current_branch = try page.dupe(u8, "main");
+    page_data.commits = try page.alloc(model.Commit, 1);
+    page_data.commits[0] = .{ .hash = try page.dupe(u8, "abc"), .short_hash = try page.dupe(u8, "abc"), .author = try page.dupe(u8, "s"), .time = try page.dupe(u8, "now"), .refs = try page.dupe(u8, ""), .subject = try page.dupe(u8, "first") };
+
+    app.applyRepoLoad(page_data, page);
+    try std.testing.expect(!app.initial_load_pending);
+    try std.testing.expect(!app.foregroundBusy());
+    try std.testing.expectEqualStrings("main", app.data.current_branch);
+    try std.testing.expectEqual(@as(usize, 1), app.data.commits.len);
+    try std.testing.expectEqualStrings("first", app.data.commits[0].subject);
+    try std.testing.expectEqualStrings("ready", app.message);
 }
 
 test "slow mutation queues off-thread, marks busy, and refuses a second op" {

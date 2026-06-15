@@ -296,6 +296,30 @@ pub const RepoData = struct {
         self.files = files;
     }
 
+    /// Deep copy into `allocator`. Used to move repo data loaded off-thread
+    /// (with the page allocator) into the gpa-owned data the UI thread keeps,
+    /// so the incremental refreshes (which free with the gpa) stay valid.
+    pub fn dupe(self: RepoData, allocator: std.mem.Allocator) std.mem.Allocator.Error!RepoData {
+        var out = RepoData{};
+        errdefer out.deinit(allocator);
+        out.ahead = self.ahead;
+        out.behind = self.behind;
+        out.state = self.state;
+        out.bisecting = self.bisecting;
+        out.current_branch = try allocator.dupe(u8, self.current_branch);
+        out.upstream = if (self.upstream) |u| try allocator.dupe(u8, u) else null;
+        out.files = try dupeList(FileStatus, allocator, self.files, dupeFile);
+        out.branches = try dupeList(Branch, allocator, self.branches, dupeBranch);
+        out.remote_branches = try dupeList(Branch, allocator, self.remote_branches, dupeBranch);
+        out.tags = try dupeList(Tag, allocator, self.tags, dupeTag);
+        out.worktrees = try dupeList(Worktree, allocator, self.worktrees, dupeWorktree);
+        out.submodules = try dupeList(Submodule, allocator, self.submodules, dupeSubmodule);
+        out.commits = try dupeList(Commit, allocator, self.commits, dupeCommit);
+        out.reflog = try dupeList(Commit, allocator, self.reflog, dupeCommit);
+        out.stash = try dupeList(StashEntry, allocator, self.stash, dupeStash);
+        return out;
+    }
+
     pub fn stagedCount(self: RepoData) usize {
         var count: usize = 0;
         for (self.files) |file| {
@@ -312,6 +336,100 @@ pub const RepoData = struct {
         return count;
     }
 };
+
+// Deep-copy helpers for `RepoData.dupe`. Each element type is duped by hand
+// (its owned strings copied), and `dupeList` copies a slice with proper
+// errdefer cleanup of any elements already duped if a later one fails.
+
+fn dupeList(
+    comptime T: type,
+    a: std.mem.Allocator,
+    src: []const T,
+    comptime dupeOne: fn (std.mem.Allocator, T) std.mem.Allocator.Error!T,
+) std.mem.Allocator.Error![]T {
+    const out = try a.alloc(T, src.len);
+    var n: usize = 0;
+    errdefer {
+        for (out[0..n]) |*e| e.deinit(a);
+        a.free(out);
+    }
+    for (src) |item| {
+        out[n] = try dupeOne(a, item);
+        n += 1;
+    }
+    return out;
+}
+
+fn dupeFile(a: std.mem.Allocator, f: FileStatus) std.mem.Allocator.Error!FileStatus {
+    const path = try a.dupe(u8, f.path);
+    errdefer a.free(path);
+    const previous_path = if (f.previous_path) |p| try a.dupe(u8, p) else null;
+    return .{
+        .path = path,
+        .previous_path = previous_path,
+        .short_status = f.short_status,
+        .has_staged = f.has_staged,
+        .has_unstaged = f.has_unstaged,
+        .tracked = f.tracked,
+        .added = f.added,
+        .deleted = f.deleted,
+        .conflict = f.conflict,
+    };
+}
+
+fn dupeBranch(a: std.mem.Allocator, b: Branch) std.mem.Allocator.Error!Branch {
+    const name = try a.dupe(u8, b.name);
+    errdefer a.free(name);
+    const upstream = if (b.upstream) |u| try a.dupe(u8, u) else null;
+    return .{ .name = name, .upstream = upstream, .current = b.current };
+}
+
+fn dupeTag(a: std.mem.Allocator, t: Tag) std.mem.Allocator.Error!Tag {
+    const name = try a.dupe(u8, t.name);
+    errdefer a.free(name);
+    const subject = try a.dupe(u8, t.subject);
+    return .{ .name = name, .subject = subject };
+}
+
+fn dupeWorktree(a: std.mem.Allocator, w: Worktree) std.mem.Allocator.Error!Worktree {
+    const path = try a.dupe(u8, w.path);
+    errdefer a.free(path);
+    const branch = try a.dupe(u8, w.branch);
+    return .{ .path = path, .branch = branch, .is_current = w.is_current };
+}
+
+fn dupeSubmodule(a: std.mem.Allocator, s: Submodule) std.mem.Allocator.Error!Submodule {
+    const path = try a.dupe(u8, s.path);
+    errdefer a.free(path);
+    const sha = try a.dupe(u8, s.sha);
+    return .{ .path = path, .sha = sha, .status = s.status };
+}
+
+fn dupeCommit(a: std.mem.Allocator, c: Commit) std.mem.Allocator.Error!Commit {
+    const hash = try a.dupe(u8, c.hash);
+    errdefer a.free(hash);
+    const short_hash = try a.dupe(u8, c.short_hash);
+    errdefer a.free(short_hash);
+    const author = try a.dupe(u8, c.author);
+    errdefer a.free(author);
+    const time = try a.dupe(u8, c.time);
+    errdefer a.free(time);
+    const refs = try a.dupe(u8, c.refs);
+    errdefer a.free(refs);
+    const subject = try a.dupe(u8, c.subject);
+    return .{ .hash = hash, .short_hash = short_hash, .author = author, .time = time, .refs = refs, .subject = subject };
+}
+
+fn dupeStash(a: std.mem.Allocator, s: StashEntry) std.mem.Allocator.Error!StashEntry {
+    const selector = try a.dupe(u8, s.selector);
+    errdefer a.free(selector);
+    const hash = try a.dupe(u8, s.hash);
+    errdefer a.free(hash);
+    const time = try a.dupe(u8, s.time);
+    errdefer a.free(time);
+    const message = try a.dupe(u8, s.message);
+    return .{ .index = s.index, .selector = selector, .hash = hash, .time = time, .message = message };
+}
 
 pub const StatusFields = struct {
     has_staged: bool,
@@ -342,6 +460,27 @@ pub fn deriveStatusFields(short_status: [2]u8) StatusFields {
         .deleted = staged == 'D' or unstaged == 'D',
         .conflict = conflict,
     };
+}
+
+test "RepoData.dupe is an independent deep copy" {
+    const a = std.testing.allocator;
+    var src = RepoData{};
+    src.current_branch = try a.dupe(u8, "main");
+    src.files = try a.alloc(FileStatus, 1);
+    src.files[0] = .{ .path = try a.dupe(u8, "f.zig"), .short_status = .{ 'M', 'M' }, .has_staged = true, .has_unstaged = true, .tracked = true, .added = false, .deleted = false, .conflict = false };
+    src.commits = try a.alloc(Commit, 1);
+    src.commits[0] = .{ .hash = try a.dupe(u8, "h"), .short_hash = try a.dupe(u8, "s"), .author = try a.dupe(u8, "au"), .time = try a.dupe(u8, "t"), .refs = try a.dupe(u8, "r"), .subject = try a.dupe(u8, "subj") };
+    defer src.deinit(a);
+
+    var copy = try src.dupe(a);
+    defer copy.deinit(a);
+
+    try std.testing.expectEqualStrings("main", copy.current_branch);
+    try std.testing.expectEqualStrings("f.zig", copy.files[0].path);
+    try std.testing.expectEqualStrings("subj", copy.commits[0].subject);
+    // Independent allocations — the copy doesn't alias the source.
+    try std.testing.expect(copy.current_branch.ptr != src.current_branch.ptr);
+    try std.testing.expect(copy.commits[0].subject.ptr != src.commits[0].subject.ptr);
 }
 
 test "derive status fields follows porcelain status columns" {

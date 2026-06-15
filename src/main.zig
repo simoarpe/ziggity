@@ -1,6 +1,23 @@
 const std = @import("std");
 const ziggity = @import("ziggity");
 
+/// A TUI owns the terminal, so `std.log` output must never reach stderr — it
+/// lands on the alt-screen and corrupts it. vaxis logs capability detection at
+/// `.info` during startup (e.g. "kitty keyboard capability detected"), which is
+/// what produced the garbled text on launch. Route all logging to a no-op sink;
+/// app errors surface through the UI, and the pre-TUI startup error path in
+/// `main` writes to stderr directly (before the alt-screen is entered).
+pub const std_options: std.Options = .{
+    .logFn = discardLog,
+};
+
+fn discardLog(
+    comptime _: std.log.Level,
+    comptime _: @EnumLiteral(),
+    comptime _: []const u8,
+    _: anytype,
+) void {}
+
 pub fn main(init: std.process.Init) !void {
     var app = ziggity.app.App.init(init.gpa, init.io, init.environ_map) catch |err| {
         var stderr_buffer: [1024]u8 = undefined;
