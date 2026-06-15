@@ -217,6 +217,20 @@ pub const StatusSummary = struct {
         if (self.upstream) |upstream| allocator.free(upstream);
         self.* = .{};
     }
+
+    /// Deep copy into `allocator`. Used to move a summary built off-thread (with
+    /// the page allocator) into the gpa-owned `RepoData`.
+    pub fn dupe(self: StatusSummary, allocator: std.mem.Allocator) !StatusSummary {
+        const branch = try allocator.dupe(u8, self.current_branch);
+        errdefer allocator.free(branch);
+        const upstream = if (self.upstream) |u| try allocator.dupe(u8, u) else null;
+        return .{
+            .current_branch = branch,
+            .upstream = upstream,
+            .ahead = self.ahead,
+            .behind = self.behind,
+        };
+    }
 };
 
 pub fn deinitFileStatuses(allocator: std.mem.Allocator, files: []FileStatus) void {

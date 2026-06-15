@@ -480,8 +480,15 @@ pub const Git = struct {
         };
     }
 
+    /// Raw `git status --porcelain -z` bytes. Split out from `loadFiles` so a
+    /// background worker can capture the (slow) git output off the UI thread and
+    /// let the UI thread do the cheap parsing with its own allocator.
+    pub fn statusPorcelain(self: *Git) ![]u8 {
+        return self.output(&.{ "status", "--porcelain", "-z", "--untracked-files=all", "--find-renames=50%" });
+    }
+
     pub fn loadFiles(self: *Git) ![]model.FileStatus {
-        const output_bytes = try self.output(&.{ "status", "--porcelain", "-z", "--untracked-files=all", "--find-renames=50%" });
+        const output_bytes = try self.statusPorcelain();
         defer self.allocator.free(output_bytes);
         return parseStatus(self.allocator, output_bytes);
     }

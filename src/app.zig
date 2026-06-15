@@ -324,6 +324,206 @@ pub const status_filter_options = [_]model.FileDisplayFilter{
     .conflicted,
 };
 
+/// Allocations shared with the preview worker thread use the page allocator,
+/// which is thread-safe and independent of the main gpa (mirrors the network
+/// async path in tui.zig). Job specs and their results live here.
+const preview_allocator = std.heap.page_allocator;
+
+/// One `git` invocation contributing a labeled section to a preview. `argv` is
+/// the argument vector after "git" (the worker prepends it). Every string is
+/// page-allocated so the job is self-contained across the thread boundary and
+/// survives repo refreshes. `keep_on_error` is for `diff --no-index` on
+/// untracked files, which exits non-zero yet still prints a usable diff.
+pub const PreviewSection = struct {
+    argv: []const []const u8,
+    label: []const u8 = "",
+    keep_on_error: bool = false,
+};
+
+/// A git-backed preview to render off the UI thread. Built on the UI thread
+/// from the current selection (see `buildPreviewJob`), run by the TUI loop's
+/// preview worker, and the result stashed in `PreviewCache`. Owned by the page
+/// allocator; freed via `deinit` once consumed.
+pub const PreviewJob = struct {
+    key: []const u8,
+    sections: []const PreviewSection,
+    /// Static fallback text shown when every section comes back empty.
+    empty_msg: []const u8,
+
+    /// Worker-thread entry point: run each section's git command and stitch the
+    /// non-empty outputs together with their labels. Allocates with `gpa` (the
+    /// page allocator); the returned slice is owned by the caller.
+    pub fn run(self: PreviewJob, gpa: std.mem.Allocator, io: std.Io, root: []const u8) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(gpa);
+        for (self.sections) |sec| {
+            var argv: std.ArrayList([]const u8) = .empty;
+            defer argv.deinit(gpa);
+            try argv.append(gpa, "git");
+            try argv.appendSlice(gpa, sec.argv);
+            const res = std.process.run(gpa, io, .{
+                .argv = argv.items,
+                .cwd = .{ .path = root },
+                .stdout_limit = .limited(16 * 1024 * 1024),
+                .stderr_limit = .limited(4 * 1024 * 1024),
+            }) catch continue;
+            defer gpa.free(res.stdout);
+            defer gpa.free(res.stderr);
+            const ok = switch (res.term) {
+                .exited => |code| code == 0,
+                else => false,
+            };
+            const usable = if (sec.keep_on_error) res.stdout.len > 0 else (ok and res.stdout.len > 0);
+            if (!usable) continue;
+            if (out.items.len > 0) try out.append(gpa, '\n');
+            try out.appendSlice(gpa, sec.label);
+            try out.appendSlice(gpa, res.stdout);
+        }
+        if (out.items.len == 0) return gpa.dupe(u8, self.empty_msg);
+        return out.toOwnedSlice(gpa);
+    }
+
+    pub fn deinit(self: PreviewJob, gpa: std.mem.Allocator) void {
+        for (self.sections) |sec| {
+            for (sec.argv) |arg| gpa.free(arg);
+            gpa.free(sec.argv);
+        }
+        gpa.free(self.sections);
+        gpa.free(self.key);
+    }
+};
+
+/// Copy an argument vector into the page allocator so a `PreviewSection` owns
+/// every string and can outlive the borrowed selection slices it was built from.
+fn dupArgv(parts: []const []const u8) ![]const []const u8 {
+    const out = try preview_allocator.alloc([]const u8, parts.len);
+    var filled: usize = 0;
+    errdefer {
+        for (out[0..filled]) |a| preview_allocator.free(a);
+        preview_allocator.free(out);
+    }
+    for (parts) |p| {
+        out[filled] = try preview_allocator.dupe(u8, p);
+        filled += 1;
+    }
+    return out;
+}
+
+/// Describes the preview the current selection wants, independent of how it is
+/// fetched. Translated into a `PreviewJob` and a cache key on the UI thread.
+const PreviewKind = union(enum) {
+    file: model.FileStatus,
+    branch: []const u8,
+    commit: []const u8,
+    commit_file: struct { hash: []const u8, path: []const u8 },
+    stash: usize,
+    diff_refs: struct { base: []const u8, target: []const u8 },
+};
+
+/// Bounded, insertion-ordered cache of rendered preview text keyed by a
+/// content-addressed string (e.g. "c:3:<hash>", "f:3:U_T:<path>"). Lets
+/// revisiting an item render instantly and lets the async worker stash results
+/// it produced even after the selection moved on. Keys and values are gpa-owned.
+const PreviewCache = struct {
+    const max_entries = 256;
+    const max_bytes = 32 * 1024 * 1024;
+
+    map: std.StringArrayHashMapUnmanaged([]u8) = .empty,
+    bytes: usize = 0,
+
+    fn deinit(self: *PreviewCache, gpa: std.mem.Allocator) void {
+        for (self.map.keys()) |k| gpa.free(k);
+        for (self.map.values()) |v| gpa.free(v);
+        self.map.deinit(gpa);
+    }
+
+    fn get(self: *PreviewCache, key: []const u8) ?[]const u8 {
+        return self.map.get(key);
+    }
+
+    /// Insert a copy of `value` under `key`. Content is immutable for a given
+    /// key, so an existing entry is kept. Evicts oldest entries past the caps.
+    fn put(self: *PreviewCache, gpa: std.mem.Allocator, key: []const u8, value: []const u8) !void {
+        if (self.map.contains(key)) return;
+        const v = try gpa.dupe(u8, value);
+        errdefer gpa.free(v);
+        const k = try gpa.dupe(u8, key);
+        errdefer gpa.free(k);
+        try self.map.put(gpa, k, v);
+        self.bytes += v.len;
+        while ((self.map.count() > max_entries or self.bytes > max_bytes) and self.map.count() > 1) {
+            const old_k = self.map.keys()[0];
+            const old_v = self.map.values()[0];
+            self.bytes -= old_v.len;
+            self.map.orderedRemoveAt(0);
+            gpa.free(old_k);
+            gpa.free(old_v);
+        }
+    }
+
+    fn clearAll(self: *PreviewCache, gpa: std.mem.Allocator) void {
+        for (self.map.keys()) |k| gpa.free(k);
+        for (self.map.values()) |v| gpa.free(v);
+        self.map.clearRetainingCapacity();
+        self.bytes = 0;
+    }
+
+    /// Drop entries whose key starts with `prefix` (e.g. "f:" when the working
+    /// tree changed but commit/branch diffs remain valid).
+    fn invalidatePrefix(self: *PreviewCache, gpa: std.mem.Allocator, prefix: []const u8) void {
+        var i: usize = 0;
+        while (i < self.map.count()) {
+            const k = self.map.keys()[i];
+            if (std.mem.startsWith(u8, k, prefix)) {
+                const v = self.map.values()[i];
+                self.bytes -= v.len;
+                self.map.orderedRemoveAt(i);
+                gpa.free(k);
+                gpa.free(v);
+            } else {
+                i += 1;
+            }
+        }
+    }
+};
+
+/// Working-tree state gathered off the UI thread for the background auto-refresh
+/// (the 1.5s tick). The slow part — spawning `git status` and friends — runs in
+/// `load` on a worker with the page allocator; the UI thread then converts the
+/// payload into gpa-owned `RepoData` (see `App.applyWorktreeSnapshot`). Keeping
+/// the git calls off the loop means the periodic refresh no longer hitches
+/// navigation on large repos.
+pub const WorktreeSnapshot = struct {
+    status: model.StatusSummary,
+    porcelain: []u8,
+    state: model.RepoState,
+
+    /// Worker-thread entry point. `gpa` is the page allocator; everything
+    /// returned is owned by it. Borrows `root`/`environ` read-only from the
+    /// app's Git (never mutated by these read-only commands).
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8) !WorktreeSnapshot {
+        // A throwaway Git bound to the page allocator. The commands it runs
+        // (branch/rev-parse/rev-list/status) are all read-only, so its command
+        // log stays empty and `root` is only ever read — no deinit needed.
+        var wgit = git_mod.Git{
+            .allocator = gpa,
+            .io = io,
+            .environ = environ,
+            .root = root,
+        };
+        var status = try wgit.loadStatusSummary();
+        errdefer status.deinit(gpa);
+        const porcelain = try wgit.statusPorcelain();
+        return .{ .status = status, .porcelain = porcelain, .state = wgit.detectState() };
+    }
+
+    pub fn deinit(self: *WorktreeSnapshot, gpa: std.mem.Allocator) void {
+        self.status.deinit(gpa);
+        gpa.free(self.porcelain);
+        self.* = undefined;
+    }
+};
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     git: git_mod.Git,
@@ -422,6 +622,25 @@ pub const App = struct {
     async_active: bool = false,
     async_op: AsyncOp = .fetch,
 
+    // Async preview pipeline. Switching panels / moving the selection only
+    // computes a cache key and renders cached text (instant); the matching git
+    // command runs off the UI loop. `preview_desired_key` is what the current
+    // selection wants shown; `preview_wanted` is a built job the loop should
+    // start; `preview_inflight_key` is the job currently running off-thread.
+    preview_cache: PreviewCache = .{},
+    preview_desired_key: []const u8 = &.{},
+    preview_wanted: ?PreviewJob = null,
+    preview_inflight_key: []const u8 = &.{},
+    preview_loading: bool = false,
+
+    // Background working-tree refresh (the 1.5s tick). `..._requested` is set by
+    // the tick for the TUI loop to start a worker; `..._active` guards against
+    // overlapping workers. `refresh_generation` bumps on every full refresh so a
+    // worktree snapshot that started before it can be discarded as stale.
+    worktree_refresh_requested: bool = false,
+    worktree_refresh_active: bool = false,
+    refresh_generation: u64 = 0,
+
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -472,6 +691,10 @@ pub const App = struct {
         for (self.patch_paths.items) |p| self.allocator.free(p);
         self.patch_paths.deinit(self.allocator);
         self.input_buffer.deinit(self.allocator);
+        self.preview_cache.deinit(self.allocator);
+        self.allocator.free(self.preview_desired_key);
+        self.allocator.free(self.preview_inflight_key);
+        if (self.preview_wanted) |job| job.deinit(preview_allocator);
         self.git.deinit();
         self.* = undefined;
     }
@@ -480,9 +703,18 @@ pub const App = struct {
         const tree_path = try self.captureTreePath();
         defer if (tree_path) |p| self.allocator.free(p);
 
+        // Invalidate any in-flight background worktree snapshot: this full
+        // reload is newer, so a snapshot that started earlier must not clobber it.
+        // A queued (not-yet-started) request is now redundant — drop it.
+        self.refresh_generation +%= 1;
+        self.worktree_refresh_requested = false;
+
         const next = try self.git.loadRepoData();
         self.data.deinit(self.allocator);
         self.data = next;
+        // A full reload can move branches, rewrite history and shift stash
+        // indices, so every cached preview is potentially stale.
+        self.preview_cache.clearAll(self.allocator);
         self.clampSelections();
         if (self.tree_view) try self.rebuildTree(tree_path);
         if (self.commit_files_active) self.reloadCommitFilesAfterRefresh();
@@ -491,22 +723,71 @@ pub const App = struct {
         };
     }
 
-    pub fn refreshWorkingTree(self: *App) !void {
+    /// True while a foreground git operation is in progress, during which the
+    /// periodic background working-tree refresh is held off (lazygit's
+    /// `pauseBackgroundRefreshes`). A network op (fetch/pull/push) runs on its
+    /// own worker while the loop stays live, so without this its `git status`
+    /// read could overlap a write; the op finishes with its own full refresh
+    /// anyway. Synchronous mutations block the loop and keep `mode` non-normal,
+    /// so the tick guard already covers them — this mainly catches network ops.
+    fn backgroundRefreshPaused(self: *const App) bool {
+        return self.async_active or self.async_requested != null;
+    }
+
+    /// Queue a background working-tree refresh (status + file list) for the TUI
+    /// loop to run off-thread. Single in-flight; ignored if one is already
+    /// running or queued, or while an operation is in progress. The slow git
+    /// calls happen on a worker so the periodic auto-refresh never blocks
+    /// navigation (see `WorktreeSnapshot`).
+    pub fn requestWorktreeRefresh(self: *App) void {
+        if (self.worktree_refresh_active or self.worktree_refresh_requested) return;
+        if (self.backgroundRefreshPaused()) return;
+        self.worktree_refresh_requested = true;
+    }
+
+    /// TUI loop hook: claim a queued worktree refresh, returning the refresh
+    /// generation to stamp the worker with (so a full refresh that lands while
+    /// it runs invalidates its result). Null when nothing is queued or while an
+    /// operation is in progress (the request is held until it clears).
+    pub fn takeWorktreeRefresh(self: *App) ?u64 {
+        if (!self.worktree_refresh_requested) return null;
+        if (self.backgroundRefreshPaused()) return null;
+        self.worktree_refresh_requested = false;
+        self.worktree_refresh_active = true;
+        return self.refresh_generation;
+    }
+
+    /// TUI loop hook: apply a finished background worktree snapshot on the UI
+    /// thread. `snap_opt` (owned by `gpa`, the page allocator) is null if the
+    /// worker could not run. Stale snapshots — ones started before a full
+    /// refresh — are dropped. The payload is freed here.
+    pub fn applyWorktreeSnapshot(self: *App, snap_opt: ?WorktreeSnapshot, generation: u64, gpa: std.mem.Allocator) !void {
+        self.worktree_refresh_active = false;
+        var snap = snap_opt orelse return;
+        defer snap.deinit(gpa);
+        // A full refresh happened while we were loading: its data is newer.
+        if (generation != self.refresh_generation) return;
+
+        // Convert the page-allocated payload into gpa-owned data before touching
+        // app.data, so everything stored there is freed with the right allocator.
+        var status = try snap.status.dupe(self.allocator);
+        errdefer status.deinit(self.allocator);
+        var files = try git_mod.parseStatus(self.allocator, snap.porcelain);
+        errdefer model.deinitFileStatuses(self.allocator, files);
+
         const selected_path = if (self.selectedFile()) |file| try self.allocator.dupe(u8, file.path) else null;
         defer if (selected_path) |path| self.allocator.free(path);
         const tree_path = try self.captureTreePath();
         defer if (tree_path) |p| self.allocator.free(p);
 
-        var status = try self.git.loadStatusSummary();
-        errdefer status.deinit(self.allocator);
-        var files = try self.git.loadFiles();
-        errdefer model.deinitFileStatuses(self.allocator, files);
-
         self.data.replaceStatus(self.allocator, status);
         status = .{};
         self.data.replaceFiles(self.allocator, files);
         files = &.{};
-        self.data.state = self.git.detectState();
+        self.data.state = snap.state;
+        // Only working-tree file diffs can have changed; commit/branch/stash
+        // previews stay valid, so drop just the "f:" entries.
+        self.preview_cache.invalidatePrefix(self.allocator, "f:");
 
         self.restoreFileSelection(selected_path);
         self.clampSelections();
@@ -815,9 +1096,8 @@ pub const App = struct {
         if (self.mode != .normal) return;
         if (self.staging_active) return;
         if (!self.terminal_focused) return;
-        self.refreshWorkingTree() catch |err| {
-            try self.setMessage("auto refresh failed: {s}", .{@errorName(err)});
-        };
+        // The actual git work runs off the loop; this only queues it.
+        self.requestWorktreeRefresh();
     }
 
     pub fn handleFocusIn(self: *App) !void {
@@ -3082,6 +3362,11 @@ pub const App = struct {
         return if (self.focus == .main) self.main_origin else self.focus;
     }
 
+    /// Refresh the main-panel preview for the current selection. Cheap previews
+    /// (status, placeholders) render immediately; diffs that require a git
+    /// command render from `preview_cache` when warm, otherwise the command is
+    /// queued for the TUI loop to run off-thread (see `requestGitPreview`). This
+    /// never spawns git on the UI thread, so panel/selection moves stay instant.
     fn updatePreview(self: *App) !void {
         // While staging, the main panel renders the raw staging diff instead of
         // self.diff, so there is nothing to recompute here.
@@ -3089,61 +3374,256 @@ pub const App = struct {
 
         // Diffing mode overrides the normal preview with a ref-to-ref diff.
         if (self.diff_base) |base| {
-            self.allocator.free(self.diff);
             const target = self.selectedRefForDiff();
-            if (target == null) {
-                self.diff = try std.fmt.allocPrint(self.allocator, "Diffing from {s}.\n\nSelect a commit or branch to compare against.\n", .{base});
-            } else if (std.mem.eql(u8, base, target.?)) {
-                self.diff = try std.fmt.allocPrint(self.allocator, "Diffing from {s}.\n\nThat is the base itself - move to another ref.\n", .{base});
-            } else {
-                self.diff = self.git.diffRefs(base, target.?, self.config.diff_context) catch
-                    try std.fmt.allocPrint(self.allocator, "Could not diff {s}..{s}.\n", .{ base, target.? });
-            }
+            if (target == null)
+                return self.setCheapPreview(try std.fmt.allocPrint(self.allocator, "Diffing from {s}.\n\nSelect a commit or branch to compare against.\n", .{base}));
+            if (std.mem.eql(u8, base, target.?))
+                return self.setCheapPreview(try std.fmt.allocPrint(self.allocator, "Diffing from {s}.\n\nThat is the base itself - move to another ref.\n", .{base}));
+            return self.requestGitPreview(.{ .diff_refs = .{ .base = base, .target = target.? } });
+        }
+
+        switch (self.contentFocus()) {
+            .status => return self.setCheapPreview(try self.statusPreview()),
+            .files, .main => {
+                if (self.tree_view) {
+                    if (self.treeSelectedRow()) |row| {
+                        if (row.is_dir) return self.setCheapPreview(try std.fmt.allocPrint(self.allocator, "Directory {s}/\n\nSelect a file to view its diff.\n", .{row.path}));
+                    }
+                }
+                if (self.selectedFile()) |file| return self.requestGitPreview(.{ .file = file });
+                if (self.anyFileFilterActive() and self.data.files.len > 0) return self.setCheapPreview(try self.allocator.dupe(u8, "No files match the active filter.\n"));
+                return self.setCheapPreview(try self.allocator.dupe(u8, "Working tree clean.\n"));
+            },
+            .branches => {
+                if (self.branches_tab == .worktrees) {
+                    if (self.selectedWorktree()) |wt|
+                        return self.setCheapPreview(try std.fmt.allocPrint(self.allocator, "Worktree{s}\nPath:   {s}\nBranch: {s}\n", .{ if (wt.is_current) " (current)" else "", wt.path, wt.branch }));
+                    return self.setCheapPreview(try self.allocator.dupe(u8, "No worktrees.\n"));
+                }
+                if (self.branches_tab == .submodules) {
+                    if (self.selectedSubmodule()) |sm|
+                        return self.setCheapPreview(try std.fmt.allocPrint(self.allocator, "Submodule ({s})\nPath: {s}\nSHA:  {s}\n\nspace to init/update.\n", .{ sm.stateLabel(), sm.path, sm.sha }));
+                    return self.setCheapPreview(try self.allocator.dupe(u8, "No submodules.\n"));
+                }
+                if (self.selectedBranchRefName()) |name| return self.requestGitPreview(.{ .branch = name });
+                return self.setCheapPreview(try self.allocator.dupe(u8, "Nothing to show in this tab.\n"));
+            },
+            .commits => {
+                const commit = self.selectedCommit() orelse return self.setCheapPreview(try self.allocator.dupe(u8, "No commits found.\n"));
+                if (self.commit_files_active) {
+                    if (self.selectedCommitFile()) |file| return self.requestGitPreview(.{ .commit_file = .{ .hash = commit.hash, .path = file.path } });
+                    return self.setCheapPreview(try self.allocator.dupe(u8, "This commit changed no files.\n"));
+                }
+                return self.requestGitPreview(.{ .commit = commit.hash });
+            },
+            .stash => {
+                if (self.selectedStash()) |entry| return self.requestGitPreview(.{ .stash = entry.index });
+                return self.setCheapPreview(try self.allocator.dupe(u8, "No stash entries.\n"));
+            },
+        }
+    }
+
+    /// Show `text` (gpa-owned; ownership transferred) right away. Used for
+    /// previews that need no git command; also cancels any queued async fetch
+    /// since a cheap preview means we are no longer waiting on git.
+    fn setCheapPreview(self: *App, text: []u8) void {
+        self.allocator.free(self.diff);
+        self.diff = text;
+        self.preview_loading = false;
+        self.setDesiredKey("");
+    }
+
+    /// Render the preview for `kind`: instantly from cache when warm, otherwise
+    /// leave the current text on screen and queue the git command for the TUI
+    /// loop to run off the UI thread. Never blocks on git.
+    fn requestGitPreview(self: *App, kind: PreviewKind) !void {
+        const key = try self.previewKey(self.allocator, kind);
+        defer self.allocator.free(key);
+        self.setDesiredKey(key);
+
+        if (self.preview_cache.get(key)) |cached| {
+            const dup = try self.allocator.dupe(u8, cached);
+            self.allocator.free(self.diff);
+            self.diff = dup;
+            self.preview_loading = false;
             return;
         }
 
-        self.allocator.free(self.diff);
-        self.diff = switch (self.contentFocus()) {
-            .status => try self.statusPreview(),
-            .files, .main => blk: {
-                if (self.tree_view) {
-                    if (self.treeSelectedRow()) |row| {
-                        if (row.is_dir) break :blk try std.fmt.allocPrint(self.allocator, "Directory {s}/\n\nSelect a file to view its diff.\n", .{row.path});
-                    }
-                }
-                if (self.selectedFile()) |file| break :blk try self.git.diffForFile(file, self.config.diff_context);
-                if (self.anyFileFilterActive() and self.data.files.len > 0) break :blk try self.allocator.dupe(u8, "No files match the active filter.\n");
-                break :blk try self.allocator.dupe(u8, "Working tree clean.\n");
-            },
-            .branches => blk: {
-                if (self.branches_tab == .worktrees) {
-                    if (self.selectedWorktree()) |wt| {
-                        break :blk try std.fmt.allocPrint(self.allocator, "Worktree{s}\nPath:   {s}\nBranch: {s}\n", .{ if (wt.is_current) " (current)" else "", wt.path, wt.branch });
-                    }
-                    break :blk try self.allocator.dupe(u8, "No worktrees.\n");
-                }
-                if (self.branches_tab == .submodules) {
-                    if (self.selectedSubmodule()) |sm| {
-                        break :blk try std.fmt.allocPrint(self.allocator, "Submodule ({s})\nPath: {s}\nSHA:  {s}\n\nspace to init/update.\n", .{ sm.stateLabel(), sm.path, sm.sha });
-                    }
-                    break :blk try self.allocator.dupe(u8, "No submodules.\n");
-                }
-                if (self.selectedBranchRefName()) |name| break :blk try self.git.showBranch(name);
-                break :blk try self.allocator.dupe(u8, "Nothing to show in this tab.\n");
-            },
-            .commits => blk: {
-                const commit = self.selectedCommit() orelse break :blk try self.allocator.dupe(u8, "No commits found.\n");
-                if (self.commit_files_active) {
-                    if (self.selectedCommitFile()) |file| break :blk try self.git.diffForCommitFile(commit.hash, file.path, self.config.diff_context);
-                    break :blk try self.allocator.dupe(u8, "This commit changed no files.\n");
-                }
-                break :blk try self.git.showCommit(commit.hash, self.config.diff_context);
-            },
-            .stash => blk: {
-                if (self.selectedStash()) |entry| break :blk try self.git.showStash(entry.index, self.config.diff_context);
-                break :blk try self.allocator.dupe(u8, "No stash entries.\n");
-            },
+        // Already running, or already queued, for this exact key: just wait.
+        if (std.mem.eql(u8, key, self.preview_inflight_key)) {
+            self.preview_loading = true;
+            return;
+        }
+        if (self.preview_wanted) |w| {
+            if (std.mem.eql(u8, key, w.key)) {
+                self.preview_loading = true;
+                return;
+            }
+        }
+
+        const job = try self.buildPreviewJob(kind, key);
+        if (self.preview_wanted) |w| w.deinit(preview_allocator);
+        self.preview_wanted = job;
+        self.preview_loading = true;
+        // Avoid a blank panel on the very first preview; thereafter we keep the
+        // previous diff on screen until the worker fills it in.
+        if (self.diff.len == 0) self.diff = try self.allocator.dupe(u8, "Loading...\n");
+    }
+
+    /// Content-addressed cache key for `kind`. The diff-context is folded in
+    /// because it changes the rendered output. The "f:" prefix marks
+    /// working-tree file diffs so they can be invalidated on a working-tree
+    /// refresh without dropping immutable commit/branch/stash previews.
+    fn previewKey(self: *App, gpa: std.mem.Allocator, kind: PreviewKind) ![]u8 {
+        const ctx = self.config.diff_context;
+        return switch (kind) {
+            .file => |f| std.fmt.allocPrint(gpa, "f:{d}:{c}{c}{c}:{s}", .{
+                ctx,
+                @as(u8, if (f.tracked) 'T' else 'u'),
+                @as(u8, if (f.has_staged) 'S' else '_'),
+                @as(u8, if (f.has_unstaged) 'U' else '_'),
+                f.path,
+            }),
+            .branch => |name| std.fmt.allocPrint(gpa, "b:{s}", .{name}),
+            .commit => |hash| std.fmt.allocPrint(gpa, "c:{d}:{s}", .{ ctx, hash }),
+            .commit_file => |cf| std.fmt.allocPrint(gpa, "cf:{d}:{s}:{s}", .{ ctx, cf.hash, cf.path }),
+            .stash => |idx| std.fmt.allocPrint(gpa, "s:{d}:{d}", .{ ctx, idx }),
+            .diff_refs => |dr| std.fmt.allocPrint(gpa, "dr:{d}:{s}:{s}", .{ ctx, dr.base, dr.target }),
         };
+    }
+
+    /// Record `key` as the preview the selection currently wants, and drop any
+    /// queued job that no longer matches it (the selection moved on before it
+    /// started). Pass "" when the current preview needs no git command.
+    fn setDesiredKey(self: *App, key: []const u8) void {
+        if (!std.mem.eql(u8, key, self.preview_desired_key)) {
+            if (self.allocator.dupe(u8, key)) |dup| {
+                self.allocator.free(self.preview_desired_key);
+                self.preview_desired_key = dup;
+            } else |_| {}
+        }
+        if (self.preview_wanted) |w| {
+            if (!std.mem.eql(u8, w.key, key)) {
+                w.deinit(preview_allocator);
+                self.preview_wanted = null;
+            }
+        }
+    }
+
+    /// Translate a `PreviewKind` into a page-allocated `PreviewJob` (git commands
+    /// mirroring git.zig's preview helpers) the worker can run thread-safely.
+    fn buildPreviewJob(self: *App, kind: PreviewKind, key: []const u8) !PreviewJob {
+        var ctx_buf: [24]u8 = undefined;
+        const ctx_arg = try std.fmt.bufPrint(&ctx_buf, "--unified={d}", .{self.config.diff_context});
+
+        var sections: std.ArrayList(PreviewSection) = .empty;
+        errdefer {
+            for (sections.items) |sec| {
+                for (sec.argv) |a| preview_allocator.free(a);
+                preview_allocator.free(sec.argv);
+            }
+            sections.deinit(preview_allocator);
+        }
+        var empty_msg: []const u8 = "No preview available.\n";
+
+        switch (kind) {
+            .file => |f| {
+                empty_msg = "No diff for selected file.\n";
+                if (f.has_unstaged) {
+                    if (!f.tracked and !f.has_staged) {
+                        try sections.append(preview_allocator, .{
+                            .argv = try dupArgv(&.{ "diff", "--no-index", "--no-color", "--", "/dev/null", f.path }),
+                            .label = "Untracked\n\n",
+                            .keep_on_error = true,
+                        });
+                    } else {
+                        try sections.append(preview_allocator, .{
+                            .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--no-color", ctx_arg, "--", f.path }),
+                            .label = "Unstaged\n\n",
+                        });
+                    }
+                }
+                if (f.has_staged) {
+                    try sections.append(preview_allocator, .{
+                        .argv = try dupArgv(&.{ "diff", "--staged", "--no-ext-diff", "--no-color", ctx_arg, "--", f.path }),
+                        .label = "Staged\n\n",
+                    });
+                }
+            },
+            .branch => |name| {
+                empty_msg = "No commits.\n";
+                try sections.append(preview_allocator, .{
+                    .argv = try dupArgv(&.{ "log", "--oneline", "--decorate", "-30", name }),
+                });
+            },
+            .commit => |hash| {
+                empty_msg = "Could not load commit.\n";
+                try sections.append(preview_allocator, .{
+                    .argv = try dupArgv(&.{ "show", "--no-ext-diff", "--no-color", "--stat", "--patch", ctx_arg, hash }),
+                });
+            },
+            .commit_file => |cf| {
+                empty_msg = "No changes for this file.\n";
+                try sections.append(preview_allocator, .{
+                    .argv = try dupArgv(&.{ "show", cf.hash, "--no-ext-diff", "--no-color", ctx_arg, "--format=", "--", cf.path }),
+                });
+            },
+            .stash => |idx| {
+                empty_msg = "No changes in stash.\n";
+                var sel_buf: [32]u8 = undefined;
+                const selector = try std.fmt.bufPrint(&sel_buf, "stash@{{{d}}}", .{idx});
+                try sections.append(preview_allocator, .{
+                    .argv = try dupArgv(&.{ "stash", "show", "-p", "--stat", "-u", "--no-ext-diff", "--no-color", ctx_arg, selector }),
+                });
+            },
+            .diff_refs => |dr| {
+                empty_msg = "No differences.\n";
+                try sections.append(preview_allocator, .{
+                    .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--no-color", "--stat", "--patch", ctx_arg, dr.base, dr.target }),
+                });
+            },
+        }
+
+        const key_copy = try preview_allocator.dupe(u8, key);
+        errdefer preview_allocator.free(key_copy);
+        const sec_slice = try sections.toOwnedSlice(preview_allocator);
+        return .{ .key = key_copy, .sections = sec_slice, .empty_msg = empty_msg };
+    }
+
+    /// Claim the queued preview job (if any) for the TUI loop to run, recording
+    /// its key as in-flight so a repeated selection of the same item does not
+    /// re-queue it. Returns null when nothing is pending.
+    pub fn takePreviewJob(self: *App) ?PreviewJob {
+        const job = self.preview_wanted orelse return null;
+        self.preview_wanted = null;
+        const dup = self.allocator.dupe(u8, job.key) catch "";
+        self.allocator.free(self.preview_inflight_key);
+        self.preview_inflight_key = dup;
+        return job;
+    }
+
+    /// Called on the UI thread when a preview worker finishes. `text` (owned by
+    /// `gpa`, the page allocator) is the rendered preview, or null if the worker
+    /// could not start. Caches the result and shows it if the selection still
+    /// wants it; otherwise it stays cached for when we return to that item.
+    pub fn completePreview(self: *App, job: PreviewJob, text: ?[]u8, gpa: std.mem.Allocator) void {
+        self.allocator.free(self.preview_inflight_key);
+        self.preview_inflight_key = "";
+        const is_desired = std.mem.eql(u8, job.key, self.preview_desired_key);
+        if (text) |t| {
+            self.preview_cache.put(self.allocator, job.key, t) catch {};
+            if (is_desired) {
+                if (self.allocator.dupe(u8, t)) |dup| {
+                    self.allocator.free(self.diff);
+                    self.diff = dup;
+                    self.preview_loading = false;
+                } else |_| {}
+            }
+            gpa.free(t);
+        } else if (is_desired) {
+            self.preview_loading = false;
+        }
+        job.deinit(gpa);
     }
 
     fn statusPreview(self: *App) ![]u8 {
@@ -3653,6 +4133,120 @@ test "diffing mode marks a ref base and clears cleanly" {
     try std.testing.expect(app.diff_base == null);
 }
 
+test "preview pipeline queues a git job, caches it, and serves repeats instantly" {
+    const allocator = std.testing.allocator;
+    const page = std.heap.page_allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("aaaaaaa"), .short_hash = @constCast("aaa"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("first") },
+        .{ .hash = @constCast("bbbbbbb"), .short_hash = @constCast("bbb"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("second") },
+    };
+    app.data.commits = &commits;
+    app.focus = .commits;
+
+    // Selecting a commit does not run git inline: it queues a job and shows a
+    // placeholder rather than blocking.
+    app.commit_index = 0;
+    try app.updatePreview();
+    try std.testing.expect(app.preview_wanted != null);
+    try std.testing.expect(app.preview_loading);
+    try std.testing.expectEqualStrings("Loading...\n", app.diff);
+
+    // The TUI loop would claim the job and run it off-thread; simulate that and
+    // hand back the rendered diff.
+    const job = app.takePreviewJob().?;
+    try std.testing.expect(app.preview_wanted == null);
+    app.completePreview(job, try page.dupe(u8, "DIFF FOR a\n"), page);
+    try std.testing.expectEqualStrings("DIFF FOR a\n", app.diff);
+    try std.testing.expect(!app.preview_loading);
+
+    // Move to another commit, then back: the first one is cache-warm and renders
+    // synchronously with no new job queued.
+    app.commit_index = 1;
+    try app.updatePreview();
+    try std.testing.expect(app.preview_wanted != null); // commit b not cached yet
+    const job_b = app.takePreviewJob().?;
+    job_b.deinit(preview_allocator);
+    app.allocator.free(app.preview_inflight_key);
+    app.preview_inflight_key = "";
+
+    app.commit_index = 0;
+    try app.updatePreview();
+    try std.testing.expect(app.preview_wanted == null); // served from cache
+    try std.testing.expectEqualStrings("DIFF FOR a\n", app.diff);
+
+    // A full refresh would invalidate everything; here just confirm the cache
+    // clears cleanly.
+    app.preview_cache.clearAll(app.allocator);
+    app.commit_index = 0;
+    try app.updatePreview();
+    try std.testing.expect(app.preview_wanted != null); // cache cold again
+}
+
+test "background worktree refresh is paused while an operation runs" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // A network op in flight pauses the periodic refresh: nothing is queued.
+    app.async_active = true;
+    app.requestWorktreeRefresh();
+    try std.testing.expect(!app.worktree_refresh_requested);
+
+    // Even an already-queued request is held back while paused.
+    app.async_active = false;
+    app.requestWorktreeRefresh();
+    try std.testing.expect(app.worktree_refresh_requested);
+    app.async_active = true;
+    try std.testing.expect(app.takeWorktreeRefresh() == null);
+    try std.testing.expect(app.worktree_refresh_requested); // still pending
+
+    // Once the op clears, the held request is claimed.
+    app.async_active = false;
+    try std.testing.expect(app.takeWorktreeRefresh() != null);
+    try std.testing.expect(app.worktree_refresh_active);
+}
+
+test "background worktree snapshot applies on the UI thread and honors generation" {
+    const allocator = std.testing.allocator;
+    const page = std.heap.page_allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer {
+        app.data.deinit(allocator);
+        deinitTestApp(&app);
+    }
+    app.data.current_branch = try allocator.dupe(u8, "old");
+
+    // A snapshot for the current generation is applied: status and file list
+    // update from the page-allocated payload (which is freed by the apply).
+    const snap = WorktreeSnapshot{
+        .status = .{ .current_branch = try page.dupe(u8, "main"), .upstream = null },
+        .porcelain = try page.dupe(u8, " M hello.txt\x00"),
+        .state = .clean,
+    };
+    try app.applyWorktreeSnapshot(snap, app.refresh_generation, page);
+    try std.testing.expectEqualStrings("main", app.data.current_branch);
+    try std.testing.expectEqual(@as(usize, 1), app.data.files.len);
+    try std.testing.expectEqualStrings("hello.txt", app.data.files[0].path);
+
+    // A snapshot stamped with an older generation (a full refresh landed while
+    // it was loading) is discarded rather than clobbering the newer data.
+    app.refresh_generation +%= 1;
+    const stale = WorktreeSnapshot{
+        .status = .{ .current_branch = try page.dupe(u8, "feature"), .upstream = null },
+        .porcelain = try page.dupe(u8, ""),
+        .state = .clean,
+    };
+    try app.applyWorktreeSnapshot(stale, app.refresh_generation - 1, page);
+    try std.testing.expectEqualStrings("main", app.data.current_branch);
+    try std.testing.expectEqual(@as(usize, 1), app.data.files.len);
+}
+
 test "clipboard copy picks the focused panel's identifier" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -3850,6 +4444,10 @@ fn deinitTestApp(app: *App) void {
     app.allocator.free(app.staging_diff);
     app.allocator.free(app.staging_path);
     app.allocator.free(app.tree_rows);
+    app.preview_cache.deinit(app.allocator);
+    app.allocator.free(app.preview_desired_key);
+    app.allocator.free(app.preview_inflight_key);
+    if (app.preview_wanted) |job| job.deinit(preview_allocator);
     app.collapsed_dirs.deinit();
 }
 

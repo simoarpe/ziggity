@@ -17,6 +17,8 @@ const Event = union(enum) {
     focus_out,
     refresh_tick,
     command_done,
+    preview_done,
+    worktree_done,
 };
 
 /// A network op run off the UI loop. Allocations use the page allocator (which
@@ -51,6 +53,39 @@ fn asyncWorker(job: *AsyncJob) void {
 
 fn postDone(job: *AsyncJob) void {
     _ = job.loop.tryPostEvent(.command_done) catch false;
+}
+
+/// A preview diff generated off the UI loop. Runs the queued `PreviewJob`'s git
+/// commands with the page allocator (thread-safe, independent of the gpa) and
+/// posts `.preview_done` so the loop can hand the result back to the app.
+const PreviewRun = struct {
+    io: std.Io,
+    loop: *vaxis.Loop(Event),
+    root: []const u8,
+    job: app_mod.PreviewJob,
+    result: ?[]u8 = null,
+};
+
+fn previewWorker(pr: *PreviewRun) void {
+    pr.result = pr.job.run(async_allocator, pr.io, pr.root) catch null;
+    _ = pr.loop.tryPostEvent(.preview_done) catch false;
+}
+
+/// The background working-tree refresh (the 1.5s tick). Gathers `git status`
+/// and friends off the UI loop with the page allocator and posts
+/// `.worktree_done` so the loop can apply the snapshot on the UI thread.
+const WorktreeRun = struct {
+    io: std.Io,
+    loop: *vaxis.Loop(Event),
+    root: []u8,
+    environ: *std.process.Environ.Map,
+    generation: u64,
+    result: ?app_mod.WorktreeSnapshot = null,
+};
+
+fn worktreeWorker(wr: *WorktreeRun) void {
+    wr.result = app_mod.WorktreeSnapshot.load(async_allocator, wr.io, wr.environ, wr.root) catch null;
+    _ = wr.loop.tryPostEvent(.worktree_done) catch false;
 }
 
 const refresh_interval = std.Io.Duration.fromMilliseconds(1500);
@@ -107,6 +142,21 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
         if (async_job.result) |*r| r.deinit(async_allocator);
     };
 
+    var preview_run: PreviewRun = undefined;
+    var preview_future: ?std.Io.Future(void) = null;
+    defer if (preview_future) |*f| {
+        f.await(io);
+        if (preview_run.result) |r| async_allocator.free(r);
+        preview_run.job.deinit(async_allocator);
+    };
+
+    var worktree_run: WorktreeRun = undefined;
+    var worktree_future: ?std.Io.Future(void) = null;
+    defer if (worktree_future) |*f| {
+        f.await(io);
+        if (worktree_run.result) |*r| r.deinit(async_allocator);
+    };
+
     var render_ctx = RenderCtx{ .vx = &vx, .writer = writer, .app = app };
     app.render_hook = .{ .ctx = &render_ctx, .func = renderHook };
     defer app.render_hook = null;
@@ -132,6 +182,24 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     async_job.result = null;
                 }
             },
+            .preview_done => {
+                if (preview_future) |*f| {
+                    f.await(io);
+                    preview_future = null;
+                    app.completePreview(preview_run.job, preview_run.result, async_allocator);
+                    preview_run.result = null;
+                }
+            },
+            .worktree_done => {
+                if (worktree_future) |*f| {
+                    f.await(io);
+                    worktree_future = null;
+                    // A failed background refresh is non-critical; the next tick
+                    // retries. applyWorktreeSnapshot frees the snapshot either way.
+                    app.applyWorktreeSnapshot(worktree_run.result, worktree_run.generation, async_allocator) catch {};
+                    worktree_run.result = null;
+                }
+            },
         }
 
         // Push any queued text to the system clipboard (OSC 52).
@@ -153,6 +221,39 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     break :blk null;
                 };
                 render_needed = true;
+            }
+        }
+
+        // Start the next queued preview once no preview worker is in flight.
+        // Rapid selection moves coalesce: only the latest wanted job is kept,
+        // so intermediate items are skipped rather than each spawning git.
+        if (preview_future == null) {
+            if (app.takePreviewJob()) |job| {
+                preview_run = .{ .io = io, .loop = &loop, .root = app.git.root, .job = job };
+                preview_future = io.concurrent(previewWorker, .{&preview_run}) catch blk: {
+                    app.completePreview(job, null, async_allocator);
+                    break :blk null;
+                };
+                render_needed = true;
+            }
+        }
+
+        // Start the queued background working-tree refresh (the 1.5s tick) off
+        // the loop, so the periodic git status never blocks navigation.
+        if (worktree_future == null) {
+            if (app.takeWorktreeRefresh()) |generation| {
+                worktree_run = .{
+                    .io = io,
+                    .loop = &loop,
+                    .root = app.git.root,
+                    .environ = app.git.environ,
+                    .generation = generation,
+                    .result = null,
+                };
+                worktree_future = io.concurrent(worktreeWorker, .{&worktree_run}) catch blk: {
+                    app.applyWorktreeSnapshot(null, generation, async_allocator) catch {};
+                    break :blk null;
+                };
             }
         }
 
