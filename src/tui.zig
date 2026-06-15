@@ -139,9 +139,10 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     var refresh_ticker: RefreshTicker = .{ .io = io, .loop = &loop, .app = app };
     var refresh_future = try io.concurrent(refreshTickerRun, .{&refresh_ticker});
     defer {
+        // Cancel the ticker's in-progress sleep so quitting returns immediately
+        // instead of blocking until it next wakes (up to the idle interval).
         refresh_ticker.stop.store(true, .release);
-        _ = loop.tryPostEvent(.refresh_tick) catch false;
-        refresh_future.await(io);
+        refresh_future.cancel(io);
     }
 
     const writer = tty.writer();
