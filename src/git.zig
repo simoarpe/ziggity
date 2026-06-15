@@ -213,6 +213,63 @@ pub const Git = struct {
         return self.exec(&.{ "apply", "--cached", "--whitespace=nowarn", "--", patch_path });
     }
 
+    /// Write `patch` to a temp file under .git and return its path; the caller
+    /// must delete the file and free the path.
+    fn writeTempPatch(self: *Git, patch: []const u8) ![]u8 {
+        const p = try std.fmt.allocPrint(self.allocator, "{s}/.git/ziggity-custom.patch", .{self.root});
+        errdefer self.allocator.free(p);
+        try std.Io.Dir.writeFile(.cwd(), self.io, .{ .sub_path = p, .data = patch });
+        return p;
+    }
+
+    /// Apply a custom patch to the working tree (not the index). `reverse`
+    /// un-applies it. Used by the custom-patch "apply to working tree" actions.
+    pub fn applyCustomPatch(self: *Git, patch: []const u8, reverse: bool) !ExecResult {
+        const p = try self.writeTempPatch(patch);
+        defer {
+            std.Io.Dir.deleteFile(.cwd(), self.io, p) catch {};
+            self.allocator.free(p);
+        }
+        if (reverse) {
+            return self.exec(&.{ "apply", "--reverse", "--whitespace=nowarn", "--", p });
+        }
+        return self.exec(&.{ "apply", "--whitespace=nowarn", "--", p });
+    }
+
+    /// Remove a built patch's changes from its source commit: rebase with the
+    /// caller's `edit` todo to stop at the source, reverse-apply the patch to
+    /// the index and tree, amend, then continue. If the patch fails to apply
+    /// the rebase is aborted; a conflict on continue is left for the user.
+    pub fn removePatchFromCommit(self: *Git, base_ref: []const u8, todo: []const u8, patch: []const u8) !ExecResult {
+        var r1 = try self.rebaseTodo(base_ref, todo, null);
+        if (!r1.ok()) return r1;
+        r1.deinit(self.allocator);
+
+        const p = try self.writeTempPatch(patch);
+        defer {
+            std.Io.Dir.deleteFile(.cwd(), self.io, p) catch {};
+            self.allocator.free(p);
+        }
+
+        var ap = try self.exec(&.{ "apply", "--reverse", "--index", "--whitespace=nowarn", "--", p });
+        if (!ap.ok()) {
+            var abort = self.rebaseAbort() catch return ap;
+            abort.deinit(self.allocator);
+            return ap;
+        }
+        ap.deinit(self.allocator);
+
+        var amend = try self.exec(&.{ "commit", "--amend", "--no-edit" });
+        if (!amend.ok()) {
+            var abort = self.rebaseAbort() catch return amend;
+            abort.deinit(self.allocator);
+            return amend;
+        }
+        amend.deinit(self.allocator);
+
+        return self.rebaseContinue();
+    }
+
     /// Run a non-interactive `git rebase -i <base_ref>` with a caller-supplied
     /// todo. The todo is written to a temp file and installed via a
     /// `sequence.editor` that copies it over git's generated todo; messages are

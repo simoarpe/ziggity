@@ -25,6 +25,7 @@ pub const KeyMap = struct {
     copy_clipboard: Binding = .{ .codepoint = 'o', .ctrl = true },
     open_browser: Binding = .{ .codepoint = 'o' },
     diff_mark: Binding = .{ .codepoint = 'W' },
+    patch_menu: Binding = .{ .codepoint = 'p', .ctrl = true },
     up: Binding = .{ .codepoint = 'k' },
     down: Binding = .{ .codepoint = 'j' },
     left: Binding = .{ .codepoint = 'h' },

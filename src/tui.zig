@@ -244,7 +244,10 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     var commits_title_buf: [80]u8 = undefined;
     var filter_label_buf: [64]u8 = undefined;
     const commits_title = if (app.commit_files_active)
-        "Commit files [4]"
+        (if (app.patchFileCount() > 0)
+            (std.fmt.bufPrint(&commits_title_buf, "Commit files [4] (patch: {d})", .{app.patchFileCount()}) catch "Commit files [4]")
+        else
+            "Commit files [4]  (space: add to patch)")
     else if (app.commits_tab == .reflog)
         "Reflog [4]"
     else if (app.commitFilterLabel(&filter_label_buf)) |label|
@@ -333,6 +336,8 @@ const help_lines = [_][]const u8{
     "  W              diff mode: compare against another ref",
     "  /              filter the log by message / author / path (esc clears)",
     "  b              bisect menu (start, then mark good/bad/skip/reset)",
+    "  enter, space   open a commit's files; space adds a file to the patch",
+    "  ctrl+p         custom patch menu (apply / remove from commit / reset)",
     "  ctrl+j/ctrl+k  move commit down / up",
     "",
     "Stash",
@@ -813,8 +818,11 @@ fn drawCommitFiles(win: vaxis.Window, app: *const app_mod.App) void {
     }) {
         const file = app.commit_files[idx];
         var buf: [512]u8 = undefined;
-        const line = std.fmt.bufPrint(&buf, "{c} {s}", .{ file.status, file.path }) catch file.path;
-        const style = switch (file.status) {
+        // A leading '+' marks files added to the custom patch.
+        const in_patch = app.patchHasFile(file.path);
+        const marker: u8 = if (in_patch) '+' else ' ';
+        const line = std.fmt.bufPrint(&buf, "{c}{c} {s}", .{ marker, file.status, file.path }) catch file.path;
+        const style = if (in_patch) styles().staged else switch (file.status) {
             'A' => styles().added,
             'D' => styles().removed,
             else => styles().normal,

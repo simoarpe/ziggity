@@ -222,6 +222,10 @@ pub const MenuAction = enum {
     bisect_good_selected,
     bisect_bad_selected,
     bisect_reset,
+    patch_apply,
+    patch_apply_reverse,
+    patch_remove_from_commit,
+    patch_reset,
 };
 
 pub const MenuItem = struct {
@@ -303,6 +307,13 @@ const bisect_actions_menu = [_]MenuItem{
     .{ .label = "Reset bisect", .action = .bisect_reset },
 };
 
+const patch_menu_items = [_]MenuItem{
+    .{ .label = "Apply patch to working tree", .action = .patch_apply },
+    .{ .label = "Apply patch in reverse", .action = .patch_apply_reverse },
+    .{ .label = "Remove patch from its commit", .action = .patch_remove_from_commit },
+    .{ .label = "Reset patch", .action = .patch_reset },
+};
+
 /// Order of entries shown in the status-filter menu popup.
 pub const status_filter_options = [_]model.FileDisplayFilter{
     .all,
@@ -382,6 +393,10 @@ pub const App = struct {
     // Diffing mode: the ref (commit hash or branch) marked as the diff base.
     // When set, the main panel shows `git diff <base> <selected ref>`.
     diff_base: ?[]u8 = null,
+    // Custom patch: paths added from a single source commit. The patch bytes
+    // are rebuilt on demand from `patch_source` and these paths.
+    patch_source: ?[]u8 = null,
+    patch_paths: std.ArrayList([]u8) = .empty,
     commit_buffer: std.ArrayList(u8) = .empty,
     file_filter_buffer: std.ArrayList(u8) = .empty,
     filter_history: std.ArrayList([]u8) = .empty,
@@ -453,6 +468,9 @@ pub const App = struct {
         if (self.marked_base) |b| self.allocator.free(b);
         if (self.clipboard_request) |c| self.allocator.free(c);
         if (self.diff_base) |b| self.allocator.free(b);
+        if (self.patch_source) |s| self.allocator.free(s);
+        for (self.patch_paths.items) |p| self.allocator.free(p);
+        self.patch_paths.deinit(self.allocator);
         self.input_buffer.deinit(self.allocator);
         self.git.deinit();
         self.* = undefined;
@@ -626,7 +644,10 @@ pub const App = struct {
                     .files => try self.toggleSelectedFileStaged(),
                     .branches => try self.checkoutSelectedBranch(),
                     .stash => try self.applySelectedStash(),
-                    .status, .commits, .main => {},
+                    // In a commit's file list, space toggles the file into the
+                    // custom patch.
+                    .commits => if (self.commit_files_active) try self.toggleFileInPatch(),
+                    .status, .main => {},
                 }
             },
             .toggle_tree => try self.toggleTreeView(),
@@ -643,6 +664,7 @@ pub const App = struct {
             .copy_to_clipboard => try self.requestClipboardCopy(),
             .open_browser => try self.openSelectionInBrowser(),
             .diff_mark => try self.toggleDiffMark(),
+            .patch_menu => try self.startPatchMenu(),
             .conflict_menu => try self.startConflictActionsMenu(),
             .stage_all => try self.toggleAllStaged(),
             .discard_selected => try self.startDiscardMenu(),
@@ -1046,6 +1068,70 @@ pub const App = struct {
     pub fn selectedCommitFile(self: *const App) ?model.CommitFile {
         if (self.commit_files.len == 0) return null;
         return self.commit_files[@min(self.commit_file_index, self.commit_files.len - 1)];
+    }
+
+    pub fn patchHasFile(self: *const App, path: []const u8) bool {
+        for (self.patch_paths.items) |p| {
+            if (std.mem.eql(u8, p, path)) return true;
+        }
+        return false;
+    }
+
+    pub fn patchFileCount(self: *const App) usize {
+        return self.patch_paths.items.len;
+    }
+
+    fn clearPatch(self: *App) void {
+        if (self.patch_source) |s| self.allocator.free(s);
+        self.patch_source = null;
+        for (self.patch_paths.items) |p| self.allocator.free(p);
+        self.patch_paths.clearRetainingCapacity();
+    }
+
+    /// Toggle the selected commit file into the custom patch. A patch is tied
+    /// to one source commit; adding a file from a different commit is refused
+    /// until the patch is reset.
+    fn toggleFileInPatch(self: *App) !void {
+        if (!self.commit_files_active) {
+            try self.setMessage("open a commit's files (enter) to build a patch", .{});
+            return;
+        }
+        const commit = self.selectedCommit() orelse return;
+        const file = self.selectedCommitFile() orelse {
+            try self.setMessage("no file selected", .{});
+            return;
+        };
+        if (self.patch_source) |source| {
+            if (!std.mem.eql(u8, source, commit.hash)) {
+                try self.setMessage("patch is from another commit - reset it first (ctrl+p)", .{});
+                return;
+            }
+        } else {
+            self.patch_source = try self.allocator.dupe(u8, commit.hash);
+        }
+        for (self.patch_paths.items, 0..) |p, idx| {
+            if (std.mem.eql(u8, p, file.path)) {
+                self.allocator.free(self.patch_paths.orderedRemove(idx));
+                if (self.patch_paths.items.len == 0) self.clearPatch();
+                try self.setMessage("removed {s} from patch ({d} files)", .{ file.path, self.patch_paths.items.len });
+                return;
+            }
+        }
+        try self.patch_paths.append(self.allocator, try self.allocator.dupe(u8, file.path));
+        try self.setMessage("added {s} to patch ({d} files)", .{ file.path, self.patch_paths.items.len });
+    }
+
+    /// Concatenate the source commit's per-file diffs into one applyable patch.
+    fn buildPatchBytes(self: *App) ![]u8 {
+        const source = self.patch_source orelse return error.NoPatch;
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+        for (self.patch_paths.items) |path| {
+            const diff = try self.git.diffForCommitFile(source, path, self.config.diff_context);
+            defer self.allocator.free(diff);
+            try out.appendSlice(self.allocator, diff);
+        }
+        return out.toOwnedSlice(self.allocator);
     }
 
     /// <enter> behaviour per panel: on the Commits tab it drills into the
@@ -2052,6 +2138,16 @@ pub const App = struct {
         try self.setMessage("stash changes", .{});
     }
 
+    fn startPatchMenu(self: *App) !void {
+        if (self.patchFileCount() == 0) {
+            try self.setMessage("no patch - open a commit (enter), then space to add files", .{});
+            return;
+        }
+        self.mode = .menu;
+        self.active_menu = .{ .title = "Custom patch", .items = &patch_menu_items, .index = 0 };
+        try self.setMessage("custom patch ({d} files)", .{self.patchFileCount()});
+    }
+
     fn startBisectMenu(self: *App) !void {
         self.focus = .commits;
         self.commits_tab = .commits;
@@ -2262,7 +2358,76 @@ pub const App = struct {
                 try self.beginOp("git bisect reset");
                 return self.runMutation(try self.git.bisectReset(), "bisect reset", .{});
             },
+            .patch_apply, .patch_apply_reverse => {
+                const reverse = action == .patch_apply_reverse;
+                const patch = self.buildPatchBytes() catch {
+                    try self.setMessage("no patch to apply", .{});
+                    return;
+                };
+                defer self.allocator.free(patch);
+                try self.beginOp(if (reverse) "git apply --reverse" else "git apply");
+                const summary = if (reverse) "applied patch in reverse" else "applied patch to working tree";
+                return self.runMutation(try self.git.applyCustomPatch(patch, reverse), "{s}", .{summary});
+            },
+            .patch_remove_from_commit => return self.removePatchFromSourceCommit(),
+            .patch_reset => {
+                self.clearPatch();
+                try self.setMessage("patch reset", .{});
+            },
         }
+    }
+
+    /// Drop the built patch's changes from its source commit via an interactive
+    /// rebase. Refused while another operation is in progress or if the source
+    /// is the root commit (it has no parent to rebase onto).
+    fn removePatchFromSourceCommit(self: *App) !void {
+        const source = self.patch_source orelse {
+            try self.setMessage("no patch built", .{});
+            return;
+        };
+        if (self.data.state != .clean) {
+            try self.setMessage("finish the in-progress operation first (m)", .{});
+            return;
+        }
+        const commits = self.data.commits;
+        const i = blk: {
+            for (commits, 0..) |commit, idx| {
+                if (std.mem.eql(u8, commit.hash, source)) break :blk idx;
+            }
+            try self.setMessage("source commit is not in the loaded history", .{});
+            return;
+        };
+        if (i + 1 >= commits.len) {
+            try self.setMessage("cannot remove a patch from the root commit", .{});
+            return;
+        }
+
+        const patch = self.buildPatchBytes() catch {
+            try self.setMessage("could not build the patch", .{});
+            return;
+        };
+        defer self.allocator.free(patch);
+
+        const base_ref = try std.fmt.allocPrint(self.allocator, "{s}^", .{commits[i].hash});
+        defer self.allocator.free(base_ref);
+
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        try writeRebaseTodo(&aw.writer, commits, i, .edit);
+        const todo = try aw.toOwnedSlice();
+        defer self.allocator.free(todo);
+
+        try self.beginOpFmt("git rebase -i {s} (remove patch, amend)", .{base_ref});
+        const result = try self.git.removePatchFromCommit(base_ref, todo, patch);
+        var mutable = result;
+        defer mutable.deinit(self.allocator);
+        if (mutable.ok()) {
+            self.clearPatch();
+            try self.finishOp(true, "removed patch from commit", mutable.stdout);
+        } else {
+            try self.finishOp(false, "remove failed (resolve with m if rebasing)", if (mutable.stderr.len > 0) mutable.stderr else mutable.stdout);
+        }
+        self.refresh() catch {};
     }
 
     /// Open the text prompt for a commit filter, prefilling the existing value
@@ -3407,6 +3572,46 @@ test "webUrlFromRemote normalizes the common remote URL forms" {
     try std.testing.expect((try webUrlFromRemote(allocator, "not-a-url")) == null);
 }
 
+test "custom patch toggles commit files and is tied to one commit" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("aaaaaaa"), .short_hash = @constCast("aaa"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("first") },
+        .{ .hash = @constCast("bbbbbbb"), .short_hash = @constCast("bbb"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("second") },
+    };
+    app.data.commits = &commits;
+    var cfiles = [_]model.CommitFile{
+        .{ .status = 'M', .path = @constCast("f.txt") },
+        .{ .status = 'M', .path = @constCast("g.txt") },
+    };
+    app.commit_files = &cfiles;
+    app.focus = .commits;
+    app.commit_files_active = true;
+    app.commit_index = 0;
+
+    app.commit_file_index = 0;
+    try app.toggleFileInPatch();
+    try std.testing.expect(app.patchHasFile("f.txt"));
+    app.commit_file_index = 1;
+    try app.toggleFileInPatch();
+    try std.testing.expectEqual(@as(usize, 2), app.patchFileCount());
+
+    // Toggling a file off removes it.
+    app.commit_file_index = 0;
+    try app.toggleFileInPatch();
+    try std.testing.expect(!app.patchHasFile("f.txt"));
+    try std.testing.expectEqual(@as(usize, 1), app.patchFileCount());
+
+    // A file from a different commit is refused while a patch exists.
+    app.commit_index = 1;
+    try app.toggleFileInPatch();
+    try std.testing.expectEqualStrings("patch is from another commit - reset it first (ctrl+p)", app.message);
+    try std.testing.expectEqual(@as(usize, 1), app.patchFileCount());
+}
+
 test "bisect menu reflects whether a bisect is in progress" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -3629,6 +3834,9 @@ fn deinitTestApp(app: *App) void {
     app.allocator.free(app.op_output);
     if (app.clipboard_request) |c| app.allocator.free(c);
     if (app.diff_base) |b| app.allocator.free(b);
+    if (app.patch_source) |s| app.allocator.free(s);
+    for (app.patch_paths.items) |p| app.allocator.free(p);
+    app.patch_paths.deinit(app.allocator);
     app.commit_buffer.deinit(app.allocator);
     app.commit_body_buffer.deinit(app.allocator);
     app.file_filter_buffer.deinit(app.allocator);
