@@ -670,6 +670,7 @@ pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process
 /// stay synchronous so rapid input is never gated. Params are page-allocated
 /// copies so the job is self-contained across the thread boundary.
 pub const Mutation = union(enum) {
+    commit: []const u8,
     merge: []const u8,
     rebase: []const u8,
     rebase_onto_marked: struct { newbase: []const u8, marked_base: []const u8 },
@@ -695,6 +696,7 @@ pub const Mutation = union(enum) {
             wgit.command_log.deinit(gpa);
         }
         return switch (self) {
+            .commit => |msg| wgit.commit(msg),
             .merge => |b| wgit.mergeBranch(b),
             .rebase => |b| wgit.rebaseOnto(b),
             .rebase_onto_marked => |x| wgit.rebaseOntoMarked(x.newbase, x.marked_base),
@@ -716,6 +718,7 @@ pub const Mutation = union(enum) {
     /// borrowed selection slices it was built from.
     pub fn dupe(self: Mutation, gpa: std.mem.Allocator) !Mutation {
         return switch (self) {
+            .commit => |msg| .{ .commit = try gpa.dupe(u8, msg) },
             .merge => |b| .{ .merge = try gpa.dupe(u8, b) },
             .rebase => |b| .{ .rebase = try gpa.dupe(u8, b) },
             .rebase_onto_marked => |x| .{ .rebase_onto_marked = .{ .newbase = try gpa.dupe(u8, x.newbase), .marked_base = try gpa.dupe(u8, x.marked_base) } },
@@ -735,7 +738,7 @@ pub const Mutation = union(enum) {
 
     pub fn deinit(self: Mutation, gpa: std.mem.Allocator) void {
         switch (self) {
-            .merge, .rebase, .autosquash => |s| gpa.free(s),
+            .commit, .merge, .rebase, .autosquash => |s| gpa.free(s),
             .rebase_onto_marked => |x| {
                 gpa.free(x.newbase);
                 gpa.free(x.marked_base);
@@ -897,6 +900,7 @@ pub const App = struct {
     mutation_msg: []u8 = &.{},
     mutation_echo: bool = false,
     mutation_post: PostMutation = .none,
+    mutation_refresh: ScopeSet = ScopeSet.initFull(),
     mutation_gerund: []const u8 = "working",
     busy_flag: std.atomic.Value(bool) = .init(false),
     spinner_frame: usize = 0,
@@ -3595,7 +3599,11 @@ pub const App = struct {
         self.commit_body_buffer.clearRetainingCapacity();
 
         switch (action) {
-            .create => return self.runMutationScoped(try self.git.commit(message), Refresh.commit, "commit created", .{}),
+            // Run the commit off-thread (lazygit closes the panel first, then
+            // commits via a waiting status): the dialog disappears at once and
+            // pre-commit hooks / signing / a slow `git status` no longer block
+            // it. The refresh is scoped to the views a commit changes.
+            .create => return self.requestMutation(.{ .commit = message }, .{ .gerund = "committing", .command = "git commit", .refresh = Refresh.commit }, "commit created", .{}),
             .reword => return self.runRebase(.reword, reword_index, message),
         }
     }
@@ -4245,6 +4253,9 @@ pub const App = struct {
         command: []const u8 = "",
         echo: bool = false,
         post: PostMutation = .none,
+        /// Views to refresh when the mutation finishes. Defaults to everything
+        /// (rebase/merge/etc. touch a lot); precise ops can narrow it.
+        refresh: ScopeSet = ScopeSet.initFull(),
     };
 
     /// Queue a slow mutation for the TUI loop to run off-thread. Refused if a
@@ -4268,6 +4279,7 @@ pub const App = struct {
         self.mutation_msg = msg;
         self.mutation_echo = meta.echo;
         self.mutation_post = meta.post;
+        self.mutation_refresh = meta.refresh;
         self.mutation_gerund = meta.gerund;
         self.spinner_frame = 0;
         try self.setMessage("{s}...", .{meta.gerund});
@@ -4304,7 +4316,7 @@ pub const App = struct {
         } else {
             try self.reportFailure("command failed to start", "");
         }
-        self.refreshViews(Refresh.all);
+        self.refreshViews(self.mutation_refresh);
     }
 
     fn runCustomCommand(self: *App, command: []const u8) !void {
