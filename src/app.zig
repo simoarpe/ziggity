@@ -673,6 +673,16 @@ pub const Mutation = union(enum) {
     commit: []const u8,
     amend,
     checkout: []const u8,
+    revert: []const u8,
+    create_fixup: []const u8,
+    cherry_pick_many: []const []const u8,
+    delete_branch: struct { name: []const u8, force: bool },
+    delete_remote_branch: struct { remote: []const u8, ref: []const u8 },
+    create_tag: []const u8,
+    delete_tag: []const u8,
+    remove_worktree: []const u8,
+    update_submodule: []const u8,
+    undo,
     merge: []const u8,
     rebase: []const u8,
     rebase_onto_marked: struct { newbase: []const u8, marked_base: []const u8 },
@@ -701,6 +711,16 @@ pub const Mutation = union(enum) {
             .commit => |msg| wgit.commit(msg),
             .amend => wgit.amendCommit(),
             .checkout => |b| wgit.checkout(b),
+            .revert => |h| wgit.revertCommit(h),
+            .create_fixup => |h| wgit.createFixup(h),
+            .cherry_pick_many => |hs| wgit.cherryPickMany(hs),
+            .delete_branch => |x| wgit.deleteBranch(x.name, x.force),
+            .delete_remote_branch => |x| wgit.deleteRemoteBranch(x.remote, x.ref),
+            .create_tag => |n| wgit.createTag(n),
+            .delete_tag => |n| wgit.deleteTag(n),
+            .remove_worktree => |p| wgit.removeWorktree(p),
+            .update_submodule => |p| wgit.updateSubmodule(p),
+            .undo => wgit.undoLastOperation(),
             .merge => |b| wgit.mergeBranch(b),
             .rebase => |b| wgit.rebaseOnto(b),
             .rebase_onto_marked => |x| wgit.rebaseOntoMarked(x.newbase, x.marked_base),
@@ -725,6 +745,16 @@ pub const Mutation = union(enum) {
             .commit => |msg| .{ .commit = try gpa.dupe(u8, msg) },
             .amend => .amend,
             .checkout => |b| .{ .checkout = try gpa.dupe(u8, b) },
+            .revert => |h| .{ .revert = try gpa.dupe(u8, h) },
+            .create_fixup => |h| .{ .create_fixup = try gpa.dupe(u8, h) },
+            .cherry_pick_many => |hs| .{ .cherry_pick_many = try dupeStrList(gpa, hs) },
+            .delete_branch => |x| .{ .delete_branch = .{ .name = try gpa.dupe(u8, x.name), .force = x.force } },
+            .delete_remote_branch => |x| .{ .delete_remote_branch = .{ .remote = try gpa.dupe(u8, x.remote), .ref = try gpa.dupe(u8, x.ref) } },
+            .create_tag => |n| .{ .create_tag = try gpa.dupe(u8, n) },
+            .delete_tag => |n| .{ .delete_tag = try gpa.dupe(u8, n) },
+            .remove_worktree => |p| .{ .remove_worktree = try gpa.dupe(u8, p) },
+            .update_submodule => |p| .{ .update_submodule = try gpa.dupe(u8, p) },
+            .undo => .undo,
             .merge => |b| .{ .merge = try gpa.dupe(u8, b) },
             .rebase => |b| .{ .rebase = try gpa.dupe(u8, b) },
             .rebase_onto_marked => |x| .{ .rebase_onto_marked = .{ .newbase = try gpa.dupe(u8, x.newbase), .marked_base = try gpa.dupe(u8, x.marked_base) } },
@@ -744,7 +774,13 @@ pub const Mutation = union(enum) {
 
     pub fn deinit(self: Mutation, gpa: std.mem.Allocator) void {
         switch (self) {
-            .commit, .checkout, .merge, .rebase, .autosquash => |s| gpa.free(s),
+            .commit, .checkout, .revert, .create_fixup, .create_tag, .delete_tag, .remove_worktree, .update_submodule, .merge, .rebase, .autosquash => |s| gpa.free(s),
+            .cherry_pick_many => |hs| freeStrList(gpa, hs),
+            .delete_branch => |x| gpa.free(x.name),
+            .delete_remote_branch => |x| {
+                gpa.free(x.remote);
+                gpa.free(x.ref);
+            },
             .rebase_onto_marked => |x| {
                 gpa.free(x.newbase);
                 gpa.free(x.marked_base);
@@ -767,8 +803,24 @@ pub const Mutation = union(enum) {
                 gpa.free(x.todo);
                 if (x.message) |m| gpa.free(m);
             },
-            .amend, .fast_forward_current, .bisect_skip, .bisect_reset, .amend_continue_rebase => {},
+            .amend, .undo, .fast_forward_current, .bisect_skip, .bisect_reset, .amend_continue_rebase => {},
         }
+    }
+
+    fn dupeStrList(gpa: std.mem.Allocator, items: []const []const u8) ![]const []const u8 {
+        const out = try gpa.alloc([]const u8, items.len);
+        var n: usize = 0;
+        errdefer {
+            for (out[0..n]) |s| gpa.free(s);
+            gpa.free(out);
+        }
+        while (n < items.len) : (n += 1) out[n] = try gpa.dupe(u8, items[n]);
+        return out;
+    }
+
+    fn freeStrList(gpa: std.mem.Allocator, items: []const []const u8) void {
+        for (items) |s| gpa.free(s);
+        gpa.free(items);
     }
 };
 
@@ -2582,19 +2634,9 @@ pub const App = struct {
         const count = ordered.items.len;
         var run_buf: [48]u8 = undefined;
         const shown = std.fmt.bufPrint(&run_buf, "git cherry-pick ({d} commit(s))", .{count}) catch "git cherry-pick";
-        try self.beginOp(shown);
-
-        var result = try self.git.cherryPickMany(ordered.items);
-        defer result.deinit(self.allocator);
-        if (result.ok()) {
-            self.clearCopiedCommits();
-            const summary = try std.fmt.allocPrint(self.allocator, "cherry-picked {d} commit(s)", .{count});
-            defer self.allocator.free(summary);
-            try self.finishOp(true, summary, result.stdout);
-        } else {
-            try self.finishOp(false, "cherry-pick failed", if (result.stderr.len > 0) result.stderr else result.stdout);
-        }
-        self.refreshViews(Refresh.all);
+        // Clear the clipboard only on success (post = .clear_copied), mirroring
+        // the old sync path. The copied hashes are duped into the job up front.
+        return self.requestMutation(.{ .cherry_pick_many = ordered.items }, .{ .gerund = "cherry-picking", .command = shown, .refresh = Refresh.all, .post = .clear_copied }, "cherry-picked {d} commit(s)", .{count});
     }
 
     fn startTextPrompt(self: *App, kind: TextPromptKind) !void {
@@ -2706,11 +2748,12 @@ pub const App = struct {
                 return self.runMutationScoped(result, Refresh.branches, "renamed to {s}", .{value});
             },
             .new_tag => {
-                const result = try self.git.createTag(value);
-                self.mode = .normal;
-                self.text_prompt_kind = null;
-                self.input_buffer.clearRetainingCapacity();
-                return self.runMutationScoped(result, Refresh.tags, "created tag {s}", .{value});
+                defer {
+                    self.mode = .normal;
+                    self.text_prompt_kind = null;
+                    self.input_buffer.clearRetainingCapacity();
+                }
+                return self.requestMutation(.{ .create_tag = value }, .{ .gerund = "creating tag", .command = "git tag", .refresh = Refresh.tags }, "created tag {s}", .{value});
             },
             .add_remote_name => {
                 // Stash the name and ask for the URL in a second prompt.
@@ -2964,7 +3007,7 @@ pub const App = struct {
                     return;
                 };
                 const force = action == .force_delete_branch;
-                return self.runMutationScoped(try self.git.deleteBranch(branch.name, force), Refresh.branches, "deleted {s}", .{branch.name});
+                return self.requestMutation(.{ .delete_branch = .{ .name = branch.name, .force = force } }, .{ .gerund = "deleting", .command = "git branch -d", .refresh = Refresh.branches }, "deleted {s}", .{branch.name});
             },
             .reset_soft, .reset_mixed, .reset_hard => {
                 const commit = self.selectedCommit() orelse {
@@ -3333,7 +3376,7 @@ pub const App = struct {
 
     fn revertSelectedCommit(self: *App) !void {
         const commit = try self.commitForAction() orelse return;
-        return self.runMutationScoped(try self.git.revertCommit(commit.hash), Refresh.commits_files, "reverted {s}", .{commit.short_hash});
+        return self.requestMutation(.{ .revert = commit.hash }, .{ .gerund = "reverting", .command = "git revert", .refresh = Refresh.commits_files }, "reverted {s}", .{commit.short_hash});
     }
 
     fn rebaseSelectedCommit(self: *App, action: RebaseAction) !void {
@@ -3462,7 +3505,7 @@ pub const App = struct {
             try self.setMessage("stage changes to create a fixup commit", .{});
             return;
         }
-        return self.runMutationScoped(try self.git.createFixup(commit.hash), Refresh.commits_files, "created fixup! for {s}", .{commit.short_hash});
+        return self.requestMutation(.{ .create_fixup = commit.hash }, .{ .gerund = "creating fixup", .command = "git commit --fixup", .refresh = Refresh.commits_files }, "created fixup! for {s}", .{commit.short_hash});
     }
 
     /// Autosquash fixup!/squash! commits above (and including) the selected one.
@@ -3523,7 +3566,7 @@ pub const App = struct {
                     try self.setMessage("no submodule selected", .{});
                     return;
                 };
-                return self.runMutationScoped(try self.git.updateSubmodule(sm.path), Refresh.submodules, "updated {s}", .{sm.path});
+                return self.requestMutation(.{ .update_submodule = sm.path }, .{ .gerund = "updating submodule", .command = "git submodule update", .refresh = Refresh.submodules }, "updated {s}", .{sm.path});
             },
         }
     }
@@ -3726,7 +3769,7 @@ pub const App = struct {
                     try self.setMessage("no tag selected", .{});
                     return;
                 };
-                return self.runMutationScoped(try self.git.deleteTag(tag.name), Refresh.tags, "deleted tag {s}", .{tag.name});
+                return self.requestMutation(.{ .delete_tag = tag.name }, .{ .gerund = "deleting tag", .command = "git tag -d", .refresh = Refresh.tags }, "deleted tag {s}", .{tag.name});
             },
             .delete_remote_branch => {
                 const branch = self.selectedRemoteBranch() orelse {
@@ -3739,14 +3782,14 @@ pub const App = struct {
                 };
                 const remote = branch.name[0..slash];
                 const remote_branch = branch.name[slash + 1 ..];
-                return self.runMutationScoped(try self.git.deleteRemoteBranch(remote, remote_branch), Refresh.remotes, "deleted remote {s}", .{branch.name});
+                return self.requestMutation(.{ .delete_remote_branch = .{ .remote = remote, .ref = remote_branch } }, .{ .gerund = "deleting remote branch", .command = "git push --delete", .refresh = Refresh.remotes }, "deleted remote {s}", .{branch.name});
             },
             .remove_worktree => {
                 const wt = self.selectedWorktree() orelse {
                     try self.setMessage("no worktree selected", .{});
                     return;
                 };
-                return self.runMutationScoped(try self.git.removeWorktree(wt.path), Refresh.worktrees, "removed worktree {s}", .{wt.path});
+                return self.requestMutation(.{ .remove_worktree = wt.path }, .{ .gerund = "removing worktree", .command = "git worktree remove", .refresh = Refresh.worktrees }, "removed worktree {s}", .{wt.path});
             },
             .remove_remote => {
                 const name = self.remote_name_buf[0..self.remote_name_len];
@@ -3756,7 +3799,7 @@ pub const App = struct {
                 }
                 return self.runMutationScoped(try self.git.removeRemote(name), Refresh.remotes, "removed remote {s}", .{name});
             },
-            .undo => return self.runMutation(try self.git.undoLastOperation(), "undone", .{}),
+            .undo => return self.requestMutation(.undo, .{ .gerund = "undoing", .command = "git reset (undo)", .refresh = Refresh.all }, "undone", .{}),
         }
     }
 
@@ -4252,7 +4295,7 @@ pub const App = struct {
     }
 
     /// UI-thread side effect to run when a mutation succeeds.
-    const PostMutation = enum { none, clear_patch };
+    const PostMutation = enum { none, clear_patch, clear_copied };
 
     const MutationMeta = struct {
         gerund: []const u8 = "working",
@@ -4312,6 +4355,7 @@ pub const App = struct {
                 switch (self.mutation_post) {
                     .none => {},
                     .clear_patch => self.clearPatch(),
+                    .clear_copied => self.clearCopiedCommits(),
                 }
                 const line = if (self.mutation_echo) firstLine(mutable.stdout) else "";
                 try self.reportSuccess(if (line.len > 0) line else self.mutation_msg, mutable.stdout);
