@@ -900,6 +900,22 @@ fn lineEnd(s: []const u8, i: usize) usize {
     return j;
 }
 
+/// lazygit's `updatedCursorAndOrigin` (pkg/gocui/view.go): given the previous
+/// scroll origin, the field's usable cell width/height, and the caret position,
+/// return the caret's column *within the view* and the new origin so the caret
+/// stays visible — the text scrolls instead of being clipped at the boundary.
+pub const ViewScroll = struct { view: usize, origin: usize };
+pub fn viewScroll(prev_origin: usize, size: usize, cursor: usize) ViewScroll {
+    if (size == 0) return .{ .view = 0, .origin = 0 };
+    const usable = size - 1;
+    if (cursor > prev_origin + usable) {
+        return .{ .view = usable, .origin = cursor - usable };
+    } else if (cursor < prev_origin) {
+        return .{ .view = 0, .origin = cursor };
+    }
+    return .{ .view = cursor - prev_origin, .origin = prev_origin };
+}
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     git: git_mod.Git,
@@ -951,6 +967,14 @@ pub const App = struct {
     commit_body_cursor: usize = 0,
     prompt_cursor: usize = 0,
     file_filter_cursor: usize = 0,
+    // Horizontal/vertical scroll origins (byte/line offsets) so a typed field
+    // whose content is wider/taller than its box scrolls to keep the caret in
+    // view instead of clipping the text. Updated at render time, lazygit-style.
+    prompt_scroll: usize = 0,
+    commit_scroll: usize = 0,
+    commit_body_scroll_x: usize = 0,
+    commit_body_scroll_y: usize = 0,
+    file_filter_scroll: usize = 0,
     commit_action: CommitAction = .create,
     commit_reword_index: usize = 0,
     diff: []u8 = &.{},
@@ -2464,6 +2488,9 @@ pub const App = struct {
         self.commit_body_buffer.clearRetainingCapacity();
         self.commit_cursor = 0;
         self.commit_body_cursor = 0;
+        self.commit_scroll = 0;
+        self.commit_body_scroll_x = 0;
+        self.commit_body_scroll_y = 0;
         try self.setMessage("enter commit message", .{});
     }
 
@@ -2497,6 +2524,9 @@ pub const App = struct {
         try self.commit_body_buffer.appendSlice(self.allocator, body);
         self.commit_cursor = self.commit_buffer.items.len;
         self.commit_body_cursor = self.commit_body_buffer.items.len;
+        self.commit_scroll = 0;
+        self.commit_body_scroll_x = 0;
+        self.commit_body_scroll_y = 0;
         try self.setMessage("reword commit", .{});
     }
 
@@ -2753,6 +2783,7 @@ pub const App = struct {
         self.input_buffer.clearRetainingCapacity();
         if (prefill.len > 0) try self.input_buffer.appendSlice(self.allocator, prefill);
         self.prompt_cursor = self.input_buffer.items.len;
+        self.prompt_scroll = 0;
         try self.setMessage("{s}", .{kind.title()});
     }
 
@@ -2987,6 +3018,7 @@ pub const App = struct {
         self.mode = .file_filter_prompt;
         self.file_filter_buffer.clearRetainingCapacity();
         self.file_filter_cursor = 0;
+        self.file_filter_scroll = 0;
         self.filter_history_index = null;
         try self.updateFileFilterFromPrompt();
         try self.setMessage("filter files (up/down for history)", .{});
@@ -4760,6 +4792,19 @@ pub const App = struct {
 
 test "action enum is referenced" {
     try std.testing.expect(actions.Action.quit == .quit);
+}
+
+test "viewScroll keeps the caret inside the field" {
+    // Caret within the window: no scroll, view tracks the caret.
+    try std.testing.expectEqual(ViewScroll{ .view = 5, .origin = 0 }, viewScroll(0, 10, 5));
+    // Caret past the right edge: origin slides so the caret sits at the edge.
+    try std.testing.expectEqual(ViewScroll{ .view = 9, .origin = 6 }, viewScroll(0, 10, 15));
+    // Caret left of the origin: origin jumps back to the caret.
+    try std.testing.expectEqual(ViewScroll{ .view = 0, .origin = 4 }, viewScroll(6, 10, 4));
+    // Caret still inside a scrolled window: keep the origin.
+    try std.testing.expectEqual(ViewScroll{ .view = 2, .origin = 6 }, viewScroll(6, 10, 8));
+    // Zero width is a no-op.
+    try std.testing.expectEqual(ViewScroll{ .view = 0, .origin = 0 }, viewScroll(3, 0, 5));
 }
 
 test "word and line motion helpers" {

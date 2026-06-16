@@ -746,31 +746,40 @@ fn drawOperationPopup(root: vaxis.Window, app: *const app_mod.App) void {
     const h: u16 = @min(@as(u16, 20), root.height -| 2);
     const title = if (app.op_running) "Running" else if (app.op_ok) "Done" else "Failed";
     const win = popup(root, w, h, title);
+    const cw = win.width; // content width to wrap long lines into
 
-    // The command that is running / ran.
-    print(win, 0, 0, app.op_command, st.title);
+    // The command that is running / ran (wrapped).
+    var cmd_lines: [3][]const u8 = undefined;
+    const cmd_n = wrapText(app.op_command, cw, &cmd_lines);
+    var row: u16 = 0;
+    for (cmd_lines[0..cmd_n]) |ln| {
+        print(win, row, 0, ln, st.title);
+        row += 1;
+    }
 
     if (app.op_running) {
-        print(win, 2, 0, "Running...", st.muted);
+        print(win, row + 1, 0, "Running...", st.muted);
         return;
     }
 
-    // Outcome summary, colored by success.
-    print(win, 2, 0, app.op_summary, if (app.op_ok) st.normal else st.warning);
+    // Outcome summary, colored by success (wrapped).
+    row += 1;
+    var sum_lines: [4][]const u8 = undefined;
+    const sum_n = wrapText(app.op_summary, cw, &sum_lines);
+    for (sum_lines[0..sum_n]) |ln| {
+        print(win, row, 0, ln, if (app.op_ok) st.normal else st.warning);
+        row += 1;
+    }
 
-    // Raw stdout/stderr below the summary, scrollable; last row is the footer.
-    const out_top: u16 = 4;
+    // Raw stdout/stderr below the summary, wrapped and scrollable by visual line.
     const footer_row: u16 = win.height -| 1;
-    if (app.op_output.len > 0 and out_top < footer_row) {
-        var lines = std.mem.splitScalar(u8, app.op_output, '\n');
-        var skipped: usize = 0;
-        while (skipped < app.op_scroll) : (skipped += 1) {
-            if (lines.next() == null) break;
-        }
-        var row: u16 = out_top;
-        while (lines.next()) |line| {
-            if (row >= footer_row) break;
-            print(win, row, 0, line, st.muted);
+    row += 1;
+    if (app.op_output.len > 0 and row < footer_row) {
+        var vis: [256][]const u8 = undefined;
+        const vis_n = wrapText(app.op_output, cw, &vis);
+        var idx: usize = @min(app.op_scroll, vis_n);
+        while (idx < vis_n and row < footer_row) : (idx += 1) {
+            print(win, row, 0, vis[idx], st.muted);
             row += 1;
         }
     }
@@ -778,19 +787,22 @@ fn drawOperationPopup(root: vaxis.Window, app: *const app_mod.App) void {
     print(win, footer_row, 0, "enter dismiss   up/down scroll", st.bottom_accent);
 }
 
-fn drawTextPromptPopup(root: vaxis.Window, app: *const app_mod.App) void {
+fn drawTextPromptPopup(root: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
     const kind = app.text_prompt_kind orelse return;
     const w: u16 = @min(@as(u16, 64), root.width -| 4);
     const win = popup(root, w, 5, kind.title());
-    print(win, 0, 0, app.input_buffer.items, st.normal);
-    print(win, 2, 0, "enter confirm   esc cancel", st.bottom_accent);
+    // Horizontally scroll so the caret stays inside the box (lazygit-style):
+    // render the buffer starting at the scroll origin instead of clipping it.
     const caret = @min(app.prompt_cursor, app.input_buffer.items.len);
-    const cursor_col: u16 = @min(win.width -| 1, @as(u16, @intCast(caret)));
-    win.showCursor(cursor_col, 0);
+    const sc = app_mod.viewScroll(app.prompt_scroll, win.width, caret);
+    app.prompt_scroll = sc.origin;
+    print(win, 0, 0, app.input_buffer.items[sc.origin..], st.normal);
+    print(win, 2, 0, "enter confirm   esc cancel", st.bottom_accent);
+    win.showCursor(@intCast(sc.view), 0);
 }
 
-fn drawCommitPopup(root: vaxis.Window, app: *const app_mod.App) void {
+fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
     const subject_focused = app.commit_field == .subject;
     const w: u16 = @min(@as(u16, 72), root.width -| 4);
@@ -799,39 +811,52 @@ fn drawCommitPopup(root: vaxis.Window, app: *const app_mod.App) void {
 
     // Field labels indicate which has focus.
     print(win, 0, 0, "Summary", if (subject_focused) st.active_title else st.muted);
-    print(win, 1, 0, app.commit_buffer.items, st.normal);
     print(win, 3, 0, "Description (optional)", if (subject_focused) st.muted else st.active_title);
 
-    // Body lines start at row 4.
+    // Summary: single line at row 1, scrolled horizontally to keep the caret in.
+    const subj = app.commit_buffer.items;
+    const subj_caret = @min(app.commit_cursor, subj.len);
+    const subj_sc = app_mod.viewScroll(app.commit_scroll, win.width, subj_caret);
+    app.commit_scroll = subj_sc.origin;
+    print(win, 1, 0, subj[subj_sc.origin..], st.normal);
+
+    // Body: multi-line area from row 4 down to the footer, scrolled in both axes.
     const body_top: u16 = 4;
-    var lines = std.mem.splitScalar(u8, app.commit_body_buffer.items, '\n');
-    var row: u16 = body_top;
-    while (lines.next()) |line| {
-        if (row < win.height -| 1) print(win, row, 0, line, st.normal);
-        row += 1;
+    const footer_row: u16 = win.height -| 1;
+    const body_h: usize = if (footer_row > body_top) footer_row - body_top else 0;
+    const body = app.commit_body_buffer.items;
+    const b_caret = @min(app.commit_body_cursor, body.len);
+    var caret_line: usize = 0;
+    var caret_col: usize = 0;
+    for (body[0..b_caret]) |b| {
+        if (b == '\n') {
+            caret_line += 1;
+            caret_col = 0;
+        } else caret_col += 1;
+    }
+    const scy = app_mod.viewScroll(app.commit_body_scroll_y, body_h, caret_line);
+    const scx = app_mod.viewScroll(app.commit_body_scroll_x, win.width, caret_col);
+    app.commit_body_scroll_y = scy.origin;
+    app.commit_body_scroll_x = scx.origin;
+
+    var lines = std.mem.splitScalar(u8, body, '\n');
+    var idx: usize = 0;
+    var drawn: usize = 0;
+    while (lines.next()) |line| : (idx += 1) {
+        if (idx < scy.origin) continue;
+        if (drawn >= body_h) break;
+        const row: u16 = body_top + @as(u16, @intCast(drawn));
+        if (scx.origin < line.len) print(win, row, 0, line[scx.origin..], st.normal);
+        drawn += 1;
     }
 
-    print(win, win.height -| 1, 0, "tab: switch field   enter: commit / newline   esc: cancel", st.bottom_accent);
+    print(win, footer_row, 0, "tab: switch field   enter: commit / newline   esc: cancel", st.bottom_accent);
 
     if (subject_focused) {
-        const caret = @min(app.commit_cursor, app.commit_buffer.items.len);
-        const col: u16 = @min(win.width -| 1, @as(u16, @intCast(caret)));
-        win.showCursor(col, 1);
+        win.showCursor(@intCast(subj_sc.view), 1);
     } else {
-        // Map the body caret's byte offset to a row/column within the body area.
-        const body = app.commit_body_buffer.items;
-        const caret = @min(app.commit_body_cursor, body.len);
-        var line_idx: u16 = 0;
-        var col_bytes: usize = 0;
-        for (body[0..caret]) |b| {
-            if (b == '\n') {
-                line_idx += 1;
-                col_bytes = 0;
-            } else col_bytes += 1;
-        }
-        const cursor_row: u16 = @min(win.height -| 1, body_top + line_idx);
-        const col: u16 = @min(win.width -| 1, @as(u16, @intCast(col_bytes)));
-        win.showCursor(col, cursor_row);
+        const cursor_row: u16 = body_top + @as(u16, @intCast(caret_line - scy.origin));
+        win.showCursor(@intCast(scx.view), cursor_row);
     }
 }
 
@@ -902,10 +927,19 @@ fn drawConfirmPopup(root: vaxis.Window, app: *const app_mod.App) void {
         .remove_remote => "Remove remote",
         .undo => "Undo",
     };
-    const w: u16 = @intCast(@min(@as(usize, 72), @max(text.len, 34) + 4));
-    const win = popup(root, w, 5, title);
-    print(win, 0, 0, text, st.normal);
-    print(win, 2, 0, "(y/enter) confirm   (n/esc) cancel", st.bottom_accent);
+    // Wrap the message so a long prompt (e.g. a worktree path) stays readable
+    // inside the box instead of being clipped, growing the popup's height.
+    const content_w: u16 = @min(@as(u16, 64), root.width -| 6);
+    var lines: [24][]const u8 = undefined;
+    const n = wrapText(text, content_w, &lines);
+    var longest: usize = 30; // keep room for the footer hint
+    for (lines[0..n]) |ln| longest = @max(longest, ln.len);
+    const w: u16 = @intCast(@min(@as(usize, root.width -| 2), longest + 4));
+    const h: u16 = @intCast(@min(@as(usize, root.height -| 2), n + 2));
+    const win = popup(root, w, h, title);
+    const shown = @min(n, @as(usize, win.height -| 1)); // keep the footer row clear
+    for (lines[0..shown], 0..) |ln, idx| print(win, @intCast(idx), 0, ln, st.normal);
+    print(win, win.height -| 1, 0, "(y/enter) confirm   (n/esc) cancel", st.bottom_accent);
 }
 
 fn panel(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, title: []const u8, focused: bool) vaxis.Window {
@@ -1316,10 +1350,13 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
     }
     if (app.mode == .file_filter_prompt) {
         print(win, 0, 0, "filter: ", st.bottom_accent);
-        print(win, 0, 8, app.file_filter_buffer.items, st.bottom);
+        // The field starts at column 8; scroll within the remaining width.
+        const field_w: usize = if (win.width > 8) win.width - 8 else 0;
         const caret = @min(app.file_filter_cursor, app.file_filter_buffer.items.len);
-        const cursor_col: u16 = @min(win.width -| 1, @as(u16, @intCast(8 + caret)));
-        win.showCursor(cursor_col, 0);
+        const sc = app_mod.viewScroll(app.file_filter_scroll, field_w, caret);
+        app.file_filter_scroll = sc.origin;
+        print(win, 0, 8, app.file_filter_buffer.items[sc.origin..], st.bottom);
+        win.showCursor(@intCast(8 + sc.view), 0);
         return;
     }
     if (app.mode == .status_filter_menu) {
@@ -1444,6 +1481,63 @@ fn printSpan(win: vaxis.Window, row: u16, col: u16, text: []const u8, style: vax
         out_col += 1;
     }
     return out_col;
+}
+
+/// Word-wrap `text` to `width` cells, writing each resulting line (a substring
+/// of `text`) into `out` and returning the count. Breaks on existing newlines,
+/// prefers to break at spaces, and hard-breaks words longer than `width`. This
+/// is how lazygit keeps confirmation/message popups readable (its Confirmation
+/// view has Wrap = true) instead of clipping at the boundary.
+fn wrapText(text: []const u8, width: u16, out: [][]const u8) usize {
+    if (out.len == 0) return 0;
+    if (text.len == 0) {
+        out[0] = text;
+        return 1;
+    }
+    if (width == 0) {
+        out[0] = text;
+        return 1;
+    }
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < text.len and n < out.len) {
+        const line_start = i;
+        var last_space: ?usize = null;
+        var j = i;
+        var line_end: usize = undefined;
+        var next: usize = undefined;
+        while (true) {
+            if (j >= text.len) {
+                line_end = text.len;
+                next = text.len;
+                break;
+            }
+            if (text[j] == '\n') {
+                line_end = j;
+                next = j + 1; // consume the newline
+                break;
+            }
+            if (j - line_start >= width) {
+                if (text[j] == ' ') {
+                    line_end = j; // a word ended exactly at the boundary
+                    next = j + 1;
+                } else if (last_space) |sp| {
+                    line_end = sp; // break at the last space that fit
+                    next = sp + 1;
+                } else {
+                    line_end = j; // hard break inside a long word
+                    next = j;
+                }
+                break;
+            }
+            if (text[j] == ' ') last_space = j;
+            j += 1;
+        }
+        out[n] = text[line_start..line_end];
+        n += 1;
+        i = next;
+    }
+    return n;
 }
 
 /// Write a single static UTF-8 glyph (e.g. an arrow) as one cell. The grapheme
@@ -1594,4 +1688,28 @@ test "side panel heights match lazygit weighting" {
     const ha = sidePanelHeights(body_h, .commits, true, 2);
     try std.testing.expect(ha.commits > ha.files);
     try std.testing.expectEqual(body_h, ha.status + ha.files + ha.branches + ha.commits + ha.stash);
+}
+
+test "wrapText wraps at word and line boundaries" {
+    var lines: [8][]const u8 = undefined;
+
+    // A word ending exactly at the boundary is not broken early.
+    try std.testing.expectEqual(@as(usize, 2), wrapText("hello world foo", 11, &lines));
+    try std.testing.expectEqualStrings("hello world", lines[0]);
+    try std.testing.expectEqualStrings("foo", lines[1]);
+
+    // Existing newlines start a new line (and blank lines are kept).
+    try std.testing.expectEqual(@as(usize, 3), wrapText("a\n\nb", 20, &lines));
+    try std.testing.expectEqualStrings("a", lines[0]);
+    try std.testing.expectEqualStrings("", lines[1]);
+    try std.testing.expectEqualStrings("b", lines[2]);
+
+    // A word longer than the width is hard-broken.
+    try std.testing.expectEqual(@as(usize, 2), wrapText("abcdefghij", 5, &lines));
+    try std.testing.expectEqualStrings("abcde", lines[0]);
+    try std.testing.expectEqualStrings("fghij", lines[1]);
+
+    // Text that fits is a single line.
+    try std.testing.expectEqual(@as(usize, 1), wrapText("short", 20, &lines));
+    try std.testing.expectEqualStrings("short", lines[0]);
 }
