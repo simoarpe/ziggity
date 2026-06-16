@@ -101,6 +101,10 @@ pub const Theme = struct {
     removed: u8 = 9,
     hunk: u8 = 14,
     header: u8 = 13,
+    /// Footer (bottom bar) keybinding hints: the key is highlighted in
+    /// `footer_key`, its description shown in `footer` — lazygit colors this bar.
+    footer: u8 = 12,
+    footer_key: u8 = 14,
 };
 
 /// A user-defined shell command bound to a key (`command.<key>` in config).

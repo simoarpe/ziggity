@@ -1394,15 +1394,41 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
         return;
     }
 
-    var buf: [1024]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "{s}  |  {s}", .{ app.message, contextHints(app) }) catch app.message;
-    print(win, 0, 0, line, st.bottom);
+    var col: u16 = 0;
+    if (app.message.len > 0) {
+        col = printSpan(win, 0, 0, app.message, st.bottom);
+        col = printSpan(win, 0, col, "  |  ", st.bottom);
+    }
+    _ = drawHints(win, 0, col, contextHints(app), st.hint_key, st.hint_desc);
+}
+
+/// Render keybinding hints lazygit-style: each "<key> <description>" group
+/// (groups separated by two spaces) draws the leading key token highlighted and
+/// the rest in the footer color. Returns the next column.
+fn drawHints(win: vaxis.Window, row: u16, start_col: u16, hints: []const u8, key_st: vaxis.Style, desc_st: vaxis.Style) u16 {
+    var col = start_col;
+    var first = true;
+    var it = std.mem.splitSequence(u8, hints, "  ");
+    while (it.next()) |raw| {
+        const group = std.mem.trim(u8, raw, " ");
+        if (group.len == 0) continue;
+        if (!first) col = printSpan(win, row, col, "  ", desc_st);
+        first = false;
+        if (std.mem.indexOfScalar(u8, group, ' ')) |sp| {
+            col = printSpan(win, row, col, group[0..sp], key_st); // key token
+            col = printSpan(win, row, col, group[sp..], desc_st); // " description"
+        } else {
+            col = printSpan(win, row, col, group, key_st); // key-only group
+        }
+        if (col >= win.width) break;
+    }
+    return col;
 }
 
 /// Keybinding hints for the focused panel only, lazygit-style. A short global
 /// suffix (refresh/quit) is appended since those apply everywhere.
 fn contextHints(app: *const app_mod.App) []const u8 {
-    const global = "  -  ? help  z undo  R refresh  q quit";
+    const global = "  ? help  z undo  R refresh  q quit";
     if (app.staging_active) {
         return "j/k line  v range  space stage/unstage (@@=hunk)  tab side  esc back" ++ global;
     }
@@ -1414,11 +1440,11 @@ fn contextHints(app: *const app_mod.App) []const u8 {
     }
     if (app.focus == .branches) {
         return switch (app.branches_tab) {
-            .local => "space checkout  n new  R rename  d delete  M merge  r rebase  f ff  [ ]" ++ global,
-            .remotes => "space checkout  n add  e edit  x remove  u upstream  d del-branch  [ ]" ++ global,
-            .tags => "space checkout  n new-tag  d delete-tag  [ ] tabs" ++ global,
-            .worktrees => "d remove  [ ] tabs" ++ global,
-            .submodules => "space init/update  [ ] tabs" ++ global,
+            .local => "space checkout  n new  R rename  d delete  M merge  r rebase  f ff  [/] tabs" ++ global,
+            .remotes => "space checkout  n add  e edit  x remove  u upstream  d del-branch  [/] tabs" ++ global,
+            .tags => "space checkout  n new-tag  d delete-tag  [/] tabs" ++ global,
+            .worktrees => "d remove  [/] tabs" ++ global,
+            .submodules => "space init/update  [/] tabs" ++ global,
         };
     }
     return switch (app.focus) {
@@ -1719,6 +1745,8 @@ const StyleSet = struct {
     header: vaxis.Style,
     bottom: vaxis.Style,
     bottom_accent: vaxis.Style,
+    hint_key: vaxis.Style,
+    hint_desc: vaxis.Style,
 };
 
 fn styles() StyleSet {
@@ -1739,6 +1767,8 @@ fn styles() StyleSet {
         .header = .{ .fg = .{ .index = t.header }, .bold = true },
         .bottom = .{ .fg = .{ .index = 15 }, .bg = .{ .index = 0 } },
         .bottom_accent = .{ .fg = .{ .index = t.accent }, .bg = .{ .index = 0 }, .bold = true },
+        .hint_key = .{ .fg = .{ .index = t.footer_key }, .bg = .{ .index = 0 }, .bold = true },
+        .hint_desc = .{ .fg = .{ .index = t.footer }, .bg = .{ .index = 0 } },
     };
 }
 
