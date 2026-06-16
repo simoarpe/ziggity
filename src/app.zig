@@ -824,6 +824,82 @@ pub const Mutation = union(enum) {
     }
 };
 
+/// Byte offset of the start of the UTF-8 codepoint immediately before `i`.
+fn prevCodepoint(s: []const u8, i: usize) usize {
+    if (i == 0) return 0;
+    var j = i - 1;
+    while (j > 0 and (s[j] & 0xC0) == 0x80) j -= 1;
+    return j;
+}
+
+/// Byte offset just past the UTF-8 codepoint starting at `i`.
+fn nextCodepoint(s: []const u8, i: usize) usize {
+    if (i >= s.len) return s.len;
+    var j = i + 1;
+    while (j < s.len and (s[j] & 0xC0) == 0x80) j += 1;
+    return j;
+}
+
+/// Remove `len` bytes at `pos` from `buf`, shifting the tail down. Never grows,
+/// so no allocation is needed.
+fn deleteRange(buf: *std.ArrayList(u8), pos: usize, len: usize) void {
+    std.mem.copyForwards(u8, buf.items[pos..], buf.items[pos + len ..]);
+    buf.items.len -= len;
+}
+
+// Word-boundary classes, mirroring lazygit's editor (pkg/gocui/text_area.go):
+// a "word" is a run of word-chars OR a run of separators; whitespace divides
+// them. Newline is treated as whitespace here so word motion crosses lines.
+const word_separators = "*?_+-.[]~=/&;!#$%^(){}<>";
+
+fn isSpace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\n';
+}
+
+fn isSeparator(c: u8) bool {
+    return std.mem.indexOfScalar(u8, word_separators, c) != null;
+}
+
+/// Byte offset one word to the left of `i` (skip whitespace, then one run of
+/// either separators or word-chars), matching lazygit's MoveLeftWord.
+fn moveLeftWord(s: []const u8, i: usize) usize {
+    var j = i;
+    while (j > 0 and isSpace(s[j - 1])) j -= 1;
+    if (j > 0 and isSeparator(s[j - 1])) {
+        while (j > 0 and isSeparator(s[j - 1])) j -= 1;
+    } else {
+        while (j > 0 and !isSpace(s[j - 1]) and !isSeparator(s[j - 1])) j -= 1;
+    }
+    return j;
+}
+
+/// Byte offset one word to the right of `i`, matching lazygit's MoveRightWord.
+fn moveRightWord(s: []const u8, i: usize) usize {
+    var j = i;
+    while (j < s.len and isSpace(s[j])) j += 1;
+    if (j < s.len and isSeparator(s[j])) {
+        while (j < s.len and isSeparator(s[j])) j += 1;
+    } else {
+        while (j < s.len and !isSpace(s[j]) and !isSeparator(s[j])) j += 1;
+    }
+    return j;
+}
+
+/// Byte offset of the start of the line containing `i` (just after the previous
+/// newline, or 0). Lazygit's Ctrl-A / Home is line-scoped, not buffer-scoped.
+fn lineStart(s: []const u8, i: usize) usize {
+    var j = i;
+    while (j > 0 and s[j - 1] != '\n') j -= 1;
+    return j;
+}
+
+/// Byte offset of the end of the line containing `i` (the next newline, or len).
+fn lineEnd(s: []const u8, i: usize) usize {
+    var j = i;
+    while (j < s.len and s[j] != '\n') j += 1;
+    return j;
+}
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     git: git_mod.Git,
@@ -868,6 +944,13 @@ pub const App = struct {
     file_display_filter: model.FileDisplayFilter = .all,
     commit_body_buffer: std.ArrayList(u8) = .empty,
     commit_field: CommitField = .subject,
+    // Byte offsets of the editing caret within each typed-input buffer, so the
+    // cursor can be moved with the arrow keys / Home / End instead of always
+    // sitting at the end. Clamped on use; reset when a prompt opens.
+    commit_cursor: usize = 0,
+    commit_body_cursor: usize = 0,
+    prompt_cursor: usize = 0,
+    file_filter_cursor: usize = 0,
     commit_action: CommitAction = .create,
     commit_reword_index: usize = 0,
     diff: []u8 = &.{},
@@ -2379,6 +2462,8 @@ pub const App = struct {
         self.commit_field = .subject;
         self.commit_buffer.clearRetainingCapacity();
         self.commit_body_buffer.clearRetainingCapacity();
+        self.commit_cursor = 0;
+        self.commit_body_cursor = 0;
         try self.setMessage("enter commit message", .{});
     }
 
@@ -2410,6 +2495,8 @@ pub const App = struct {
         try self.commit_buffer.appendSlice(self.allocator, commit.subject);
         self.commit_body_buffer.clearRetainingCapacity();
         try self.commit_body_buffer.appendSlice(self.allocator, body);
+        self.commit_cursor = self.commit_buffer.items.len;
+        self.commit_body_cursor = self.commit_body_buffer.items.len;
         try self.setMessage("reword commit", .{});
     }
 
@@ -2665,7 +2752,123 @@ pub const App = struct {
         self.text_prompt_kind = kind;
         self.input_buffer.clearRetainingCapacity();
         if (prefill.len > 0) try self.input_buffer.appendSlice(self.allocator, prefill);
+        self.prompt_cursor = self.input_buffer.items.len;
         try self.setMessage("{s}", .{kind.title()});
+    }
+
+    /// Outcome of feeding a key to `editLine`, so callers can react (e.g. the
+    /// file filter re-filters only when the text actually changed).
+    const EditResult = enum { ignored, moved, changed };
+
+    /// Shared single-field text editing for the typed prompts: cursor movement
+    /// (left/right, Home/End, Ctrl-A/Ctrl-E), delete-before (backspace) and
+    /// delete-at (Delete) the caret, and inserting printable text at the caret.
+    /// `cursor` is a byte offset into `buf` and is kept on a UTF-8 boundary.
+    fn editLine(self: *App, buf: *std.ArrayList(u8), cursor: *usize, key: vaxis.Key) !EditResult {
+        if (cursor.* > buf.items.len) cursor.* = buf.items.len;
+
+        // ---- cursor movement ----
+        // Word left: Option/Alt+Left, Ctrl+Left, or Alt+b (matching lazygit; on
+        // macOS Option+Left arrives as Alt+Left, Alt+b, or ESC-b depending on
+        // the terminal — all three are bound).
+        if (key.matches(vaxis.Key.left, .{ .alt = true }) or
+            key.matches(vaxis.Key.left, .{ .ctrl = true }) or
+            key.matches('b', .{ .alt = true }))
+        {
+            cursor.* = moveLeftWord(buf.items, cursor.*);
+            return .moved;
+        }
+        // Word right: Option/Alt+Right, Ctrl+Right, or Alt+f.
+        if (key.matches(vaxis.Key.right, .{ .alt = true }) or
+            key.matches(vaxis.Key.right, .{ .ctrl = true }) or
+            key.matches('f', .{ .alt = true }))
+        {
+            cursor.* = moveRightWord(buf.items, cursor.*);
+            return .moved;
+        }
+        // Start of line: Home, Ctrl-A, or Cmd+Left (super, in terminals that
+        // report it — Terminal.app does not deliver Command to TUI apps).
+        if (key.matches(vaxis.Key.home, .{}) or
+            key.matches('a', .{ .ctrl = true }) or
+            key.matches(vaxis.Key.left, .{ .super = true }))
+        {
+            cursor.* = lineStart(buf.items, cursor.*);
+            return .moved;
+        }
+        // End of line: End, Ctrl-E, or Cmd+Right.
+        if (key.matches(vaxis.Key.end, .{}) or
+            key.matches('e', .{ .ctrl = true }) or
+            key.matches(vaxis.Key.right, .{ .super = true }))
+        {
+            cursor.* = lineEnd(buf.items, cursor.*);
+            return .moved;
+        }
+        if (key.matches(vaxis.Key.left, .{})) {
+            cursor.* = prevCodepoint(buf.items, cursor.*);
+            return .moved;
+        }
+        if (key.matches(vaxis.Key.right, .{})) {
+            cursor.* = nextCodepoint(buf.items, cursor.*);
+            return .moved;
+        }
+
+        // ---- deletion ----
+        // Delete word before caret: Ctrl-W or Ctrl-Backspace (Option+Delete on
+        // macOS arrives as Alt+Backspace, also bound).
+        if (key.matches('w', .{ .ctrl = true }) or
+            key.matches(vaxis.Key.backspace, .{ .ctrl = true }) or
+            key.matches(vaxis.Key.backspace, .{ .alt = true }))
+        {
+            const start = moveLeftWord(buf.items, cursor.*);
+            if (cursor.* > start) {
+                deleteRange(buf, start, cursor.* - start);
+                cursor.* = start;
+            }
+            return .changed;
+        }
+        // Delete word after caret: Alt-D or Ctrl-Delete.
+        if (key.matches('d', .{ .alt = true }) or key.matches(vaxis.Key.delete, .{ .ctrl = true })) {
+            const end = moveRightWord(buf.items, cursor.*);
+            if (end > cursor.*) deleteRange(buf, cursor.*, end - cursor.*);
+            return .changed;
+        }
+        // Delete to start / end of line: Ctrl-U / Ctrl-K.
+        if (key.matches('u', .{ .ctrl = true })) {
+            const start = lineStart(buf.items, cursor.*);
+            if (cursor.* > start) {
+                deleteRange(buf, start, cursor.* - start);
+                cursor.* = start;
+            }
+            return .changed;
+        }
+        if (key.matches('k', .{ .ctrl = true })) {
+            const end = lineEnd(buf.items, cursor.*);
+            if (end > cursor.*) deleteRange(buf, cursor.*, end - cursor.*);
+            return .changed;
+        }
+        if (key.matches(vaxis.Key.delete, .{})) {
+            const nxt = nextCodepoint(buf.items, cursor.*);
+            if (nxt > cursor.*) deleteRange(buf, cursor.*, nxt - cursor.*);
+            return .changed;
+        }
+        if (self.isBackspaceKey(key)) {
+            const prv = prevCodepoint(buf.items, cursor.*);
+            if (cursor.* > prv) {
+                deleteRange(buf, prv, cursor.* - prv);
+                cursor.* = prv;
+            }
+            return .changed;
+        }
+
+        // ---- insertion ----
+        if (key.text) |text| {
+            if (!key.mods.ctrl and !key.mods.alt and text.len > 0 and text[0] >= 0x20) {
+                try buf.insertSlice(self.allocator, cursor.*, text);
+                cursor.* += text.len;
+                return .changed;
+            }
+        }
+        return .ignored;
     }
 
     fn handleTextPromptKey(self: *App, key: vaxis.Key) !void {
@@ -2677,15 +2880,7 @@ pub const App = struct {
             try self.submitTextPrompt();
             return;
         }
-        if (self.isBackspaceKey(key)) {
-            if (self.input_buffer.items.len > 0) self.input_buffer.items.len -= 1;
-            return;
-        }
-        if (key.text) |text| {
-            if (!key.mods.ctrl and !key.mods.alt and text.len > 0 and text[0] >= 0x20) {
-                try self.input_buffer.appendSlice(self.allocator, text);
-            }
-        }
+        _ = try self.editLine(&self.input_buffer, &self.prompt_cursor, key);
     }
 
     fn cancelTextPrompt(self: *App, comptime reason: []const u8) void {
@@ -2791,6 +2986,7 @@ pub const App = struct {
         self.main_scroll = 0;
         self.mode = .file_filter_prompt;
         self.file_filter_buffer.clearRetainingCapacity();
+        self.file_filter_cursor = 0;
         self.filter_history_index = null;
         try self.updateFileFilterFromPrompt();
         try self.setMessage("filter files (up/down for history)", .{});
@@ -2800,6 +2996,7 @@ pub const App = struct {
     fn setFilterPromptBuffer(self: *App, value: []const u8) !void {
         self.file_filter_buffer.clearRetainingCapacity();
         try self.file_filter_buffer.appendSlice(self.allocator, value);
+        self.file_filter_cursor = self.file_filter_buffer.items.len;
         try self.updateFileFilterFromPrompt();
     }
 
@@ -3611,21 +3808,15 @@ pub const App = struct {
         // Enter submits from the subject; in the body it inserts a newline.
         if (self.isEnterKey(key)) {
             if (self.commit_field == .body) {
-                try self.commit_body_buffer.append(self.allocator, '\n');
+                try self.commit_body_buffer.insertSlice(self.allocator, self.commit_body_cursor, "\n");
+                self.commit_body_cursor += 1;
                 return;
             }
             return self.submitCommit();
         }
         const buffer = if (self.commit_field == .subject) &self.commit_buffer else &self.commit_body_buffer;
-        if (self.isBackspaceKey(key)) {
-            if (buffer.items.len > 0) buffer.items.len -= 1;
-            return;
-        }
-        if (key.text) |text| {
-            if (!key.mods.ctrl and !key.mods.alt and text.len > 0 and text[0] >= 0x20) {
-                try buffer.appendSlice(self.allocator, text);
-            }
-        }
+        const cursor = if (self.commit_field == .subject) &self.commit_cursor else &self.commit_body_cursor;
+        _ = try self.editLine(buffer, cursor, key);
     }
 
     fn submitCommit(self: *App) !void {
@@ -3675,18 +3866,9 @@ pub const App = struct {
             try self.applyFileFilter(filter);
             return;
         }
-        if (self.isBackspaceKey(key)) {
-            if (self.file_filter_buffer.items.len > 0) self.file_filter_buffer.items.len -= 1;
+        if (try self.editLine(&self.file_filter_buffer, &self.file_filter_cursor, key) == .changed) {
             self.filter_history_index = null;
             try self.updateFileFilterFromPrompt();
-            return;
-        }
-        if (key.text) |text| {
-            if (!key.mods.ctrl and !key.mods.alt and text.len > 0 and text[0] >= 0x20) {
-                try self.file_filter_buffer.appendSlice(self.allocator, text);
-                self.filter_history_index = null;
-                try self.updateFileFilterFromPrompt();
-            }
         }
     }
 
@@ -4578,6 +4760,26 @@ pub const App = struct {
 
 test "action enum is referenced" {
     try std.testing.expect(actions.Action.quit == .quit);
+}
+
+test "word and line motion helpers" {
+    const s = "fix: the bug in main.zig";
+    // From end, word-left lands at the start of each word/separator run.
+    try std.testing.expectEqual(@as(usize, 21), moveLeftWord(s, s.len)); // -> "zig"
+    try std.testing.expectEqual(@as(usize, 20), moveLeftWord(s, 21)); // -> "." separator
+    try std.testing.expectEqual(@as(usize, 16), moveLeftWord(s, 20)); // -> "main"
+    try std.testing.expectEqual(@as(usize, 0), moveLeftWord(s, 3)); // from ":" back to start
+    // Word-right mirrors it. ':' is not in lazygit's separator set, so "fix:"
+    // is one word ending at the space (index 4).
+    try std.testing.expectEqual(@as(usize, 4), moveRightWord(s, 0));
+    try std.testing.expectEqual(@as(usize, 8), moveRightWord(s, 5)); // "the"
+    try std.testing.expectEqual(@as(usize, s.len), moveRightWord(s, 21)); // to the end
+    // Line motion is scoped to the current line in multi-line buffers.
+    const m = "line one\nsecond line\nthird";
+    try std.testing.expectEqual(@as(usize, 9), lineStart(m, 15));
+    try std.testing.expectEqual(@as(usize, 20), lineEnd(m, 15));
+    try std.testing.expectEqual(@as(usize, 0), lineStart(m, 4));
+    try std.testing.expectEqual(@as(usize, 8), lineEnd(m, 4));
 }
 
 test "cherry-pick clipboard toggles copied commits" {

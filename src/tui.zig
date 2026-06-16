@@ -785,7 +785,8 @@ fn drawTextPromptPopup(root: vaxis.Window, app: *const app_mod.App) void {
     const win = popup(root, w, 5, kind.title());
     print(win, 0, 0, app.input_buffer.items, st.normal);
     print(win, 2, 0, "enter confirm   esc cancel", st.bottom_accent);
-    const cursor_col: u16 = @min(win.width -| 1, @as(u16, @intCast(app.input_buffer.items.len)));
+    const caret = @min(app.prompt_cursor, app.input_buffer.items.len);
+    const cursor_col: u16 = @min(win.width -| 1, @as(u16, @intCast(caret)));
     win.showCursor(cursor_col, 0);
 }
 
@@ -805,23 +806,31 @@ fn drawCommitPopup(root: vaxis.Window, app: *const app_mod.App) void {
     const body_top: u16 = 4;
     var lines = std.mem.splitScalar(u8, app.commit_body_buffer.items, '\n');
     var row: u16 = body_top;
-    var body_rows: u16 = 0;
-    var last_line_len: usize = 0;
     while (lines.next()) |line| {
         if (row < win.height -| 1) print(win, row, 0, line, st.normal);
-        last_line_len = line.len;
         row += 1;
-        body_rows += 1;
     }
 
     print(win, win.height -| 1, 0, "tab: switch field   enter: commit / newline   esc: cancel", st.bottom_accent);
 
     if (subject_focused) {
-        const col: u16 = @min(win.width -| 1, @as(u16, @intCast(app.commit_buffer.items.len)));
+        const caret = @min(app.commit_cursor, app.commit_buffer.items.len);
+        const col: u16 = @min(win.width -| 1, @as(u16, @intCast(caret)));
         win.showCursor(col, 1);
     } else {
-        const cursor_row: u16 = @min(win.height -| 1, body_top + (body_rows -| 1));
-        const col: u16 = @min(win.width -| 1, @as(u16, @intCast(last_line_len)));
+        // Map the body caret's byte offset to a row/column within the body area.
+        const body = app.commit_body_buffer.items;
+        const caret = @min(app.commit_body_cursor, body.len);
+        var line_idx: u16 = 0;
+        var col_bytes: usize = 0;
+        for (body[0..caret]) |b| {
+            if (b == '\n') {
+                line_idx += 1;
+                col_bytes = 0;
+            } else col_bytes += 1;
+        }
+        const cursor_row: u16 = @min(win.height -| 1, body_top + line_idx);
+        const col: u16 = @min(win.width -| 1, @as(u16, @intCast(col_bytes)));
         win.showCursor(col, cursor_row);
     }
 }
@@ -1308,7 +1317,8 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
     if (app.mode == .file_filter_prompt) {
         print(win, 0, 0, "filter: ", st.bottom_accent);
         print(win, 0, 8, app.file_filter_buffer.items, st.bottom);
-        const cursor_col: u16 = @min(win.width -| 1, @as(u16, @intCast(8 + app.file_filter_buffer.items.len)));
+        const caret = @min(app.file_filter_cursor, app.file_filter_buffer.items.len);
+        const cursor_col: u16 = @min(win.width -| 1, @as(u16, @intCast(8 + caret)));
         win.showCursor(cursor_col, 0);
         return;
     }
