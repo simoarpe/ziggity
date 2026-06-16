@@ -671,6 +671,8 @@ pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process
 /// copies so the job is self-contained across the thread boundary.
 pub const Mutation = union(enum) {
     commit: []const u8,
+    amend,
+    checkout: []const u8,
     merge: []const u8,
     rebase: []const u8,
     rebase_onto_marked: struct { newbase: []const u8, marked_base: []const u8 },
@@ -697,6 +699,8 @@ pub const Mutation = union(enum) {
         }
         return switch (self) {
             .commit => |msg| wgit.commit(msg),
+            .amend => wgit.amendCommit(),
+            .checkout => |b| wgit.checkout(b),
             .merge => |b| wgit.mergeBranch(b),
             .rebase => |b| wgit.rebaseOnto(b),
             .rebase_onto_marked => |x| wgit.rebaseOntoMarked(x.newbase, x.marked_base),
@@ -719,6 +723,8 @@ pub const Mutation = union(enum) {
     pub fn dupe(self: Mutation, gpa: std.mem.Allocator) !Mutation {
         return switch (self) {
             .commit => |msg| .{ .commit = try gpa.dupe(u8, msg) },
+            .amend => .amend,
+            .checkout => |b| .{ .checkout = try gpa.dupe(u8, b) },
             .merge => |b| .{ .merge = try gpa.dupe(u8, b) },
             .rebase => |b| .{ .rebase = try gpa.dupe(u8, b) },
             .rebase_onto_marked => |x| .{ .rebase_onto_marked = .{ .newbase = try gpa.dupe(u8, x.newbase), .marked_base = try gpa.dupe(u8, x.marked_base) } },
@@ -738,7 +744,7 @@ pub const Mutation = union(enum) {
 
     pub fn deinit(self: Mutation, gpa: std.mem.Allocator) void {
         switch (self) {
-            .commit, .merge, .rebase, .autosquash => |s| gpa.free(s),
+            .commit, .checkout, .merge, .rebase, .autosquash => |s| gpa.free(s),
             .rebase_onto_marked => |x| {
                 gpa.free(x.newbase);
                 gpa.free(x.marked_base);
@@ -761,7 +767,7 @@ pub const Mutation = union(enum) {
                 gpa.free(x.todo);
                 if (x.message) |m| gpa.free(m);
             },
-            .fast_forward_current, .bisect_skip, .bisect_reset, .amend_continue_rebase => {},
+            .amend, .fast_forward_current, .bisect_skip, .bisect_reset, .amend_continue_rebase => {},
         }
     }
 };
@@ -2364,7 +2370,7 @@ pub const App = struct {
             try self.setMessage("stage changes to amend into the last commit", .{});
             return;
         }
-        return self.runMutationScoped(try self.git.amendCommit(), Refresh.commit, "amended last commit", .{});
+        return self.requestMutation(.amend, .{ .gerund = "amending", .command = "git commit --amend", .refresh = Refresh.commit }, "amended last commit", .{});
     }
 
     pub fn isCommitCopied(self: *const App, hash: []const u8) bool {
@@ -3484,7 +3490,7 @@ pub const App = struct {
                     try self.setMessage("already on {s}", .{branch.name});
                     return;
                 }
-                return self.runMutationScoped(try self.git.checkout(branch.name), Refresh.checkout, "checked out {s}", .{branch.name});
+                return self.requestMutation(.{ .checkout = branch.name }, .{ .gerund = "checking out", .command = "git checkout", .refresh = Refresh.checkout }, "checked out {s}", .{branch.name});
             },
             .remotes => {
                 const branch = self.selectedRemoteBranch() orelse {
@@ -3494,14 +3500,14 @@ pub const App = struct {
                 // git's DWIM checkout creates a local tracking branch from
                 // "<remote>/<name>" when "<name>" doesn't already exist locally.
                 const local_name = textmatch.localNameForRemote(branch.name);
-                return self.runMutationScoped(try self.git.checkout(local_name), Refresh.checkout, "checked out {s}", .{local_name});
+                return self.requestMutation(.{ .checkout = local_name }, .{ .gerund = "checking out", .command = "git checkout", .refresh = Refresh.checkout }, "checked out {s}", .{local_name});
             },
             .tags => {
                 const tag = self.selectedTag() orelse {
                     try self.setMessage("no tag selected", .{});
                     return;
                 };
-                return self.runMutationScoped(try self.git.checkout(tag.name), Refresh.checkout, "checked out {s} (detached)", .{tag.name});
+                return self.requestMutation(.{ .checkout = tag.name }, .{ .gerund = "checking out", .command = "git checkout", .refresh = Refresh.checkout }, "checked out {s} (detached)", .{tag.name});
             },
             .worktrees => {
                 // Switching the active worktree would re-root the app; instead
