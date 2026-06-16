@@ -4213,45 +4213,45 @@ pub const App = struct {
                 if (f.has_unstaged) {
                     if (!f.tracked and !f.has_staged) {
                         try sections.append(page_alloc, .{
-                            .argv = try dupArgv(&.{ "diff", "--no-index", "--no-color", "--", "/dev/null", f.path }),
+                            .argv = try dupArgv(&.{ "diff", "--no-index", "--color=always", "--", "/dev/null", f.path }),
                             .label = "Untracked\n\n",
                             .keep_on_error = true,
                         });
                     } else {
                         try sections.append(page_alloc, .{
-                            .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--no-color", ctx_arg, "--", f.path }),
+                            .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--color=always", ctx_arg, "--", f.path }),
                             .label = "Unstaged\n\n",
                         });
                     }
                 }
                 if (f.has_staged) {
                     try sections.append(page_alloc, .{
-                        .argv = try dupArgv(&.{ "diff", "--staged", "--no-ext-diff", "--no-color", ctx_arg, "--", f.path }),
+                        .argv = try dupArgv(&.{ "diff", "--staged", "--no-ext-diff", "--color=always", ctx_arg, "--", f.path }),
                         .label = "Staged\n\n",
                     });
                 }
             },
             .branch => |name| {
                 // lazygit shows the branch's commit graph in the main view
-                // (`git log --graph --decorate --date=relative --pretty=medium`,
-                // titled "Log"), not a terse oneline list. Mirror that, with
-                // --no-color since the preview is colorized per-line, and a
-                // generous cap so the buffered preview stays bounded.
+                // (`git log --graph --color=always --decorate --date=relative
+                // --pretty=medium`, titled "Log"), not a terse oneline list.
+                // Mirror it; the renderer parses git's ANSI colors. A generous
+                // cap keeps the buffered preview bounded.
                 empty_msg = "No commits.\n";
                 try sections.append(page_alloc, .{
-                    .argv = try dupArgv(&.{ "log", "--graph", "--no-color", "--abbrev-commit", "--decorate", "--date=relative", "--pretty=medium", "-300", name, "--" }),
+                    .argv = try dupArgv(&.{ "log", "--graph", "--color=always", "--abbrev-commit", "--decorate", "--date=relative", "--pretty=medium", "-300", name, "--" }),
                 });
             },
             .commit => |hash| {
                 empty_msg = "Could not load commit.\n";
                 try sections.append(page_alloc, .{
-                    .argv = try dupArgv(&.{ "show", "--no-ext-diff", "--no-color", "--stat", "--patch", ctx_arg, hash }),
+                    .argv = try dupArgv(&.{ "show", "--no-ext-diff", "--color=always", "--stat", "--patch", ctx_arg, hash }),
                 });
             },
             .commit_file => |cf| {
                 empty_msg = "No changes for this file.\n";
                 try sections.append(page_alloc, .{
-                    .argv = try dupArgv(&.{ "show", cf.hash, "--no-ext-diff", "--no-color", ctx_arg, "--format=", "--", cf.path }),
+                    .argv = try dupArgv(&.{ "show", cf.hash, "--no-ext-diff", "--color=always", ctx_arg, "--format=", "--", cf.path }),
                 });
             },
             .stash => |idx| {
@@ -4259,13 +4259,13 @@ pub const App = struct {
                 var sel_buf: [32]u8 = undefined;
                 const selector = try std.fmt.bufPrint(&sel_buf, "stash@{{{d}}}", .{idx});
                 try sections.append(page_alloc, .{
-                    .argv = try dupArgv(&.{ "stash", "show", "-p", "--stat", "-u", "--no-ext-diff", "--no-color", ctx_arg, selector }),
+                    .argv = try dupArgv(&.{ "stash", "show", "-p", "--stat", "-u", "--no-ext-diff", "--color=always", ctx_arg, selector }),
                 });
             },
             .diff_refs => |dr| {
                 empty_msg = "No differences.\n";
                 try sections.append(page_alloc, .{
-                    .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--no-color", "--stat", "--patch", ctx_arg, dr.base, dr.target }),
+                    .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--color=always", "--stat", "--patch", ctx_arg, dr.base, dr.target }),
                 });
             },
         }

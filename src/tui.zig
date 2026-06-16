@@ -1334,13 +1334,20 @@ fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
     var row: u16 = 0;
     while (row < win.height) : (row += 1) {
         const line = lines.next() orelse break;
-        const abs_line = app.main_scroll + row;
-        var style = diffStyle(line);
-        if (app.staging_active and abs_line >= hl_start and abs_line < hl_end) {
-            style.bg = .{ .index = 8 };
-            fillRow(win, row, style);
+        if (app.staging_active) {
+            // The staging diff is plain (--no-color) for patch building; colorize
+            // it per-line and highlight the selected line/range.
+            const abs_line = app.main_scroll + row;
+            var style = diffStyle(line);
+            if (abs_line >= hl_start and abs_line < hl_end) {
+                style.bg = .{ .index = 8 };
+                fillRow(win, row, style);
+            }
+            print(win, row, 0, line, style);
+        } else {
+            // Preview text carries git's own ANSI colors (--color=always).
+            printAnsi(win, row, line, styles().normal);
         }
-        print(win, row, 0, line, style);
     }
 }
 
@@ -1484,6 +1491,122 @@ fn printSpan(win: vaxis.Window, row: u16, col: u16, text: []const u8, style: vax
         out_col += 1;
     }
     return out_col;
+}
+
+fn clampU8(v: u32) u8 {
+    return @intCast(@min(v, 255));
+}
+
+/// Update `style` from one ANSI SGR escape's parameters (the bytes between
+/// `ESC[` and the final `m`), resetting to `base` on code 0 / empty. Supports
+/// the attributes git emits: bold/dim/italic/underline/reverse, the 8 basic and
+/// 8 bright colors, and the 256-color (`38;5;n`) and truecolor (`38;2;r;g;b`)
+/// extended forms for both foreground and background.
+fn applySgr(style: *vaxis.Style, base: vaxis.Style, params: []const u8) void {
+    var codes: [24]u32 = undefined;
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, params, ';');
+    while (it.next()) |tok| {
+        if (n >= codes.len) break;
+        codes[n] = if (tok.len == 0) 0 else (std.fmt.parseInt(u32, tok, 10) catch 0);
+        n += 1;
+    }
+    if (n == 0) {
+        style.* = base; // a bare ESC[m is a reset
+        return;
+    }
+    var k: usize = 0;
+    while (k < n) : (k += 1) {
+        switch (codes[k]) {
+            0 => style.* = base,
+            1 => style.bold = true,
+            2 => style.dim = true,
+            3 => style.italic = true,
+            4 => style.ul_style = .single,
+            5, 6 => style.blink = true,
+            7 => style.reverse = true,
+            8 => style.invisible = true,
+            9 => style.strikethrough = true,
+            22 => {
+                style.bold = false;
+                style.dim = false;
+            },
+            23 => style.italic = false,
+            24 => style.ul_style = .off,
+            25 => style.blink = false,
+            27 => style.reverse = false,
+            28 => style.invisible = false,
+            29 => style.strikethrough = false,
+            30...37 => style.fg = .{ .index = clampU8(codes[k] - 30) },
+            38 => {
+                if (k + 2 < n and codes[k + 1] == 5) {
+                    style.fg = .{ .index = clampU8(codes[k + 2]) };
+                    k += 2;
+                } else if (k + 4 < n and codes[k + 1] == 2) {
+                    style.fg = .{ .rgb = .{ clampU8(codes[k + 2]), clampU8(codes[k + 3]), clampU8(codes[k + 4]) } };
+                    k += 4;
+                }
+            },
+            39 => style.fg = .default,
+            40...47 => style.bg = .{ .index = clampU8(codes[k] - 40) },
+            48 => {
+                if (k + 2 < n and codes[k + 1] == 5) {
+                    style.bg = .{ .index = clampU8(codes[k + 2]) };
+                    k += 2;
+                } else if (k + 4 < n and codes[k + 1] == 2) {
+                    style.bg = .{ .rgb = .{ clampU8(codes[k + 2]), clampU8(codes[k + 3]), clampU8(codes[k + 4]) } };
+                    k += 4;
+                }
+            },
+            49 => style.bg = .default,
+            90...97 => style.fg = .{ .index = clampU8(codes[k] - 90 + 8) },
+            100...107 => style.bg = .{ .index = clampU8(codes[k] - 100 + 8) },
+            else => {},
+        }
+    }
+}
+
+/// Render one line into `win` at `row`, interpreting ANSI SGR escape sequences
+/// (git's `--color=always` output) as styles instead of printing them as raw
+/// bytes. Non-SGR CSI sequences are skipped. `base` is the default/reset style.
+/// Like `printSpan`, one cell is written per byte (ASCII-oriented).
+fn printAnsi(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style) void {
+    if (row >= win.height) return;
+    var style = base;
+    var out_col: u16 = 0;
+    var i: usize = 0;
+    while (i < line.len and out_col < win.width) {
+        const byte = line[i];
+        if (byte == 0x1b) {
+            // CSI: ESC [ params... final(0x40-0x7e). Other escapes: drop ESC.
+            if (i + 1 < line.len and line[i + 1] == '[') {
+                var j = i + 2;
+                while (j < line.len and !(line[j] >= 0x40 and line[j] <= 0x7e)) j += 1;
+                if (j >= line.len) break; // truncated sequence
+                if (line[j] == 'm') applySgr(&style, base, line[i + 2 .. j]);
+                i = j + 1;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if (byte == '\r') {
+            i += 1;
+            continue;
+        }
+        if (byte == '\t') {
+            var spaces: u8 = 0;
+            while (spaces < 4 and out_col < win.width) : (spaces += 1) {
+                win.writeCell(out_col, row, .{ .char = .{ .grapheme = " ", .width = 1 }, .style = style });
+                out_col += 1;
+            }
+            i += 1;
+            continue;
+        }
+        win.writeCell(out_col, row, .{ .char = .{ .grapheme = glyph(byte), .width = 1 }, .style = style });
+        out_col += 1;
+        i += 1;
+    }
 }
 
 /// Word-wrap `text` to `width` cells, writing each resulting line (a substring
@@ -1715,4 +1838,41 @@ test "wrapText wraps at word and line boundaries" {
     // Text that fits is a single line.
     try std.testing.expectEqual(@as(usize, 1), wrapText("short", 20, &lines));
     try std.testing.expectEqualStrings("short", lines[0]);
+}
+
+test "applySgr parses ANSI color codes" {
+    const base: vaxis.Style = .{};
+    var s = base;
+
+    // Basic foreground color (green).
+    applySgr(&s, base, "32");
+    try std.testing.expectEqual(@as(u8, 2), s.fg.index);
+
+    // Bold + basic color in one sequence.
+    s = base;
+    applySgr(&s, base, "1;31");
+    try std.testing.expect(s.bold);
+    try std.testing.expectEqual(@as(u8, 1), s.fg.index);
+
+    // Code 0 and an empty sequence both reset to the base style.
+    s = .{ .bold = true, .fg = .{ .index = 5 } };
+    applySgr(&s, base, "0");
+    try std.testing.expect(!s.bold);
+    try std.testing.expect(std.meta.activeTag(s.fg) == .default);
+    s = .{ .italic = true };
+    applySgr(&s, base, "");
+    try std.testing.expect(!s.italic);
+
+    // 256-color and truecolor extended forms.
+    s = base;
+    applySgr(&s, base, "38;5;208");
+    try std.testing.expectEqual(@as(u8, 208), s.fg.index);
+    s = base;
+    applySgr(&s, base, "48;2;10;20;30");
+    try std.testing.expectEqual([3]u8{ 10, 20, 30 }, s.bg.rgb);
+
+    // Bright foreground maps into the 8-15 palette range.
+    s = base;
+    applySgr(&s, base, "92");
+    try std.testing.expectEqual(@as(u8, 10), s.fg.index);
 }
