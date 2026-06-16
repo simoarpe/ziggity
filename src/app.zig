@@ -551,6 +551,118 @@ pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.proce
     return wgit.loadRepoData() catch null;
 }
 
+/// The independently-refreshable data views (lazygit's RefreshableView). A
+/// mutation refreshes only the views it touched; the slow ones load off-thread.
+pub const Scope = enum { files, status, branches, remotes, commits, reflog, tags, worktrees, submodules, stash };
+pub const ScopeSet = std.EnumSet(Scope);
+
+/// The active Commits-list filters, captured so a scoped commits reload off the
+/// UI thread applies the same filter the synchronous load would.
+pub const LogFilters = struct {
+    grep: ?[]const u8 = null,
+    author: ?[]const u8 = null,
+    path: ?[]const u8 = null,
+};
+
+/// One scoped refresh's worth of data, loaded off-thread. Only the `RepoData`
+/// fields named in `scopes` are populated; the rest stay empty. Page-allocated.
+pub const ScopedData = struct {
+    scopes: ScopeSet,
+    data: model.RepoData = .{},
+
+    pub fn deinit(self: *ScopedData, gpa: std.mem.Allocator) void {
+        self.data.deinit(gpa); // unloaded (empty) fields free as no-ops
+        self.* = undefined;
+    }
+};
+
+/// Worker-thread entry: load just the requested views on a throwaway
+/// page-allocator `Git`. `filters` are applied to the commits load so an active
+/// Commits filter is preserved. Borrows `root`/`environ`/filter strings.
+pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, scopes: ScopeSet, filters: LogFilters) ScopedData {
+    var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root };
+    // Borrowed filter strings (owned by the caller's run struct); wgit only
+    // reads them and we never call clearLogFilters, so nothing is freed here.
+    wgit.log_grep = @constCast(filters.grep);
+    wgit.log_author = @constCast(filters.author);
+    wgit.log_path = @constCast(filters.path);
+    defer {
+        for (wgit.command_log.items) |e| gpa.free(e);
+        wgit.command_log.deinit(gpa);
+    }
+
+    // `loaded` tracks the views that actually loaded — a transient git error on
+    // a view leaves it out, so applyScopedLoad keeps the stale data for it
+    // rather than wiping the panel.
+    var d = model.RepoData{};
+    var loaded = ScopeSet.initEmpty();
+    if (scopes.contains(.files)) {
+        if (wgit.loadFiles()) |f| {
+            d.files = f;
+            d.state = wgit.detectState();
+            loaded.insert(.files);
+        } else |_| {}
+    }
+    if (scopes.contains(.status)) {
+        if (wgit.loadStatusSummary()) |s| {
+            d.current_branch = s.current_branch;
+            d.upstream = s.upstream;
+            d.ahead = s.ahead;
+            d.behind = s.behind;
+            loaded.insert(.status);
+        } else |_| {}
+    }
+    if (scopes.contains(.branches)) {
+        if (wgit.loadBranches()) |b| {
+            d.branches = b;
+            loaded.insert(.branches);
+        } else |_| {}
+    }
+    if (scopes.contains(.remotes)) {
+        if (wgit.loadRemoteBranches()) |b| {
+            d.remote_branches = b;
+            loaded.insert(.remotes);
+        } else |_| {}
+    }
+    if (scopes.contains(.tags)) {
+        if (wgit.loadTags()) |t| {
+            d.tags = t;
+            loaded.insert(.tags);
+        } else |_| {}
+    }
+    if (scopes.contains(.commits)) {
+        if (wgit.loadCommits("HEAD", 100)) |c| {
+            d.commits = c;
+            loaded.insert(.commits);
+        } else |_| {}
+    }
+    if (scopes.contains(.reflog)) {
+        if (wgit.loadReflog(100)) |c| {
+            d.reflog = c;
+            loaded.insert(.reflog);
+        } else |_| {}
+    }
+    if (scopes.contains(.worktrees)) {
+        if (wgit.loadWorktrees()) |w| {
+            d.worktrees = w;
+            loaded.insert(.worktrees);
+        } else |_| {}
+    }
+    if (scopes.contains(.submodules)) {
+        if (wgit.loadSubmodules()) |m| {
+            d.submodules = m;
+            loaded.insert(.submodules);
+        } else |_| {}
+    }
+    if (scopes.contains(.stash)) {
+        if (wgit.loadStash()) |st| {
+            d.stash = st;
+            loaded.insert(.stash);
+        } else |_| {}
+    }
+    return .{ .scopes = loaded, .data = d };
+}
+
 /// A slow / multi-step git mutation to run off the UI thread (merge, rebase,
 /// bisect, custom-patch, …). The worker runs it on a page-allocator `Git`,
 /// which reuses the real `Git` methods verbatim — so temp files, env vars and
@@ -767,6 +879,11 @@ pub const App = struct {
     /// True from startup until the first (async) repo load lands; panels show a
     /// "Loading…" state and mutating input is gated meanwhile.
     initial_load_pending: bool = false,
+    /// Slow views (branches/commits/tags/…) queued for an off-thread scoped
+    /// reload (lazygit-style per-view refresh). The fast Files/Status views are
+    /// refreshed synchronously, so they never appear here and never race.
+    pending_scopes: ScopeSet = ScopeSet.initEmpty(),
+    scoped_load_active: bool = false,
 
     // Async slow mutations (merge/rebase/bisect/…) run off the UI loop like the
     // network ops: `mutation_requested` is a built job the loop starts (page-
@@ -878,29 +995,6 @@ pub const App = struct {
         self.setMessage("ready", .{}) catch {};
     }
 
-    pub fn refresh(self: *App) !void {
-        const tree_path = try self.captureTreePath();
-        defer if (tree_path) |p| self.allocator.free(p);
-
-        // Invalidate any in-flight background worktree snapshot: this full
-        // reload is newer, so a snapshot that started earlier must not clobber it.
-        // A queued (not-yet-started) request is now redundant — drop it.
-        self.refresh_generation +%= 1;
-        self.worktree_refresh_requested = false;
-
-        const next = try self.git.loadRepoData();
-        self.data.deinit(self.allocator);
-        self.data = next;
-        // A full reload can move branches, rewrite history and shift stash
-        // indices, so every cached preview is potentially stale.
-        self.preview_cache.clearAll(self.allocator);
-        self.clampSelections();
-        if (self.tree_view) try self.rebuildTree(tree_path);
-        if (self.commit_files_active) self.reloadCommitFilesAfterRefresh();
-        self.updatePreview() catch |err| {
-            try self.setMessage("preview failed: {s}", .{@errorName(err)});
-        };
-    }
 
     /// Fast, scoped reload of just the working tree (status + file list), the
     /// lazygit "FILES scope" refresh. Used after stage/unstage/discard/resolve,
@@ -918,6 +1012,8 @@ pub const App = struct {
         self.data.replaceFiles(self.allocator, files);
         files = &.{};
         self.data.state = self.git.detectState();
+        // This file list is newer than any in-flight background snapshot.
+        self.refresh_generation +%= 1;
         // Only working-tree file diffs can have changed.
         self.preview_cache.invalidatePrefix(self.allocator, "f:");
 
@@ -930,6 +1026,93 @@ pub const App = struct {
                 try self.setMessage("preview failed: {s}", .{@errorName(err)});
             };
         }
+    }
+
+    /// lazygit-style per-view refresh. The fast Files view (and its derived
+    /// state) reloads synchronously for instant feedback; every other requested
+    /// view (branches, commits, tags, …) is queued for an off-thread scoped
+    /// load so the UI never blocks. Because Files is never loaded off-thread,
+    /// the async loads can't race the synchronous file refresh.
+    pub fn refreshViews(self: *App, scopes: ScopeSet) void {
+        if (scopes.contains(.files)) self.refreshFiles() catch {};
+        var async_scopes = scopes;
+        async_scopes.remove(.files);
+        if (async_scopes.count() > 0) self.pending_scopes.setUnion(async_scopes);
+    }
+
+    /// TUI loop hook: claim the queued scoped-load views (if any) to run on a
+    /// worker. Returns null when nothing is pending or a load is already in
+    /// flight (single in-flight; new requests accumulate until it finishes).
+    pub fn takeScopes(self: *App) ?ScopeSet {
+        if (self.scoped_load_active) return null;
+        if (self.pending_scopes.count() == 0) return null;
+        const scopes = self.pending_scopes;
+        self.pending_scopes = ScopeSet.initEmpty();
+        self.scoped_load_active = true;
+        return scopes;
+    }
+
+    /// The active Commits-list filters, so a scoped commits reload applies them.
+    pub fn logFilters(self: *const App) LogFilters {
+        return .{ .grep = self.git.log_grep, .author = self.git.log_author, .path = self.git.log_path };
+    }
+
+    /// TUI loop hook: apply a finished scoped load. `sd` (owned by `gpa`, the
+    /// page allocator) holds only the loaded views; each is deep-copied into the
+    /// gpa-owned `data` and replaces just that view. Non-loaded views are left
+    /// untouched, so concurrent refreshes of other views don't conflict.
+    pub fn applyScopedLoad(self: *App, sd_opt: ?ScopedData, gpa: std.mem.Allocator) void {
+        self.scoped_load_active = false;
+        var sd = sd_opt orelse return;
+        defer sd.deinit(gpa);
+        const a = self.allocator;
+        const src = &sd.data;
+        const s = sd.scopes;
+
+        if (s.contains(.status)) {
+            if (a.dupe(u8, src.current_branch)) |cb| {
+                a.free(self.data.current_branch);
+                self.data.current_branch = cb;
+                if (self.data.upstream) |u| a.free(u);
+                self.data.upstream = if (src.upstream) |u| (a.dupe(u8, u) catch null) else null;
+                self.data.ahead = src.ahead;
+                self.data.behind = src.behind;
+            } else |_| {}
+        }
+        if (s.contains(.files)) {
+            if (model.dupeFiles(a, src.files)) |f| {
+                self.data.replaceFiles(a, f);
+                self.data.state = src.state;
+            } else |_| {}
+        }
+        if (s.contains(.branches)) {
+            if (model.dupeBranches(a, src.branches)) |b| self.data.replaceBranches(a, b) else |_| {}
+        }
+        if (s.contains(.remotes)) {
+            if (model.dupeBranches(a, src.remote_branches)) |b| self.data.replaceRemoteBranches(a, b) else |_| {}
+        }
+        if (s.contains(.tags)) {
+            if (model.dupeTags(a, src.tags)) |t| self.data.replaceTags(a, t) else |_| {}
+        }
+        if (s.contains(.commits)) {
+            if (model.dupeCommits(a, src.commits)) |c| self.data.replaceCommits(a, c) else |_| {}
+        }
+        if (s.contains(.reflog)) {
+            if (model.dupeCommits(a, src.reflog)) |c| self.data.replaceReflog(a, c) else |_| {}
+        }
+        if (s.contains(.worktrees)) {
+            if (model.dupeWorktrees(a, src.worktrees)) |w| self.data.replaceWorktrees(a, w) else |_| {}
+        }
+        if (s.contains(.submodules)) {
+            if (model.dupeSubmodules(a, src.submodules)) |m| self.data.replaceSubmodules(a, m) else |_| {}
+        }
+        if (s.contains(.stash)) {
+            if (model.dupeStashes(a, src.stash)) |st| self.data.replaceStash(a, st) else |_| {}
+        }
+
+        self.clampSelections();
+        if (s.contains(.commits) and self.commit_files_active) self.reloadCommitFilesAfterRefresh();
+        self.updatePreview() catch {};
     }
 
     /// True while a foreground git operation is in progress, during which the
@@ -1118,7 +1301,7 @@ pub const App = struct {
             .prev_tab => try self.cycleTab(.prev),
             .next_tab => try self.cycleTab(.next),
             .refresh => {
-                try self.refresh();
+                self.refreshViews(Refresh.all);
                 try self.setMessage("refreshed", .{});
             },
             .fetch => try self.requestAsync(.fetch),
@@ -1326,12 +1509,10 @@ pub const App = struct {
     pub fn handleFocusIn(self: *App) !void {
         self.terminal_focused = true;
         if (self.mode != .normal) return;
-        // Don't run a heavy reload alongside an in-flight op; it refreshes on
+        // Don't queue a heavy reload alongside an in-flight op; it refreshes on
         // completion anyway.
         if (self.foregroundBusy()) return;
-        self.refresh() catch |err| {
-            try self.setMessage("focus refresh failed: {s}", .{@errorName(err)});
-        };
+        self.refreshViews(Refresh.all);
     }
 
     pub fn handleFocusOut(self: *App) void {
@@ -1806,7 +1987,7 @@ pub const App = struct {
         // Staging a line only touches the index — scoped (fast) reload. Keep
         // the cursor where it is so repeated space keeps staging the lines that
         // shift up into its position.
-        self.refreshScope(.files);
+        self.refreshFiles() catch {};
         try self.loadStaging(true);
     }
 
@@ -2193,7 +2374,7 @@ pub const App = struct {
             try self.setMessage("stage changes to amend into the last commit", .{});
             return;
         }
-        return self.runMutation(try self.git.amendCommit(), "amended last commit", .{});
+        return self.runMutationScoped(try self.git.amendCommit(), Refresh.commit, "amended last commit", .{});
     }
 
     pub fn isCommitCopied(self: *const App, hash: []const u8) bool {
@@ -2417,7 +2598,7 @@ pub const App = struct {
         } else {
             try self.finishOp(false, "cherry-pick failed", if (result.stderr.len > 0) result.stderr else result.stdout);
         }
-        self.refresh() catch {};
+        self.refreshViews(Refresh.all);
     }
 
     fn startTextPrompt(self: *App, kind: TextPromptKind) !void {
@@ -2511,7 +2692,7 @@ pub const App = struct {
                 self.mode = .normal;
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
-                return self.runMutation(result, "created branch {s}", .{value});
+                return self.runMutationScoped(result, Refresh.branches, "created branch {s}", .{value});
             },
             .rename_branch => {
                 const branch = self.selectedBranch() orelse {
@@ -2526,14 +2707,14 @@ pub const App = struct {
                 self.mode = .normal;
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
-                return self.runMutation(result, "renamed to {s}", .{value});
+                return self.runMutationScoped(result, Refresh.branches, "renamed to {s}", .{value});
             },
             .new_tag => {
                 const result = try self.git.createTag(value);
                 self.mode = .normal;
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
-                return self.runMutation(result, "created tag {s}", .{value});
+                return self.runMutationScoped(result, Refresh.tags, "created tag {s}", .{value});
             },
             .add_remote_name => {
                 // Stash the name and ask for the URL in a second prompt.
@@ -2551,7 +2732,7 @@ pub const App = struct {
                 self.mode = .normal;
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
-                return self.runMutation(result, "added remote {s}", .{name});
+                return self.runMutationScoped(result, Refresh.remotes, "added remote {s}", .{name});
             },
             .edit_remote_url => {
                 const name = self.remote_name_buf[0..self.remote_name_len];
@@ -2559,7 +2740,7 @@ pub const App = struct {
                 self.mode = .normal;
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
-                return self.runMutation(result, "set URL for {s}", .{name});
+                return self.runMutationScoped(result, Refresh.remotes, "set URL for {s}", .{name});
             },
             // Handled before the non-empty guard above.
             .commit_grep, .commit_author, .commit_path => unreachable,
@@ -2691,7 +2872,7 @@ pub const App = struct {
     fn applyCommitFilter(self: *App, which: git_mod.Git.LogFilter, value: []const u8) !void {
         try self.git.setLogFilter(which, value);
         self.commit_index = 0;
-        try self.refresh();
+        self.refreshViews(ScopeSet.init(.{ .commits = true }));
         if (value.len == 0) {
             try self.setMessage("commit filter cleared", .{});
         } else {
@@ -2702,7 +2883,7 @@ pub const App = struct {
     fn clearCommitFilter(self: *App) !void {
         self.git.clearLogFilters();
         self.commit_index = 0;
-        try self.refresh();
+        self.refreshViews(ScopeSet.init(.{ .commits = true }));
         try self.setMessage("commit filter cleared", .{});
     }
 
@@ -2787,7 +2968,7 @@ pub const App = struct {
                     return;
                 };
                 const force = action == .force_delete_branch;
-                return self.runMutation(try self.git.deleteBranch(branch.name, force), "deleted {s}", .{branch.name});
+                return self.runMutationScoped(try self.git.deleteBranch(branch.name, force), Refresh.branches, "deleted {s}", .{branch.name});
             },
             .reset_soft, .reset_mixed, .reset_hard => {
                 const commit = self.selectedCommit() orelse {
@@ -2800,7 +2981,7 @@ pub const App = struct {
                     .reset_hard => .hard,
                     else => unreachable,
                 };
-                return self.runMutation(try self.git.resetTo(commit.hash, mode), "reset to {s}", .{commit.short_hash});
+                return self.runMutationScoped(try self.git.resetTo(commit.hash, mode), Refresh.checkout, "reset to {s}", .{commit.short_hash});
             },
             .take_ours, .take_theirs => {
                 const file = self.selectedFile() orelse {
@@ -2829,15 +3010,15 @@ pub const App = struct {
                 }
                 return self.requestMutation(.amend_continue_rebase, .{ .gerund = "rebasing", .command = "git commit --amend --no-edit && git rebase --continue" }, "amended and continued", .{});
             },
-            .stash_all => return self.runMutation(try self.git.stashAll(), "stashed all changes", .{}),
-            .stash_untracked => return self.runMutation(try self.git.stashIncludingUntracked(), "stashed (incl. untracked)", .{}),
-            .stash_staged => return self.runMutation(try self.git.stashStaged(), "stashed staged changes", .{}),
+            .stash_all => return self.runMutationScoped(try self.git.stashAll(), Refresh.stash, "stashed all changes", .{}),
+            .stash_untracked => return self.runMutationScoped(try self.git.stashIncludingUntracked(), Refresh.stash, "stashed (incl. untracked)", .{}),
+            .stash_staged => return self.runMutationScoped(try self.git.stashStaged(), Refresh.stash, "stashed staged changes", .{}),
             .stash_file => {
                 const file = self.selectedFile() orelse {
                     try self.setMessage("no file selected", .{});
                     return;
                 };
-                return self.runMutation(try self.git.stashFile(file.path), "stashed {s}", .{file.path});
+                return self.runMutationScoped(try self.git.stashFile(file.path), Refresh.stash, "stashed {s}", .{file.path});
             },
             .filter_commits_message => return self.startCommitFilterPrompt(.commit_grep),
             .filter_commits_author => return self.startCommitFilterPrompt(.commit_author),
@@ -3055,7 +3236,7 @@ pub const App = struct {
             return;
         };
         try self.beginOpFmt("git branch --set-upstream-to={s}", .{branch.name});
-        return self.runMutation(try self.git.setUpstream(branch.name), "tracking {s}", .{branch.name});
+        return self.runMutationScoped(try self.git.setUpstream(branch.name), Refresh.upstream, "tracking {s}", .{branch.name});
     }
 
     /// `d` in the Branches panel deletes by tab: local branch / tag / remote.
@@ -3156,7 +3337,7 @@ pub const App = struct {
 
     fn revertSelectedCommit(self: *App) !void {
         const commit = try self.commitForAction() orelse return;
-        return self.runMutation(try self.git.revertCommit(commit.hash), "reverted {s}", .{commit.short_hash});
+        return self.runMutationScoped(try self.git.revertCommit(commit.hash), Refresh.commits_files, "reverted {s}", .{commit.short_hash});
     }
 
     fn rebaseSelectedCommit(self: *App, action: RebaseAction) !void {
@@ -3285,7 +3466,7 @@ pub const App = struct {
             try self.setMessage("stage changes to create a fixup commit", .{});
             return;
         }
-        return self.runMutation(try self.git.createFixup(commit.hash), "created fixup! for {s}", .{commit.short_hash});
+        return self.runMutationScoped(try self.git.createFixup(commit.hash), Refresh.commits_files, "created fixup! for {s}", .{commit.short_hash});
     }
 
     /// Autosquash fixup!/squash! commits above (and including) the selected one.
@@ -3313,7 +3494,7 @@ pub const App = struct {
                     try self.setMessage("already on {s}", .{branch.name});
                     return;
                 }
-                return self.runMutation(try self.git.checkout(branch.name), "checked out {s}", .{branch.name});
+                return self.runMutationScoped(try self.git.checkout(branch.name), Refresh.checkout, "checked out {s}", .{branch.name});
             },
             .remotes => {
                 const branch = self.selectedRemoteBranch() orelse {
@@ -3323,14 +3504,14 @@ pub const App = struct {
                 // git's DWIM checkout creates a local tracking branch from
                 // "<remote>/<name>" when "<name>" doesn't already exist locally.
                 const local_name = textmatch.localNameForRemote(branch.name);
-                return self.runMutation(try self.git.checkout(local_name), "checked out {s}", .{local_name});
+                return self.runMutationScoped(try self.git.checkout(local_name), Refresh.checkout, "checked out {s}", .{local_name});
             },
             .tags => {
                 const tag = self.selectedTag() orelse {
                     try self.setMessage("no tag selected", .{});
                     return;
                 };
-                return self.runMutation(try self.git.checkout(tag.name), "checked out {s} (detached)", .{tag.name});
+                return self.runMutationScoped(try self.git.checkout(tag.name), Refresh.checkout, "checked out {s} (detached)", .{tag.name});
             },
             .worktrees => {
                 // Switching the active worktree would re-root the app; instead
@@ -3346,7 +3527,7 @@ pub const App = struct {
                     try self.setMessage("no submodule selected", .{});
                     return;
                 };
-                return self.runMutation(try self.git.updateSubmodule(sm.path), "updated {s}", .{sm.path});
+                return self.runMutationScoped(try self.git.updateSubmodule(sm.path), Refresh.submodules, "updated {s}", .{sm.path});
             },
         }
     }
@@ -3356,7 +3537,7 @@ pub const App = struct {
             try self.setMessage("no stash entry selected", .{});
             return;
         };
-        return self.runMutation(try self.git.stashApply(entry.index), "applied {s}", .{entry.selector});
+        return self.runMutationScoped(try self.git.stashApply(entry.index), Refresh.stash_apply, "applied {s}", .{entry.selector});
     }
 
     fn popSelectedStash(self: *App) !void {
@@ -3364,7 +3545,7 @@ pub const App = struct {
             try self.setMessage("no stash entry selected", .{});
             return;
         };
-        return self.runMutation(try self.git.stashPop(entry.index), "popped {s}", .{entry.selector});
+        return self.runMutationScoped(try self.git.stashPop(entry.index), Refresh.stash, "popped {s}", .{entry.selector});
     }
 
     fn dropSelectedStash(self: *App) !void {
@@ -3372,7 +3553,7 @@ pub const App = struct {
             try self.setMessage("no stash entry selected", .{});
             return;
         };
-        return self.runMutation(try self.git.stashDrop(entry.index), "dropped {s}", .{entry.selector});
+        return self.runMutationScoped(try self.git.stashDrop(entry.index), Refresh.stash, "dropped {s}", .{entry.selector});
     }
 
     fn handleCommitPromptKey(self: *App, key: vaxis.Key) !void {
@@ -3428,7 +3609,7 @@ pub const App = struct {
         self.commit_body_buffer.clearRetainingCapacity();
 
         switch (action) {
-            .create => return self.runMutation(try self.git.commit(message), "commit created", .{}),
+            .create => return self.runMutationScoped(try self.git.commit(message), Refresh.commit, "commit created", .{}),
             .reword => return self.runRebase(.reword, reword_index, message),
         }
     }
@@ -3545,7 +3726,7 @@ pub const App = struct {
                     try self.setMessage("no tag selected", .{});
                     return;
                 };
-                return self.runMutation(try self.git.deleteTag(tag.name), "deleted tag {s}", .{tag.name});
+                return self.runMutationScoped(try self.git.deleteTag(tag.name), Refresh.tags, "deleted tag {s}", .{tag.name});
             },
             .delete_remote_branch => {
                 const branch = self.selectedRemoteBranch() orelse {
@@ -3558,14 +3739,14 @@ pub const App = struct {
                 };
                 const remote = branch.name[0..slash];
                 const remote_branch = branch.name[slash + 1 ..];
-                return self.runMutation(try self.git.deleteRemoteBranch(remote, remote_branch), "deleted remote {s}", .{branch.name});
+                return self.runMutationScoped(try self.git.deleteRemoteBranch(remote, remote_branch), Refresh.remotes, "deleted remote {s}", .{branch.name});
             },
             .remove_worktree => {
                 const wt = self.selectedWorktree() orelse {
                     try self.setMessage("no worktree selected", .{});
                     return;
                 };
-                return self.runMutation(try self.git.removeWorktree(wt.path), "removed worktree {s}", .{wt.path});
+                return self.runMutationScoped(try self.git.removeWorktree(wt.path), Refresh.worktrees, "removed worktree {s}", .{wt.path});
             },
             .remove_remote => {
                 const name = self.remote_name_buf[0..self.remote_name_len];
@@ -3573,7 +3754,7 @@ pub const App = struct {
                     try self.setMessage("no remote selected", .{});
                     return;
                 }
-                return self.runMutation(try self.git.removeRemote(name), "removed remote {s}", .{name});
+                return self.runMutationScoped(try self.git.removeRemote(name), Refresh.remotes, "removed remote {s}", .{name});
             },
             .undo => return self.runMutation(try self.git.undoLastOperation(), "undone", .{}),
         }
@@ -3932,7 +4113,7 @@ pub const App = struct {
         } else {
             try self.setMessage("{s} failed to start", .{op.label()});
         }
-        self.refresh() catch {};
+        self.refreshViews(Refresh.all);
     }
 
     /// Paint the operation dialog's "running" frame for a slow op before it
@@ -4014,40 +4195,51 @@ pub const App = struct {
         try self.finishOp(false, summary, raw);
     }
 
-    /// How much to reload after a mutation. `.files` is the fast working-tree
-    /// scope (lazygit's FILES scope); `.full` reloads the whole repo.
-    const RefreshScope = enum { files, full };
-
-    fn refreshScope(self: *App, scope: RefreshScope) void {
-        switch (scope) {
-            .files => self.refreshFiles() catch self.refresh() catch {},
-            .full => self.refresh() catch {},
-        }
-    }
+    /// Named view-sets for the per-view refresh after a mutation (lazygit-style
+    /// "refresh only what changed"). The Files view loads synchronously for
+    /// instant feedback; the rest load off-thread.
+    pub const Refresh = struct {
+        pub const files = ScopeSet.init(.{ .files = true, .status = true });
+        pub const commit = ScopeSet.init(.{ .files = true, .status = true, .commits = true, .branches = true });
+        pub const checkout = ScopeSet.init(.{ .files = true, .status = true, .commits = true, .branches = true });
+        pub const branches = ScopeSet.init(.{ .branches = true });
+        pub const branches_commits = ScopeSet.init(.{ .branches = true, .commits = true });
+        pub const commits_files = ScopeSet.init(.{ .files = true, .status = true, .commits = true });
+        pub const tags = ScopeSet.init(.{ .tags = true });
+        pub const remotes = ScopeSet.init(.{ .remotes = true });
+        pub const stash = ScopeSet.init(.{ .files = true, .status = true, .stash = true });
+        pub const stash_apply = ScopeSet.init(.{ .files = true, .status = true });
+        pub const worktrees = ScopeSet.init(.{ .worktrees = true });
+        pub const submodules = ScopeSet.init(.{ .files = true, .submodules = true });
+        pub const upstream = ScopeSet.init(.{ .branches = true, .status = true });
+        pub const all = ScopeSet.initFull();
+    };
 
     /// Run a mutation that touched only the working tree (stage/unstage/discard/
     /// resolve) — refreshes just the file list, so it stays snappy on big repos.
     fn runMutationFiles(self: *App, result: git_mod.ExecResult, comptime success_fmt: []const u8, args: anytype) !void {
-        return self.runMutationScoped(result, .files, success_fmt, args);
+        return self.runMutationScoped(result, Refresh.files, success_fmt, args);
     }
 
+    /// Default mutation: refresh every view. Files reload synchronously; all the
+    /// slow views load off-thread, so the dialog/prompt closes at once and the
+    /// UI never blocks. Use `runMutationScoped` to refresh fewer views.
     fn runMutation(self: *App, result: git_mod.ExecResult, comptime success_fmt: []const u8, args: anytype) !void {
-        return self.runMutationScoped(result, .full, success_fmt, args);
+        return self.runMutationScoped(result, Refresh.all, success_fmt, args);
     }
 
-    fn runMutationScoped(self: *App, result: git_mod.ExecResult, scope: RefreshScope, comptime success_fmt: []const u8, args: anytype) !void {
+    fn runMutationScoped(self: *App, result: git_mod.ExecResult, scopes: ScopeSet, comptime success_fmt: []const u8, args: anytype) !void {
         var mutable = result;
         defer mutable.deinit(self.allocator);
         if (mutable.ok()) {
             const summary = try std.fmt.allocPrint(self.allocator, success_fmt, args);
             defer self.allocator.free(summary);
             try self.reportSuccess(summary, mutable.stdout);
-            self.refreshScope(scope);
-            return;
+        } else {
+            const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
+            try self.reportFailure("command failed", if (stderr.len > 0) mutable.stderr else mutable.stdout);
         }
-        const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
-        try self.reportFailure("command failed", if (stderr.len > 0) mutable.stderr else mutable.stdout);
-        self.refreshScope(scope);
+        self.refreshViews(scopes);
     }
 
     /// True while a foreground git op (the initial load, a network op, or a slow
@@ -4126,7 +4318,7 @@ pub const App = struct {
         } else {
             try self.reportFailure("command failed to start", "");
         }
-        self.refresh() catch {};
+        self.refreshViews(Refresh.all);
     }
 
     fn runCustomCommand(self: *App, command: []const u8) !void {
@@ -4153,7 +4345,7 @@ pub const App = struct {
         } else {
             try self.reportFailure("command failed", if (result.stderr.len > 0) result.stderr else result.stdout);
         }
-        self.refresh() catch {};
+        self.refreshViews(Refresh.all);
     }
 
     fn setMessage(self: *App, comptime fmt: []const u8, args: anytype) !void {
@@ -4781,6 +4973,34 @@ test "skip-confirm flag controls whether the confirm prompt is shown" {
     try app.requestConfirmation(.discard_all, "confirm discard", .{});
     try std.testing.expectEqual(Mode.confirmation, app.mode);
     try std.testing.expectEqual(Confirmation.discard_all, app.pending_confirmation.?);
+}
+
+test "scoped refresh replaces only the loaded views" {
+    const allocator = std.testing.allocator;
+    const page = std.heap.page_allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer {
+        app.data.deinit(allocator);
+        deinitTestApp(&app);
+    }
+    // Seed commits (gpa-owned) that a branches-only refresh must leave intact.
+    app.data.commits = try allocator.alloc(model.Commit, 1);
+    app.data.commits[0] = .{ .hash = try allocator.dupe(u8, "h"), .short_hash = try allocator.dupe(u8, "h"), .author = try allocator.dupe(u8, "a"), .time = try allocator.dupe(u8, "t"), .refs = try allocator.dupe(u8, ""), .subject = try allocator.dupe(u8, "keep me") };
+
+    // A scoped load of just BRANCHES (page-allocated, as a worker produces).
+    var sd = ScopedData{ .scopes = ScopeSet.init(.{ .branches = true }) };
+    sd.data.branches = try page.alloc(model.Branch, 1);
+    sd.data.branches[0] = .{ .name = try page.dupe(u8, "feature"), .current = false };
+
+    app.applyScopedLoad(sd, page);
+    try std.testing.expect(!app.scoped_load_active);
+    // Branches were replaced...
+    try std.testing.expectEqual(@as(usize, 1), app.data.branches.len);
+    try std.testing.expectEqualStrings("feature", app.data.branches[0].name);
+    // ...and the unrelated Commits view was left untouched.
+    try std.testing.expectEqual(@as(usize, 1), app.data.commits.len);
+    try std.testing.expectEqualStrings("keep me", app.data.commits[0].subject);
 }
 
 test "async initial load deep-copies into gpa and clears the loading state" {

@@ -299,6 +299,54 @@ pub const RepoData = struct {
         self.files = files;
     }
 
+    pub fn replaceBranches(self: *RepoData, allocator: std.mem.Allocator, branches: []Branch) void {
+        for (self.branches) |*b| b.deinit(allocator);
+        allocator.free(self.branches);
+        self.branches = branches;
+    }
+
+    pub fn replaceRemoteBranches(self: *RepoData, allocator: std.mem.Allocator, branches: []Branch) void {
+        for (self.remote_branches) |*b| b.deinit(allocator);
+        allocator.free(self.remote_branches);
+        self.remote_branches = branches;
+    }
+
+    pub fn replaceTags(self: *RepoData, allocator: std.mem.Allocator, tags: []Tag) void {
+        for (self.tags) |*t| t.deinit(allocator);
+        allocator.free(self.tags);
+        self.tags = tags;
+    }
+
+    pub fn replaceWorktrees(self: *RepoData, allocator: std.mem.Allocator, worktrees: []Worktree) void {
+        for (self.worktrees) |*w| w.deinit(allocator);
+        allocator.free(self.worktrees);
+        self.worktrees = worktrees;
+    }
+
+    pub fn replaceSubmodules(self: *RepoData, allocator: std.mem.Allocator, submodules: []Submodule) void {
+        for (self.submodules) |*s| s.deinit(allocator);
+        allocator.free(self.submodules);
+        self.submodules = submodules;
+    }
+
+    pub fn replaceCommits(self: *RepoData, allocator: std.mem.Allocator, commits: []Commit) void {
+        for (self.commits) |*c| c.deinit(allocator);
+        allocator.free(self.commits);
+        self.commits = commits;
+    }
+
+    pub fn replaceReflog(self: *RepoData, allocator: std.mem.Allocator, reflog: []Commit) void {
+        for (self.reflog) |*c| c.deinit(allocator);
+        allocator.free(self.reflog);
+        self.reflog = reflog;
+    }
+
+    pub fn replaceStash(self: *RepoData, allocator: std.mem.Allocator, stash: []StashEntry) void {
+        for (self.stash) |*s| s.deinit(allocator);
+        allocator.free(self.stash);
+        self.stash = stash;
+    }
+
     /// Deep copy into `allocator`. Used to move repo data loaded off-thread
     /// (with the page allocator) into the gpa-owned data the UI thread keeps,
     /// so the incremental refreshes (which free with the gpa) stay valid.
@@ -432,6 +480,30 @@ fn dupeStash(a: std.mem.Allocator, s: StashEntry) std.mem.Allocator.Error!StashE
     errdefer a.free(time);
     const message = try a.dupe(u8, s.message);
     return .{ .index = s.index, .selector = selector, .hash = hash, .time = time, .message = message };
+}
+
+// Public per-slice deep copies — used to move one view's data, loaded off-thread
+// with the page allocator, into the gpa-owned `RepoData` (see scoped refresh).
+pub fn dupeFiles(a: std.mem.Allocator, src: []const FileStatus) std.mem.Allocator.Error![]FileStatus {
+    return dupeList(FileStatus, a, src, dupeFile);
+}
+pub fn dupeBranches(a: std.mem.Allocator, src: []const Branch) std.mem.Allocator.Error![]Branch {
+    return dupeList(Branch, a, src, dupeBranch);
+}
+pub fn dupeTags(a: std.mem.Allocator, src: []const Tag) std.mem.Allocator.Error![]Tag {
+    return dupeList(Tag, a, src, dupeTag);
+}
+pub fn dupeWorktrees(a: std.mem.Allocator, src: []const Worktree) std.mem.Allocator.Error![]Worktree {
+    return dupeList(Worktree, a, src, dupeWorktree);
+}
+pub fn dupeSubmodules(a: std.mem.Allocator, src: []const Submodule) std.mem.Allocator.Error![]Submodule {
+    return dupeList(Submodule, a, src, dupeSubmodule);
+}
+pub fn dupeCommits(a: std.mem.Allocator, src: []const Commit) std.mem.Allocator.Error![]Commit {
+    return dupeList(Commit, a, src, dupeCommit);
+}
+pub fn dupeStashes(a: std.mem.Allocator, src: []const StashEntry) std.mem.Allocator.Error![]StashEntry {
+    return dupeList(StashEntry, a, src, dupeStash);
 }
 
 pub const StatusFields = struct {

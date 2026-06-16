@@ -21,6 +21,7 @@ const Event = union(enum) {
     worktree_done,
     mutation_done,
     repo_load_done,
+    scoped_load_done,
 };
 
 /// A network op run off the UI loop. Allocations use the page allocator (which
@@ -121,6 +122,40 @@ const RepoLoadRun = struct {
 fn repoLoadWorker(rl: *RepoLoadRun) void {
     rl.result = app_mod.loadRepoDataAsync(async_allocator, rl.io, rl.environ, rl.root);
     _ = rl.loop.tryPostEvent(.repo_load_done) catch false;
+}
+
+/// A per-view scoped refresh (lazygit-style): loads just the requested slow
+/// views (branches/commits/tags/…) off the UI loop and posts `.scoped_load_done`
+/// so the loop can apply each into its view. `grep`/`author`/`path` are
+/// page-allocated copies of the active Commits filter, freed when done.
+const ScopedLoadRun = struct {
+    io: std.Io,
+    loop: *vaxis.Loop(Event),
+    root: []u8,
+    environ: *std.process.Environ.Map,
+    scopes: app_mod.ScopeSet,
+    grep: ?[]u8 = null,
+    author: ?[]u8 = null,
+    path: ?[]u8 = null,
+    result: ?app_mod.ScopedData = null,
+
+    fn freeFilters(self: *ScopedLoadRun) void {
+        if (self.grep) |g| async_allocator.free(g);
+        if (self.author) |a| async_allocator.free(a);
+        if (self.path) |p| async_allocator.free(p);
+        self.grep = null;
+        self.author = null;
+        self.path = null;
+    }
+};
+
+fn scopedLoadWorker(sr: *ScopedLoadRun) void {
+    sr.result = app_mod.loadScopesAsync(async_allocator, sr.io, sr.environ, sr.root, sr.scopes, .{
+        .grep = sr.grep,
+        .author = sr.author,
+        .path = sr.path,
+    });
+    _ = sr.loop.tryPostEvent(.scoped_load_done) catch false;
 }
 
 const refresh_interval = std.Io.Duration.fromMilliseconds(1500);
@@ -226,6 +261,14 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
         break :blk null;
     };
 
+    var scoped_load_run: ScopedLoadRun = undefined;
+    var scoped_load_future: ?std.Io.Future(void) = null;
+    defer if (scoped_load_future) |*f| {
+        f.cancel(io); // read-only views, safe to interrupt on quit
+        if (scoped_load_run.result) |*r| r.deinit(async_allocator);
+        scoped_load_run.freeFilters();
+    };
+
     // Size the screen up front so the first in-loop render is correctly sized
     // regardless of whether the initial winsize or the load-done event is
     // processed first (a tiny repo can finish loading before the winsize).
@@ -285,6 +328,15 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     repo_load_future = null;
                     app.applyRepoLoad(repo_load_run.result, async_allocator);
                     repo_load_run.result = null;
+                }
+            },
+            .scoped_load_done => {
+                if (scoped_load_future) |*f| {
+                    f.await(io);
+                    scoped_load_future = null;
+                    app.applyScopedLoad(scoped_load_run.result, async_allocator);
+                    scoped_load_run.result = null;
+                    scoped_load_run.freeFilters();
                 }
             },
         }
@@ -351,6 +403,32 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 mutation_run = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ, .mutation = mutation, .result = null };
                 mutation_future = io.concurrent(mutationWorker, .{&mutation_run}) catch blk: {
                     try app.completeMutation(mutation, null, async_allocator);
+                    break :blk null;
+                };
+                render_needed = true;
+            }
+        }
+
+        // Start a queued per-view scoped refresh off the loop. Single in-flight;
+        // further requests accumulate and run after this one. The active Commits
+        // filter is copied for the worker so a filtered list stays filtered.
+        if (scoped_load_future == null) {
+            if (app.takeScopes()) |scopes| {
+                const filters = app.logFilters();
+                scoped_load_run = .{
+                    .io = io,
+                    .loop = &loop,
+                    .root = app.git.root,
+                    .environ = app.git.environ,
+                    .scopes = scopes,
+                    .grep = if (filters.grep) |g| async_allocator.dupe(u8, g) catch null else null,
+                    .author = if (filters.author) |x| async_allocator.dupe(u8, x) catch null else null,
+                    .path = if (filters.path) |p| async_allocator.dupe(u8, p) catch null else null,
+                    .result = null,
+                };
+                scoped_load_future = io.concurrent(scopedLoadWorker, .{&scoped_load_run}) catch blk: {
+                    app.applyScopedLoad(null, async_allocator);
+                    scoped_load_run.freeFilters();
                     break :blk null;
                 };
                 render_needed = true;
