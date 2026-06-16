@@ -862,7 +862,7 @@ fn drawStatusFilterPopup(root: vaxis.Window, app: *const app_mod.App) void {
         var buf: [64]u8 = undefined;
         const marker: u8 = if (option == app.file_display_filter) '*' else ' ';
         const line = std.fmt.bufPrint(&buf, "{c} {s}", .{ marker, option.label() }) catch option.label();
-        drawSelectable(win, @intCast(idx), line, st.normal, idx == app.status_filter_index);
+        drawSelectable(win, @intCast(idx), line, st.normal, selOf(idx == app.status_filter_index, true));
     }
 }
 
@@ -875,7 +875,7 @@ fn drawMenuPopup(root: vaxis.Window, app: *const app_mod.App) void {
     const h: u16 = @intCast(menu.items.len + 2);
     const win = popup(root, w, h, menu.title);
     for (menu.items, 0..) |item, idx| {
-        drawSelectable(win, @intCast(idx), item.label, st.normal, idx == menu.index);
+        drawSelectable(win, @intCast(idx), item.label, st.normal, selOf(idx == menu.index, true));
     }
 }
 
@@ -995,11 +995,9 @@ fn drawFiles(win: vaxis.Window, app: *const app_mod.App) void {
         }
         if (row >= win.height) break;
         var base = styles().normal;
-        if (idx == app.file_index and app.focus == .files) {
-            base.bg = selectedBg();
-            base.bold = true;
-            fillRow(win, row, base);
-        }
+        const sel = selOf(idx == app.file_index, app.focus == .files);
+        applySel(&base, sel);
+        if (sel != .none) fillRow(win, row, base);
         // The two short-status columns are colored independently (lazygit-style):
         // the index/staged column green, the worktree/unstaged column red — so a
         // half-staged "MM" shows one green M and one red M.
@@ -1043,13 +1041,10 @@ fn drawFileTree(win: vaxis.Window, app: *const app_mod.App) void {
         row += 1;
     }) {
         const tr = app.tree_rows[i];
-        const selected = i == app.tree_cursor and app.focus == .files;
         var base = styles().normal;
-        if (selected) {
-            base.bg = selectedBg();
-            base.bold = true;
-            fillRow(win, row, base);
-        }
+        const sel = selOf(i == app.tree_cursor, app.focus == .files);
+        applySel(&base, sel);
+        if (sel != .none) fillRow(win, row, base);
 
         const indent: usize = @min(@as(usize, tr.depth) * 2, indent_spaces.len);
         var col = printSpan(win, row, 0, indent_spaces[0..indent], base);
@@ -1106,11 +1101,9 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
 
         const base = blk: {
             var s = if (branch.current) styles().staged else styles().normal;
-            if (idx == selected and app.focus == .branches) {
-                s.bg = selectedBg();
-                s.bold = true;
-                fillRow(win, row, s);
-            }
+            const sel = selOf(idx == selected, app.focus == .branches);
+            applySel(&s, sel);
+            if (sel != .none) fillRow(win, row, s);
             break :blk s;
         };
         const end = printSpan(win, row, 0, line, base);
@@ -1146,7 +1139,7 @@ fn drawTags(win: vaxis.Window, app: *const app_mod.App) void {
             std.fmt.bufPrint(&buf, "{s}  {s}", .{ tag.name, tag.subject }) catch tag.name
         else
             tag.name;
-        drawSelectable(win, row, line, styles().normal, idx == app.tag_index and app.focus == .branches);
+        drawSelectable(win, row, line, styles().normal, selOf(idx == app.tag_index, app.focus == .branches));
     }
 }
 
@@ -1167,7 +1160,7 @@ fn drawWorktrees(win: vaxis.Window, app: *const app_mod.App) void {
         const marker: u8 = if (wt.is_current) '*' else ' ';
         const name = std.fs.path.basename(wt.path);
         const line = std.fmt.bufPrint(&buf, "{c} {s} [{s}]", .{ marker, name, wt.branch }) catch wt.path;
-        drawSelectable(win, row, line, if (wt.is_current) styles().staged else styles().normal, idx == app.worktree_index and app.focus == .branches);
+        drawSelectable(win, row, line, if (wt.is_current) styles().staged else styles().normal, selOf(idx == app.worktree_index, app.focus == .branches));
     }
 }
 
@@ -1191,7 +1184,7 @@ fn drawSubmodules(win: vaxis.Window, app: *const app_mod.App) void {
             '+', 'U' => styles().warning,
             else => styles().normal,
         };
-        drawSelectable(win, row, line, style, idx == app.submodule_index and app.focus == .branches);
+        drawSelectable(win, row, line, style, selOf(idx == app.submodule_index, app.focus == .branches));
     }
 }
 
@@ -1218,7 +1211,7 @@ fn drawCommitFiles(win: vaxis.Window, app: *const app_mod.App) void {
             'D' => styles().removed,
             else => styles().normal,
         };
-        drawSelectable(win, row, line, style, idx == app.commit_file_index and app.focus == .commits);
+        drawSelectable(win, row, line, style, selOf(idx == app.commit_file_index, app.focus == .commits));
     }
 }
 
@@ -1247,7 +1240,7 @@ fn drawCommits(win: vaxis.Window, app: *const app_mod.App) void {
         const marker: u8 = if (marked) 'B' else if (copied) '*' else ' ';
         const line = std.fmt.bufPrint(&buf, "{c}{s} {s}", .{ marker, commit.short_hash, commit.subject }) catch commit.subject;
         const style = if (marked) styles().warning else if (copied) styles().staged else styles().normal;
-        drawSelectable(win, row, line, style, idx == selected and app.focus == .commits);
+        drawSelectable(win, row, line, style, selOf(idx == selected, app.focus == .commits));
     }
 }
 
@@ -1266,7 +1259,7 @@ fn drawStash(win: vaxis.Window, app: *const app_mod.App) void {
         const entry = app.data.stash[idx];
         var buf: [512]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, "{s} {s}", .{ entry.selector, entry.message }) catch entry.message;
-        drawSelectable(win, row, line, styles().normal, idx == app.stash_index and app.focus == .stash);
+        drawSelectable(win, row, line, styles().normal, selOf(idx == app.stash_index, app.focus == .stash));
     }
 }
 
@@ -1381,13 +1374,34 @@ fn contextHints(app: *const app_mod.App) []const u8 {
     };
 }
 
-fn drawSelectable(win: vaxis.Window, row: u16, text: []const u8, style: vaxis.Style, selected: bool) void {
-    var draw_style = style;
-    if (selected) {
-        draw_style.bg = selectedBg();
-        draw_style.bold = true;
-        fillRow(win, row, draw_style);
+/// How a row's selection is drawn: not selected, selected in an unfocused panel
+/// (dim highlight so it stays visible, lazygit-style), or selected in the
+/// focused panel (full highlight).
+const Sel = enum { none, inactive, active };
+
+/// The selection state for a row given whether it's the selected index and
+/// whether its panel has focus.
+fn selOf(selected: bool, focused: bool) Sel {
+    if (!selected) return .none;
+    return if (focused) .active else .inactive;
+}
+
+/// Apply the selection highlight (background, and bold when focused) to `base`.
+fn applySel(base: *vaxis.Style, sel: Sel) void {
+    switch (sel) {
+        .none => {},
+        .active => {
+            base.bg = .{ .index = ui_theme.selected_bg };
+            base.bold = true;
+        },
+        .inactive => base.bg = .{ .index = ui_theme.inactive_selected_bg },
     }
+}
+
+fn drawSelectable(win: vaxis.Window, row: u16, text: []const u8, style: vaxis.Style, sel: Sel) void {
+    var draw_style = style;
+    applySel(&draw_style, sel);
+    if (sel != .none) fillRow(win, row, draw_style);
     print(win, row, 0, text, draw_style);
 }
 
@@ -1496,10 +1510,6 @@ fn styles() StyleSet {
         .bottom = .{ .fg = .{ .index = 15 }, .bg = .{ .index = 0 } },
         .bottom_accent = .{ .fg = .{ .index = t.accent }, .bg = .{ .index = 0 }, .bold = true },
     };
-}
-
-fn selectedBg() vaxis.Color {
-    return .{ .index = ui_theme.selected_bg };
 }
 
 const ascii_table: [128][1]u8 = initAsciiTable();

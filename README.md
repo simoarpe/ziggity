@@ -234,6 +234,7 @@ key.command_log = @
 
 # Theme colors are terminal palette indices (0-255):
 color.selected_bg = 4
+color.inactive_selected_bg = 8   # selected row in an unfocused panel (dimmer)
 color.active = 10
 color.added = 10
 color.removed = 9

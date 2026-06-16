@@ -1397,14 +1397,13 @@ pub const App = struct {
                 try self.focusPanel(rect.focus);
                 try self.clickSelectInPanel(rect, @intCast(mouse.row));
             },
-            .wheel_up => {
-                try self.focusPanel(rect.focus);
-                if (rect.focus == .main) try self.scrollMain(-1) else try self.moveUp();
-            },
-            .wheel_down => {
-                try self.focusPanel(rect.focus);
-                if (rect.focus == .main) try self.scrollMain(1) else try self.moveDown();
-            },
+            // The mouse wheel scrolls the panel under the cursor in place,
+            // without changing focus (lazygit-style — only a click focuses).
+            // Scrolling the diff moves its view; scrolling a list moves that
+            // list's selection (shown dimmed when the list isn't focused), and
+            // the preview updates only when the scrolled list is the active one.
+            .wheel_up => try self.wheelScroll(rect.focus, false),
+            .wheel_down => try self.wheelScroll(rect.focus, true),
             else => return false,
         }
         return true;
@@ -1423,6 +1422,15 @@ pub const App = struct {
         } else {
             try self.setFocus(focus);
         }
+    }
+
+    /// Mouse-wheel scroll over `panel` (no focus change): scroll the diff in
+    /// place, or move a list's selection. The preview only updates when the
+    /// scrolled list is the one the diff currently reflects.
+    fn wheelScroll(self: *App, panel: model.Focus, down: bool) !void {
+        if (panel == .main) return self.scrollMain(if (down) 1 else -1);
+        self.moveSelection(panel, down);
+        if (panel == self.contentFocus()) try self.updatePreview();
     }
 
     /// Scroll offset a list panel uses for a given selection (mirrors the
@@ -2200,69 +2208,47 @@ pub const App = struct {
     }
 
     fn moveUp(self: *App) !void {
-        switch (self.focus) {
-            .status => return,
-            .files => if (self.tree_view) self.moveTreeCursor(-1) else self.moveFileUp(),
-            .branches => switch (self.branches_tab) {
-                .local => self.branch_index -|= 1,
-                .remotes => self.remote_index -|= 1,
-                .tags => self.tag_index -|= 1,
-                .worktrees => self.worktree_index -|= 1,
-                .submodules => self.submodule_index -|= 1,
-            },
-            .commits => {
-                if (self.commit_files_active) {
-                    self.commit_file_index -|= 1;
-                } else switch (self.commits_tab) {
-                    .commits => self.commit_index -|= 1,
-                    .reflog => self.reflog_index -|= 1,
-                }
-            },
-            .stash => self.stash_index -|= 1,
-            .main => return self.scrollMain(-1),
-        }
+        if (self.focus == .main) return self.scrollMain(-1);
+        self.moveSelection(self.focus, false);
         try self.updatePreview();
     }
 
     fn moveDown(self: *App) !void {
-        switch (self.focus) {
-            .status => return,
-            .files => if (self.tree_view) self.moveTreeCursor(1) else self.moveFileDown(),
+        if (self.focus == .main) return self.scrollMain(1);
+        self.moveSelection(self.focus, true);
+        try self.updatePreview();
+    }
+
+    /// Move the selection of a specific `panel` up or down (without touching
+    /// focus or the preview). Lets the mouse wheel scroll the panel under the
+    /// cursor, lazygit-style, and backs `moveUp`/`moveDown` for the focused one.
+    fn moveSelection(self: *App, panel: model.Focus, down: bool) void {
+        switch (panel) {
+            .status, .main => {},
+            .files => if (self.tree_view) self.moveTreeCursor(if (down) 1 else -1) else (if (down) self.moveFileDown() else self.moveFileUp()),
             .branches => switch (self.branches_tab) {
-                .local => if (self.branch_index + 1 < self.data.branches.len) {
-                    self.branch_index += 1;
-                },
-                .remotes => if (self.remote_index + 1 < self.data.remote_branches.len) {
-                    self.remote_index += 1;
-                },
-                .tags => if (self.tag_index + 1 < self.data.tags.len) {
-                    self.tag_index += 1;
-                },
-                .worktrees => if (self.worktree_index + 1 < self.data.worktrees.len) {
-                    self.worktree_index += 1;
-                },
-                .submodules => if (self.submodule_index + 1 < self.data.submodules.len) {
-                    self.submodule_index += 1;
-                },
+                .local => self.branch_index = step(self.branch_index, down, self.data.branches.len),
+                .remotes => self.remote_index = step(self.remote_index, down, self.data.remote_branches.len),
+                .tags => self.tag_index = step(self.tag_index, down, self.data.tags.len),
+                .worktrees => self.worktree_index = step(self.worktree_index, down, self.data.worktrees.len),
+                .submodules => self.submodule_index = step(self.submodule_index, down, self.data.submodules.len),
             },
             .commits => {
                 if (self.commit_files_active) {
-                    if (self.commit_file_index + 1 < self.commit_files.len) self.commit_file_index += 1;
+                    self.commit_file_index = step(self.commit_file_index, down, self.commit_files.len);
                 } else switch (self.commits_tab) {
-                    .commits => if (self.commit_index + 1 < self.data.commits.len) {
-                        self.commit_index += 1;
-                    },
-                    .reflog => if (self.reflog_index + 1 < self.data.reflog.len) {
-                        self.reflog_index += 1;
-                    },
+                    .commits => self.commit_index = step(self.commit_index, down, self.data.commits.len),
+                    .reflog => self.reflog_index = step(self.reflog_index, down, self.data.reflog.len),
                 }
             },
-            .stash => {
-                if (self.stash_index + 1 < self.data.stash.len) self.stash_index += 1;
-            },
-            .main => return self.scrollMain(1),
+            .stash => self.stash_index = step(self.stash_index, down, self.data.stash.len),
         }
-        try self.updatePreview();
+    }
+
+    /// Move a selection index one step within `[0, len)`, saturating at both ends.
+    fn step(index: usize, down: bool, len: usize) usize {
+        if (down) return if (index + 1 < len) index + 1 else index;
+        return index -| 1;
     }
 
     fn scrollMain(self: *App, amount: isize) !void {
@@ -4880,6 +4866,46 @@ test "click row maps to the list item under the cursor" {
     // Clamps to the last item and handles empty lists.
     try std.testing.expectEqual(@as(usize, 4), App.rowToIndex(0, 5, 10, 9));
     try std.testing.expectEqual(@as(usize, 0), App.rowToIndex(0, 0, 3, 1));
+}
+
+test "mouse wheel scrolls the panel under the cursor without changing focus" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("a"), .short_hash = @constCast("a"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("one") },
+        .{ .hash = @constCast("b"), .short_hash = @constCast("b"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("two") },
+    };
+    app.data.commits = &commits;
+
+    app.panel_rects = .{
+        .{ .focus = .status, .x = 0, .y = 0, .w = 20, .h = 6 },
+        .{ .focus = .files, .x = 0, .y = 6, .w = 20, .h = 5 },
+        .{ .focus = .branches, .x = 0, .y = 11, .w = 20, .h = 5 },
+        .{ .focus = .commits, .x = 0, .y = 16, .w = 20, .h = 5 },
+        .{ .focus = .stash, .x = 0, .y = 21, .w = 20, .h = 4 },
+        .{ .focus = .main, .x = 20, .y = 0, .w = 40, .h = 25 },
+    };
+    app.panel_rect_count = 6;
+    app.focus = .commits;
+    app.commit_index = 0;
+    app.main_scroll = 0;
+
+    // Wheel over the diff: scrolls it; focus stays on commits.
+    _ = try app.handleMouse(.{ .col = 30, .row = 10, .button = .wheel_down, .mods = .{}, .type = .press });
+    try std.testing.expectEqual(@as(usize, 1), app.main_scroll);
+    try std.testing.expectEqual(model.Focus.commits, app.focus);
+
+    // Wheel over the focused commits panel: moves its selection; focus stays.
+    _ = try app.handleMouse(.{ .col = 5, .row = 17, .button = .wheel_down, .mods = .{}, .type = .press });
+    try std.testing.expectEqual(@as(usize, 1), app.commit_index);
+    try std.testing.expectEqual(model.Focus.commits, app.focus);
+
+    // Wheel over an unfocused panel (files): does NOT steal focus.
+    _ = try app.handleMouse(.{ .col = 5, .row = 7, .button = .wheel_down, .mods = .{}, .type = .press });
+    try std.testing.expectEqual(model.Focus.commits, app.focus);
 }
 
 test "escape clears active file filter before quitting" {

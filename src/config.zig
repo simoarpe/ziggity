@@ -86,6 +86,9 @@ pub const KeyMap = struct {
 /// the config. Defaults match the built-in palette.
 pub const Theme = struct {
     selected_bg: u8 = 4,
+    /// Background of the selected row in a panel that does NOT have focus, so
+    /// the selection stays visible (dimmer than `selected_bg`). lazygit-style.
+    inactive_selected_bg: u8 = 8,
     active: u8 = 10,
     inactive_border: u8 = 8,
     muted: u8 = 8,
