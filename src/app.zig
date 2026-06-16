@@ -4232,9 +4232,14 @@ pub const App = struct {
                 }
             },
             .branch => |name| {
+                // lazygit shows the branch's commit graph in the main view
+                // (`git log --graph --decorate --date=relative --pretty=medium`,
+                // titled "Log"), not a terse oneline list. Mirror that, with
+                // --no-color since the preview is colorized per-line, and a
+                // generous cap so the buffered preview stays bounded.
                 empty_msg = "No commits.\n";
                 try sections.append(page_alloc, .{
-                    .argv = try dupArgv(&.{ "log", "--oneline", "--decorate", "-30", name }),
+                    .argv = try dupArgv(&.{ "log", "--graph", "--no-color", "--abbrev-commit", "--decorate", "--date=relative", "--pretty=medium", "-300", name, "--" }),
                 });
             },
             .commit => |hash| {

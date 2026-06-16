@@ -611,6 +611,9 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         (if (app.staging_staged_view) "Staging - staged" else "Staging - unstaged")
     else if (app.diff_base) |diff_ref|
         (std.fmt.bufPrint(&title_buf, "Diff [base {s}]", .{diff_ref[0..@min(diff_ref.len, 16)]}) catch "Diff [diffing]")
+    else if (app.contentFocus() == .branches and app.selectedBranchRefName() != null)
+        // A selected branch/tag shows its commit graph — lazygit titles this "Log".
+        "Log"
     else
         "Diff";
     const main = panel(root, side_w, 0, main_w, body_h, main_title, app.focus == .main);
