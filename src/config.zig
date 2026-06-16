@@ -141,6 +141,10 @@ pub const ConfirmSkips = struct {
 pub const Config = struct {
     side_panel_width_percent: u8 = 34,
     diff_context: u8 = 3,
+    /// lazygit's accordion mode: when true, the focused side-panel list grows to
+    /// `expanded_side_panel_weight` while the others shrink. Default off.
+    expand_focused_side_panel: bool = false,
+    expanded_side_panel_weight: u8 = 2,
     result_dialog: ResultDialog = .on_error,
     command_output: CommandOutput = .show,
     skip_confirm: ConfirmSkips = .{},
@@ -199,6 +203,14 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "diff_context")) {
             self.diff_context = std.fmt.parseInt(u8, value, 10) catch self.diff_context;
+            return;
+        }
+        if (std.mem.eql(u8, key, "expand_focused_side_panel")) {
+            if (parseBool(value)) |on| self.expand_focused_side_panel = on;
+            return;
+        }
+        if (std.mem.eql(u8, key, "expanded_side_panel_weight")) {
+            self.expanded_side_panel_weight = @max(1, std.fmt.parseInt(u8, value, 10) catch self.expanded_side_panel_weight);
             return;
         }
         if (std.mem.eql(u8, key, "result_dialog")) {
@@ -326,12 +338,16 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
         \\skip_confirm.undo = yes
         \\skip_confirm.bogus = true
         \\result_dialog = nonsense
+        \\expand_focused_side_panel = true
+        \\expanded_side_panel_weight = 3
     );
     try std.testing.expectEqual(ResultDialog.always, cfg.result_dialog); // valid set; bad value ignored
     try std.testing.expectEqual(CommandOutput.silent, cfg.command_output);
     try std.testing.expect(cfg.skip_confirm.discard_all);
     try std.testing.expect(cfg.skip_confirm.undo);
     try std.testing.expect(!cfg.skip_confirm.merge_branch); // untouched
+    try std.testing.expect(cfg.expand_focused_side_panel);
+    try std.testing.expectEqual(@as(u8, 3), cfg.expanded_side_panel_weight);
 }
 
 test "config parser stores custom commands bound to keys" {

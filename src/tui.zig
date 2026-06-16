@@ -401,6 +401,59 @@ fn renderHook(ctx: *anyopaque) void {
     renderAndFlush(rc.vx, rc.writer, rc.app) catch {};
 }
 
+const SidePanelHeights = struct { status: u16, files: u16, branches: u16, commits: u16, stash: u16 };
+
+/// lazygit's side-panel sizing: the status panel is a fixed height; files,
+/// branches and commits share the remaining space by weight (1 each); and the
+/// stash panel is a small fixed height *unless it is focused*, in which case it
+/// joins the weighted group. With the accordion (`expand_focused_side_panel`),
+/// the focused list panel gets `expanded_weight` instead of 1, growing at the
+/// others' expense. The returned heights always sum to `body_h`.
+fn sidePanelHeights(body_h: u16, focused: model.Focus, accordion: bool, expanded_weight: u16) SidePanelHeights {
+    const status_h: u16 = @min(body_h, 5);
+    const stash_fixed: u16 = @min(body_h -| status_h, 3);
+    const stash_focused = focused == .stash;
+
+    // Weights for files, branches, commits, stash. Stash stays fixed (weight 0)
+    // unless it is the focused panel.
+    var weights = [4]u16{ 1, 1, 1, if (stash_focused) @as(u16, 1) else 0 };
+    if (accordion) {
+        const ew: u16 = @max(1, expanded_weight);
+        switch (focused) {
+            .files => weights[0] = ew,
+            .branches => weights[1] = ew,
+            .commits => weights[2] = ew,
+            .stash => weights[3] = ew,
+            else => {},
+        }
+    }
+
+    const reserved = status_h + (if (stash_focused) @as(u16, 0) else stash_fixed);
+    const dynamic = body_h -| reserved;
+    const total = weights[0] + weights[1] + weights[2] + weights[3];
+    const unit = if (total > 0) dynamic / total else 0;
+    var rem = if (total > 0) dynamic % total else 0;
+
+    var h = [4]u16{ unit * weights[0], unit * weights[1], unit * weights[2], unit * weights[3] };
+    // Hand out the integer-division remainder one row at a time across the
+    // weighted panels so the column fills `body_h` exactly.
+    var i: usize = 0;
+    while (rem > 0) : (i = (i + 1) % 4) {
+        if (weights[i] > 0) {
+            h[i] += 1;
+            rem -= 1;
+        }
+    }
+
+    return .{
+        .status = status_h,
+        .files = h[0],
+        .branches = h[1],
+        .commits = h[2],
+        .stash = if (stash_focused) h[3] else stash_fixed,
+    };
+}
+
 fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     const root = vx.window();
     root.clear();
@@ -422,14 +475,17 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     const main_w = root.width - side_w;
 
     var y: u16 = 0;
-    const status_h: u16 = 6;
-    const remaining = body_h - status_h;
-    const base = remaining / 4;
-    const extra = remaining % 4;
-    const files_h = base + if (extra > 0) @as(u16, 1) else 0;
-    const branches_h = base + if (extra > 1) @as(u16, 1) else 0;
-    const commits_h = base + if (extra > 2) @as(u16, 1) else 0;
-    const stash_h = body_h - status_h - files_h - branches_h - commits_h;
+    const heights = sidePanelHeights(
+        body_h,
+        app.contentFocus(),
+        app.config.expand_focused_side_panel,
+        app.config.expanded_side_panel_weight,
+    );
+    const status_h = heights.status;
+    const files_h = heights.files;
+    const branches_h = heights.branches;
+    const commits_h = heights.commits;
+    const stash_h = heights.stash;
 
     // Capture panel hit-boxes for mouse handling.
     app.panel_rects = .{
@@ -1417,4 +1473,27 @@ fn withFg(base: vaxis.Style, index: u8) vaxis.Style {
     var s = base;
     s.fg = .{ .index = index };
     return s;
+}
+
+test "side panel heights match lazygit weighting" {
+    const body_h: u16 = 30;
+
+    // Default (no accordion): status fixed, stash a small fixed size when not
+    // focused, files/branches/commits share the rest equally. Fills body_h.
+    const h = sidePanelHeights(body_h, .files, false, 2);
+    try std.testing.expectEqual(@as(u16, 5), h.status);
+    try std.testing.expectEqual(@as(u16, 3), h.stash);
+    try std.testing.expectEqual(body_h, h.status + h.files + h.branches + h.commits + h.stash);
+    const lists_spread = @max(h.files, @max(h.branches, h.commits)) - @min(h.files, @min(h.branches, h.commits));
+    try std.testing.expect(lists_spread <= 1);
+
+    // Stash focused: it joins the weighted group and grows past the fixed 3.
+    const hs = sidePanelHeights(body_h, .stash, false, 2);
+    try std.testing.expect(hs.stash > 3);
+    try std.testing.expectEqual(body_h, hs.status + hs.files + hs.branches + hs.commits + hs.stash);
+
+    // Accordion: the focused list panel is larger than the others.
+    const ha = sidePanelHeights(body_h, .commits, true, 2);
+    try std.testing.expect(ha.commits > ha.files);
+    try std.testing.expectEqual(body_h, ha.status + ha.files + ha.branches + ha.commits + ha.stash);
 }

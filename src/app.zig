@@ -3601,7 +3601,7 @@ pub const App = struct {
 
     /// The panel whose selection drives the main-panel content. When the main
     /// panel is focused we keep showing the side panel we descended from.
-    fn contentFocus(self: *const App) model.Focus {
+    pub fn contentFocus(self: *const App) model.Focus {
         return if (self.focus == .main) self.main_origin else self.focus;
     }
 

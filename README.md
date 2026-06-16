@@ -191,6 +191,12 @@ Supported settings:
 side_panel_width_percent = 34
 diff_context = 3
 
+# Side-panel layout (lazygit-style): the Status panel is a fixed height, the
+# Files/Branches/Commits lists share the rest equally, and Stash stays small
+# unless it's focused. Enable the "accordion" to grow the focused list panel.
+expand_focused_side_panel = false  # focused list panel expands, others shrink
+expanded_side_panel_weight = 2     # how much bigger the focused panel gets
+
 # Action feedback (lazygit-style). Default: actions succeed silently with a
 # one-line summary in the bottom bar, and only failures pop a dialog.
 result_dialog = on_error    # on_error (default) | always | never
