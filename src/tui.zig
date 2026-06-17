@@ -1031,10 +1031,12 @@ fn drawConfirmPopup(root: vaxis.Window, app: *const app_mod.App) void {
     const content_w: u16 = @min(@as(u16, 64), root.width -| 6);
     var lines: [24][]const u8 = undefined;
     const n = wrapText(text, content_w, &lines);
-    var longest: usize = 30; // keep room for the footer hint
+    var longest: usize = 34; // keep room for the footer hint (its full width)
     for (lines[0..n]) |ln| longest = @max(longest, ln.len);
     const w: u16 = @intCast(@min(@as(usize, root.width -| 2), longest + 4));
-    const h: u16 = @intCast(@min(@as(usize, root.height -| 2), n + 2));
+    // Inner height needs n text rows + a blank + the footer row; +2 more for the
+    // border, so the popup is n + 4 tall (clamped to the screen).
+    const h: u16 = @intCast(@min(@as(usize, root.height -| 2), n + 4));
     const win = popup(root, w, h, title);
     const shown = @min(n, @as(usize, win.height -| 1)); // keep the footer row clear
     for (lines[0..shown], 0..) |ln, idx| print(win, @intCast(idx), 0, ln, st.normal);
