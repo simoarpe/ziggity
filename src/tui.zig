@@ -632,7 +632,10 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     const main = panel(root, side_w, 0, main_w, body_h, main_title, app.focus == .main);
     app.main_view_height = main.height;
     drawDiff(main, app);
-    drawBottom(root.child(.{ .x_off = 0, .y_off = @intCast(body_h), .width = root.width, .height = bottom_h }), app);
+    // Indent the footer by one column so it lines up with the panel content
+    // (just inside the left `│` border) and clears the terminal's rounded
+    // bottom-left corner, which would otherwise clip the first character.
+    drawBottom(root.child(.{ .x_off = 1, .y_off = @intCast(body_h), .width = root.width -| 1, .height = bottom_h }), app);
 
     // Centered popups render on top of everything else.
     switch (app.mode) {
