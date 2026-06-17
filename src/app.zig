@@ -430,6 +430,22 @@ fn dupArgv(parts: []const []const u8) ![]const []const u8 {
     return out;
 }
 
+/// Build a page-allocated `git diff` argv for a working-tree file. Includes the
+/// flags needed for renames, copies and submodule changes to show up at all:
+/// `--submodule`, `--find-renames`, and — for a renamed/copied file — the
+/// previous path in the pathspec, so the diff is paired against its source
+/// instead of coming back empty (or as a misleading whole-file add).
+fn fileDiffArgv(staged: bool, ctx_arg: []const u8, path: []const u8, previous_path: ?[]const u8) ![]const []const u8 {
+    var parts: std.ArrayList([]const u8) = .empty;
+    defer parts.deinit(page_alloc);
+    try parts.append(page_alloc, "diff");
+    if (staged) try parts.append(page_alloc, "--staged");
+    try parts.appendSlice(page_alloc, &.{ "--no-ext-diff", "--submodule", "--color=always", ctx_arg, "--find-renames=50%", "--" });
+    try parts.append(page_alloc, path);
+    if (previous_path) |prev| try parts.append(page_alloc, prev);
+    return dupArgv(parts.items);
+}
+
 /// The first non-blank line of `text`, trimmed, or "" if there is none. Used to
 /// surface a one-line summary (e.g. bisect progress, an error's first line) in
 /// the bottom bar.
@@ -4244,14 +4260,14 @@ pub const App = struct {
                         });
                     } else {
                         try sections.append(page_alloc, .{
-                            .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--color=always", ctx_arg, "--", f.path }),
+                            .argv = try fileDiffArgv(false, ctx_arg, f.path, f.previous_path),
                             .label = "Unstaged\n\n",
                         });
                     }
                 }
                 if (f.has_staged) {
                     try sections.append(page_alloc, .{
-                        .argv = try dupArgv(&.{ "diff", "--staged", "--no-ext-diff", "--color=always", ctx_arg, "--", f.path }),
+                        .argv = try fileDiffArgv(true, ctx_arg, f.path, f.previous_path),
                         .label = "Staged\n\n",
                     });
                 }
@@ -4864,6 +4880,36 @@ test "word and line motion helpers" {
     try std.testing.expectEqual(@as(usize, 20), lineEnd(m, 15));
     try std.testing.expectEqual(@as(usize, 0), lineStart(m, 4));
     try std.testing.expectEqual(@as(usize, 8), lineEnd(m, 4));
+}
+
+test "fileDiffArgv pairs renames and sets rename/submodule flags" {
+    // A renamed file: the previous path must be appended so the diff is paired
+    // against its source (otherwise it can come back empty / as a whole-file add).
+    const argv = try fileDiffArgv(true, "--unified=3", "new/path.zig", "old/path.zig");
+    defer {
+        for (argv) |a| page_alloc.free(a);
+        page_alloc.free(argv);
+    }
+    try std.testing.expectEqualStrings("diff", argv[0]);
+    try std.testing.expectEqualStrings("--staged", argv[1]);
+    try std.testing.expectEqualStrings("new/path.zig", argv[argv.len - 2]);
+    try std.testing.expectEqualStrings("old/path.zig", argv[argv.len - 1]);
+    var has_submodule = false;
+    var has_rename = false;
+    for (argv) |a| {
+        if (std.mem.eql(u8, a, "--submodule")) has_submodule = true;
+        if (std.mem.eql(u8, a, "--find-renames=50%")) has_rename = true;
+    }
+    try std.testing.expect(has_submodule and has_rename);
+
+    // A normal (non-renamed) file: no previous path, no --staged.
+    const argv2 = try fileDiffArgv(false, "--unified=3", "file.zig", null);
+    defer {
+        for (argv2) |a| page_alloc.free(a);
+        page_alloc.free(argv2);
+    }
+    try std.testing.expectEqualStrings("file.zig", argv2[argv2.len - 1]);
+    for (argv2) |a| try std.testing.expect(!std.mem.eql(u8, a, "--staged"));
 }
 
 test "pushNeedsForce detects diverged-remote rejections only" {
