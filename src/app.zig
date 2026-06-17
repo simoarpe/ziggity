@@ -1050,6 +1050,9 @@ pub const App = struct {
     // current end; `dragged` distinguishes a real drag from a plain click.
     diff_sel_active: bool = false,
     diff_sel_dragged: bool = false,
+    // Whether a non-empty selection was visible when the current click began —
+    // so clicking to deselect just clears it, without also focusing the panel.
+    diff_sel_had_span: bool = false,
     diff_sel_anchor_line: usize = 0,
     diff_sel_anchor_col: usize = 0,
     diff_sel_head_line: usize = 0,
@@ -1675,6 +1678,11 @@ pub const App = struct {
                     if (self.mainRect()) |r| {
                         if (r.contains(@intCast(mouse.col), @intCast(mouse.row)) and self.diff.len > 0) {
                             const pt = self.diffPointAt(r, @intCast(mouse.col), @intCast(mouse.row));
+                            // Remember if a real selection was on screen, so a
+                            // click that clears it doesn't also grab focus.
+                            self.diff_sel_had_span = self.diff_sel_active and
+                                (self.diff_sel_anchor_line != self.diff_sel_head_line or
+                                    self.diff_sel_anchor_col != self.diff_sel_head_col);
                             self.diff_sel_active = true;
                             self.diff_sel_dragged = false;
                             self.diff_sel_anchor_line = pt.line;
@@ -1702,8 +1710,12 @@ pub const App = struct {
                 .release => if (self.diff_sel_active) {
                     if (self.diff_sel_dragged) {
                         try self.copyDiffSelection(); // drag: copy, keep focus put
+                    } else if (self.diff_sel_had_span) {
+                        // Click that dismisses a visible selection: just deselect,
+                        // don't grab focus (that was the glitch).
+                        self.diff_sel_active = false;
                     } else {
-                        // Plain click (no drag): focus the diff, clear selection.
+                        // Fresh click on the diff (no prior selection): focus it.
                         self.diff_sel_active = false;
                         try self.focusPanel(.main);
                     }
