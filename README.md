@@ -213,6 +213,8 @@ skip_confirm.delete_remote_branch = false
 skip_confirm.remove_worktree = false
 skip_confirm.remove_remote = false
 skip_confirm.undo = false
+skip_confirm.force_push = false        # auto --force-with-lease when a push is rejected
+skip_confirm.force_push_plain = false  # auto --force when force-with-lease is rejected
 
 # Any keymap field can be remapped with key.<name>:
 key.quit = q

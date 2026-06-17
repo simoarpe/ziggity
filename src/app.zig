@@ -78,6 +78,8 @@ pub const Confirmation = enum {
     remove_worktree,
     remove_remote,
     undo,
+    force_push,
+    force_push_plain,
 };
 
 /// Network operations that run off the UI loop so they don't freeze it.
@@ -85,12 +87,19 @@ pub const AsyncOp = enum {
     fetch,
     pull,
     push,
+    /// A force push, offered after a normal push is rejected for a diverged
+    /// remote. Uses `--force-with-lease` so it refuses if the remote moved in a
+    /// way we have not seen, rather than blindly overwriting it.
+    push_force,
+    /// A plain `--force` push, offered if `--force-with-lease` is itself rejected
+    /// (e.g. a stale lease). The last, unconditional step of the push chain.
+    push_force_plain,
 
     pub fn label(self: AsyncOp) []const u8 {
         return switch (self) {
             .fetch => "fetch",
             .pull => "pull",
-            .push => "push",
+            .push, .push_force, .push_force_plain => "push",
         };
     }
 
@@ -99,6 +108,7 @@ pub const AsyncOp = enum {
             .fetch => "fetching",
             .pull => "pulling",
             .push => "pushing",
+            .push_force, .push_force_plain => "force-pushing",
         };
     }
 
@@ -108,9 +118,20 @@ pub const AsyncOp = enum {
             .fetch => &.{ "fetch", "--all", "--no-write-fetch-head" },
             .pull => &.{ "pull", "--no-edit" },
             .push => &.{"push"},
+            .push_force => &.{ "push", "--force-with-lease" },
+            .push_force_plain => &.{ "push", "--force" },
         };
     }
 };
+
+/// True when a push failed because the remote has diverged and the push needs to
+/// be forced. Matches git's English rejection messages.
+fn pushNeedsForce(output: []const u8) bool {
+    return std.mem.indexOf(u8, output, "Updates were rejected") != null or
+        std.mem.indexOf(u8, output, "[rejected]") != null or
+        std.mem.indexOf(u8, output, "non-fast-forward") != null or
+        std.mem.indexOf(u8, output, "fetch first") != null;
+}
 
 /// A panel's screen rectangle, captured during render for mouse hit-testing.
 pub const PanelRect = struct {
@@ -2320,6 +2341,8 @@ pub const App = struct {
                 }
                 break :blk "Undo the last operation? Resets HEAD.";
             },
+            .force_push => "Push rejected: the remote has commits you don't. Force-push (--force-with-lease)?",
+            .force_push_plain => "Safe force push (--force-with-lease) was rejected. Force-push anyway (--force)?",
         };
     }
 
@@ -4014,6 +4037,8 @@ pub const App = struct {
                 return self.runMutationScoped(try self.git.removeRemote(name), Refresh.remotes, "removed remote {s}", .{name});
             },
             .undo => return self.requestMutation(.undo, .{ .gerund = "undoing", .command = "git reset (undo)", .refresh = Refresh.all }, "undone", .{}),
+            .force_push => return self.requestAsync(.push_force),
+            .force_push_plain => return self.requestAsync(.push_force_plain),
         }
     }
 
@@ -4366,11 +4391,20 @@ pub const App = struct {
                 // Network success stays silent (bottom bar).
                 try self.setMessage("{s} complete", .{op.label()});
             } else {
-                // Failures follow result_dialog so a rejected push/pull is seen.
-                var label_buf: [64]u8 = undefined;
-                const summary = std.fmt.bufPrint(&label_buf, "{s} failed", .{op.label()}) catch "command failed";
                 const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
-                try self.reportFailure(summary, if (stderr.len > 0) mutable.stderr else mutable.stdout);
+                const raw = if (stderr.len > 0) mutable.stderr else mutable.stdout;
+                // Escalating push chain: a rejected step offers the next, stronger
+                // option (confirmed first): push → --force-with-lease → --force.
+                // A rejected plain --force just reports the error (end of chain).
+                if (pushNeedsForce(raw) and op == .push) {
+                    try self.requestConfirmation(.force_push, "push rejected — force-push? (y/n)", .{});
+                } else if (pushNeedsForce(raw) and op == .push_force) {
+                    try self.requestConfirmation(.force_push_plain, "force-with-lease rejected — force-push anyway? (y/n)", .{});
+                } else {
+                    var label_buf: [64]u8 = undefined;
+                    const summary = std.fmt.bufPrint(&label_buf, "{s} failed", .{op.label()}) catch "command failed";
+                    try self.reportFailure(summary, raw);
+                }
             }
         } else {
             try self.setMessage("{s} failed to start", .{op.label()});
@@ -4830,6 +4864,21 @@ test "word and line motion helpers" {
     try std.testing.expectEqual(@as(usize, 20), lineEnd(m, 15));
     try std.testing.expectEqual(@as(usize, 0), lineStart(m, 4));
     try std.testing.expectEqual(@as(usize, 8), lineEnd(m, 4));
+}
+
+test "pushNeedsForce detects diverged-remote rejections only" {
+    // Real git non-fast-forward rejection.
+    try std.testing.expect(pushNeedsForce(
+        \\ ! [rejected]        main -> main (non-fast-forward)
+        \\error: failed to push some refs to 'origin'
+        \\hint: Updates were rejected because the tip of your current branch is behind
+    ));
+    // "fetch first" variant (remote has work you don't).
+    try std.testing.expect(pushNeedsForce(" ! [rejected]        main -> main (fetch first)"));
+    // Unrelated failures must NOT offer a force push.
+    try std.testing.expect(!pushNeedsForce("fatal: Authentication failed for 'https://...'"));
+    try std.testing.expect(!pushNeedsForce("fatal: could not read from remote repository"));
+    try std.testing.expect(!pushNeedsForce("Everything up-to-date"));
 }
 
 test "cherry-pick clipboard toggles copied commits" {

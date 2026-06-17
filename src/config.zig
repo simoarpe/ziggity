@@ -144,6 +144,8 @@ pub const ConfirmSkips = struct {
     remove_worktree: bool = false,
     remove_remote: bool = false,
     undo: bool = false,
+    force_push: bool = false,
+    force_push_plain: bool = false,
 };
 
 pub const Config = struct {

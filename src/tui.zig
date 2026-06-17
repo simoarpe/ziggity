@@ -942,6 +942,7 @@ fn drawConfirmPopup(root: vaxis.Window, app: *const app_mod.App) void {
         .remove_worktree => "Remove worktree",
         .remove_remote => "Remove remote",
         .undo => "Undo",
+        .force_push, .force_push_plain => "Force push",
     };
     // Wrap the message so a long prompt (e.g. a worktree path) stays readable
     // inside the box instead of being clipped, growing the popup's height.
