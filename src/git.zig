@@ -504,9 +504,14 @@ pub const Git = struct {
     }
 
     pub fn loadBranches(self: *Git) ![]model.Branch {
-        const bytes = try self.output(&.{ "branch", "--format=%(HEAD)%00%(refname:short)%00%(upstream:short)%00%(upstream:track)" });
+        // lazygit's default order (localBranchSortOrder = "date"): most-recently
+        // committed first (`--sort=-committerdate`), then the current branch
+        // moved to the very top.
+        const bytes = try self.output(&.{ "branch", "--sort=-committerdate", "--format=%(HEAD)%00%(refname:short)%00%(upstream:short)%00%(upstream:track)" });
         defer self.allocator.free(bytes);
-        return parseBranches(self.allocator, bytes);
+        const list = try parseBranches(self.allocator, bytes);
+        moveCurrentBranchToFront(list);
+        return list;
     }
 
     pub fn loadRemoteBranches(self: *Git) ![]model.Branch {
@@ -1137,6 +1142,21 @@ pub fn parseBranches(allocator: std.mem.Allocator, bytes: []const u8) ![]model.B
     return branches.toOwnedSlice(allocator);
 }
 
+/// Move the current (checked-out) branch to index 0, preserving the relative
+/// order of the rest — lazygit always lists the current branch first. A no-op
+/// for remote-branch lists (none is marked current).
+pub fn moveCurrentBranchToFront(branches: []model.Branch) void {
+    for (branches, 0..) |branch, i| {
+        if (!branch.current) continue;
+        if (i == 0) return;
+        const cur = branches[i];
+        var j = i;
+        while (j > 0) : (j -= 1) branches[j] = branches[j - 1];
+        branches[0] = cur;
+        return;
+    }
+}
+
 pub fn parseTags(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Tag {
     var tags: std.ArrayList(model.Tag) = .empty;
     errdefer {
@@ -1389,6 +1409,28 @@ test "parse branches captures current marker, upstream, and gone upstream" {
     try std.testing.expect(branches[2].upstream_gone);
     try std.testing.expect(branches[3].upstream == null);
     try std.testing.expect(!branches[3].upstream_gone);
+}
+
+test "moveCurrentBranchToFront lists the current branch first" {
+    // git sorts by -committerdate; the current branch may be anywhere.
+    var b = [_]model.Branch{
+        .{ .name = @constCast(@as([]const u8, "feat-a")) },
+        .{ .name = @constCast(@as([]const u8, "main")), .current = true },
+        .{ .name = @constCast(@as([]const u8, "feat-b")) },
+    };
+    moveCurrentBranchToFront(&b);
+    try std.testing.expectEqualStrings("main", b[0].name); // moved to top
+    try std.testing.expectEqualStrings("feat-a", b[1].name); // others keep order
+    try std.testing.expectEqualStrings("feat-b", b[2].name);
+
+    // No current branch (remote list / detached HEAD): order is unchanged.
+    var r = [_]model.Branch{
+        .{ .name = @constCast(@as([]const u8, "origin/x")) },
+        .{ .name = @constCast(@as([]const u8, "origin/y")) },
+    };
+    moveCurrentBranchToFront(&r);
+    try std.testing.expectEqualStrings("origin/x", r[0].name);
+    try std.testing.expectEqualStrings("origin/y", r[1].name);
 }
 
 test "command log filters read-only invocations" {
