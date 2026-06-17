@@ -1576,8 +1576,10 @@ pub const App = struct {
             .focus_commits => try self.setFocus(.commits),
             .focus_stash => try self.setFocus(.stash),
             .focus_main => try self.descendOrOpenCommitFiles(),
-            .prev_tab => try self.cycleTab(.prev),
-            .next_tab => try self.cycleTab(.next),
+            // `[` / `]` cycle a multi-dimensional panel: the Branches/Commits
+            // tabs, or the staged/unstaged side of the staging view.
+            .prev_tab => if (self.staging_active) try self.toggleStagingSide() else try self.cycleTab(.prev),
+            .next_tab => if (self.staging_active) try self.toggleStagingSide() else try self.cycleTab(.next),
             .refresh => {
                 self.refreshViews(Refresh.all);
                 try self.setMessage("refreshed", .{});
@@ -1595,7 +1597,8 @@ pub const App = struct {
                 }
             },
             .focus_left => if (self.staging_active) try self.closeStaging() else try self.focusPrevious(),
-            .focus_right => if (self.staging_active) try self.toggleStagingSide() else try self.focusNext(),
+            // Tab / l / right no longer switches the staging side ([ ] does that now).
+            .focus_right => if (!self.staging_active) try self.focusNext(),
             .select => {
                 if (self.staging_active) {
                     try self.applyStagingSelection();

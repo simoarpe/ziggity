@@ -112,7 +112,7 @@ with `j`/`k`, scroll its diff, `esc` to go back) are done.
 
 Branch rename (`R`) and hunk- + line-level staging (`<enter>` on a file →
 stage/unstage individual lines with `v` for a range, or whole hunks on a `@@`
-header, `tab` to switch unstaged/staged sides; via `src/diff.zig` line-patch
+header, `[`/`]` to switch unstaged/staged sides; via `src/diff.zig` line-patch
 construction + `git apply --cached [--reverse]`) are done.
 
 Branch fast-forward (`f` in the Branches panel: `git pull --ff-only` for the

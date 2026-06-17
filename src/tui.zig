@@ -684,7 +684,7 @@ const help_lines = [_][]const u8{
     "  1-5            focus Status/Files/Branches/Commits/Stash",
     "  h/l, tab       move between side panels",
     "  j/k, arrows    move selection",
-    "  [ / ]          switch panel tabs",
+    "  [ / ]          switch panel tabs / staging side",
     "  enter / esc    inspect in main panel / go back",
     "  @ / ?          command log / this help",
     "  z              undo the last operation (reflog reset)",
@@ -709,7 +709,7 @@ const help_lines = [_][]const u8{
     "  j/k            move by line",
     "  v              toggle range selection",
     "  space          stage/unstage line(s); on @@ the whole hunk",
-    "  tab            switch unstaged / staged side",
+    "  [ / ]          switch unstaged / staged side",
     "",
     "Branches  (tabs: Local / Remotes / Tags / Worktrees / Submodules)",
     "  space          checkout / apply / init-update",
@@ -1401,7 +1401,7 @@ fn drawStash(win: vaxis.Window, app: *const app_mod.App) void {
 fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
     const text = if (app.staging_active) app.staging_diff else app.diff;
     if (app.staging_active and text.len == 0) {
-        print(win, 0, 0, "No changes on this side - press tab to switch", styles().muted);
+        print(win, 0, 0, "No changes on this side - press [ or ] to switch", styles().muted);
         return;
     }
 
@@ -1530,7 +1530,7 @@ fn drawHints(win: vaxis.Window, row: u16, start_col: u16, hints: []const u8, key
 fn contextHints(app: *const app_mod.App) []const u8 {
     const global = "  ? help  z undo  R refresh  q quit";
     if (app.staging_active) {
-        return "j/k line  v range  space stage/unstage (@@=hunk)  tab side  esc back" ++ global;
+        return "j/k line  v range  space stage/unstage (@@=hunk)  [/] staged/unstaged  esc back" ++ global;
     }
     if (app.commit_files_active and app.focus == .commits) {
         return "j/k file  enter diff  esc back" ++ global;
