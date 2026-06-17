@@ -615,9 +615,9 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     };
     app.panel_rect_count = 6;
 
-    drawStatus(panel(root, 0, y, side_w, status_h, "Status [1]", app.focus == .status), app);
+    drawStatus(panel(root, 0, y, side_w, status_h, "Status [1]", app.focus == .status, null), app);
     y += status_h;
-    drawFiles(panel(root, 0, y, side_w, files_h, "Files [2]", app.focus == .files), app);
+    drawFiles(panel(root, 0, y, side_w, files_h, "Files [2]", app.focus == .files, listScrollInfo(app, .files)), app);
     y += files_h;
     const branches_title = switch (app.branches_tab) {
         .local => "Branches [3]",
@@ -626,7 +626,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         .worktrees => "Worktrees [3]",
         .submodules => "Submodules [3]",
     };
-    drawBranches(panel(root, 0, y, side_w, branches_h, branches_title, app.focus == .branches), app);
+    drawBranches(panel(root, 0, y, side_w, branches_h, branches_title, app.focus == .branches, listScrollInfo(app, .branches)), app);
     y += branches_h;
     var commits_title_buf: [80]u8 = undefined;
     var filter_label_buf: [64]u8 = undefined;
@@ -641,9 +641,9 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         (std.fmt.bufPrint(&commits_title_buf, "Commits [4] ({s})", .{label}) catch "Commits [4] (filtered)")
     else
         "Commits [4]";
-    drawCommits(panel(root, 0, y, side_w, commits_h, commits_title, app.focus == .commits), app);
+    drawCommits(panel(root, 0, y, side_w, commits_h, commits_title, app.focus == .commits, listScrollInfo(app, .commits)), app);
     y += commits_h;
-    drawStash(panel(root, 0, y, side_w, stash_h, "Stash [5]", app.focus == .stash), app);
+    drawStash(panel(root, 0, y, side_w, stash_h, "Stash [5]", app.focus == .stash, listScrollInfo(app, .stash)), app);
 
     var title_buf: [64]u8 = undefined;
     const main_title = if (app.staging_active)
@@ -659,7 +659,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         // Split staging view: two panes (Unstaged | Staged) fill the main area.
         drawStagingSplit(root, app, side_w, 0, main_w, body_h);
     } else {
-        const main = panel(root, side_w, 0, main_w, body_h, main_title, app.focus == .main);
+        const main = panel(root, side_w, 0, main_w, body_h, main_title, app.focus == .main, .{ .len = app.mainContentLines(), .pos = app.main_scroll });
         app.main_view_height = main.height;
         drawDiff(main, app);
     }
@@ -787,7 +787,7 @@ fn drawHelpPopup(root: vaxis.Window, app: *app_mod.App) void {
     }
 
     const h: u16 = @intCast(@min(@as(usize, root.height -| 1), total + 2));
-    const win = popup(root, w, h, "Keybindings");
+    const win = popup(root, w, h, "Keybindings", .{ .len = total, .pos = app.help_scroll });
 
     const max_scroll = if (total > win.height) total - win.height else 0;
     app.help_max_scroll = max_scroll; // so key handlers can clamp scrolling
@@ -805,7 +805,7 @@ fn drawCommandLogPopup(root: vaxis.Window, app: *const app_mod.App) void {
     const log = app.git.command_log.items;
     const w: u16 = @min(@as(u16, 90), root.width -| 4);
     const h: u16 = @min(@as(u16, 20), root.height -| 2);
-    const win = popup(root, w, h, "Command log");
+    const win = popup(root, w, h, "Command log", null);
     if (log.len == 0) {
         print(win, 0, 0, "No commands run yet.", st.muted);
         return;
@@ -839,7 +839,7 @@ fn drawOperationPopup(root: vaxis.Window, app: *app_mod.App) void {
     const w: u16 = @min(@as(u16, 86), root.width -| 4);
     const h: u16 = @min(@as(u16, 20), root.height -| 2);
     const title = if (app.op_running) "Running" else if (app.op_ok) "Done" else "Failed";
-    const win = popup(root, w, h, title);
+    const win = popup(root, w, h, title, null);
     const cw = win.width; // content width to wrap long lines into
 
     // The command that is running / ran (wrapped).
@@ -879,6 +879,11 @@ fn drawOperationPopup(root: vaxis.Window, app: *app_mod.App) void {
             print(win, row, 0, vis[idx], st.muted);
             row += 1;
         }
+        // Scrollbar over just the output region, on the popup's right border
+        // (same centering as popup(), mapped back to root coordinates).
+        const px: u16 = (root.width - w) / 2;
+        const py: u16 = (root.height - h) / 2;
+        drawScrollbarRange(root, px + w - 1, py + 1 + output_top, avail, vis_n, app.op_scroll, true);
     } else {
         app.op_max_scroll = 0;
     }
@@ -890,7 +895,7 @@ fn drawTextPromptPopup(root: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
     const kind = app.text_prompt_kind orelse return;
     const w: u16 = @min(@as(u16, 64), root.width -| 4);
-    const win = popup(root, w, 5, kind.title());
+    const win = popup(root, w, 5, kind.title(), null);
     // Horizontally scroll so the caret stays inside the box:
     // render the buffer starting at the scroll origin instead of clipping it.
     const caret = @min(app.prompt_cursor, app.input_buffer.items.len);
@@ -906,7 +911,7 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     const subject_focused = app.commit_field == .subject;
     const w: u16 = @min(@as(u16, 72), root.width -| 4);
     const title = if (app.commit_action == .reword) "Reword commit" else "Commit message";
-    const win = popup(root, w, 12, title);
+    const win = popup(root, w, 12, title, null);
 
     // Field labels indicate which has focus.
     print(win, 0, 0, "Summary", if (subject_focused) st.active_title else st.muted);
@@ -949,6 +954,13 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
         drawn += 1;
     }
 
+    // Scrollbar over the multi-line description when it overflows, on the right
+    // border (same centering as popup(); the popup height is the fixed 12).
+    const body_lines = std.mem.count(u8, body, "\n") + 1;
+    const px: u16 = (root.width - w) / 2;
+    const py: u16 = (root.height - 12) / 2;
+    drawScrollbarRange(root, px + w - 1, py + 1 + body_top, body_h, body_lines, scy.origin, !subject_focused);
+
     print(win, footer_row, 0, "tab: switch field   enter: commit / newline   esc: cancel", st.bottom_accent);
 
     if (subject_focused) {
@@ -962,7 +974,7 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
 /// Centered, bordered, opaque popup window. Fills its region first so the
 /// panels underneath do not bleed through, draws a rounded border and a title,
 /// and returns the inner content window.
-fn popup(root: vaxis.Window, width: u16, height: u16, title: []const u8) vaxis.Window {
+fn popup(root: vaxis.Window, width: u16, height: u16, title: []const u8, scroll: ?ScrollInfo) vaxis.Window {
     const w = @min(@max(width, 8), root.width);
     const h = @min(@max(height, 3), root.height);
     const x: u16 = (root.width - w) / 2;
@@ -982,6 +994,7 @@ fn popup(root: vaxis.Window, width: u16, height: u16, title: []const u8) vaxis.W
         .col_offset = 2,
         .wrap = .none,
     });
+    if (scroll) |s| drawScrollbar(raw, s.len, s.pos, true);
     return inner;
 }
 
@@ -990,7 +1003,7 @@ fn drawStatusFilterPopup(root: vaxis.Window, app: *const app_mod.App) void {
     const options = app_mod.status_filter_options;
     const w: u16 = 38;
     const h: u16 = @intCast(options.len + 2);
-    const win = popup(root, w, h, "Status filter");
+    const win = popup(root, w, h, "Status filter", null);
     for (options, 0..) |option, idx| {
         var buf: [64]u8 = undefined;
         const marker: u8 = if (option == app.file_display_filter) '*' else ' ';
@@ -1006,7 +1019,7 @@ fn drawMenuPopup(root: vaxis.Window, app: *const app_mod.App) void {
     for (menu.items) |item| max_label = @max(max_label, item.label.len);
     const w: u16 = @intCast(@min(@as(usize, 72), max_label + 6));
     const h: u16 = @intCast(menu.items.len + 2);
-    const win = popup(root, w, h, menu.title);
+    const win = popup(root, w, h, menu.title, null);
     for (menu.items, 0..) |item, idx| {
         drawSelectable(win, @intCast(idx), item.label, st.normal, selOf(idx == menu.index, true));
     }
@@ -1038,13 +1051,24 @@ fn drawConfirmPopup(root: vaxis.Window, app: *const app_mod.App) void {
     // Inner height needs n text rows + a blank + the footer row; +2 more for the
     // border, so the popup is n + 4 tall (clamped to the screen).
     const h: u16 = @intCast(@min(@as(usize, root.height -| 2), n + 4));
-    const win = popup(root, w, h, title);
+    const win = popup(root, w, h, title, null);
     const shown = @min(n, @as(usize, win.height -| 1)); // keep the footer row clear
     for (lines[0..shown], 0..) |ln, idx| print(win, @intCast(idx), 0, ln, st.normal);
     print(win, win.height -| 1, 0, "(y/enter) confirm   (n/esc) cancel", st.bottom_accent);
 }
 
-fn panel(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, title: []const u8, focused: bool) vaxis.Window {
+/// Content size and scroll position for a panel's scrollbar. `len` is the total
+/// number of lines/items, `pos` the index of the first visible one.
+const ScrollInfo = struct { len: usize, pos: usize };
+
+const scrollbar_glyph = "▐"; // U+2590, drawn on the right border
+
+/// Scrollbar info for a list panel: total items and the current view offset.
+fn listScrollInfo(app: *const app_mod.App, focus: model.Focus) ScrollInfo {
+    return .{ .len = app.activeListLen(focus), .pos = app.listScroll(focus) };
+}
+
+fn panel(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, title: []const u8, focused: bool, scroll: ?ScrollInfo) vaxis.Window {
     const raw = root.child(.{ .x_off = @intCast(x), .y_off = @intCast(y), .width = w, .height = h });
     if (w < 4 or h < 3) return raw;
     const st = styles();
@@ -1061,7 +1085,44 @@ fn panel(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, title: []const u8, 
         .col_offset = 2,
         .wrap = .none,
     });
+    if (scroll) |s| drawScrollbar(raw, s.len, s.pos, focused);
     return inner;
+}
+
+/// Draw a proportional scrollbar thumb on a panel's right border when its
+/// content is taller than the visible area (otherwise nothing). The thumb size
+/// reflects the visible fraction and its position the scroll offset.
+const Thumb = struct { start: usize, size: usize };
+
+/// Thumb position/size for a `track`-row scrollbar over `len` items scrolled to
+/// `pos`. Null when the content fits (no scrollbar needed).
+fn scrollbarThumb(track: usize, len: usize, pos: usize) ?Thumb {
+    if (track < 1 or len <= track) return null;
+    const max_scroll = len - track;
+    var size = (track * track) / len; // proportional to the visible fraction
+    if (size < 1) size = 1;
+    if (size > track) size = track;
+    const span = track - size; // travel range
+    const p = @min(pos, max_scroll);
+    const start = if (max_scroll == 0) 0 else (p * span) / max_scroll;
+    return .{ .start = start, .size = size };
+}
+
+/// Draw a scrollbar thumb in `win` at column `col`, over a `track`-row region
+/// starting at `top`, for `len` items scrolled to `pos`. Nothing if it fits.
+fn drawScrollbarRange(win: vaxis.Window, col: u16, top: u16, track: usize, len: usize, pos: usize, focused: bool) void {
+    const t = scrollbarThumb(track, len, pos) orelse return;
+    const st = styles();
+    const style = if (focused) st.active_border else st.inactive_border;
+    var i: usize = 0;
+    while (i < t.size) : (i += 1) {
+        win.writeCell(col, @intCast(top + t.start + i), .{ .char = .{ .grapheme = scrollbar_glyph, .width = 1 }, .style = style });
+    }
+}
+
+/// Scrollbar on a bordered window's right edge, spanning its inner height.
+fn drawScrollbar(raw: vaxis.Window, len: usize, pos: usize, focused: bool) void {
+    drawScrollbarRange(raw, raw.width - 1, 1, raw.height -| 2, len, pos, focused);
 }
 
 fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
@@ -1484,8 +1545,11 @@ fn drawStagingSplit(root: vaxis.Window, app: *app_mod.App, x: u16, y: u16, w: u1
     const unstaged_text = if (unstaged_active) app.staging_diff else app.staging_other_diff;
     const staged_text = if (unstaged_active) app.staging_other_diff else app.staging_diff;
     const focused = app.focus == .main;
-    const left = panel(root, x, y, left_w, h, "Unstaged", focused and unstaged_active);
-    const right = panel(root, x + left_w, y, w - left_w, h, "Staged", focused and !unstaged_active);
+    // The active pane scrolls with main_scroll; the read-only one shows the top.
+    const unstaged_pos: usize = if (unstaged_active) app.main_scroll else 0;
+    const staged_pos: usize = if (unstaged_active) 0 else app.main_scroll;
+    const left = panel(root, x, y, left_w, h, "Unstaged", focused and unstaged_active, .{ .len = app_mod.diffLineCount(unstaged_text), .pos = unstaged_pos });
+    const right = panel(root, x + left_w, y, w - left_w, h, "Staged", focused and !unstaged_active, .{ .len = app_mod.diffLineCount(staged_text), .pos = staged_pos });
     app.main_view_height = if (unstaged_active) left.height else right.height;
     drawStagingPane(left, app, unstaged_text, unstaged_active, "No unstaged changes");
     drawStagingPane(right, app, staged_text, !unstaged_active, "No staged changes");
@@ -1962,6 +2026,34 @@ fn withFg(base: vaxis.Style, index: u8) vaxis.Style {
     var s = base;
     s.fg = .{ .index = index };
     return s;
+}
+
+test "scrollbar thumb sizes and positions to the content" {
+    // Content fits the track → no scrollbar.
+    try std.testing.expect(scrollbarThumb(10, 5, 0) == null);
+    try std.testing.expect(scrollbarThumb(10, 10, 0) == null);
+
+    // 10 of 100 visible → a 1-row thumb that travels the full track.
+    {
+        const top = scrollbarThumb(10, 100, 0).?;
+        try std.testing.expectEqual(@as(usize, 0), top.start);
+        try std.testing.expectEqual(@as(usize, 1), top.size);
+        const bot = scrollbarThumb(10, 100, 90).?; // max scroll
+        try std.testing.expectEqual(@as(usize, 9), bot.start); // sits at the bottom
+        try std.testing.expectEqual(@as(usize, 1), bot.size);
+    }
+
+    // Half visible → a thumb half the track tall.
+    {
+        const t = scrollbarThumb(10, 20, 0).?;
+        try std.testing.expectEqual(@as(usize, 5), t.size);
+        try std.testing.expectEqual(@as(usize, 0), t.start);
+        const b = scrollbarThumb(10, 20, 10).?; // max scroll
+        try std.testing.expectEqual(@as(usize, 5), b.start); // start+size == track
+    }
+
+    // Over-scrolled position is clamped to the bottom.
+    try std.testing.expectEqual(@as(usize, 9), scrollbarThumb(10, 100, 9999).?.start);
 }
 
 test "side panel heights match the weighting" {

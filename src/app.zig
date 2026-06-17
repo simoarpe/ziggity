@@ -917,7 +917,7 @@ fn appendDiffColumns(out: *std.ArrayList(u8), allocator: std.mem.Allocator, line
 
 /// Number of displayed lines in `text` (newline-separated), ignoring a single
 /// trailing newline so it matches what the diff renderer actually draws.
-fn diffLineCount(text: []const u8) usize {
+pub fn diffLineCount(text: []const u8) usize {
     if (text.len == 0) return 0;
     var n = std.mem.count(u8, text, "\n");
     if (text[text.len - 1] != '\n') n += 1;
@@ -1823,7 +1823,7 @@ pub const App = struct {
     }
 
     /// Number of items in the panel's currently-shown list (tab/mode aware).
-    fn activeListLen(self: *const App, focus: model.Focus) usize {
+    pub fn activeListLen(self: *const App, focus: model.Focus) usize {
         return switch (focus) {
             .files => if (self.tree_view) self.tree_rows.len else self.visibleFileCount(),
             .branches => switch (self.branches_tab) {
@@ -2841,6 +2841,12 @@ pub const App = struct {
         const lines = diffLineCount(text);
         const height: usize = if (self.main_view_height == 0) 20 else self.main_view_height;
         return lines -| height;
+    }
+
+    /// Total displayed lines of the main panel's current content (the active
+    /// staging diff or the preview) — for sizing the scrollbar.
+    pub fn mainContentLines(self: *const App) usize {
+        return diffLineCount(if (self.staging_active) self.staging_diff else self.diff);
     }
 
     fn scrollMain(self: *App, amount: isize) !void {
