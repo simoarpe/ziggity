@@ -1538,6 +1538,21 @@ pub const App = struct {
             return;
         }
 
+        // In the staging view, c / A commit / amend the staged changes (the
+        // Files panel allows the same). Gated to the staging view so they don't
+        // shadow anything in the generic diff/inspect view, where the main panel
+        // may be showing a commit or branch reached from another panel.
+        if (self.staging_active) {
+            if (self.config.keymap.commit.matches(key)) {
+                if (self.foregroundBusy()) return self.setMessage("operation in progress...", .{});
+                return self.startCommitPrompt();
+            }
+            if (self.config.keymap.amend.matches(key)) {
+                if (self.foregroundBusy()) return self.setMessage("operation in progress...", .{});
+                return self.amendLastCommit();
+            }
+        }
+
         // User-defined custom commands take precedence over built-in bindings.
         for (self.config.custom_commands[0..self.config.custom_count]) |*cc| {
             if (cc.binding.matches(key)) {
@@ -5010,6 +5025,9 @@ pub const App = struct {
             try self.reportFailure("command failed to start", "");
         }
         self.refreshViews(self.mutation_refresh);
+        // If the staging view is open (e.g. a commit/amend was started from it),
+        // reload its diff so it reflects what's left after the mutation.
+        if (self.staging_active) self.loadStaging(true) catch {};
     }
 
     fn runCustomCommand(self: *App, command: []const u8) !void {
@@ -5785,6 +5803,35 @@ test "esc never quits and walks back one level at a time" {
     try app.handleKey(esc);
     try std.testing.expectEqual(model.Focus.files, app.focus);
     try std.testing.expect(app.running);
+}
+
+test "commit works from the staging view but not the generic diff view" {
+    const allocator = std.testing.allocator;
+    var files = [_]model.FileStatus{.{
+        .path = @constCast("f.txt"),
+        .short_status = .{ 'M', ' ' },
+        .has_staged = true,
+        .has_unstaged = false,
+        .tracked = true,
+        .added = false,
+        .deleted = false,
+        .conflict = false,
+    }};
+    var app = try testApp(allocator, &files);
+    defer deinitTestApp(&app);
+
+    const c = vaxis.Key{ .codepoint = 'c' };
+
+    // Main panel, NOT staging (e.g. inspecting a diff): `c` does nothing.
+    app.focus = .main;
+    app.staging_active = false;
+    try app.handleKey(c);
+    try std.testing.expect(app.mode == .normal);
+
+    // Staging view: `c` opens the commit prompt.
+    app.staging_active = true;
+    try app.handleKey(c);
+    try std.testing.expect(app.mode == .commit_prompt);
 }
 
 test "tab closes the staging view back to the files panel" {

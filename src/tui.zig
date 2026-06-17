@@ -717,6 +717,7 @@ const help_lines = [_][]const u8{
     "  space          stage/unstage line(s); on @@ the whole hunk",
     "  [ / ]          switch unstaged / staged side",
     "  \\              toggle split view (unstaged | staged)",
+    "  c / A          commit / amend the staged changes",
     "",
     "Branches  (tabs: Local / Remotes / Tags / Worktrees / Submodules)",
     "  space          checkout / apply / init-update",
@@ -1569,7 +1570,7 @@ fn drawHints(win: vaxis.Window, row: u16, start_col: u16, hints: []const u8, key
 fn contextHints(app: *const app_mod.App) []const u8 {
     const global = "  ? help  z undo  R refresh  q quit";
     if (app.staging_active) {
-        return "j/k line  v range  space stage/unstage (@@=hunk)  [/] staged/unstaged  \\ split  esc back" ++ global;
+        return "j/k line  v range  space stage/unstage (@@=hunk)  [/] staged/unstaged  \\ split  c commit  esc back" ++ global;
     }
     if (app.commit_files_active and app.focus == .commits) {
         return "j/k file  enter diff  esc back" ++ global;

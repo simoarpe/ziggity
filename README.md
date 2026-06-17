@@ -150,7 +150,8 @@ Useful keys:
 - `enter` on a file: open the staging view (`j`/`k` move by line, `v` toggles a
   range, `space` stages/unstages the line(s) — or the whole hunk on a `@@`
   header, `[`/`]` switch unstaged/staged side, `\` toggles a split view showing
-  unstaged and staged side by side, `esc` goes back)
+  unstaged and staged side by side, `c`/`A` commit/amend the staged changes,
+  `esc` goes back)
 - `space`: stage/unstage file, checkout branch, or apply stash depending on focus
 - `n`: create a new branch from HEAD (branches panel, Local tab)
 - `R`: rename the selected local branch (branches panel; refresh elsewhere)

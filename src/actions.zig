@@ -247,6 +247,9 @@ test "normal key mapping handles global and focused actions" {
     try std.testing.expectEqual(Action.start_file_filter, fromNormalKey(testKey('/'), keymap, .files).?);
     try std.testing.expectEqual(Action.open_status_filter, fromNormalKey(ctrlTestKey('b'), keymap, .files).?);
     try std.testing.expectEqual(Action.start_commit, fromNormalKey(testKey('c'), keymap, .files).?);
+    // `c` is not a generic main-panel binding (commit there is gated to the
+    // staging view, handled in handleKey).
+    try std.testing.expect(fromNormalKey(testKey('c'), keymap, .main) == null);
     try std.testing.expectEqual(Action.stash_pop, fromNormalKey(testKey('g'), keymap, .stash).?);
     try std.testing.expect(fromNormalKey(testKey('g'), keymap, .files) == null);
 
