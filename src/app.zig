@@ -1190,6 +1190,11 @@ pub const App = struct {
         var git = try git_mod.Git.init(allocator, io, env_map);
         errdefer git.deinit();
 
+        // Disable git's interactive credential prompt: in a TUI it would write to
+        // the controlling terminal and block, corrupting the screen. Credential
+        // helpers still work; a missing credential now fails with a clear error.
+        env_map.put("GIT_TERMINAL_PROMPT", "0") catch {};
+
         const cfg = try config_mod.Config.load(allocator, io, env_map, git.root);
         git.branch_sort = cfg.branch_sort_order;
         var app = App{

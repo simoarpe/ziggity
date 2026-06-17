@@ -33,6 +33,7 @@ const AsyncJob = struct {
     io: std.Io,
     loop: *vaxis.Loop(Event),
     root: []const u8,
+    environ: *std.process.Environ.Map,
     op: app_mod.AsyncOp,
     result: ?git_mod.ExecResult = null,
 };
@@ -43,9 +44,13 @@ fn asyncWorker(job: *AsyncJob) void {
     argv.append(async_allocator, "git") catch return postDone(job);
     argv.appendSlice(async_allocator, job.op.argv()) catch return postDone(job);
 
+    // Pass the app's environment (which sets GIT_TERMINAL_PROMPT=0) so git never
+    // tries to prompt for credentials on the controlling terminal — that would
+    // corrupt the TUI and hang. A missing credential becomes a clean error.
     const result = std.process.run(async_allocator, job.io, .{
         .argv = argv.items,
         .cwd = .{ .path = job.root },
+        .environ_map = job.environ,
         .stdout_limit = .limited(16 * 1024 * 1024),
         .stderr_limit = .limited(4 * 1024 * 1024),
     }) catch return postDone(job);
@@ -360,7 +365,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             if (app.async_requested) |op| {
                 app.async_requested = null;
                 app.async_active = true;
-                async_job = .{ .io = io, .loop = &loop, .root = app.git.root, .op = op };
+                async_job = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ, .op = op };
                 async_future = io.concurrent(asyncWorker, .{&async_job}) catch blk: {
                     app.async_active = false;
                     try app.completeAsync(op, null, async_allocator);
