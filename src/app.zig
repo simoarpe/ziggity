@@ -108,7 +108,8 @@ pub const AsyncOp = enum {
             .fetch => "fetching",
             .pull => "pulling",
             .push => "pushing",
-            .push_force, .push_force_plain => "force-pushing",
+            .push_force => "force push with lease",
+            .push_force_plain => "force push",
         };
     }
 
@@ -2357,8 +2358,8 @@ pub const App = struct {
                 }
                 break :blk "Undo the last operation? Resets HEAD.";
             },
-            .force_push => "Push rejected: the remote has commits you don't. Force-push (--force-with-lease)?",
-            .force_push_plain => "Safe force push (--force-with-lease) was rejected. Force-push anyway (--force)?",
+            .force_push => "Push rejected: the remote has commits you don't have. It will be force pushed WITH LEASE (--force-with-lease). Continue?",
+            .force_push_plain => "Force push with lease (--force-with-lease) was rejected. It will be force pushed (--force). Continue?",
         };
     }
 
@@ -4413,9 +4414,9 @@ pub const App = struct {
                 // option (confirmed first): push → --force-with-lease → --force.
                 // A rejected plain --force just reports the error (end of chain).
                 if (pushNeedsForce(raw) and op == .push) {
-                    try self.requestConfirmation(.force_push, "push rejected — force-push? (y/n)", .{});
+                    try self.requestConfirmation(.force_push, "push rejected — force push with lease? (y/n)", .{});
                 } else if (pushNeedsForce(raw) and op == .push_force) {
-                    try self.requestConfirmation(.force_push_plain, "force-with-lease rejected — force-push anyway? (y/n)", .{});
+                    try self.requestConfirmation(.force_push_plain, "force push with lease rejected — force push? (y/n)", .{});
                 } else {
                     var label_buf: [64]u8 = undefined;
                     const summary = std.fmt.bufPrint(&label_buf, "{s} failed", .{op.label()}) catch "command failed";
