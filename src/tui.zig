@@ -684,6 +684,7 @@ const help_lines = [_][]const u8{
     "  o              open the selected commit / branch on its remote host",
     "  W              diff mode: mark a ref, then select another to compare",
     "  f / p / P      fetch / pull / push (async)",
+    "  mouse drag     select text in the Diff panel (auto-copies on release)",
     "",
     "Files",
     "  space          stage/unstage (whole dir in tree view)",
@@ -1411,13 +1412,15 @@ fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
         if (lines.next() == null) return;
     }
 
+    const sel = app.diffSelectionRange();
+
     var row: u16 = 0;
     while (row < win.height) : (row += 1) {
         const line = lines.next() orelse break;
+        const abs_line = app.main_scroll + row;
         if (app.staging_active) {
             // The staging diff is plain (--no-color) for patch building; colorize
             // it per-line and highlight the selected line/range.
-            const abs_line = app.main_scroll + row;
             var style = diffStyle(line);
             if (abs_line >= hl_start and abs_line < hl_end) {
                 style.bg = .{ .index = 8 };
@@ -1425,8 +1428,17 @@ fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
             }
             print(win, row, 0, line, style);
         } else {
-            // Preview text carries git's own ANSI colors (--color=always).
-            printAnsi(win, row, line, styles().normal);
+            // Preview text carries git's own ANSI colors (--color=always). The
+            // mouse text selection (if any) highlights columns on this line.
+            var sel_lo: u16 = 0;
+            var sel_hi: u16 = 0;
+            if (sel) |s| {
+                if (abs_line >= s.sl and abs_line <= s.el) {
+                    sel_lo = if (abs_line == s.sl) @intCast(@min(s.sc, win.width)) else 0;
+                    sel_hi = if (abs_line == s.el) @intCast(@min(s.ec, win.width)) else win.width;
+                }
+            }
+            printAnsi(win, row, line, styles().normal, sel_lo, sel_hi);
         }
     }
 }
@@ -1675,12 +1687,21 @@ fn applySgr(style: *vaxis.Style, base: vaxis.Style, params: []const u8) void {
 /// Render one line into `win` at `row`, interpreting ANSI SGR escape sequences
 /// (git's `--color=always` output) as styles instead of printing them as raw
 /// bytes. Non-SGR CSI sequences are skipped. `base` is the default/reset style.
-/// Like `printSpan`, one cell is written per byte (ASCII-oriented).
-fn printAnsi(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style) void {
+/// Like `printSpan`, one cell is written per byte (ASCII-oriented). Cells whose
+/// column falls in `[sel_lo, sel_hi)` get the selection background (mouse text
+/// selection); pass an empty range (0,0) for none.
+fn printAnsi(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, sel_lo: u16, sel_hi: u16) void {
     if (row >= win.height) return;
     var style = base;
     var out_col: u16 = 0;
     var i: usize = 0;
+    const writeAt = struct {
+        fn f(w: vaxis.Window, c: u16, r: u16, g: []const u8, s: vaxis.Style, lo: u16, hi: u16) void {
+            var cell_style = s;
+            if (c >= lo and c < hi) cell_style.bg = .{ .index = ui_theme.selected_bg };
+            w.writeCell(c, r, .{ .char = .{ .grapheme = g, .width = 1 }, .style = cell_style });
+        }
+    }.f;
     while (i < line.len and out_col < win.width) {
         const byte = line[i];
         if (byte == 0x1b) {
@@ -1703,13 +1724,13 @@ fn printAnsi(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style) v
         if (byte == '\t') {
             var spaces: u8 = 0;
             while (spaces < 4 and out_col < win.width) : (spaces += 1) {
-                win.writeCell(out_col, row, .{ .char = .{ .grapheme = " ", .width = 1 }, .style = style });
+                writeAt(win, out_col, row, " ", style, sel_lo, sel_hi);
                 out_col += 1;
             }
             i += 1;
             continue;
         }
-        win.writeCell(out_col, row, .{ .char = .{ .grapheme = glyph(byte), .width = 1 }, .style = style });
+        writeAt(win, out_col, row, glyph(byte), style, sel_lo, sel_hi);
         out_col += 1;
         i += 1;
     }

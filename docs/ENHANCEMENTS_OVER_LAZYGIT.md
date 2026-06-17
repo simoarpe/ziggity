@@ -55,3 +55,34 @@ skip_confirm.force_push_plain = false  # auto --force when force-with-lease is r
 
 Implemented in `src/app.zig` (`AsyncOp.push_force` / `push_force_plain`,
 `pushNeedsForce`, `completeAsync`) and `src/git.zig`.
+
+## Mouse text selection in the Diff panel
+
+**What lazygit does:** it has no in-app text selection in the diff view. To copy
+diff text you fall back to the terminal's own selection (often Shift-drag), which
+is terminal-dependent, spans the whole screen rather than just the diff, and
+doesn't auto-copy.
+
+**What Ziggity does:** character-precise text selection built into the Diff panel
+itself. Click-drag over the diff to select an exact span; the selection is
+highlighted as you drag, and on release the text is copied straight to the system
+clipboard (OSC 52) — no extra keypress.
+
+- Works for **whatever the diff panel is showing** — a file diff, the branch
+  commit graph, a commit, or a stash — regardless of which left panel is
+  selected.
+- The copied text is **clean**: git's ANSI color codes are stripped, and tabs are
+  preserved so copied code keeps its indentation. Multi-line selections join with
+  newlines.
+- Dragging **does not steal focus** from the left panel (a plain click still
+  focuses the diff, as before), so your navigation context is kept.
+- The selection clears automatically when the diff content changes, and the
+  feature is disabled in the hunk/line staging view (which has its own keyboard
+  selection).
+
+Caveat: copying relies on the terminal honoring OSC 52 (the same mechanism as
+Ziggity's other copy actions).
+
+Implemented in `src/app.zig` (`handleMouse` press/drag/release, `diffPointAt`,
+`diffSelectionRange`, `copyDiffSelection`, `appendDiffColumns`) and `src/tui.zig`
+(`printAnsi` selection highlight in `drawDiff`).

@@ -878,6 +878,38 @@ fn nextCodepoint(s: []const u8, i: usize) usize {
     return j;
 }
 
+/// Append the visible columns `[lo, hi)` of one diff line to `out`, stripping
+/// ANSI escape sequences and counting a tab as 4 columns (matching how the
+/// renderer draws it) while preserving the tab byte in the copied text.
+fn appendDiffColumns(out: *std.ArrayList(u8), allocator: std.mem.Allocator, line: []const u8, lo: usize, hi: usize) !void {
+    var i: usize = 0;
+    var col: usize = 0;
+    while (i < line.len and col < hi) {
+        const b = line[i];
+        if (b == 0x1b) { // skip a CSI escape sequence (ESC [ ... final)
+            if (i + 1 < line.len and line[i + 1] == '[') {
+                var j = i + 2;
+                while (j < line.len and !(line[j] >= 0x40 and line[j] <= 0x7e)) j += 1;
+                i = if (j < line.len) j + 1 else line.len;
+            } else i += 1;
+            continue;
+        }
+        if (b == '\r') {
+            i += 1;
+            continue;
+        }
+        if (b == '\t') {
+            if (col >= lo and col < hi) try out.append(allocator, '\t');
+            col += 4;
+            i += 1;
+            continue;
+        }
+        if (col >= lo and col < hi) try out.append(allocator, b);
+        col += 1;
+        i += 1;
+    }
+}
+
 /// Number of displayed lines in `text` (newline-separated), ignoring a single
 /// trailing newline so it matches what the diff renderer actually draws.
 fn diffLineCount(text: []const u8) usize {
@@ -1001,6 +1033,16 @@ pub const App = struct {
     /// Panel hit-boxes captured by the renderer for mouse handling.
     panel_rects: [6]PanelRect = undefined,
     panel_rect_count: usize = 0,
+    // Character-precise mouse text selection in the Diff panel. Coordinates are
+    // into the rendered diff (`self.diff`): `line` is an absolute line index,
+    // `col` a visible column. `anchor` is where the drag began, `head` the
+    // current end; `dragged` distinguishes a real drag from a plain click.
+    diff_sel_active: bool = false,
+    diff_sel_dragged: bool = false,
+    diff_sel_anchor_line: usize = 0,
+    diff_sel_anchor_col: usize = 0,
+    diff_sel_head_line: usize = 0,
+    diff_sel_head_col: usize = 0,
     branches_tab: BranchesTab = .local,
     commits_tab: CommitsTab = .commits,
     main_scroll: usize = 0,
@@ -1610,8 +1652,58 @@ pub const App = struct {
     /// Returns true if the event changed state and a re-render is warranted.
     /// Motion/drag events (which flood with any-motion tracking) return false.
     pub fn handleMouse(self: *App, mouse: vaxis.Mouse) !bool {
-        if (mouse.type != .press) return false;
         if (self.mode != .normal) return false;
+
+        // Character-precise text selection in the Diff panel: left-drag selects,
+        // release copies to the clipboard. Works for whatever the diff currently
+        // shows (file/branch/commit/stash diff), but not in the staging view,
+        // which has its own keyboard line selection.
+        if (!self.staging_active) {
+            switch (mouse.type) {
+                .press => if (mouse.button == .left and mouse.col >= 0 and mouse.row >= 0) {
+                    if (self.mainRect()) |r| {
+                        if (r.contains(@intCast(mouse.col), @intCast(mouse.row)) and self.diff.len > 0) {
+                            const pt = self.diffPointAt(r, @intCast(mouse.col), @intCast(mouse.row));
+                            self.diff_sel_active = true;
+                            self.diff_sel_dragged = false;
+                            self.diff_sel_anchor_line = pt.line;
+                            self.diff_sel_anchor_col = pt.col;
+                            self.diff_sel_head_line = pt.line;
+                            self.diff_sel_head_col = pt.col;
+                            // Don't change focus here: a drag selects text while
+                            // keeping the left panel's context. A plain click
+                            // (no drag) focuses the diff on release, as before.
+                            return true;
+                        }
+                    }
+                },
+                .drag => if (self.diff_sel_active) {
+                    if (self.mainRect()) |r| {
+                        const c: u16 = if (mouse.col < 0) 0 else @intCast(mouse.col);
+                        const rw: u16 = if (mouse.row < 0) 0 else @intCast(mouse.row);
+                        const pt = self.diffPointAt(r, c, rw);
+                        self.diff_sel_head_line = pt.line;
+                        self.diff_sel_head_col = pt.col;
+                        self.diff_sel_dragged = true;
+                    }
+                    return true;
+                },
+                .release => if (self.diff_sel_active) {
+                    if (self.diff_sel_dragged) {
+                        try self.copyDiffSelection(); // drag: copy, keep focus put
+                    } else {
+                        // Plain click (no drag): focus the diff, clear selection.
+                        self.diff_sel_active = false;
+                        try self.focusPanel(.main);
+                    }
+                    self.diff_sel_dragged = false;
+                    return true;
+                },
+                else => {},
+            }
+        }
+
+        if (mouse.type != .press) return false;
         if (mouse.col < 0 or mouse.row < 0) return false;
         const rect = self.panelAt(@intCast(mouse.col), @intCast(mouse.row)) orelse return false;
         switch (mouse.button) {
@@ -1636,6 +1728,83 @@ pub const App = struct {
             if (rect.contains(col, row)) return rect;
         }
         return null;
+    }
+
+    fn mainRect(self: *const App) ?PanelRect {
+        for (self.panel_rects[0..self.panel_rect_count]) |rect| {
+            if (rect.focus == .main) return rect;
+        }
+        return null;
+    }
+
+    const DiffPoint = struct { line: usize, col: usize };
+
+    /// Map an absolute screen cell to a position in the diff content: the line
+    /// index (accounting for the scroll offset) and the visible column, both
+    /// clamped to the panel's inner content area.
+    fn diffPointAt(self: *const App, r: PanelRect, col: u16, row: u16) DiffPoint {
+        const content_top = r.y + 1;
+        const content_left = r.x + 1;
+        const content_h = r.h -| 2;
+        const content_w = r.w -| 2;
+        const rel_row: u16 = if (row <= content_top)
+            0
+        else
+            @min(row - content_top, content_h -| 1);
+        const dcol: usize = if (col <= content_left) 0 else @min(col - content_left, content_w);
+        return .{ .line = self.main_scroll + rel_row, .col = dcol };
+    }
+
+    /// Normalized (start <= end) diff selection, with the end line clamped to the
+    /// content. Null when there is no active selection.
+    pub fn diffSelectionRange(self: *const App) ?struct { sl: usize, sc: usize, el: usize, ec: usize } {
+        if (!self.diff_sel_active) return null;
+        var sl = self.diff_sel_anchor_line;
+        var sc = self.diff_sel_anchor_col;
+        var el = self.diff_sel_head_line;
+        var ec = self.diff_sel_head_col;
+        if (el < sl or (el == sl and ec < sc)) {
+            std.mem.swap(usize, &sl, &el);
+            std.mem.swap(usize, &sc, &ec);
+        }
+        const total = diffLineCount(self.diff);
+        if (total == 0 or sl >= total) return null;
+        if (el >= total) {
+            el = total - 1;
+            ec = std.math.maxInt(usize); // to end of the last line
+        }
+        return .{ .sl = sl, .sc = sc, .el = el, .ec = ec };
+    }
+
+    /// Extract the selected diff text (ANSI colors stripped, tabs preserved) and
+    /// queue it for the system clipboard.
+    fn copyDiffSelection(self: *App) !void {
+        const sel = self.diffSelectionRange() orelse {
+            self.diff_sel_active = false;
+            return;
+        };
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(self.allocator);
+
+        var lines = std.mem.splitScalar(u8, self.diff, '\n');
+        var idx: usize = 0;
+        while (lines.next()) |line| : (idx += 1) {
+            if (idx < sel.sl) continue;
+            if (idx > sel.el) break;
+            const lo = if (idx == sel.sl) sel.sc else 0;
+            const hi = if (idx == sel.el) sel.ec else std.math.maxInt(usize);
+            try appendDiffColumns(&out, self.allocator, line, lo, hi);
+            if (idx != sel.el) try out.append(self.allocator, '\n');
+        }
+
+        if (out.items.len == 0) {
+            try self.setMessage("nothing selected to copy", .{});
+            return;
+        }
+        if (self.clipboard_request) |old| self.allocator.free(old);
+        self.clipboard_request = try self.allocator.dupe(u8, out.items);
+        const line_count = sel.el - sel.sl + 1;
+        try self.setMessage("copied {d} line(s) to clipboard", .{line_count});
     }
 
     fn focusPanel(self: *App, focus: model.Focus) !void {
@@ -4246,6 +4415,10 @@ pub const App = struct {
     /// started). Pass "" when the current preview needs no git command.
     fn setDesiredKey(self: *App, key: []const u8) void {
         if (!std.mem.eql(u8, key, self.preview_desired_key)) {
+            // The diff content is about to change — drop any text selection so a
+            // stale highlight doesn't linger over different content. Same-content
+            // refreshes keep the same key and leave the selection alone.
+            self.diff_sel_active = false;
             if (self.allocator.dupe(u8, key)) |dup| {
                 self.allocator.free(self.preview_desired_key);
                 self.preview_desired_key = dup;
@@ -4960,6 +5133,52 @@ test "help dialog scrolling clamps at the bottom and resumes up immediately" {
     const up = vaxis.Key{ .codepoint = 'k' };
     try app.handleKey(up);
     try std.testing.expectEqual(@as(usize, 1), app.help_scroll);
+}
+
+test "appendDiffColumns strips ANSI, respects columns, preserves tabs" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+
+    // ANSI color codes are stripped; the visible text remains.
+    try appendDiffColumns(&out, a, "\x1b[32m+added\x1b[m", 0, std.math.maxInt(usize));
+    try std.testing.expectEqualStrings("+added", out.items);
+
+    // A column slice picks exactly the visible columns.
+    out.clearRetainingCapacity();
+    try appendDiffColumns(&out, a, "hello world", 6, 11);
+    try std.testing.expectEqualStrings("world", out.items);
+
+    // A tab spans 4 columns but is kept as a tab in the copied text.
+    out.clearRetainingCapacity();
+    try appendDiffColumns(&out, a, "\tcode", 0, 8);
+    try std.testing.expectEqualStrings("\tcode", out.items);
+}
+
+test "diff selection copies the highlighted span across lines" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    allocator.free(app.diff);
+    app.diff = try allocator.dupe(u8, "line one\nline two\nline three\n");
+    app.diff_sel_active = true;
+    app.diff_sel_anchor_line = 0;
+    app.diff_sel_anchor_col = 5; // "one"
+    app.diff_sel_head_line = 1;
+    app.diff_sel_head_col = 8; // through "line two"
+    try app.copyDiffSelection();
+    try std.testing.expectEqualStrings("one\nline two", app.clipboard_request.?);
+
+    // Reversed drag (head before anchor) selects the same span.
+    app.diff_sel_active = true;
+    app.diff_sel_anchor_line = 1;
+    app.diff_sel_anchor_col = 8;
+    app.diff_sel_head_line = 0;
+    app.diff_sel_head_col = 5;
+    try app.copyDiffSelection();
+    try std.testing.expectEqualStrings("one\nline two", app.clipboard_request.?);
 }
 
 test "diffLineCount ignores a single trailing newline" {
