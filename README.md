@@ -149,7 +149,8 @@ Useful keys:
   `enter` to scroll its diff, `esc` to go back)
 - `enter` on a file: open the staging view (`j`/`k` move by line, `v` toggles a
   range, `space` stages/unstages the line(s) — or the whole hunk on a `@@`
-  header, `[`/`]` switch unstaged/staged side, `esc` goes back)
+  header, `[`/`]` switch unstaged/staged side, `\` toggles a split view showing
+  unstaged and staged side by side, `esc` goes back)
 - `space`: stage/unstage file, checkout branch, or apply stash depending on focus
 - `n`: create a new branch from HEAD (branches panel, Local tab)
 - `R`: rename the selected local branch (branches panel; refresh elsewhere)
@@ -199,6 +200,7 @@ diff_context = 3
 # unless it's focused. Enable the "accordion" to grow the focused list panel.
 expand_focused_side_panel = false  # focused list panel expands, others shrink
 expanded_side_panel_weight = 2     # how much bigger the focused panel gets
+staging_split = false              # default staging layout: false=single, true=split (\ toggles)
 
 # Action feedback (lazygit-style). Default: actions succeed silently with a
 # one-line summary in the bottom bar, and only failures pop a dialog.

@@ -1034,6 +1034,11 @@ pub const App = struct {
     staging: ?diff_mod.ParsedDiff = null,
     staging_cursor: usize = 0,
     staging_anchor: ?usize = null,
+    // Split staging view: when on, the unstaged and staged diffs show side by
+    // side. The active side (`staging_staged_view`) is interactive; the other is
+    // a read-only preview. Toggled by a command; its default comes from config.
+    staging_split: bool = false,
+    staging_other_diff: []u8 = &.{},
     main_view_height: u16 = 0,
     /// Panel hit-boxes captured by the renderer for mouse handling.
     panel_rects: [6]PanelRect = undefined,
@@ -1191,6 +1196,9 @@ pub const App = struct {
             .allocator = allocator,
             .git = git,
             .config = cfg,
+            // Seed the staging layout from config; thereafter the `\` toggle
+            // updates it and the last-chosen mode is reused on the next open.
+            .staging_split = cfg.staging_split,
         };
         app.collapsed_dirs = std.BufSet.init(allocator);
         errdefer app.deinit();
@@ -1209,6 +1217,7 @@ pub const App = struct {
         self.collapsed_dirs.deinit();
         if (self.staging) |*parsed| parsed.deinit(self.allocator);
         self.allocator.free(self.staging_diff);
+        self.allocator.free(self.staging_other_diff);
         self.allocator.free(self.staging_path);
         self.allocator.free(self.diff);
         self.allocator.free(self.message);
@@ -1617,6 +1626,8 @@ pub const App = struct {
                     try self.enterMain();
                 }
             },
+            // Toggle the staging view between single and split layouts.
+            .toggle_staging_split => if (self.staging_active) try self.toggleStagingSplit(),
             .select => {
                 if (self.staging_active) {
                     try self.applyStagingSelection();
@@ -2399,6 +2410,8 @@ pub const App = struct {
         self.main_origin = .files;
         self.focus = .main;
         self.staging_active = true;
+        // staging_split is not reset here: it keeps the last layout chosen with
+        // the `\` toggle (initialized from config at startup).
         try self.loadStaging(false);
         try self.setMessage("staging {s}", .{file.path});
     }
@@ -2416,6 +2429,15 @@ pub const App = struct {
         self.staging_diff = self.git.rawFileDiff(self.staging_path, self.staging_staged_view, self.config.diff_context) catch
             try self.allocator.dupe(u8, "");
         self.staging = try diff_mod.parse(self.allocator, self.staging_diff);
+
+        // In split view, also load the other side's diff for the read-only pane.
+        self.allocator.free(self.staging_other_diff);
+        self.staging_other_diff = &.{};
+        if (self.staging_split) {
+            self.staging_other_diff = self.git.rawFileDiff(self.staging_path, !self.staging_staged_view, self.config.diff_context) catch
+                try self.allocator.dupe(u8, "");
+        }
+
         self.staging_anchor = null;
         if (keep_cursor) {
             self.staging_cursor = @min(@max(self.staging_cursor, self.stagingFirstLine()), self.stagingLastLine());
@@ -2429,6 +2451,12 @@ pub const App = struct {
         self.staging_staged_view = !self.staging_staged_view;
         try self.loadStaging(false);
         try self.setMessage("{s} changes", .{if (self.staging_staged_view) "staged" else "unstaged"});
+    }
+
+    fn toggleStagingSplit(self: *App) !void {
+        self.staging_split = !self.staging_split;
+        try self.loadStaging(true); // (re)load or drop the other side's diff
+        try self.setMessage("{s} staging view", .{if (self.staging_split) "split" else "single"});
     }
 
     fn toggleStagingRange(self: *App) void {
@@ -2546,6 +2574,8 @@ pub const App = struct {
         self.staging = null;
         self.allocator.free(self.staging_diff);
         self.staging_diff = &.{};
+        self.allocator.free(self.staging_other_diff);
+        self.staging_other_diff = &.{};
         self.allocator.free(self.staging_path);
         self.staging_path = &.{};
         self.staging_active = false;

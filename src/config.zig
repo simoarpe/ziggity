@@ -38,6 +38,7 @@ pub const KeyMap = struct {
     stage_all: Binding = .{ .codepoint = 'a' },
     file_filter: Binding = .{ .codepoint = '/' },
     toggle_tree: Binding = .{ .codepoint = '`' },
+    staging_split: Binding = .{ .codepoint = '\\' },
     open_status_filter: Binding = .{ .codepoint = 'b', .ctrl = true },
     discard: Binding = .{ .codepoint = 'd' },
     discard_all: Binding = .{ .codepoint = 'D' },
@@ -155,6 +156,10 @@ pub const Config = struct {
     /// `expanded_side_panel_weight` while the others shrink. Default off.
     expand_focused_side_panel: bool = false,
     expanded_side_panel_weight: u8 = 2,
+    /// Default staging-view layout: `false` (single pane, the default) or `true`
+    /// (split — unstaged and staged side by side). Toggle at runtime with the
+    /// `staging_split` key.
+    staging_split: bool = false,
     result_dialog: ResultDialog = .on_error,
     command_output: CommandOutput = .show,
     /// Local Branches panel ordering: `date` (default), `recency`, or `alphabetical`.
@@ -219,6 +224,10 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "expand_focused_side_panel")) {
             if (parseBool(value)) |on| self.expand_focused_side_panel = on;
+            return;
+        }
+        if (std.mem.eql(u8, key, "staging_split")) {
+            if (parseBool(value)) |on| self.staging_split = on;
             return;
         }
         if (std.mem.eql(u8, key, "expanded_side_panel_weight")) {
@@ -346,6 +355,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     try std.testing.expectEqual(ResultDialog.on_error, cfg.result_dialog);
     try std.testing.expectEqual(CommandOutput.show, cfg.command_output);
     try std.testing.expectEqual(model.BranchSortOrder.date, cfg.branch_sort_order);
+    try std.testing.expect(!cfg.staging_split); // single by default
     try std.testing.expect(!cfg.skip_confirm.discard_all);
 
     cfg.applyBytes(
@@ -358,10 +368,12 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
         \\branch_sort_order = recency
         \\expand_focused_side_panel = true
         \\expanded_side_panel_weight = 3
+        \\staging_split = true
     );
     try std.testing.expectEqual(ResultDialog.always, cfg.result_dialog); // valid set; bad value ignored
     try std.testing.expectEqual(CommandOutput.silent, cfg.command_output);
     try std.testing.expectEqual(model.BranchSortOrder.recency, cfg.branch_sort_order);
+    try std.testing.expect(cfg.staging_split);
     try std.testing.expect(cfg.skip_confirm.discard_all);
     try std.testing.expect(cfg.skip_confirm.undo);
     try std.testing.expect(!cfg.skip_confirm.merge_branch); // untouched

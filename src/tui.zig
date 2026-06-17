@@ -655,9 +655,14 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         "Log"
     else
         "Diff";
-    const main = panel(root, side_w, 0, main_w, body_h, main_title, app.focus == .main);
-    app.main_view_height = main.height;
-    drawDiff(main, app);
+    if (app.staging_active and app.staging_split) {
+        // Split staging view: two panes (Unstaged | Staged) fill the main area.
+        drawStagingSplit(root, app, side_w, 0, main_w, body_h);
+    } else {
+        const main = panel(root, side_w, 0, main_w, body_h, main_title, app.focus == .main);
+        app.main_view_height = main.height;
+        drawDiff(main, app);
+    }
     // Indent the footer by one column so it lines up with the panel content
     // (just inside the left `│` border) and clears the terminal's rounded
     // bottom-left corner, which would otherwise clip the first character.
@@ -711,6 +716,7 @@ const help_lines = [_][]const u8{
     "  v              toggle range selection",
     "  space          stage/unstage line(s); on @@ the whole hunk",
     "  [ / ]          switch unstaged / staged side",
+    "  \\              toggle split view (unstaged | staged)",
     "",
     "Branches  (tabs: Local / Remotes / Tags / Worktrees / Submodules)",
     "  space          checkout / apply / init-update",
@@ -1400,21 +1406,11 @@ fn drawStash(win: vaxis.Window, app: *const app_mod.App) void {
 }
 
 fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
-    const text = if (app.staging_active) app.staging_diff else app.diff;
-    if (app.staging_active and text.len == 0) {
-        print(win, 0, 0, "No changes on this side - press [ or ] to switch", styles().muted);
-        return;
-    }
-
-    // The selected line (or v-range) is highlighted while staging.
-    var hl_start: usize = 0;
-    var hl_end: usize = 0;
     if (app.staging_active) {
-        const anchor = app.staging_anchor orelse app.staging_cursor;
-        hl_start = @min(anchor, app.staging_cursor);
-        hl_end = @max(anchor, app.staging_cursor) + 1;
+        return drawStagingPane(win, app, app.staging_diff, true, "No changes on this side - press [ or ] to switch");
     }
 
+    const text = app.diff;
     var lines = std.mem.splitScalar(u8, text, '\n');
     var skipped: usize = 0;
     while (skipped < app.main_scroll) : (skipped += 1) {
@@ -1427,29 +1423,69 @@ fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
     while (row < win.height) : (row += 1) {
         const line = lines.next() orelse break;
         const abs_line = app.main_scroll + row;
-        if (app.staging_active) {
-            // The staging diff is plain (--no-color) for patch building; colorize
-            // it per-line and highlight the selected line/range.
-            var style = diffStyle(line);
-            if (abs_line >= hl_start and abs_line < hl_end) {
-                style.bg = .{ .index = 8 };
-                fillRow(win, row, style);
+        // Preview text carries git's own ANSI colors (--color=always). The mouse
+        // text selection (if any) highlights columns on this line.
+        var sel_lo: u16 = 0;
+        var sel_hi: u16 = 0;
+        if (sel) |s| {
+            if (abs_line >= s.sl and abs_line <= s.el) {
+                sel_lo = if (abs_line == s.sl) @intCast(@min(s.sc, win.width)) else 0;
+                sel_hi = if (abs_line == s.el) @intCast(@min(s.ec, win.width)) else win.width;
             }
-            print(win, row, 0, line, style);
-        } else {
-            // Preview text carries git's own ANSI colors (--color=always). The
-            // mouse text selection (if any) highlights columns on this line.
-            var sel_lo: u16 = 0;
-            var sel_hi: u16 = 0;
-            if (sel) |s| {
-                if (abs_line >= s.sl and abs_line <= s.el) {
-                    sel_lo = if (abs_line == s.sl) @intCast(@min(s.sc, win.width)) else 0;
-                    sel_hi = if (abs_line == s.el) @intCast(@min(s.ec, win.width)) else win.width;
-                }
-            }
-            printAnsi(win, row, line, styles().normal, sel_lo, sel_hi);
         }
+        printAnsi(win, row, line, styles().normal, sel_lo, sel_hi);
     }
+}
+
+/// Render one side of the staging diff. The plain (--no-color) text is colorized
+/// per line; the `active` pane shows the line/range highlight and scrolls with
+/// `main_scroll`, while an inactive pane (the read-only side in split view)
+/// renders from the top with no highlight.
+fn drawStagingPane(win: vaxis.Window, app: *const app_mod.App, text: []const u8, active: bool, empty_msg: []const u8) void {
+    if (text.len == 0) {
+        print(win, 0, 0, empty_msg, styles().muted);
+        return;
+    }
+    var hl_start: usize = 0;
+    var hl_end: usize = 0;
+    if (active) {
+        const anchor = app.staging_anchor orelse app.staging_cursor;
+        hl_start = @min(anchor, app.staging_cursor);
+        hl_end = @max(anchor, app.staging_cursor) + 1;
+    }
+    const scroll: usize = if (active) app.main_scroll else 0;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var skipped: usize = 0;
+    while (skipped < scroll) : (skipped += 1) {
+        if (lines.next() == null) return;
+    }
+    var row: u16 = 0;
+    while (row < win.height) : (row += 1) {
+        const line = lines.next() orelse break;
+        const abs_line = scroll + row;
+        var style = diffStyle(line);
+        if (active and abs_line >= hl_start and abs_line < hl_end) {
+            style.bg = .{ .index = 8 };
+            fillRow(win, row, style);
+        }
+        print(win, row, 0, line, style);
+    }
+}
+
+/// Split staging view: Unstaged on the left, Staged on the right, with the
+/// active side bordered as focused. The active side is `app.staging_diff`; the
+/// other is the read-only `app.staging_other_diff`.
+fn drawStagingSplit(root: vaxis.Window, app: *app_mod.App, x: u16, y: u16, w: u16, h: u16) void {
+    const left_w = w / 2;
+    const unstaged_active = !app.staging_staged_view;
+    const unstaged_text = if (unstaged_active) app.staging_diff else app.staging_other_diff;
+    const staged_text = if (unstaged_active) app.staging_other_diff else app.staging_diff;
+    const focused = app.focus == .main;
+    const left = panel(root, x, y, left_w, h, "Unstaged", focused and unstaged_active);
+    const right = panel(root, x + left_w, y, w - left_w, h, "Staged", focused and !unstaged_active);
+    app.main_view_height = if (unstaged_active) left.height else right.height;
+    drawStagingPane(left, app, unstaged_text, unstaged_active, "No unstaged changes");
+    drawStagingPane(right, app, staged_text, !unstaged_active, "No staged changes");
 }
 
 fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
@@ -1531,7 +1567,7 @@ fn drawHints(win: vaxis.Window, row: u16, start_col: u16, hints: []const u8, key
 fn contextHints(app: *const app_mod.App) []const u8 {
     const global = "  ? help  z undo  R refresh  q quit";
     if (app.staging_active) {
-        return "j/k line  v range  space stage/unstage (@@=hunk)  [/] staged/unstaged  esc back" ++ global;
+        return "j/k line  v range  space stage/unstage (@@=hunk)  [/] staged/unstaged  \\ split  esc back" ++ global;
     }
     if (app.commit_files_active and app.focus == .commits) {
         return "j/k file  enter diff  esc back" ++ global;

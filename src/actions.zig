@@ -12,6 +12,7 @@ pub const Action = enum {
     focus_left,
     focus_right,
     toggle_main,
+    toggle_staging_split,
     select,
     stage_all,
     discard_selected,
@@ -89,6 +90,7 @@ pub fn isMutating(self: Action) bool {
         .focus_left,
         .focus_right,
         .toggle_main,
+        .toggle_staging_split,
         .focus_status,
         .focus_files,
         .focus_branches,
@@ -163,6 +165,9 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     if (key.matches(vaxis.Key.tab, .{})) return .toggle_main;
     if (keymap.left.matches(key) or key.matches(vaxis.Key.left, .{})) return .focus_left;
     if (keymap.right.matches(key) or key.matches(vaxis.Key.right, .{})) return .focus_right;
+
+    // Toggle the staging view's single/split layout (only acts in that view).
+    if (keymap.staging_split.matches(key)) return .toggle_staging_split;
 
     // `select` (space) is valid in every focus — the handler branches by focus
     // and staging state (stage a file, checkout a branch, apply a stash, stage
