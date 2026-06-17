@@ -26,7 +26,7 @@ Each iteration ends with `zig fmt`, `zig build`, `zig build test`, and a commit.
 - Make **Status** a focusable bordered panel.
 - Number side panels lazygit-style: `1`=Status `2`=Files `3`=Branches
   `4`=Commits `5`=Stash.
-- `h`/`l`/`←`/`→`/`<tab>`/`<backtab>` cycle the **side** panels only.
+- `h`/`l`/`←`/`→` cycle the **side** panels; `<tab>` toggles the Diff panel.
 - `<enter>` on a side-panel item focuses the **main** panel (scroll/inspect);
   `<esc>`/`h` returns to the originating side panel.
 - Branches/stash: `<space>` performs the primary action (checkout/apply),

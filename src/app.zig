@@ -1597,8 +1597,19 @@ pub const App = struct {
                 }
             },
             .focus_left => if (self.staging_active) try self.closeStaging() else try self.focusPrevious(),
-            // Tab / l / right no longer switches the staging side ([ ] does that now).
             .focus_right => if (!self.staging_active) try self.focusNext(),
+            // Tab toggles focus into the Diff (main) panel and back to the side
+            // panel it came from. In the staging view it closes it (back to the
+            // Files panel); `[`/`]` switch the staged/unstaged side there.
+            .toggle_main => {
+                if (self.staging_active) {
+                    try self.closeStaging();
+                } else if (self.focus == .main) {
+                    try self.leaveMain();
+                } else {
+                    try self.enterMain();
+                }
+            },
             .select => {
                 if (self.staging_active) {
                     try self.applyStagingSelection();
@@ -5691,6 +5702,37 @@ test "filter history dedups consecutive entries and ignores empties" {
     try std.testing.expectEqual(@as(usize, 2), app.filter_history.items.len);
     try std.testing.expectEqualStrings("app", app.filter_history.items[0]);
     try std.testing.expectEqualStrings("zig", app.filter_history.items[1]);
+}
+
+test "tab toggles focus into the diff panel and back" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.focus = .branches;
+    const tab = vaxis.Key{ .codepoint = vaxis.Key.tab };
+
+    try app.handleKey(tab); // into the diff panel
+    try std.testing.expectEqual(model.Focus.main, app.focus);
+    try std.testing.expectEqual(model.Focus.branches, app.main_origin);
+
+    try app.handleKey(tab); // back to the side panel it came from
+    try std.testing.expectEqual(model.Focus.branches, app.focus);
+}
+
+test "tab closes the staging view back to the files panel" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.staging_active = true;
+    app.focus = .main;
+    const tab = vaxis.Key{ .codepoint = vaxis.Key.tab };
+    try app.handleKey(tab);
+    try std.testing.expect(!app.staging_active);
+    try std.testing.expectEqual(model.Focus.files, app.focus);
 }
 
 test "list view scrolls with the wheel but follows the selection on move" {

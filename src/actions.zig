@@ -11,6 +11,7 @@ pub const Action = enum {
     move_down,
     focus_left,
     focus_right,
+    toggle_main,
     select,
     stage_all,
     discard_selected,
@@ -87,6 +88,7 @@ pub fn isMutating(self: Action) bool {
         .move_down,
         .focus_left,
         .focus_right,
+        .toggle_main,
         .focus_status,
         .focus_files,
         .focus_branches,
@@ -156,9 +158,11 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
 
     if (keymap.up.matches(key) or key.matches(vaxis.Key.up, .{})) return .move_up;
     if (keymap.down.matches(key) or key.matches(vaxis.Key.down, .{})) return .move_down;
-    if (key.matches(vaxis.Key.tab, .{ .shift = true })) return .focus_left;
+    // Tab toggles focus into the Diff (main) panel and back; the h/l/arrow keys
+    // cycle the side panels.
+    if (key.matches(vaxis.Key.tab, .{})) return .toggle_main;
     if (keymap.left.matches(key) or key.matches(vaxis.Key.left, .{})) return .focus_left;
-    if (keymap.right.matches(key) or key.matches(vaxis.Key.right, .{}) or key.matches(vaxis.Key.tab, .{})) return .focus_right;
+    if (keymap.right.matches(key) or key.matches(vaxis.Key.right, .{})) return .focus_right;
 
     // `select` (space) is valid in every focus — the handler branches by focus
     // and staging state (stage a file, checkout a branch, apply a stash, stage

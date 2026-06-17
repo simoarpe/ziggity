@@ -140,9 +140,10 @@ Useful keys:
   stage a whole dir with `space`)
 - `ctrl+b`: open files status filter menu
 - `j`/`k` or arrows: move selection
-- `h`/`l`, `tab`/`shift+tab`, or arrows: cycle focus between side panels
+- `h`/`l` or arrows: cycle focus between side panels
+- `tab`: focus the Diff panel (press `tab` again to return to the side panel)
 - `1`/`2`/`3`/`4`/`5`: focus status, files, branches, commits, stash
-- `[`/`]`: switch panel tabs (branches: Local/Remotes/Tags; commits: Commits/Reflog)
+- `[`/`]`: switch panel tabs (branches: Local/Remotes/Tags; commits: Commits/Reflog) or the staging view's unstaged/staged side
 - `enter`: inspect the selected item in the main panel; `esc`/`h` returns
 - `enter` on a commit: drill into its changed-file list (`j`/`k` to pick a file,
   `enter` to scroll its diff, `esc` to go back)
