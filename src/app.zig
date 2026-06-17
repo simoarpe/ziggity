@@ -542,8 +542,8 @@ pub const WorktreeSnapshot = struct {
 /// `App.applyRepoLoad`). Returns null on failure. `root`/`environ` are borrowed
 /// read-only. The throwaway Git's command log stays empty (loadRepoData is all
 /// read-only commands) but is freed defensively.
-pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8) ?model.RepoData {
-    var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root };
+pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, branch_sort: model.BranchSortOrder) ?model.RepoData {
+    var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root, .branch_sort = branch_sort };
     defer {
         for (wgit.command_log.items) |e| gpa.free(e);
         wgit.command_log.deinit(gpa);
@@ -579,8 +579,8 @@ pub const ScopedData = struct {
 /// Worker-thread entry: load just the requested views on a throwaway
 /// page-allocator `Git`. `filters` are applied to the commits load so an active
 /// Commits filter is preserved. Borrows `root`/`environ`/filter strings.
-pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, scopes: ScopeSet, filters: LogFilters) ScopedData {
-    var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root };
+pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, scopes: ScopeSet, filters: LogFilters, branch_sort: model.BranchSortOrder) ScopedData {
+    var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root, .branch_sort = branch_sort };
     // Borrowed filter strings (owned by the caller's run struct); wgit only
     // reads them and we never call clearLogFilters, so nothing is freed here.
     wgit.log_grep = @constCast(filters.grep);
@@ -1079,6 +1079,7 @@ pub const App = struct {
         errdefer git.deinit();
 
         const cfg = try config_mod.Config.load(allocator, io, env_map, git.root);
+        git.branch_sort = cfg.branch_sort_order;
         var app = App{
             .allocator = allocator,
             .git = git,

@@ -116,11 +116,12 @@ const RepoLoadRun = struct {
     loop: *vaxis.Loop(Event),
     root: []u8,
     environ: *std.process.Environ.Map,
+    branch_sort: model.BranchSortOrder = .date,
     result: ?model.RepoData = null,
 };
 
 fn repoLoadWorker(rl: *RepoLoadRun) void {
-    rl.result = app_mod.loadRepoDataAsync(async_allocator, rl.io, rl.environ, rl.root);
+    rl.result = app_mod.loadRepoDataAsync(async_allocator, rl.io, rl.environ, rl.root, rl.branch_sort);
     _ = rl.loop.tryPostEvent(.repo_load_done) catch false;
 }
 
@@ -137,6 +138,7 @@ const ScopedLoadRun = struct {
     grep: ?[]u8 = null,
     author: ?[]u8 = null,
     path: ?[]u8 = null,
+    branch_sort: model.BranchSortOrder = .date,
     result: ?app_mod.ScopedData = null,
 
     fn freeFilters(self: *ScopedLoadRun) void {
@@ -154,7 +156,7 @@ fn scopedLoadWorker(sr: *ScopedLoadRun) void {
         .grep = sr.grep,
         .author = sr.author,
         .path = sr.path,
-    });
+    }, sr.branch_sort);
     _ = sr.loop.tryPostEvent(.scoped_load_done) catch false;
 }
 
@@ -249,7 +251,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     // Load the repo off-thread: the loop's initial winsize event
     // paints the skeleton with "Loading…" placeholders right away, and the
     // panels fill in when `repo_load_done` lands — no startup freeze, no flash.
-    var repo_load_run: RepoLoadRun = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ };
+    var repo_load_run: RepoLoadRun = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ, .branch_sort = app.git.branch_sort };
     var repo_load_future: ?std.Io.Future(void) = null;
     defer if (repo_load_future) |*f| {
         f.cancel(io);
@@ -424,6 +426,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     .grep = if (filters.grep) |g| async_allocator.dupe(u8, g) catch null else null,
                     .author = if (filters.author) |x| async_allocator.dupe(u8, x) catch null else null,
                     .path = if (filters.path) |p| async_allocator.dupe(u8, p) catch null else null,
+                    .branch_sort = app.git.branch_sort,
                     .result = null,
                 };
                 scoped_load_future = io.concurrent(scopedLoadWorker, .{&scoped_load_run}) catch blk: {

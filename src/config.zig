@@ -1,4 +1,5 @@
 const std = @import("std");
+const model = @import("model.zig");
 
 pub const Binding = struct {
     codepoint: u21,
@@ -154,6 +155,8 @@ pub const Config = struct {
     expanded_side_panel_weight: u8 = 2,
     result_dialog: ResultDialog = .on_error,
     command_output: CommandOutput = .show,
+    /// Local Branches panel ordering: `date` (default), `recency`, or `alphabetical`.
+    branch_sort_order: model.BranchSortOrder = .date,
     skip_confirm: ConfirmSkips = .{},
     keymap: KeyMap = .{},
     theme: Theme = .{},
@@ -226,6 +229,10 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "command_output")) {
             if (std.meta.stringToEnum(CommandOutput, value)) |v| self.command_output = v;
+            return;
+        }
+        if (std.mem.eql(u8, key, "branch_sort_order")) {
+            if (std.meta.stringToEnum(model.BranchSortOrder, value)) |v| self.branch_sort_order = v;
             return;
         }
         if (std.mem.startsWith(u8, key, "skip_confirm.")) {
@@ -336,6 +343,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     // confirmations on.
     try std.testing.expectEqual(ResultDialog.on_error, cfg.result_dialog);
     try std.testing.expectEqual(CommandOutput.show, cfg.command_output);
+    try std.testing.expectEqual(model.BranchSortOrder.date, cfg.branch_sort_order);
     try std.testing.expect(!cfg.skip_confirm.discard_all);
 
     cfg.applyBytes(
@@ -345,11 +353,13 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
         \\skip_confirm.undo = yes
         \\skip_confirm.bogus = true
         \\result_dialog = nonsense
+        \\branch_sort_order = recency
         \\expand_focused_side_panel = true
         \\expanded_side_panel_weight = 3
     );
     try std.testing.expectEqual(ResultDialog.always, cfg.result_dialog); // valid set; bad value ignored
     try std.testing.expectEqual(CommandOutput.silent, cfg.command_output);
+    try std.testing.expectEqual(model.BranchSortOrder.recency, cfg.branch_sort_order);
     try std.testing.expect(cfg.skip_confirm.discard_all);
     try std.testing.expect(cfg.skip_confirm.undo);
     try std.testing.expect(!cfg.skip_confirm.merge_branch); // untouched

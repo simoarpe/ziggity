@@ -1,5 +1,10 @@
 const std = @import("std");
 
+/// How the local Branches panel is ordered: `date` = most-recent commit first,
+/// `recency` = most-recently checked out first (from the reflog),
+/// `alphabetical` = by name.
+pub const BranchSortOrder = enum { date, recency, alphabetical };
+
 /// Whether an interrupted merge or rebase is in progress (conflicts pending).
 pub const RepoState = enum {
     clean,

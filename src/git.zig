@@ -38,6 +38,8 @@ pub const Git = struct {
     log_grep: ?[]u8 = null,
     log_author: ?[]u8 = null,
     log_path: ?[]u8 = null,
+    /// How `loadBranches` orders the local branch list.
+    branch_sort: model.BranchSortOrder = .date,
 
     pub const LogFilter = enum { grep, author, path };
 
@@ -504,13 +506,40 @@ pub const Git = struct {
     }
 
     pub fn loadBranches(self: *Git) ![]model.Branch {
-        // Most-recently committed first (`--sort=-committerdate`), then the
-        // current branch moved to the very top.
-        const bytes = try self.output(&.{ "branch", "--sort=-committerdate", "--format=%(HEAD)%00%(refname:short)%00%(upstream:short)%00%(upstream:track)" });
+        // `alphabetical` sorts by ref name; `date`/`recency` start from
+        // most-recent commit first. `recency` is then reordered by the reflog.
+        const sort_flag: []const u8 = switch (self.branch_sort) {
+            .alphabetical => "--sort=refname",
+            .date, .recency => "--sort=-committerdate",
+        };
+        const bytes = try self.output(&.{ "branch", sort_flag, "--format=%(HEAD)%00%(refname:short)%00%(upstream:short)%00%(upstream:track)" });
         defer self.allocator.free(bytes);
         const list = try parseBranches(self.allocator, bytes);
+        errdefer {
+            for (list) |*branch| branch.deinit(self.allocator);
+            self.allocator.free(list);
+        }
+        if (self.branch_sort == .recency) {
+            if (self.loadBranchRecency()) |recency| {
+                defer {
+                    for (recency) |name| self.allocator.free(name);
+                    self.allocator.free(recency);
+                }
+                applyRecencyOrder(list, recency);
+            } else |_| {}
+        }
+        // The current branch is always listed first.
         moveCurrentBranchToFront(list);
         return list;
+    }
+
+    /// Branch names in most-recently-checked-out order, parsed from HEAD's
+    /// reflog `checkout: moving from X to Y` subjects (for the `recency` order).
+    pub fn loadBranchRecency(self: *Git) ![][]u8 {
+        var result = try self.exec(&.{ "reflog", "-200", "--format=%gs" });
+        defer result.deinit(self.allocator);
+        if (!result.ok()) return self.allocator.alloc([]u8, 0);
+        return parseBranchRecency(self.allocator, result.stdout);
     }
 
     pub fn loadRemoteBranches(self: *Git) ![]model.Branch {
@@ -1155,6 +1184,66 @@ pub fn moveCurrentBranchToFront(branches: []model.Branch) void {
     }
 }
 
+/// Parse the ordered, de-duplicated branch names from reflog `%gs` subjects.
+/// Each `checkout: moving from X to Y` contributes X then Y; the first time a
+/// name is seen fixes its position, so the result is in most-recent-first order.
+pub fn parseBranchRecency(allocator: std.mem.Allocator, bytes: []const u8) ![][]u8 {
+    const prefix = "checkout: moving from ";
+    var names: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (names.items) |n| allocator.free(n);
+        names.deinit(allocator);
+    }
+
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, prefix)) continue;
+        const rest = line[prefix.len..];
+        const to_at = std.mem.indexOf(u8, rest, " to ") orelse continue;
+        const from = rest[0..to_at];
+        const to = rest[to_at + " to ".len ..];
+        for ([_][]const u8{ from, to }) |name| {
+            if (name.len == 0) continue;
+            var seen = false;
+            for (names.items) |existing| {
+                if (std.mem.eql(u8, existing, name)) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (seen) continue;
+            try names.append(allocator, try allocator.dupe(u8, name));
+        }
+    }
+    return names.toOwnedSlice(allocator);
+}
+
+/// Reorder `branches` in place for the `recency` sort: branches present in
+/// `recency` (in that order, skipping the current branch) come first, then the
+/// rest sorted alphabetically. The current branch is positioned separately.
+fn applyRecencyOrder(branches: []model.Branch, recency: []const []const u8) void {
+    var front: usize = 0; // next slot for a recency-ordered branch
+    for (recency) |name| {
+        var k = front;
+        while (k < branches.len) : (k += 1) {
+            if (branches[k].current) continue;
+            if (!std.ascii.eqlIgnoreCase(branches[k].name, name)) continue;
+            const hit = branches[k];
+            var j = k;
+            while (j > front) : (j -= 1) branches[j] = branches[j - 1];
+            branches[front] = hit;
+            front += 1;
+            break;
+        }
+    }
+    // Remaining branches (not in the reflog) keep deterministic alphabetical order.
+    std.mem.sort(model.Branch, branches[front..], {}, struct {
+        fn lt(_: void, a: model.Branch, b: model.Branch) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.lt);
+}
+
 pub fn parseTags(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Tag {
     var tags: std.ArrayList(model.Tag) = .empty;
     errdefer {
@@ -1429,6 +1518,41 @@ test "moveCurrentBranchToFront lists the current branch first" {
     moveCurrentBranchToFront(&r);
     try std.testing.expectEqualStrings("origin/x", r[0].name);
     try std.testing.expectEqualStrings("origin/y", r[1].name);
+}
+
+test "parseBranchRecency extracts checkout order, de-duplicated" {
+    const input =
+        "checkout: moving from main to feature\n" ++
+        "commit: some work\n" ++
+        "checkout: moving from feature to main\n" ++
+        "checkout: moving from main to old-thing\n";
+    const names = try parseBranchRecency(std.testing.allocator, input);
+    defer {
+        for (names) |n| std.testing.allocator.free(n);
+        std.testing.allocator.free(names);
+    }
+    try std.testing.expectEqual(@as(usize, 3), names.len);
+    try std.testing.expectEqualStrings("main", names[0]);
+    try std.testing.expectEqualStrings("feature", names[1]);
+    try std.testing.expectEqualStrings("old-thing", names[2]);
+}
+
+test "applyRecencyOrder orders by reflog then alphabetical, skipping current" {
+    // committerdate order from git; `main` is the current branch.
+    var b = [_]model.Branch{
+        .{ .name = @constCast(@as([]const u8, "feature")) },
+        .{ .name = @constCast(@as([]const u8, "main")), .current = true },
+        .{ .name = @constCast(@as([]const u8, "old")) },
+        .{ .name = @constCast(@as([]const u8, "zeta")) },
+    };
+    const recency = [_][]const u8{ "main", "feature", "old" };
+    applyRecencyOrder(&b, &recency);
+    // `main` is current so it's skipped here; feature/old lead in reflog order,
+    // then the rest (main, zeta) sorted alphabetically.
+    try std.testing.expectEqualStrings("feature", b[0].name);
+    try std.testing.expectEqualStrings("old", b[1].name);
+    try std.testing.expectEqualStrings("main", b[2].name);
+    try std.testing.expectEqualStrings("zeta", b[3].name);
 }
 
 test "command log filters read-only invocations" {
