@@ -86,3 +86,37 @@ Ziggity's other copy actions).
 Implemented in `src/app.zig` (`handleMouse` press/drag/release, `diffPointAt`,
 `diffSelectionRange`, `copyDiffSelection`, `appendDiffColumns`) and `src/tui.zig`
 (`printAnsi` selection highlight in `drawDiff`).
+
+## In-app credential entry for push / pull / fetch
+
+**What lazygit does:** when a network op needs HTTPS credentials, lazygit runs
+git inside a pseudo-terminal (PTY), watches the byte stream for git's prompts
+(`Username for '…':`, `Password for '…':`, passphrase/PIN/token), and pops a
+modal prompt (masked for secrets) whose answer it writes back into the PTY.
+
+**What Ziggity does:** the same user experience — a username prompt then a
+masked password/token prompt, in-app, with no external credential helper
+required — implemented without a PTY. When a network op fails with an
+authentication error, Ziggity opens a two-step credential popup; the entered
+values are handed to git through a `GIT_ASKPASS` (and `SSH_ASKPASS`) re-exec of
+the Ziggity binary, which echoes the requested secret. Why this design:
+
+- **No terminal corruption.** A PTY-and-fork approach is fragile alongside the
+  async I/O runtime and the alt-screen TUI; the askpass re-exec keeps git off the
+  controlling terminal entirely (`GIT_TERMINAL_PROMPT=0` stays set as a backstop).
+- **No environment races.** The secrets ride on a *clone* of the process
+  environment built per credentialed op; the shared environment that the
+  background status/preview threads read is never mutated.
+- **Plays well with keychains.** Because the values flow through git's normal
+  credential machinery, a configured helper (e.g. macOS `osxkeychain`) will
+  `store` them on success, so subsequent pushes are silent.
+- **Secrets are wiped** from the input buffers once stored and zeroed on exit;
+  wrong credentials are discarded and re-prompted rather than retried in a loop.
+
+Press `esc` at either step to cancel (git then fails cleanly). Entered
+credentials are reused for the rest of the session across push/pull/fetch.
+
+Implemented in `src/app.zig` (`runAskpassHelper`, `startCredentialPrompt`,
+`advanceCredentialPrompt`, `buildCredentialEnv`, `isAuthFailure`,
+`clearGitCredentials`, `completeAsync`), `src/main.zig` (askpass short-circuit),
+and `src/tui.zig` (`drawCredentialPopup`, credential-bearing `asyncWorker`).

@@ -34,6 +34,10 @@ const AsyncJob = struct {
     loop: *vaxis.Loop(Event),
     root: []const u8,
     environ: *std.process.Environ.Map,
+    /// When credentials have been entered, an owned clone of `environ` carrying
+    /// the askpass wiring + secrets. Used in place of `environ` for this op and
+    /// freed when the op finishes; null otherwise.
+    cred_environ: ?std.process.Environ.Map = null,
     op: app_mod.AsyncOp,
     result: ?git_mod.ExecResult = null,
 };
@@ -44,17 +48,29 @@ fn asyncWorker(job: *AsyncJob) void {
     argv.append(async_allocator, "git") catch return postDone(job);
     argv.appendSlice(async_allocator, job.op.argv()) catch return postDone(job);
 
-    // Pass the app's environment (which sets GIT_TERMINAL_PROMPT=0) so git never
-    // tries to prompt for credentials on the controlling terminal — that would
-    // corrupt the TUI and hang. A missing credential becomes a clean error.
+    // Use the credential-bearing clone when present, else the shared environment
+    // (which sets GIT_TERMINAL_PROMPT=0 so git never blocks on a terminal
+    // prompt). The credential clone points GIT_ASKPASS back at this binary, so
+    // git fetches the entered username/password from us instead.
+    const env = if (job.cred_environ) |*e| e else job.environ;
     const result = std.process.run(async_allocator, job.io, .{
         .argv = argv.items,
         .cwd = .{ .path = job.root },
-        .environ_map = job.environ,
+        .environ_map = env,
         .stdout_limit = .limited(16 * 1024 * 1024),
         .stderr_limit = .limited(4 * 1024 * 1024),
-    }) catch return postDone(job);
+    }) catch {
+        if (job.cred_environ) |*e| {
+            e.deinit();
+            job.cred_environ = null;
+        }
+        return postDone(job);
+    };
 
+    if (job.cred_environ) |*e| {
+        e.deinit();
+        job.cred_environ = null;
+    }
     job.result = .{ .stdout = result.stdout, .stderr = result.stderr, .term = result.term };
     postDone(job);
 }
@@ -366,7 +382,16 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 app.async_requested = null;
                 app.async_active = true;
                 async_job = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ, .op = op };
+                // Attach entered credentials (a cloned, askpass-wired env) when
+                // available; on clone failure fall back to the bare env.
+                if (app.gitCredentialsSet()) {
+                    async_job.cred_environ = app.buildCredentialEnv(async_allocator) catch null;
+                }
                 async_future = io.concurrent(asyncWorker, .{&async_job}) catch blk: {
+                    if (async_job.cred_environ) |*e| {
+                        e.deinit();
+                        async_job.cred_environ = null;
+                    }
                     app.async_active = false;
                     try app.completeAsync(op, null, async_allocator);
                     break :blk null;
@@ -680,6 +705,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         .confirmation => drawConfirmPopup(root, app),
         .commit_prompt => drawCommitPopup(root, app),
         .text_prompt => drawTextPromptPopup(root, app),
+        .credential_prompt => drawCredentialPopup(root, app),
         .command_log => drawCommandLogPopup(root, app),
         .help => drawHelpPopup(root, app),
         .operation => drawOperationPopup(root, app),
@@ -907,6 +933,33 @@ fn drawTextPromptPopup(root: vaxis.Window, app: *app_mod.App) void {
     const sc = app_mod.viewScroll(app.prompt_scroll, win.width, caret);
     app.prompt_scroll = sc.origin;
     print(win, 0, 0, app.input_buffer.items[sc.origin..], st.normal);
+    print(win, 2, 0, "enter confirm   esc cancel", st.bottom_accent);
+    win.showCursor(@intCast(sc.view), 0);
+}
+
+fn drawCredentialPopup(root: vaxis.Window, app: *app_mod.App) void {
+    const st = styles();
+    const w: u16 = @min(@as(u16, 56), root.width -| 4);
+    const win = popup(root, w, 5, app.credentialTitle(), null);
+    // Scroll horizontally so the caret stays inside the box.
+    const caret = @min(app.prompt_cursor, app.input_buffer.items.len);
+    const sc = app_mod.viewScroll(app.prompt_scroll, win.width, caret);
+    app.prompt_scroll = sc.origin;
+    const visible = app.input_buffer.items[sc.origin..];
+    if (app.credentialMask()) {
+        // Mask the secret with bullets, one per byte (credentials are ASCII, so
+        // a byte maps to a column). A bullet is used instead of `*` because a
+        // run of identical asterisks can be reshaped by the terminal font's
+        // ligature/contextual rules, making earlier glyphs visibly shift as more
+        // are typed; the dedicated bullet mask is not subject to that.
+        const n = @min(visible.len, @as(usize, win.width));
+        var i: u16 = 0;
+        while (i < n) : (i += 1) {
+            win.writeCell(i, 0, .{ .char = .{ .grapheme = "\u{2022}", .width = 1 }, .style = st.normal });
+        }
+    } else {
+        print(win, 0, 0, visible, st.normal);
+    }
     print(win, 2, 0, "enter confirm   esc cancel", st.bottom_accent);
     win.showCursor(@intCast(sc.view), 0);
 }
@@ -1588,6 +1641,10 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
     }
     if (app.mode == .text_prompt) {
         print(win, 0, 0, "enter confirm  -  esc cancel", st.bottom_accent);
+        return;
+    }
+    if (app.mode == .credential_prompt) {
+        print(win, 0, 0, "credentials  -  enter next/confirm  -  esc cancel", st.bottom_accent);
         return;
     }
     if (app.mode == .confirmation) {

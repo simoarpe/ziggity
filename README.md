@@ -87,6 +87,10 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 - Non-blocking fetch, pull, and push: they run off the UI loop (the status
   panel shows a "fetching…/pulling…/pushing…" indicator) so the UI stays
   responsive.
+- In-app credential entry: when an HTTPS push/pull/fetch fails to authenticate,
+  a username prompt and a masked password/token prompt appear (no external
+  credential helper required); the values are fed to git for the rest of the
+  session. See `docs/ENHANCEMENTS_OVER_LAZYGIT.md`.
 - Command-log overlay (`@`), configurable theme colors, fully remappable keys,
   and user-defined custom commands.
 - Repo-local and environment-selected config file support.

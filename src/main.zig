@@ -19,6 +19,13 @@ fn discardLog(
 ) void {}
 
 pub fn main(init: std.process.Init) !void {
+    // When git runs us as its GIT_ASKPASS/SSH_ASKPASS program, the marker env
+    // var is set: echo the requested credential and exit before touching the
+    // terminal or requiring a git repository.
+    if (init.environ_map.get(ziggity.app.askpass_env_marker) != null) {
+        return ziggity.app.runAskpassHelper(init);
+    }
+
     var app = ziggity.app.App.init(init.gpa, init.io, init.environ_map) catch |err| {
         var stderr_buffer: [1024]u8 = undefined;
         var stderr_writer: std.Io.File.Writer = .init(.stderr(), init.io, &stderr_buffer);
