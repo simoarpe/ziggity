@@ -1545,7 +1545,13 @@ pub const App = struct {
         }
         switch (action) {
             .quit => self.running = false,
+            // Esc walks back one level; it never quits — only `q` does. Each
+            // press undoes the most recent/local thing in turn.
             .cancel => {
+                if (self.diff_sel_active) {
+                    self.diff_sel_active = false; // first: drop a diff text selection
+                    return;
+                }
                 if (self.diff_base != null) {
                     self.clearDiffBase();
                     try self.setMessage("exited diffing mode", .{});
@@ -1567,7 +1573,8 @@ pub const App = struct {
                 } else if (self.commit_files_active) {
                     try self.closeCommitFiles();
                 } else {
-                    self.running = false;
+                    // Top level: nothing to back out of. Esc does not quit.
+                    try self.setMessage("press q to quit", .{});
                 }
             },
             .focus_status => try self.setFocus(.status),
@@ -5719,6 +5726,35 @@ test "tab toggles focus into the diff panel and back" {
 
     try app.handleKey(tab); // back to the side panel it came from
     try std.testing.expectEqual(model.Focus.branches, app.focus);
+}
+
+test "esc never quits and walks back one level at a time" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    const esc = vaxis.Key{ .codepoint = vaxis.Key.escape };
+
+    // Top level: esc does nothing and does NOT quit.
+    app.focus = .files;
+    try app.handleKey(esc);
+    try std.testing.expect(app.running);
+    try std.testing.expectEqual(model.Focus.files, app.focus);
+
+    // A diff text selection is dropped first, without leaving the panel.
+    app.focus = .main;
+    app.main_origin = .files;
+    app.diff_sel_active = true;
+    try app.handleKey(esc);
+    try std.testing.expect(!app.diff_sel_active);
+    try std.testing.expectEqual(model.Focus.main, app.focus); // still on the diff
+    try std.testing.expect(app.running);
+
+    // Next esc leaves the diff panel back to its origin; still doesn't quit.
+    try app.handleKey(esc);
+    try std.testing.expectEqual(model.Focus.files, app.focus);
+    try std.testing.expect(app.running);
 }
 
 test "tab closes the staging view back to the files panel" {

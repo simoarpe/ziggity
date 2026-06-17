@@ -177,7 +177,9 @@ Useful keys:
 - `f`: fetch
 - `p`: pull
 - `P`: push
-- `esc`: clear active filter, exit diffing mode, cancel prompts, or leave the diff panel
+- `esc`: step back one level — deselect diff text, clear an active filter, exit
+  diffing mode, cancel a prompt, leave the staging/diff panel. It never quits
+  (only `q` does); at the top level it does nothing.
 
 ## Config
 
