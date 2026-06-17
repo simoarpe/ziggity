@@ -878,6 +878,15 @@ fn nextCodepoint(s: []const u8, i: usize) usize {
     return j;
 }
 
+/// Number of displayed lines in `text` (newline-separated), ignoring a single
+/// trailing newline so it matches what the diff renderer actually draws.
+fn diffLineCount(text: []const u8) usize {
+    if (text.len == 0) return 0;
+    var n = std.mem.count(u8, text, "\n");
+    if (text[text.len - 1] != '\n') n += 1;
+    return n;
+}
+
 /// Remove `len` bytes at `pos` from `buf`, shifting the tail down. Never grows,
 /// so no allocation is needed.
 fn deleteRange(buf: *std.ArrayList(u8), pos: usize, len: usize) void {
@@ -2460,12 +2469,23 @@ pub const App = struct {
         return index -| 1;
     }
 
+    /// The largest `main_scroll` that still shows content: stops at the point
+    /// where the last line sits on the bottom row, so the panel can't scroll on
+    /// into empty space. Zero when the content fits the view.
+    fn maxMainScroll(self: *const App) usize {
+        const text = if (self.staging_active) self.staging_diff else self.diff;
+        const lines = diffLineCount(text);
+        const height: usize = if (self.main_view_height == 0) 20 else self.main_view_height;
+        return lines -| height;
+    }
+
     fn scrollMain(self: *App, amount: isize) !void {
         if (amount < 0) {
             self.main_scroll -|= @intCast(-amount);
         } else {
             self.main_scroll += @intCast(amount);
         }
+        self.main_scroll = @min(self.main_scroll, self.maxMainScroll());
     }
 
     /// Space in the Files panel: stage/unstage a whole directory in tree view
@@ -4913,6 +4933,38 @@ test "fileDiffArgv pairs renames and sets rename/submodule flags" {
     for (argv2) |a| try std.testing.expect(!std.mem.eql(u8, a, "--staged"));
 }
 
+test "diffLineCount ignores a single trailing newline" {
+    try std.testing.expectEqual(@as(usize, 0), diffLineCount(""));
+    try std.testing.expectEqual(@as(usize, 3), diffLineCount("a\nb\nc\n"));
+    try std.testing.expectEqual(@as(usize, 3), diffLineCount("a\nb\nc"));
+    try std.testing.expectEqual(@as(usize, 1), diffLineCount("a\n"));
+    try std.testing.expectEqual(@as(usize, 1), diffLineCount("only"));
+}
+
+test "scrollMain clamps to content so it can't scroll into empty space" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // 5 lines of content in a 2-row view: last scroll position is 3.
+    allocator.free(app.diff);
+    app.diff = try allocator.dupe(u8, "l1\nl2\nl3\nl4\nl5\n");
+    app.main_view_height = 2;
+
+    try app.scrollMain(100); // way past the end
+    try std.testing.expectEqual(@as(usize, 3), app.main_scroll);
+    try app.scrollMain(-100); // back to the top
+    try std.testing.expectEqual(@as(usize, 0), app.main_scroll);
+
+    // Content that fits the view never scrolls.
+    allocator.free(app.diff);
+    app.diff = try allocator.dupe(u8, "a\nb\n");
+    app.main_view_height = 10;
+    try app.scrollMain(50);
+    try std.testing.expectEqual(@as(usize, 0), app.main_scroll);
+}
+
 test "pushNeedsForce detects diverged-remote rejections only" {
     // Real git non-fast-forward rejection.
     try std.testing.expect(pushNeedsForce(
@@ -5302,6 +5354,10 @@ test "mouse wheel scrolls the panel under the cursor without changing focus" {
     app.focus = .commits;
     app.commit_index = 0;
     app.main_scroll = 0;
+    // Give the diff enough lines (in a short view) that scrolling is valid.
+    app.allocator.free(app.diff);
+    app.diff = try app.allocator.dupe(u8, "1\n2\n3\n4\n5\n");
+    app.main_view_height = 2;
 
     // Wheel over the diff: scrolls it; focus stays on commits.
     _ = try app.handleMouse(.{ .col = 30, .row = 10, .button = .wheel_down, .mods = .{}, .type = .press });
