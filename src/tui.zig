@@ -482,6 +482,17 @@ fn renderHook(ctx: *anyopaque) void {
     renderAndFlush(rc.vx, rc.writer, rc.app) catch {};
 }
 
+/// Side-panel column width: `percent` of the total terminal width, scaling
+/// proportionally with it. A small floor keeps the panel usable on narrow
+/// terminals, and at least 20 columns are reserved for the main panel. There is
+/// deliberately no fixed upper cap, so the side panels keep growing on wide
+/// terminals instead of stalling at a maximum width.
+fn sidePanelWidth(total: u16, percent: u8) u16 {
+    const raw: u16 = @intCast((@as(u32, total) * percent) / 100);
+    const main_floor: u16 = if (total > 20) total - 20 else total;
+    return @max(@as(u16, 20), @min(raw, main_floor));
+}
+
 const SidePanelHeights = struct { status: u16, files: u16, branches: u16, commits: u16, stash: u16 };
 
 /// Side-panel sizing: the status panel is a fixed height; files,
@@ -551,8 +562,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
 
     const bottom_h: u16 = 1;
     const body_h = root.height - bottom_h;
-    var side_w: u16 = @intCast((@as(u32, root.width) * app.config.side_panel_width_percent) / 100);
-    side_w = @max(@as(u16, 24), @min(side_w, @min(@as(u16, 60), root.width - 20)));
+    const side_w = sidePanelWidth(root.width, app.config.side_panel_width_percent);
     const main_w = root.width - side_w;
 
     var y: u16 = 0;
@@ -1846,6 +1856,17 @@ test "side panel heights match the weighting" {
     const ha = sidePanelHeights(body_h, .commits, true, 2);
     try std.testing.expect(ha.commits > ha.files);
     try std.testing.expectEqual(body_h, ha.status + ha.files + ha.branches + ha.commits + ha.stash);
+}
+
+test "side panel width scales with the terminal, no fixed cap" {
+    // Stays proportional (~1/3 at 33%) at any width — no stalling at 60 columns.
+    try std.testing.expectEqual(@as(u16, 39), sidePanelWidth(120, 33));
+    try std.testing.expectEqual(@as(u16, 66), sidePanelWidth(200, 33)); // would have been capped at 60 before
+    try std.testing.expectEqual(@as(u16, 79), sidePanelWidth(240, 33));
+    // The main panel always keeps at least 20 columns.
+    try std.testing.expect(120 - sidePanelWidth(120, 90) >= 20);
+    // A small floor keeps the panel usable on a narrow terminal.
+    try std.testing.expectEqual(@as(u16, 20), sidePanelWidth(50, 33));
 }
 
 test "wrapText wraps at word and line boundaries" {
