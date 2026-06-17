@@ -122,14 +122,14 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     if (keymap.commits_panel.matches(key)) return .focus_commits;
     if (keymap.stash_panel.matches(key)) return .focus_stash;
 
-    // <enter> on a side panel descends into the main panel (lazygit: inspect
-    // the selected item). The main panel is left with <esc>/<h>.
+    // <enter> on a side panel descends into the main panel to inspect
+    // the selected item. The main panel is left with <esc>/<h>.
     if (focus.isSidePanel() and keymap.enter.matches(key)) return .focus_main;
 
     if (keymap.prev_tab.matches(key)) return .prev_tab;
     if (keymap.next_tab.matches(key)) return .next_tab;
 
-    // Context keybindings inside the Branches panel (lazygit-style), shadowing
+    // Context keybindings inside the Branches panel, shadowing
     // the global refresh/fetch there: R renames, f fast-forwards.
     if (focus == .branches and keymap.rename.matches(key)) return .rename_branch;
     if (focus == .branches and keymap.fast_forward.matches(key)) return .fast_forward_branch;

@@ -9,7 +9,7 @@ pub fn localNameForRemote(remote_name: []const u8) []const u8 {
     return remote_name;
 }
 
-/// lazygit-style file filtering, made fuzzy: each whitespace-separated term
+/// Fuzzy file filtering: each whitespace-separated term
 /// must appear in the path as a smart-case subsequence (its characters in
 /// order, not necessarily contiguous). A term is case-sensitive iff it has an
 /// uppercase letter.

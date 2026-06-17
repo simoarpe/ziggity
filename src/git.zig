@@ -504,9 +504,8 @@ pub const Git = struct {
     }
 
     pub fn loadBranches(self: *Git) ![]model.Branch {
-        // lazygit's default order (localBranchSortOrder = "date"): most-recently
-        // committed first (`--sort=-committerdate`), then the current branch
-        // moved to the very top.
+        // Most-recently committed first (`--sort=-committerdate`), then the
+        // current branch moved to the very top.
         const bytes = try self.output(&.{ "branch", "--sort=-committerdate", "--format=%(HEAD)%00%(refname:short)%00%(upstream:short)%00%(upstream:track)" });
         defer self.allocator.free(bytes);
         const list = try parseBranches(self.allocator, bytes);
@@ -811,7 +810,7 @@ pub const Git = struct {
         return self.exec(&.{ "checkout", branch_name });
     }
 
-    /// Create a new branch from HEAD and switch to it (lazygit's new-branch).
+    /// Create a new branch from HEAD and switch to it.
     pub fn createBranch(self: *Git, name: []const u8) !ExecResult {
         return self.exec(&.{ "checkout", "-b", name });
     }
@@ -897,8 +896,7 @@ pub const Git = struct {
     }
 
     /// Replay commits from `marked_base` (inclusive) through HEAD onto `newbase`,
-    /// dropping any commits before the marked base. Mirrors lazygit's "rebase
-    /// onto marked base" — `git rebase --onto <newbase> <marked_base>^`.
+    /// dropping any commits before the marked base. Runs `git rebase --onto <newbase> <marked_base>^`.
     pub fn rebaseOntoMarked(self: *Git, newbase: []const u8, marked_base: []const u8) !ExecResult {
         var buf: [80]u8 = undefined;
         const upstream = try std.fmt.bufPrint(&buf, "{s}^", .{marked_base});
@@ -1143,7 +1141,7 @@ pub fn parseBranches(allocator: std.mem.Allocator, bytes: []const u8) ![]model.B
 }
 
 /// Move the current (checked-out) branch to index 0, preserving the relative
-/// order of the rest — lazygit always lists the current branch first. A no-op
+/// order of the rest — the current branch is always listed first. A no-op
 /// for remote-branch lists (none is marked current).
 pub fn moveCurrentBranchToFront(branches: []model.Branch) void {
     for (branches, 0..) |branch, i| {

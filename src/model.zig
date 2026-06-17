@@ -37,7 +37,7 @@ pub const Focus = enum {
     }
 
     /// True for the left-column list panels that participate in block
-    /// navigation (lazygit's "blocks"). The main panel is reached with
+    /// navigation. The main panel is reached with
     /// <enter> and left with <esc>, so it is excluded here.
     pub fn isSidePanel(self: Focus) bool {
         return self != .main;
@@ -576,7 +576,7 @@ test "derive status fields follows porcelain status columns" {
     try std.testing.expect(conflict.conflict);
 }
 
-test "file display filter follows lazygit status filter semantics" {
+test "file display filter follows status filter semantics" {
     const unstaged: FileStatus = .{
         .path = @constCast("src/main.zig"),
         .short_status = .{ ' ', 'M' },

@@ -160,7 +160,7 @@ pub const RebaseAction = enum {
     }
 };
 
-/// Tabs within the Branches panel, switched with [ and ] (lazygit).
+/// Tabs within the Branches panel, switched with [ and ].
 pub const BranchesTab = enum {
     local,
     remotes,
@@ -179,7 +179,7 @@ pub const BranchesTab = enum {
     }
 };
 
-/// Tabs within the Commits panel, switched with [ and ] (lazygit).
+/// Tabs within the Commits panel, switched with [ and ].
 pub const CommitsTab = enum {
     commits,
     reflog,
@@ -233,7 +233,7 @@ pub const MenuItem = struct {
     action: MenuAction,
 };
 
-/// A lazygit-style action menu: a titled list of choices navigated with j/k
+/// An action menu: a titled list of choices navigated with j/k
 /// and confirmed with enter. Items point at static arrays, so no ownership.
 pub const Menu = struct {
     title: []const u8,
@@ -536,7 +536,7 @@ pub const WorktreeSnapshot = struct {
     }
 };
 
-/// Worker-thread full repo load (lazygit-style async startup). Runs
+/// Worker-thread full repo load (async startup). Runs
 /// `git.loadRepoData` on a throwaway page-allocator `Git`; the result is
 /// page-owned and the UI thread deep-copies it into the gpa (see
 /// `App.applyRepoLoad`). Returns null on failure. `root`/`environ` are borrowed
@@ -551,7 +551,7 @@ pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.proce
     return wgit.loadRepoData() catch null;
 }
 
-/// The independently-refreshable data views (lazygit's RefreshableView). A
+/// The independently-refreshable data views. A
 /// mutation refreshes only the views it touched; the slow ones load off-thread.
 pub const Scope = enum { files, status, branches, remotes, commits, reflog, tags, worktrees, submodules, stash };
 pub const ScopeSet = std.EnumSet(Scope);
@@ -847,7 +847,7 @@ fn deleteRange(buf: *std.ArrayList(u8), pos: usize, len: usize) void {
     buf.items.len -= len;
 }
 
-// Word-boundary classes, mirroring lazygit's editor (pkg/gocui/text_area.go):
+// Word-boundary classes for the line editor:
 // a "word" is a run of word-chars OR a run of separators; whitespace divides
 // them. Newline is treated as whitespace here so word motion crosses lines.
 const word_separators = "*?_+-.[]~=/&;!#$%^(){}<>";
@@ -861,7 +861,7 @@ fn isSeparator(c: u8) bool {
 }
 
 /// Byte offset one word to the left of `i` (skip whitespace, then one run of
-/// either separators or word-chars), matching lazygit's MoveLeftWord.
+/// either separators or word-chars).
 fn moveLeftWord(s: []const u8, i: usize) usize {
     var j = i;
     while (j > 0 and isSpace(s[j - 1])) j -= 1;
@@ -873,7 +873,7 @@ fn moveLeftWord(s: []const u8, i: usize) usize {
     return j;
 }
 
-/// Byte offset one word to the right of `i`, matching lazygit's MoveRightWord.
+/// Byte offset one word to the right of `i`.
 fn moveRightWord(s: []const u8, i: usize) usize {
     var j = i;
     while (j < s.len and isSpace(s[j])) j += 1;
@@ -886,7 +886,7 @@ fn moveRightWord(s: []const u8, i: usize) usize {
 }
 
 /// Byte offset of the start of the line containing `i` (just after the previous
-/// newline, or 0). Lazygit's Ctrl-A / Home is line-scoped, not buffer-scoped.
+/// newline, or 0). Ctrl-A / Home is line-scoped, not buffer-scoped.
 fn lineStart(s: []const u8, i: usize) usize {
     var j = i;
     while (j > 0 and s[j - 1] != '\n') j -= 1;
@@ -900,10 +900,10 @@ fn lineEnd(s: []const u8, i: usize) usize {
     return j;
 }
 
-/// lazygit's `updatedCursorAndOrigin` (pkg/gocui/view.go): given the previous
-/// scroll origin, the field's usable cell width/height, and the caret position,
-/// return the caret's column *within the view* and the new origin so the caret
-/// stays visible — the text scrolls instead of being clipped at the boundary.
+/// Horizontal-scroll helper: given the previous origin, the field's usable
+/// cell width/height, and the caret position, return the caret's column
+/// *within the view* and the new origin so the caret stays visible — the text
+/// scrolls instead of being clipped at the boundary.
 pub const ViewScroll = struct { view: usize, origin: usize };
 pub fn viewScroll(prev_origin: usize, size: usize, cursor: usize) ViewScroll {
     if (size == 0) return .{ .view = 0, .origin = 0 };
@@ -969,7 +969,7 @@ pub const App = struct {
     file_filter_cursor: usize = 0,
     // Horizontal/vertical scroll origins (byte/line offsets) so a typed field
     // whose content is wider/taller than its box scrolls to keep the caret in
-    // view instead of clipping the text. Updated at render time, lazygit-style.
+    // view instead of clipping the text. Updated at render time.
     prompt_scroll: usize = 0,
     commit_scroll: usize = 0,
     commit_body_scroll_x: usize = 0,
@@ -1048,7 +1048,7 @@ pub const App = struct {
     /// "Loading…" state and mutating input is gated meanwhile.
     initial_load_pending: bool = false,
     /// Slow views (branches/commits/tags/…) queued for an off-thread scoped
-    /// reload (lazygit-style per-view refresh). The fast Files/Status views are
+    /// reload (per-view refresh). The fast Files/Status views are
     /// refreshed synchronously, so they never appear here and never race.
     pending_scopes: ScopeSet = ScopeSet.initEmpty(),
     scoped_load_active: bool = false,
@@ -1164,9 +1164,8 @@ pub const App = struct {
         self.setMessage("ready", .{}) catch {};
     }
 
-
     /// Fast, scoped reload of just the working tree (status + file list), the
-    /// lazygit "FILES scope" refresh. Used after stage/unstage/discard/resolve,
+    /// Files-scope refresh. Used after stage/unstage/discard/resolve,
     /// which change only the working tree — reloading the whole repo (branches,
     /// 100 commits, reflog, tags, …) on every such keypress is what made staging
     /// slow and clunky. Keeps the cursor on the same file.
@@ -1197,7 +1196,7 @@ pub const App = struct {
         }
     }
 
-    /// lazygit-style per-view refresh. The fast Files view (and its derived
+    /// Per-view refresh. The fast Files view (and its derived
     /// state) reloads synchronously for instant feedback; every other requested
     /// view (branches, commits, tags, …) is queued for an off-thread scoped
     /// load so the UI never blocks. Because Files is never loaded off-thread,
@@ -1285,9 +1284,9 @@ pub const App = struct {
     }
 
     /// True while a foreground git operation is in progress, during which the
-    /// periodic background working-tree refresh is held off (lazygit's
-    /// `pauseBackgroundRefreshes`). A network op (fetch/pull/push) runs on its
-    /// own worker while the loop stays live, so without this its `git status`
+    /// periodic background working-tree refresh is held off. A network op
+    /// (fetch/pull/push) runs on its own worker while the loop stays live, so
+    /// without this its `git status`
     /// read could overlap a write; the op finishes with its own full refresh
     /// anyway. Synchronous mutations block the loop and keep `mode` non-normal,
     /// so the tick guard already covers them — this mainly catches network ops.
@@ -1567,7 +1566,7 @@ pub const App = struct {
                 try self.clickSelectInPanel(rect, @intCast(mouse.row));
             },
             // The mouse wheel scrolls the panel under the cursor in place,
-            // without changing focus (lazygit-style — only a click focuses).
+            // without changing focus (only a click focuses).
             // Scrolling the diff moves its view; scrolling a list moves that
             // list's selection (shown dimmed when the list isn't focused), and
             // the preview updates only when the scrolled list is the active one.
@@ -2390,7 +2389,7 @@ pub const App = struct {
 
     /// Move the selection of a specific `panel` up or down (without touching
     /// focus or the preview). Lets the mouse wheel scroll the panel under the
-    /// cursor, lazygit-style, and backs `moveUp`/`moveDown` for the focused one.
+    /// cursor, and backs `moveUp`/`moveDown` for the focused one.
     fn moveSelection(self: *App, panel: model.Focus, down: bool) void {
         switch (panel) {
             .status, .main => {},
@@ -2799,7 +2798,7 @@ pub const App = struct {
         if (cursor.* > buf.items.len) cursor.* = buf.items.len;
 
         // ---- cursor movement ----
-        // Word left: Option/Alt+Left, Ctrl+Left, or Alt+b (matching lazygit; on
+        // Word left: Option/Alt+Left, Ctrl+Left, or Alt+b (on
         // macOS Option+Left arrives as Alt+Left, Alt+b, or ESC-b depending on
         // the terminal — all three are bound).
         if (key.matches(vaxis.Key.left, .{ .alt = true }) or
@@ -3871,8 +3870,8 @@ pub const App = struct {
         self.commit_body_buffer.clearRetainingCapacity();
 
         switch (action) {
-            // Run the commit off-thread (lazygit closes the panel first, then
-            // commits via a waiting status): the dialog disappears at once and
+            // Run the commit off-thread (close the panel first, then
+            // commit via a waiting status): the dialog disappears at once and
             // pre-commit hooks / signing / a slow `git status` no longer block
             // it. The refresh is scoped to the views a commit changes.
             .create => return self.requestMutation(.{ .commit = message }, .{ .gerund = "committing", .command = "git commit", .refresh = Refresh.commit }, "commit created", .{}),
@@ -3921,7 +3920,7 @@ pub const App = struct {
         if (self.isEnterKey(key) or self.config.keymap.select.matches(key)) {
             return self.setFileDisplayFilter(status_filter_options[self.status_filter_index]);
         }
-        // Letter shortcuts mirror lazygit's quick filters.
+        // Letter shortcuts for quick filters.
         if (key.matches('r', .{})) return self.setFileDisplayFilter(.all);
         if (key.matches('s', .{})) return self.setFileDisplayFilter(.staged);
         if (key.matches('u', .{})) return self.setFileDisplayFilter(.unstaged);
@@ -4232,11 +4231,11 @@ pub const App = struct {
                 }
             },
             .branch => |name| {
-                // lazygit shows the branch's commit graph in the main view
+                // Show the branch's commit graph in the main view
                 // (`git log --graph --color=always --decorate --date=relative
                 // --pretty=medium`, titled "Log"), not a terse oneline list.
-                // Mirror it; the renderer parses git's ANSI colors. A generous
-                // cap keeps the buffered preview bounded.
+                // The renderer parses git's ANSI colors; a generous cap keeps
+                // the buffered preview bounded.
                 empty_msg = "No commits.\n";
                 try sections.append(page_alloc, .{
                     .argv = try dupArgv(&.{ "log", "--graph", "--color=always", "--abbrev-commit", "--decorate", "--date=relative", "--pretty=medium", "-300", name, "--" }),
@@ -4363,7 +4362,7 @@ pub const App = struct {
             var mutable = result;
             defer mutable.deinit(result_allocator);
             if (mutable.ok()) {
-                // Network success stays silent (bottom bar), like lazygit.
+                // Network success stays silent (bottom bar).
                 try self.setMessage("{s} complete", .{op.label()});
             } else {
                 // Failures follow result_dialog so a rejected push/pull is seen.
@@ -4431,7 +4430,7 @@ pub const App = struct {
         if (self.mode == .operation) self.mode = .normal;
     }
 
-    /// Surface a successful op (lazygit-style). Under `result_dialog = always`
+    /// Surface a successful op. Under `result_dialog = always`
     /// the legacy result dialog is shown; otherwise it is silent — a one-line
     /// bottom-bar summary, tearing down any "Running…" frame. `raw` is the
     /// command's stdout, shown only in the dialog.
@@ -4457,8 +4456,8 @@ pub const App = struct {
         try self.finishOp(false, summary, raw);
     }
 
-    /// Named view-sets for the per-view refresh after a mutation (lazygit-style
-    /// "refresh only what changed"). The Files view loads synchronously for
+    /// Named view-sets for the per-view refresh after a mutation
+    /// ("refresh only what changed"). The Files view loads synchronously for
     /// instant feedback; the rest load off-thread.
     pub const Refresh = struct {
         pub const files = ScopeSet.init(.{ .files = true, .status = true });
@@ -4819,7 +4818,7 @@ test "word and line motion helpers" {
     try std.testing.expectEqual(@as(usize, 20), moveLeftWord(s, 21)); // -> "." separator
     try std.testing.expectEqual(@as(usize, 16), moveLeftWord(s, 20)); // -> "main"
     try std.testing.expectEqual(@as(usize, 0), moveLeftWord(s, 3)); // from ":" back to start
-    // Word-right mirrors it. ':' is not in lazygit's separator set, so "fix:"
+    // Word-right mirrors it. ':' is not in the separator set, so "fix:"
     // is one word ending at the space (index 4).
     try std.testing.expectEqual(@as(usize, 4), moveRightWord(s, 0));
     try std.testing.expectEqual(@as(usize, 8), moveRightWord(s, 5)); // "the"

@@ -87,7 +87,7 @@ pub const KeyMap = struct {
 pub const Theme = struct {
     selected_bg: u8 = 4,
     /// Background of the selected row in a panel that does NOT have focus, so
-    /// the selection stays visible (dimmer than `selected_bg`). lazygit-style.
+    /// the selection stays visible (dimmer than `selected_bg`).
     inactive_selected_bg: u8 = 8,
     active: u8 = 10,
     inactive_border: u8 = 8,
@@ -102,7 +102,7 @@ pub const Theme = struct {
     hunk: u8 = 14,
     header: u8 = 13,
     /// Footer (bottom bar) keybinding hints: the key is highlighted in
-    /// `footer_key`, its description shown in `footer` — lazygit colors this bar.
+    /// `footer_key`, its description shown in `footer`.
     footer: u8 = 12,
     footer_key: u8 = 14,
 };
@@ -122,7 +122,7 @@ pub const CustomCommand = struct {
 pub const max_custom_commands = 16;
 
 /// When the operation result dialog appears after a git action.
-/// `on_error` (default) mirrors lazygit: silent on success, dialog on failure.
+/// `on_error` (default): silent on success, dialog on failure.
 pub const ResultDialog = enum { on_error, always, never };
 
 /// Whether a custom shell command's output pops a dialog (`show`, the default,
@@ -148,7 +148,7 @@ pub const ConfirmSkips = struct {
 pub const Config = struct {
     side_panel_width_percent: u8 = 34,
     diff_context: u8 = 3,
-    /// lazygit's accordion mode: when true, the focused side-panel list grows to
+    /// Accordion mode: when true, the focused side-panel list grows to
     /// `expanded_side_panel_weight` while the others shrink. Default off.
     expand_focused_side_panel: bool = false,
     expanded_side_panel_weight: u8 = 2,
@@ -332,7 +332,7 @@ test "config parser applies theme colors and newer keybindings" {
 
 test "config parser applies result-dialog, command-output, and skip-confirm flags" {
     var cfg: Config = .{};
-    // Defaults match lazygit: dialog only on error, custom output shown,
+    // Defaults: dialog only on error, custom output shown,
     // confirmations on.
     try std.testing.expectEqual(ResultDialog.on_error, cfg.result_dialog);
     try std.testing.expectEqual(CommandOutput.show, cfg.command_output);

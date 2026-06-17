@@ -108,7 +108,7 @@ fn mutationWorker(mr: *MutationRun) void {
     _ = mr.loop.tryPostEvent(.mutation_done) catch false;
 }
 
-/// The one-shot initial repo load (lazygit-style async startup). Loads the full
+/// The one-shot initial repo load (async startup). Loads the full
 /// repo off the UI loop on a page-allocator Git and posts `.repo_load_done` so
 /// the loop can deep-copy it into the gpa and paint the populated panels.
 const RepoLoadRun = struct {
@@ -124,7 +124,7 @@ fn repoLoadWorker(rl: *RepoLoadRun) void {
     _ = rl.loop.tryPostEvent(.repo_load_done) catch false;
 }
 
-/// A per-view scoped refresh (lazygit-style): loads just the requested slow
+/// A per-view scoped refresh: loads just the requested slow
 /// views (branches/commits/tags/…) off the UI loop and posts `.scoped_load_done`
 /// so the loop can apply each into its view. `grep`/`author`/`path` are
 /// page-allocated copies of the active Commits filter, freed when done.
@@ -246,7 +246,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     app.render_hook = .{ .ctx = &render_ctx, .func = renderHook };
     defer app.render_hook = null;
 
-    // Load the repo off-thread (lazygit-style): the loop's initial winsize event
+    // Load the repo off-thread: the loop's initial winsize event
     // paints the skeleton with "Loading…" placeholders right away, and the
     // panels fill in when `repo_load_done` lands — no startup freeze, no flash.
     var repo_load_run: RepoLoadRun = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ };
@@ -481,7 +481,7 @@ fn renderHook(ctx: *anyopaque) void {
 
 const SidePanelHeights = struct { status: u16, files: u16, branches: u16, commits: u16, stash: u16 };
 
-/// lazygit's side-panel sizing: the status panel is a fixed height; files,
+/// Side-panel sizing: the status panel is a fixed height; files,
 /// branches and commits share the remaining space by weight (1 each); and the
 /// stash panel is a small fixed height *unless it is focused*, in which case it
 /// joins the weighted group. With the accordion (`expand_focused_side_panel`),
@@ -612,7 +612,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     else if (app.diff_base) |diff_ref|
         (std.fmt.bufPrint(&title_buf, "Diff [base {s}]", .{diff_ref[0..@min(diff_ref.len, 16)]}) catch "Diff [diffing]")
     else if (app.contentFocus() == .branches and app.selectedBranchRefName() != null)
-        // A selected branch/tag shows its commit graph — lazygit titles this "Log".
+        // A selected branch/tag shows its commit graph, titled "Log".
         "Log"
     else
         "Diff";
@@ -795,7 +795,7 @@ fn drawTextPromptPopup(root: vaxis.Window, app: *app_mod.App) void {
     const kind = app.text_prompt_kind orelse return;
     const w: u16 = @min(@as(u16, 64), root.width -| 4);
     const win = popup(root, w, 5, kind.title());
-    // Horizontally scroll so the caret stays inside the box (lazygit-style):
+    // Horizontally scroll so the caret stays inside the box:
     // render the buffer starting at the scroll origin instead of clipping it.
     const caret = @min(app.prompt_cursor, app.input_buffer.items.len);
     const sc = app_mod.viewScroll(app.prompt_scroll, win.width, caret);
@@ -968,7 +968,7 @@ fn panel(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, title: []const u8, 
 fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
     const st = styles();
 
-    // Line 0: <repo> → <branch>  <ahead/behind status>   (lazygit-style)
+    // Line 0: <repo> → <branch>  <ahead/behind status>
     const repo = std.fs.path.basename(app.git.root);
     var col: u16 = 0;
     col = printSpan(win, 0, col, repo, st.normal);
@@ -1044,7 +1044,7 @@ fn drawFiles(win: vaxis.Window, app: *const app_mod.App) void {
         const sel = selOf(idx == app.file_index, app.focus == .files);
         applySel(&base, sel);
         if (sel != .none) fillRow(win, row, base);
-        // The two short-status columns are colored independently (lazygit-style):
+        // The two short-status columns are colored independently:
         // the index/staged column green, the worktree/unstaged column red — so a
         // half-staged "MM" shows one green M and one red M.
         var col = printSpan(win, row, 0, file.short_status[0..1], statusCharStyle(file.short_status[0], true, file.conflict, base));
@@ -1402,7 +1402,7 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
     _ = drawHints(win, 0, col, contextHints(app), st.hint_key, st.hint_desc);
 }
 
-/// Render keybinding hints lazygit-style: each "<key> <description>" group
+/// Render keybinding hints: each "<key> <description>" group
 /// (groups separated by two spaces) draws the leading key token highlighted and
 /// the rest in the footer color. Returns the next column.
 fn drawHints(win: vaxis.Window, row: u16, start_col: u16, hints: []const u8, key_st: vaxis.Style, desc_st: vaxis.Style) u16 {
@@ -1425,7 +1425,7 @@ fn drawHints(win: vaxis.Window, row: u16, start_col: u16, hints: []const u8, key
     return col;
 }
 
-/// Keybinding hints for the focused panel only, lazygit-style. A short global
+/// Keybinding hints for the focused panel only. A short global
 /// suffix (refresh/quit) is appended since those apply everywhere.
 fn contextHints(app: *const app_mod.App) []const u8 {
     const global = "  ? help  z undo  R refresh  q quit";
@@ -1458,7 +1458,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
 }
 
 /// How a row's selection is drawn: not selected, selected in an unfocused panel
-/// (dim highlight so it stays visible, lazygit-style), or selected in the
+/// (dim highlight so it stays visible), or selected in the
 /// focused panel (full highlight).
 const Sel = enum { none, inactive, active };
 
@@ -1637,9 +1637,8 @@ fn printAnsi(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style) v
 
 /// Word-wrap `text` to `width` cells, writing each resulting line (a substring
 /// of `text`) into `out` and returning the count. Breaks on existing newlines,
-/// prefers to break at spaces, and hard-breaks words longer than `width`. This
-/// is how lazygit keeps confirmation/message popups readable (its Confirmation
-/// view has Wrap = true) instead of clipping at the boundary.
+/// prefers to break at spaces, and hard-breaks words longer than `width`, so
+/// confirmation/message popups stay readable instead of being clipped at the boundary.
 fn wrapText(text: []const u8, width: u16, out: [][]const u8) usize {
     if (out.len == 0) return 0;
     if (text.len == 0) {
@@ -1796,7 +1795,7 @@ const glyph_collapsed = "▸"; // U+25B8
 const glyph_expanded = "▾"; // U+25BE
 const indent_spaces = " " ** 32;
 
-/// Render lazygit-style ahead/behind status: `↓2↑3`, `✓` when in sync, or a
+/// Render ahead/behind status: `↓2↑3`, `✓` when in sync, or a
 /// note when there is no upstream. Returns the next column.
 fn drawBranchStatus(win: vaxis.Window, row: u16, col: u16, base: vaxis.Style, has_upstream: bool, ahead: usize, behind: usize) u16 {
     if (!has_upstream) return printSpan(win, row, col, "?", withFg(base, 8));
@@ -1823,7 +1822,7 @@ fn withFg(base: vaxis.Style, index: u8) vaxis.Style {
     return s;
 }
 
-test "side panel heights match lazygit weighting" {
+test "side panel heights match the weighting" {
     const body_h: u16 = 30;
 
     // Default (no accordion): status fixed, stash a small fixed size when not
