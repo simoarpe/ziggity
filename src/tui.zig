@@ -738,7 +738,7 @@ const help_lines = [_][]const u8{
     "  fetch/pull/push run in the background (status in the bottom bar)",
 };
 
-fn drawHelpPopup(root: vaxis.Window, app: *const app_mod.App) void {
+fn drawHelpPopup(root: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
     // Size the popup to the longest line so nothing is cut on a wide terminal;
     // cap at the screen width and wrap any still-too-long line as a fallback.
@@ -773,6 +773,7 @@ fn drawHelpPopup(root: vaxis.Window, app: *const app_mod.App) void {
     const win = popup(root, w, h, "Keybindings");
 
     const max_scroll = if (total > win.height) total - win.height else 0;
+    app.help_max_scroll = max_scroll; // so key handlers can clamp scrolling
     const start = @min(app.help_scroll, max_scroll);
     var row: u16 = 0;
     for (wrapped[start..total]) |wl| {
@@ -816,7 +817,7 @@ fn drawCommandLogPopup(root: vaxis.Window, app: *const app_mod.App) void {
     }
 }
 
-fn drawOperationPopup(root: vaxis.Window, app: *const app_mod.App) void {
+fn drawOperationPopup(root: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
     const w: u16 = @min(@as(u16, 86), root.width -| 4);
     const h: u16 = @min(@as(u16, 20), root.height -| 2);
@@ -850,14 +851,19 @@ fn drawOperationPopup(root: vaxis.Window, app: *const app_mod.App) void {
     // Raw stdout/stderr below the summary, wrapped and scrollable by visual line.
     const footer_row: u16 = win.height -| 1;
     row += 1;
-    if (app.op_output.len > 0 and row < footer_row) {
+    const output_top = row;
+    if (app.op_output.len > 0 and output_top < footer_row) {
         var vis: [256][]const u8 = undefined;
         const vis_n = wrapText(app.op_output, cw, &vis);
-        var idx: usize = @min(app.op_scroll, vis_n);
+        const avail: usize = footer_row - output_top;
+        app.op_max_scroll = vis_n -| avail; // clamp target for the key handler
+        var idx: usize = @min(app.op_scroll, app.op_max_scroll);
         while (idx < vis_n and row < footer_row) : (idx += 1) {
             print(win, row, 0, vis[idx], st.muted);
             row += 1;
         }
+    } else {
+        app.op_max_scroll = 0;
     }
 
     print(win, footer_row, 0, "enter dismiss   up/down scroll", st.bottom_accent);

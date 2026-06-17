@@ -1037,6 +1037,9 @@ pub const App = struct {
     op_ok: bool = true,
     op_running: bool = false,
     op_scroll: usize = 0,
+    // Largest scroll offset that still shows content, captured at render time so
+    // key handlers can clamp and over-scrolling past the bottom never piles up.
+    op_max_scroll: usize = 0,
     render_hook: ?RenderHook = null,
     // Text the TUI loop should copy to the system clipboard (OSC 52), owned;
     // set by a copy action, consumed and freed by the loop.
@@ -1061,6 +1064,7 @@ pub const App = struct {
     mode: Mode = .normal,
     status_filter_index: usize = 0,
     help_scroll: usize = 0,
+    help_max_scroll: usize = 0,
     undo_label_buf: [160]u8 = undefined,
     undo_label_len: usize = 0,
     active_menu: ?Menu = null,
@@ -1435,8 +1439,10 @@ pub const App = struct {
         }
         if (self.mode == .operation) {
             // The result stays up until dismissed; arrows scroll long output.
+            // Clamp at the last-rendered max so over-scrolling past the bottom
+            // doesn't accumulate (which would stall scrolling back up).
             if (self.config.keymap.down.matches(key) or key.matches(vaxis.Key.down, .{})) {
-                self.op_scroll += 1;
+                self.op_scroll = @min(self.op_scroll + 1, self.op_max_scroll);
             } else if (self.config.keymap.up.matches(key) or key.matches(vaxis.Key.up, .{})) {
                 self.op_scroll -|= 1;
             } else if (self.isEnterKey(key) or self.isEscapeKey(key)) {
@@ -1451,7 +1457,7 @@ pub const App = struct {
         }
         if (self.mode == .help) {
             if (self.config.keymap.down.matches(key) or key.matches(vaxis.Key.down, .{})) {
-                self.help_scroll += 1;
+                self.help_scroll = @min(self.help_scroll + 1, self.help_max_scroll);
             } else if (self.config.keymap.up.matches(key) or key.matches(vaxis.Key.up, .{})) {
                 self.help_scroll -|= 1;
             } else {
@@ -4931,6 +4937,29 @@ test "fileDiffArgv pairs renames and sets rename/submodule flags" {
     }
     try std.testing.expectEqualStrings("file.zig", argv2[argv2.len - 1]);
     for (argv2) |a| try std.testing.expect(!std.mem.eql(u8, a, "--staged"));
+}
+
+test "help dialog scrolling clamps at the bottom and resumes up immediately" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.mode = .help;
+    app.help_max_scroll = 2; // as a render would have computed
+    app.help_scroll = 0;
+
+    const down = vaxis.Key{ .codepoint = 'j' };
+    try app.handleKey(down);
+    try app.handleKey(down);
+    try app.handleKey(down); // past the bottom — must clamp, not accumulate
+    try app.handleKey(down);
+    try std.testing.expectEqual(@as(usize, 2), app.help_scroll);
+
+    // Scrolling up moves on the very next press (no stuck phantom offset).
+    const up = vaxis.Key{ .codepoint = 'k' };
+    try app.handleKey(up);
+    try std.testing.expectEqual(@as(usize, 1), app.help_scroll);
 }
 
 test "diffLineCount ignores a single trailing newline" {
