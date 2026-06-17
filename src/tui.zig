@@ -160,8 +160,13 @@ fn scopedLoadWorker(sr: *ScopedLoadRun) void {
     _ = sr.loop.tryPostEvent(.scoped_load_done) catch false;
 }
 
-const refresh_interval = std.Io.Duration.fromMilliseconds(1500);
-const spinner_interval = std.Io.Duration.fromMilliseconds(120);
+// The ticker always wakes at this fast cadence so the spinner animates smoothly
+// and a newly-started op begins spinning within one tick — instead of staying
+// stuck on the first frame until a long idle sleep finishes.
+const spinner_tick_ms: u64 = 80;
+const spinner_tick = std.Io.Duration.fromMilliseconds(spinner_tick_ms);
+// Background working-tree refresh cadence while idle, accumulated from ticks.
+const refresh_interval_ms: u64 = 1500;
 const focus_events_set = "\x1b[?1004h";
 const focus_events_reset = "\x1b[?1004l";
 
@@ -453,13 +458,26 @@ fn spinnerGlyph(frame: usize) []const u8 {
 }
 
 fn refreshTickerRun(state: *RefreshTicker) void {
+    var idle_ms: u64 = 0;
     while (!state.stop.load(.acquire)) {
-        // Tick fast while a foreground op runs (to animate the spinner),
-        // slowly otherwise (just the periodic working-tree refresh).
-        const interval = if (state.app.busy_flag.load(.acquire)) spinner_interval else refresh_interval;
-        std.Io.sleep(state.io, interval, .awake) catch return;
+        // Always sleep the short spinner tick so the ticker re-checks the
+        // busy state promptly; a freshly-started op then animates within one
+        // tick instead of waiting out a long idle sleep.
+        std.Io.sleep(state.io, spinner_tick, .awake) catch return;
         if (state.stop.load(.acquire)) return;
-        _ = state.loop.tryPostEvent(.refresh_tick) catch false;
+        if (state.app.busy_flag.load(.acquire)) {
+            // Busy: animate the spinner on every fast tick.
+            idle_ms = 0;
+            _ = state.loop.tryPostEvent(.refresh_tick) catch false;
+        } else {
+            // Idle: fire the periodic working-tree refresh only at the slower
+            // cadence (built up from the fast ticks), not every tick.
+            idle_ms += spinner_tick_ms;
+            if (idle_ms >= refresh_interval_ms) {
+                idle_ms = 0;
+                _ = state.loop.tryPostEvent(.refresh_tick) catch false;
+            }
+        }
     }
 }
 
