@@ -125,6 +125,11 @@ pub const AsyncOp = enum {
     }
 };
 
+/// Per-list-panel view state: `scroll` is the top visible item index, `view_h`
+/// the last-rendered visible row count, and `last_sel` the selection index at
+/// the previous render (used to detect when to re-anchor the view).
+const ListView = struct { scroll: usize = 0, view_h: u16 = 0, last_sel: usize = 0 };
+
 /// True when a push failed because the remote has diverged and the push needs to
 /// be forced. Matches git's English rejection messages.
 fn pushNeedsForce(output: []const u8) bool {
@@ -1033,6 +1038,12 @@ pub const App = struct {
     /// Panel hit-boxes captured by the renderer for mouse handling.
     panel_rects: [6]PanelRect = undefined,
     panel_rect_count: usize = 0,
+    // Independent view scroll for the side list panels, so the mouse wheel
+    // scrolls the view without moving the selection. The view re-anchors to the
+    // selection only when the *selection* changes (keyboard/click/refresh), not
+    // when the wheel scrolls. Indexed via `listViewIndex` (files/branches/
+    // commits/stash); status and main have no entry.
+    list_views: [4]ListView = [_]ListView{.{}} ** 4,
     // Character-precise mouse text selection in the Diff panel. Coordinates are
     // into the rendered diff (`self.diff`): `line` is an absolute line index,
     // `col` a visible column. `anchor` is where the drag began, `head` the
@@ -1713,9 +1724,9 @@ pub const App = struct {
             },
             // The mouse wheel scrolls the panel under the cursor in place,
             // without changing focus (only a click focuses).
-            // Scrolling the diff moves its view; scrolling a list moves that
-            // list's selection (shown dimmed when the list isn't focused), and
-            // the preview updates only when the scrolled list is the active one.
+            // Scrolling the diff moves its view; scrolling a list scrolls that
+            // list's view without moving its selection (so the diff/preview is
+            // left alone too).
             .wheel_up => try self.wheelScroll(rect.focus, false),
             .wheel_down => try self.wheelScroll(rect.focus, true),
             else => return false,
@@ -1728,6 +1739,88 @@ pub const App = struct {
             if (rect.contains(col, row)) return rect;
         }
         return null;
+    }
+
+    /// Index into `list_views` for a side list panel, or null for status/main.
+    fn listViewIndex(focus: model.Focus) ?usize {
+        return switch (focus) {
+            .files => 0,
+            .branches => 1,
+            .commits => 2,
+            .stash => 3,
+            .status, .main => null,
+        };
+    }
+
+    fn listView(self: *App, focus: model.Focus) ?*ListView {
+        const i = listViewIndex(focus) orelse return null;
+        return &self.list_views[i];
+    }
+
+    /// Top visible item index of a list panel's view (0 for non-list panels).
+    pub fn listScroll(self: *const App, focus: model.Focus) usize {
+        const i = listViewIndex(focus) orelse return 0;
+        return self.list_views[i].scroll;
+    }
+
+    /// Number of items in the panel's currently-shown list (tab/mode aware).
+    fn activeListLen(self: *const App, focus: model.Focus) usize {
+        return switch (focus) {
+            .files => if (self.tree_view) self.tree_rows.len else self.visibleFileCount(),
+            .branches => switch (self.branches_tab) {
+                .local => self.data.branches.len,
+                .remotes => self.data.remote_branches.len,
+                .tags => self.data.tags.len,
+                .worktrees => self.data.worktrees.len,
+                .submodules => self.data.submodules.len,
+            },
+            .commits => if (self.commit_files_active) self.commit_files.len else switch (self.commits_tab) {
+                .commits => self.data.commits.len,
+                .reflog => self.data.reflog.len,
+            },
+            .stash => self.data.stash.len,
+            .status, .main => 0,
+        };
+    }
+
+    /// Selected item index in the panel's currently-shown list (tab/mode aware).
+    fn activeListSelected(self: *const App, focus: model.Focus) usize {
+        return switch (focus) {
+            .files => if (self.tree_view) self.tree_cursor else self.selectedFileVisibleOrdinal(),
+            .branches => switch (self.branches_tab) {
+                .local => self.branch_index,
+                .remotes => self.remote_index,
+                .tags => self.tag_index,
+                .worktrees => self.worktree_index,
+                .submodules => self.submodule_index,
+            },
+            .commits => if (self.commit_files_active) self.commit_file_index else switch (self.commits_tab) {
+                .commits => self.commit_index,
+                .reflog => self.reflog_index,
+            },
+            .stash => self.stash_index,
+            .status, .main => 0,
+        };
+    }
+
+    /// Render-time sync for a list panel's view scroll. Records the visible
+    /// height, re-anchors the view to keep the selection visible *only when the
+    /// selection changed* (so wheel scrolling, which never moves the selection,
+    /// scrolls freely), and clamps the offset to the content.
+    pub fn syncListView(self: *App, focus: model.Focus, inner_height: u16) void {
+        const lv = self.listView(focus) orelse return;
+        lv.view_h = inner_height;
+        const sel = self.activeListSelected(focus);
+        if (sel != lv.last_sel) {
+            if (sel < lv.scroll) {
+                lv.scroll = sel;
+            } else if (inner_height > 0 and sel >= lv.scroll + inner_height) {
+                lv.scroll = sel - inner_height + 1;
+            }
+            lv.last_sel = sel;
+        }
+        const max = self.activeListLen(focus) -| inner_height;
+        if (lv.scroll > max) lv.scroll = max;
     }
 
     fn mainRect(self: *const App) ?PanelRect {
@@ -1820,26 +1913,18 @@ pub const App = struct {
     /// scrolled list is the one the diff currently reflects.
     fn wheelScroll(self: *App, panel: model.Focus, down: bool) !void {
         if (panel == .main) return self.scrollMain(if (down) 1 else -1);
-        self.moveSelection(panel, down);
-        if (panel == self.contentFocus()) try self.updatePreview();
+        const lv = self.listView(panel) orelse return;
+        // Scroll the view only; the selection (and thus the preview) is unchanged.
+        const max = self.activeListLen(panel) -| lv.view_h;
+        if (down) {
+            lv.scroll = @min(lv.scroll + 1, max);
+        } else {
+            lv.scroll -|= 1;
+        }
     }
 
-    /// Scroll offset a list panel uses for a given selection (mirrors the
-    /// renderer's scrollStart) — used to map a clicked row back to an item.
-    fn listScrollStart(selected: usize, len: usize, visible: usize) usize {
-        if (len == 0 or visible == 0) return 0;
-        if (selected < visible) return 0;
-        return selected - visible + 1;
-    }
-
-    /// Resolve a clicked content row to an item index in a flat list.
-    fn rowToIndex(current: usize, len: usize, visible: usize, rel: usize) usize {
-        if (len == 0) return 0;
-        const start = listScrollStart(@min(current, len - 1), len, visible);
-        return @min(start + rel, len - 1);
-    }
-
-    /// Select the item under a left-click in a list panel.
+    /// Select the item under a left-click in a list panel. The clicked item is
+    /// the view's scroll offset plus the row offset within the panel.
     fn clickSelectInPanel(self: *App, rect: PanelRect, row: u16) !void {
         if (rect.h < 3) return; // border-only, no content
         const content_top = rect.y + 1;
@@ -1847,34 +1932,60 @@ pub const App = struct {
         const rel: usize = row - content_top;
         const visible: usize = rect.h - 2;
         if (rel >= visible) return;
+        const clicked = self.listScroll(rect.focus) + rel;
 
         switch (rect.focus) {
             .files => {
                 if (self.tree_view) {
-                    self.tree_cursor = rowToIndex(self.tree_cursor, self.tree_rows.len, visible, rel);
+                    if (self.tree_rows.len == 0) return;
+                    self.tree_cursor = @min(clicked, self.tree_rows.len - 1);
                 } else {
                     const vis = self.visibleFileCount();
                     if (vis == 0) return;
-                    const start = listScrollStart(@min(self.selectedFileVisibleOrdinal(), vis - 1), vis, visible);
-                    if (self.fileIndexAtVisibleOrdinal(@min(start + rel, vis - 1))) |idx| self.file_index = idx;
+                    if (self.fileIndexAtVisibleOrdinal(@min(clicked, vis - 1))) |idx| self.file_index = idx;
                 }
             },
             .branches => switch (self.branches_tab) {
-                .local => self.branch_index = rowToIndex(self.branch_index, self.data.branches.len, visible, rel),
-                .remotes => self.remote_index = rowToIndex(self.remote_index, self.data.remote_branches.len, visible, rel),
-                .tags => self.tag_index = rowToIndex(self.tag_index, self.data.tags.len, visible, rel),
-                .worktrees => self.worktree_index = rowToIndex(self.worktree_index, self.data.worktrees.len, visible, rel),
-                .submodules => self.submodule_index = rowToIndex(self.submodule_index, self.data.submodules.len, visible, rel),
+                .local => {
+                    if (self.data.branches.len == 0) return;
+                    self.branch_index = @min(clicked, self.data.branches.len - 1);
+                },
+                .remotes => {
+                    if (self.data.remote_branches.len == 0) return;
+                    self.remote_index = @min(clicked, self.data.remote_branches.len - 1);
+                },
+                .tags => {
+                    if (self.data.tags.len == 0) return;
+                    self.tag_index = @min(clicked, self.data.tags.len - 1);
+                },
+                .worktrees => {
+                    if (self.data.worktrees.len == 0) return;
+                    self.worktree_index = @min(clicked, self.data.worktrees.len - 1);
+                },
+                .submodules => {
+                    if (self.data.submodules.len == 0) return;
+                    self.submodule_index = @min(clicked, self.data.submodules.len - 1);
+                },
             },
             .commits => {
                 if (self.commit_files_active) {
-                    self.commit_file_index = rowToIndex(self.commit_file_index, self.commit_files.len, visible, rel);
+                    if (self.commit_files.len == 0) return;
+                    self.commit_file_index = @min(clicked, self.commit_files.len - 1);
                 } else switch (self.commits_tab) {
-                    .commits => self.commit_index = rowToIndex(self.commit_index, self.data.commits.len, visible, rel),
-                    .reflog => self.reflog_index = rowToIndex(self.reflog_index, self.data.reflog.len, visible, rel),
+                    .commits => {
+                        if (self.data.commits.len == 0) return;
+                        self.commit_index = @min(clicked, self.data.commits.len - 1);
+                    },
+                    .reflog => {
+                        if (self.data.reflog.len == 0) return;
+                        self.reflog_index = @min(clicked, self.data.reflog.len - 1);
+                    },
                 }
             },
-            .stash => self.stash_index = rowToIndex(self.stash_index, self.data.stash.len, visible, rel),
+            .stash => {
+                if (self.data.stash.len == 0) return;
+                self.stash_index = @min(clicked, self.data.stash.len - 1);
+            },
             .status, .main => return,
         }
         try self.updatePreview();
@@ -5567,15 +5678,33 @@ test "filter history dedups consecutive entries and ignores empties" {
     try std.testing.expectEqualStrings("zig", app.filter_history.items[1]);
 }
 
-test "click row maps to the list item under the cursor" {
-    // No scroll: row N selects item N.
-    try std.testing.expectEqual(@as(usize, 2), App.rowToIndex(0, 5, 3, 2));
-    // Selection at the bottom scrolls the window; row 0 is item 2 of 5.
-    try std.testing.expectEqual(@as(usize, 2), App.rowToIndex(4, 5, 3, 0));
-    try std.testing.expectEqual(@as(usize, 4), App.rowToIndex(4, 5, 3, 2));
-    // Clamps to the last item and handles empty lists.
-    try std.testing.expectEqual(@as(usize, 4), App.rowToIndex(0, 5, 10, 9));
-    try std.testing.expectEqual(@as(usize, 0), App.rowToIndex(0, 0, 3, 1));
+test "list view scrolls with the wheel but follows the selection on move" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits: [10]model.Commit = undefined;
+    for (&commits, 0..) |*c, i| {
+        _ = i;
+        c.* = .{ .hash = @constCast("h"), .short_hash = @constCast("h"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("c") };
+    }
+    app.data.commits = &commits;
+    app.focus = .commits;
+    app.commit_index = 0;
+
+    // Establish the visible height, then wheel down twice: the view scrolls but
+    // the selection stays at 0.
+    app.syncListView(.commits, 3);
+    try app.wheelScroll(.commits, true);
+    try app.wheelScroll(.commits, true);
+    try std.testing.expectEqual(@as(usize, 2), app.listScroll(.commits));
+    try std.testing.expectEqual(@as(usize, 0), app.commit_index);
+
+    // Moving the selection out of view re-anchors the view to reveal it.
+    app.commit_index = 5;
+    app.syncListView(.commits, 3);
+    try std.testing.expectEqual(@as(usize, 3), app.listScroll(.commits)); // shows 3,4,5
 }
 
 test "mouse wheel scrolls the panel under the cursor without changing focus" {
@@ -5612,9 +5741,11 @@ test "mouse wheel scrolls the panel under the cursor without changing focus" {
     try std.testing.expectEqual(@as(usize, 1), app.main_scroll);
     try std.testing.expectEqual(model.Focus.commits, app.focus);
 
-    // Wheel over the focused commits panel: moves its selection; focus stays.
+    // Wheel over the focused commits panel scrolls its VIEW, not its selection:
+    // commit_index stays put while the list's scroll offset advances.
     _ = try app.handleMouse(.{ .col = 5, .row = 17, .button = .wheel_down, .mods = .{}, .type = .press });
-    try std.testing.expectEqual(@as(usize, 1), app.commit_index);
+    try std.testing.expectEqual(@as(usize, 0), app.commit_index);
+    try std.testing.expectEqual(@as(usize, 1), app.listScroll(.commits));
     try std.testing.expectEqual(model.Focus.commits, app.focus);
 
     // Wheel over an unfocused panel (files): does NOT steal focus.

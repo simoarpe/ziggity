@@ -596,6 +596,14 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     const commits_h = heights.commits;
     const stash_h = heights.stash;
 
+    // Sync each list panel's view scroll to its visible height (inner = panel
+    // height minus the border) before drawing: re-anchors to the selection if it
+    // moved, leaves a wheel-scrolled view alone, and clamps to the content.
+    app.syncListView(.files, files_h -| 2);
+    app.syncListView(.branches, branches_h -| 2);
+    app.syncListView(.commits, commits_h -| 2);
+    app.syncListView(.stash, stash_h -| 2);
+
     // Capture panel hit-boxes for mouse handling.
     app.panel_rects = .{
         .{ .focus = .status, .x = 0, .y = 0, .w = side_w, .h = status_h },
@@ -1111,7 +1119,7 @@ fn drawFiles(win: vaxis.Window, app: *const app_mod.App) void {
         print(win, 0, 0, "No files match filter", styles().muted);
         return;
     }
-    const start = scrollStart(app.selectedFileVisibleOrdinal(), visible_count, win.height);
+    const start = app.listScroll(.files);
     var row: u16 = 0;
     var ordinal: usize = 0;
     for (app.data.files, 0..) |file, idx| {
@@ -1160,7 +1168,7 @@ fn drawFileTree(win: vaxis.Window, app: *const app_mod.App) void {
         print(win, 0, 0, "No files match filter", styles().muted);
         return;
     }
-    const start = scrollStart(app.tree_cursor, app.tree_rows.len, win.height);
+    const start = app.listScroll(.files);
     var row: u16 = 0;
     var i = start;
     while (i < app.tree_rows.len and row < win.height) : ({
@@ -1211,7 +1219,7 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
         print(win, 0, 0, empty_label, styles().muted);
         return;
     }
-    const start = scrollStart(selected, branches.len, win.height);
+    const start = app.listScroll(.branches);
     var row: u16 = 0;
     var idx = start;
     while (idx < branches.len and row < win.height) : ({
@@ -1253,7 +1261,7 @@ fn drawTags(win: vaxis.Window, app: *const app_mod.App) void {
         print(win, 0, 0, "No tags", styles().muted);
         return;
     }
-    const start = scrollStart(app.tag_index, app.data.tags.len, win.height);
+    const start = app.listScroll(.branches);
     var row: u16 = 0;
     var idx = start;
     while (idx < app.data.tags.len and row < win.height) : ({
@@ -1275,7 +1283,7 @@ fn drawWorktrees(win: vaxis.Window, app: *const app_mod.App) void {
         print(win, 0, 0, "No worktrees", styles().muted);
         return;
     }
-    const start = scrollStart(app.worktree_index, app.data.worktrees.len, win.height);
+    const start = app.listScroll(.branches);
     var row: u16 = 0;
     var idx = start;
     while (idx < app.data.worktrees.len and row < win.height) : ({
@@ -1296,7 +1304,7 @@ fn drawSubmodules(win: vaxis.Window, app: *const app_mod.App) void {
         print(win, 0, 0, "No submodules", styles().muted);
         return;
     }
-    const start = scrollStart(app.submodule_index, app.data.submodules.len, win.height);
+    const start = app.listScroll(.branches);
     var row: u16 = 0;
     var idx = start;
     while (idx < app.data.submodules.len and row < win.height) : ({
@@ -1320,7 +1328,7 @@ fn drawCommitFiles(win: vaxis.Window, app: *const app_mod.App) void {
         print(win, 0, 0, "No files in this commit", styles().muted);
         return;
     }
-    const start = scrollStart(app.commit_file_index, app.commit_files.len, win.height);
+    const start = app.listScroll(.commits);
     var row: u16 = 0;
     var idx = start;
     while (idx < app.commit_files.len and row < win.height) : ({
@@ -1351,7 +1359,7 @@ fn drawCommits(win: vaxis.Window, app: *const app_mod.App) void {
         return;
     }
     const selected = app.activeCommitIndex();
-    const start = scrollStart(selected, commits.len, win.height);
+    const start = app.listScroll(.commits);
     var row: u16 = 0;
     var idx = start;
     while (idx < commits.len and row < win.height) : ({
@@ -1376,7 +1384,7 @@ fn drawStash(win: vaxis.Window, app: *const app_mod.App) void {
         print(win, 0, 0, if (app.initial_load_pending) "Loading..." else "No stash entries", styles().muted);
         return;
     }
-    const start = scrollStart(app.stash_index, app.data.stash.len, win.height);
+    const start = app.listScroll(.stash);
     var row: u16 = 0;
     var idx = start;
     while (idx < app.data.stash.len and row < win.height) : ({
@@ -1811,13 +1819,6 @@ fn fillRow(win: vaxis.Window, row: u16, style: vaxis.Style) void {
             .style = style,
         });
     }
-}
-
-fn scrollStart(selected: usize, len: usize, visible: u16) usize {
-    if (len == 0 or visible == 0) return 0;
-    const vis: usize = visible;
-    if (selected < vis) return 0;
-    return selected - vis + 1;
 }
 
 fn diffStyle(line: []const u8) vaxis.Style {
