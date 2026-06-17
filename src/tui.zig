@@ -740,18 +740,44 @@ const help_lines = [_][]const u8{
 
 fn drawHelpPopup(root: vaxis.Window, app: *const app_mod.App) void {
     const st = styles();
-    const w: u16 = @min(@as(u16, 70), root.width -| 2);
-    const h: u16 = @min(@as(u16, help_lines.len + 2), root.height -| 1);
+    // Size the popup to the longest line so nothing is cut on a wide terminal;
+    // cap at the screen width and wrap any still-too-long line as a fallback.
+    var longest: usize = 0;
+    for (help_lines) |line| longest = @max(longest, line.len);
+    const w: u16 = @intCast(@min(@as(usize, root.width -| 2), longest + 4));
+    const content_w: u16 = w -| 2;
+
+    const HelpLine = struct { text: []const u8, header: bool };
+    var wrapped: [320]HelpLine = undefined;
+    var total: usize = 0;
+    for (help_lines) |line| {
+        // Section headers have no leading indent; their wrapped parts keep the style.
+        const header = line.len > 0 and line[0] != ' ';
+        if (line.len == 0) {
+            if (total < wrapped.len) {
+                wrapped[total] = .{ .text = "", .header = false };
+                total += 1;
+            }
+            continue;
+        }
+        var segs: [8][]const u8 = undefined;
+        const n = wrapText(line, content_w, &segs);
+        for (segs[0..n]) |s| {
+            if (total >= wrapped.len) break;
+            wrapped[total] = .{ .text = s, .header = header };
+            total += 1;
+        }
+    }
+
+    const h: u16 = @intCast(@min(@as(usize, root.height -| 1), total + 2));
     const win = popup(root, w, h, "Keybindings");
 
-    const max_scroll = if (help_lines.len > win.height) help_lines.len - win.height else 0;
+    const max_scroll = if (total > win.height) total - win.height else 0;
     const start = @min(app.help_scroll, max_scroll);
     var row: u16 = 0;
-    for (help_lines[start..]) |line| {
+    for (wrapped[start..total]) |wl| {
         if (row >= win.height) break;
-        // Section headers (no leading indent) are accented.
-        const style = if (line.len > 0 and line[0] != ' ') st.bottom_accent else st.normal;
-        print(win, row, 0, line, style);
+        print(win, row, 0, wl.text, if (wl.header) st.bottom_accent else st.normal);
         row += 1;
     }
 }
@@ -766,13 +792,26 @@ fn drawCommandLogPopup(root: vaxis.Window, app: *const app_mod.App) void {
         print(win, 0, 0, "No commands run yet.", st.muted);
         return;
     }
-    // Show the most recent commands that fit, oldest at the top.
-    const capacity: usize = win.height;
-    const start = if (log.len > capacity) log.len - capacity else 0;
+    // Wrap the most recent commands (a long command is wrapped, not cut), then
+    // show the tail that fits — oldest of the visible block at the top.
+    const cw = win.width;
+    const entry_start = if (log.len > win.height) log.len - win.height else 0;
+    var vis: [512][]const u8 = undefined;
+    var total: usize = 0;
+    for (log[entry_start..]) |entry| {
+        var segs: [16][]const u8 = undefined;
+        const n = wrapText(entry, cw, &segs);
+        for (segs[0..n]) |s| {
+            if (total >= vis.len) break;
+            vis[total] = s;
+            total += 1;
+        }
+    }
+    const start = if (total > win.height) total - win.height else 0;
     var row: u16 = 0;
-    for (log[start..]) |entry| {
+    for (vis[start..total]) |line| {
         if (row >= win.height) break;
-        print(win, row, 0, entry, st.normal);
+        print(win, row, 0, line, st.normal);
         row += 1;
     }
 }
