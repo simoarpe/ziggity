@@ -749,10 +749,13 @@ pub const Git = struct {
         // A pathspec must come last, after a `--` separator.
         if (self.log_path) |p| try argv.appendSlice(self.allocator, &.{ "--", p });
 
-        const bytes = try self.output(argv.items);
-        defer self.allocator.free(bytes);
-
-        return parseCommits(self.allocator, bytes);
+        // `git log` fails on an unborn branch (no commits yet) and on an
+        // unmatched/invalid filter; treat that as an empty list rather than
+        // failing the whole repo load (matches the other list loaders).
+        var result = try self.exec(argv.items);
+        defer result.deinit(self.allocator);
+        if (!result.ok()) return self.allocator.alloc(model.Commit, 0);
+        return parseCommits(self.allocator, result.stdout);
     }
 
     pub fn loadReflog(self: *Git, limit: usize) ![]model.Commit {
@@ -1594,6 +1597,48 @@ test "parse porcelain status including rename" {
     try std.testing.expect(files[1].isRename());
     try std.testing.expectEqualSlices(u8, "old.txt", files[1].previous_path.?);
     try std.testing.expect(!files[2].tracked);
+}
+
+test "parse porcelain status handles merge/rebase conflict codes" {
+    // The codes `git status` emits during a merge/rebase/cherry-pick conflict.
+    const input = "UU both.txt\x00AA addadd.txt\x00DD deldel.txt\x00UA us-added.txt\x00 M plain.txt\x00";
+    const files = try parseStatus(std.testing.allocator, input);
+    defer {
+        for (files) |*file| file.deinit(std.testing.allocator);
+        std.testing.allocator.free(files);
+    }
+    try std.testing.expectEqual(@as(usize, 5), files.len);
+    try std.testing.expect(files[0].conflict and files[0].has_unstaged); // UU
+    try std.testing.expectEqualSlices(u8, "both.txt", files[0].path);
+    try std.testing.expect(files[1].conflict); // AA
+    try std.testing.expect(files[2].conflict); // DD
+    try std.testing.expect(files[3].conflict); // UA
+    try std.testing.expect(!files[4].conflict); // plain modification
+}
+
+test "parse branches handles rebase/detached pseudo-entry as current" {
+    // `branch --format` lists a pseudo-entry for the detached HEAD during a
+    // rebase or detached checkout; it must parse without panicking and be the
+    // current branch.
+    const input = "*\x00(no branch, rebasing topic)\x00\x00\n" ++
+        " \x00main\x00\x00\n" ++
+        " \x00topic\x00\x00\n";
+    const branches = try parseBranches(std.testing.allocator, input);
+    defer {
+        for (branches) |*b| b.deinit(std.testing.allocator);
+        std.testing.allocator.free(branches);
+    }
+    try std.testing.expectEqual(@as(usize, 3), branches.len);
+    try std.testing.expect(branches[0].current);
+    try std.testing.expectEqualSlices(u8, "(no branch, rebasing topic)", branches[0].name);
+    try std.testing.expect(!branches[1].current);
+    try std.testing.expectEqualSlices(u8, "main", branches[1].name);
+}
+
+test "parse commits handles empty (unborn branch) output" {
+    const commits = try parseCommits(std.testing.allocator, "");
+    defer std.testing.allocator.free(commits);
+    try std.testing.expectEqual(@as(usize, 0), commits.len);
 }
 
 test "parse branches captures current marker, upstream, and gone upstream" {
