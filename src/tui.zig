@@ -1227,7 +1227,13 @@ fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
     col = printSpan(win, 0, col, " ", st.muted);
     col = printSpan(win, 0, col, app.data.current_branch, st.active_title);
     col = printSpan(win, 0, col, " ", st.muted);
-    _ = drawBranchStatus(win, 0, col, st.muted, app.data.upstream != null, app.data.ahead orelse 0, app.data.behind orelse 0);
+    if (app.data.upstream_gone) {
+        // The upstream was deleted on the remote — flag it (red), matching the
+        // branches panel, instead of a misleading "in sync" tick.
+        _ = printSpan(win, 0, col, "(upstream gone)", withFg(st.muted, ui_theme.unstaged));
+    } else {
+        _ = drawBranchStatus(win, 0, col, st.muted, app.data.upstream != null, app.data.ahead orelse 0, app.data.behind orelse 0);
+    }
 
     // Line 1: a running foreground op (network or slow mutation) takes
     // priority with an animated spinner, then merge/rebase state, then a
@@ -2110,10 +2116,10 @@ const glyph_collapsed = "▸"; // U+25B8
 const glyph_expanded = "▾"; // U+25BE
 const indent_spaces = " " ** 32;
 
-/// Render ahead/behind status: `↓2↑3`, `✓` when in sync, or a
-/// note when there is no upstream. Returns the next column.
+/// Render ahead/behind status: `↓2↑3`, `✓` when in sync, or `(unpushed)`
+/// when the branch has no upstream (never pushed). Returns the next column.
 fn drawBranchStatus(win: vaxis.Window, row: u16, col: u16, base: vaxis.Style, has_upstream: bool, ahead: usize, behind: usize) u16 {
-    if (!has_upstream) return printSpan(win, row, col, "?", withFg(base, 8));
+    if (!has_upstream) return printSpan(win, row, col, "(unpushed)", withFg(base, ui_theme.muted));
     if (ahead == 0 and behind == 0) return printGlyph(win, row, col, glyph_uptodate, withFg(base, 10));
 
     var c = col;

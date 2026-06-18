@@ -418,6 +418,7 @@ pub const Git = struct {
         const status = try self.loadStatusSummary();
         data.current_branch = status.current_branch;
         data.upstream = status.upstream;
+        data.upstream_gone = status.upstream_gone;
         data.ahead = status.ahead;
         data.behind = status.behind;
         data.files = try self.loadFiles();
@@ -518,8 +519,16 @@ pub const Git = struct {
         };
         errdefer status.deinit(self.allocator);
 
-        status.upstream = try self.upstreamBranch();
-        if (status.upstream != null) {
+        // Resolve the upstream and whether it's gone from the branch's config
+        // (`%(upstream:*)`), which is reliable even when the remote ref was
+        // deleted — unlike `@{u}`, which stops resolving once the ref is gone.
+        if (status.current_branch.len > 0) {
+            if (self.upstreamTrack(status.current_branch)) |track| {
+                status.upstream = track.upstream;
+                status.upstream_gone = track.gone;
+            } else |_| {}
+        }
+        if (status.upstream != null and !status.upstream_gone) {
             const counts = self.aheadBehind() catch null;
             if (counts) |value| {
                 status.behind = value.behind;
@@ -528,6 +537,26 @@ pub const Git = struct {
         }
 
         return status;
+    }
+
+    const UpstreamTrack = struct { upstream: ?[]u8, gone: bool };
+
+    /// The configured upstream of `branch` and whether it's "[gone]" (deleted on
+    /// the remote), read via `for-each-ref` so it works from config regardless of
+    /// whether the remote-tracking ref still exists. `upstream` is owned.
+    fn upstreamTrack(self: *Git, branch: []const u8) !UpstreamTrack {
+        const ref = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{branch});
+        defer self.allocator.free(ref);
+        var result = try self.exec(&.{ "for-each-ref", "--format=%(upstream:short)%00%(upstream:track)", ref });
+        defer result.deinit(self.allocator);
+        if (!result.ok()) return .{ .upstream = null, .gone = false };
+        var it = std.mem.splitScalar(u8, std.mem.trim(u8, result.stdout, " \t\r\n"), 0);
+        const up = it.next() orelse "";
+        const track = it.next() orelse "";
+        return .{
+            .upstream = if (up.len > 0) try self.allocator.dupe(u8, up) else null,
+            .gone = std.mem.indexOf(u8, track, "[gone]") != null,
+        };
     }
 
     pub fn currentBranch(self: *Git) ![]u8 {
@@ -543,15 +572,6 @@ pub const Git = struct {
         if (!detached.ok()) return GitError.CommandFailed;
         const trimmed = std.mem.trim(u8, detached.stdout, " \t\r\n");
         return std.fmt.allocPrint(self.allocator, "detached@{s}", .{trimmed});
-    }
-
-    pub fn upstreamBranch(self: *Git) !?[]u8 {
-        var result = try self.exec(&.{ "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}" });
-        defer result.deinit(self.allocator);
-        if (!result.ok()) return null;
-        const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
-        if (trimmed.len == 0) return null;
-        return try self.allocator.dupe(u8, trimmed);
     }
 
     const AheadBehind = struct {

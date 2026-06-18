@@ -217,6 +217,8 @@ pub const StashEntry = struct {
 pub const StatusSummary = struct {
     current_branch: []u8 = &.{},
     upstream: ?[]u8 = null,
+    /// The current branch's upstream was deleted on the remote ("[gone]").
+    upstream_gone: bool = false,
     ahead: ?usize = null,
     behind: ?usize = null,
 
@@ -235,6 +237,7 @@ pub const StatusSummary = struct {
         return .{
             .current_branch = branch,
             .upstream = upstream,
+            .upstream_gone = self.upstream_gone,
             .ahead = self.ahead,
             .behind = self.behind,
         };
@@ -249,6 +252,8 @@ pub fn deinitFileStatuses(allocator: std.mem.Allocator, files: []FileStatus) voi
 pub const RepoData = struct {
     current_branch: []u8 = &.{},
     upstream: ?[]u8 = null,
+    /// The current branch's upstream was deleted on the remote ("[gone]").
+    upstream_gone: bool = false,
     ahead: ?usize = null,
     behind: ?usize = null,
     state: RepoState = .clean,
@@ -300,6 +305,7 @@ pub const RepoData = struct {
         if (self.upstream) |upstream| allocator.free(upstream);
         self.current_branch = status.current_branch;
         self.upstream = status.upstream;
+        self.upstream_gone = status.upstream_gone;
         self.ahead = status.ahead;
         self.behind = status.behind;
     }
@@ -375,6 +381,7 @@ pub const RepoData = struct {
         out.bisecting = self.bisecting;
         out.current_branch = try allocator.dupe(u8, self.current_branch);
         out.upstream = if (self.upstream) |u| try allocator.dupe(u8, u) else null;
+        out.upstream_gone = self.upstream_gone;
         out.files = try dupeList(FileStatus, allocator, self.files, dupeFile);
         out.branches = try dupeList(Branch, allocator, self.branches, dupeBranch);
         out.remote_branches = try dupeList(Branch, allocator, self.remote_branches, dupeBranch);

@@ -181,6 +181,11 @@ pub const AsyncOp = enum {
     /// `push_set_upstream` the worker appends the remote and branch.
     pub fn argv(self: AsyncOp) []const []const u8 {
         return switch (self) {
+            // Plain fetch, honoring the user's `fetch.prune` config (git prunes
+            // automatically when it's set). We don't force `--prune`: it would
+            // override an explicit `fetch.prune=false` and delete remote-tracking
+            // refs without asking. A branch surfaces as "(upstream gone)" once a
+            // prune happens — i.e. exactly when git itself would consider it gone.
             .fetch => &.{ "fetch", "--all", "--no-write-fetch-head" },
             .pull => &.{ "pull", "--no-edit" },
             .push => &.{"push"},
@@ -717,6 +722,7 @@ pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process
         if (wgit.loadStatusSummary()) |s| {
             d.current_branch = s.current_branch;
             d.upstream = s.upstream;
+            d.upstream_gone = s.upstream_gone;
             d.ahead = s.ahead;
             d.behind = s.behind;
             loaded.insert(.status);
@@ -1503,6 +1509,7 @@ pub const App = struct {
                 self.data.current_branch = cb;
                 if (self.data.upstream) |u| a.free(u);
                 self.data.upstream = if (src.upstream) |u| (a.dupe(u8, u) catch null) else null;
+                self.data.upstream_gone = src.upstream_gone;
                 self.data.ahead = src.ahead;
                 self.data.behind = src.behind;
             } else |_| {}
