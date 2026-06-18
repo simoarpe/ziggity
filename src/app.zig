@@ -1779,7 +1779,19 @@ pub const App = struct {
     /// Returns true if the event changed state and a re-render is warranted.
     /// Motion/drag events (which flood with any-motion tracking) return false.
     pub fn handleMouse(self: *App, mouse: vaxis.Mouse) !bool {
-        if (self.mode != .normal) return false;
+        // While a dialog is open the mouse only drives wheel scrolling of its
+        // content (the operation-result and help popups); all other mouse input
+        // is ignored until the dialog is dismissed.
+        if (self.mode != .normal) {
+            if (mouse.type == .press) {
+                switch (mouse.button) {
+                    .wheel_up => return self.dialogScroll(false),
+                    .wheel_down => return self.dialogScroll(true),
+                    else => {},
+                }
+            }
+            return false;
+        }
 
         // Character-precise text selection in the Diff panel: left-drag selects,
         // release copies to the clipboard. Works for whatever the diff currently
@@ -2045,6 +2057,24 @@ pub const App = struct {
             lv.scroll = @min(lv.scroll + 1, max);
         } else {
             lv.scroll -|= 1;
+        }
+    }
+
+    /// Mouse-wheel scrolling for the scrollable dialogs (the same content the
+    /// up/down keys move). Three lines per notch, clamped to the max captured at
+    /// render time. Returns whether anything scrolled (so the loop repaints).
+    fn dialogScroll(self: *App, down: bool) bool {
+        const lines = 3;
+        switch (self.mode) {
+            .operation => {
+                self.op_scroll = if (down) @min(self.op_scroll + lines, self.op_max_scroll) else self.op_scroll -| lines;
+                return true;
+            },
+            .help => {
+                self.help_scroll = if (down) @min(self.help_scroll + lines, self.help_max_scroll) else self.help_scroll -| lines;
+                return true;
+            },
+            else => return false,
         }
     }
 
@@ -6194,6 +6224,34 @@ test "mouse wheel scrolls the panel under the cursor without changing focus" {
     // Wheel over an unfocused panel (files): does NOT steal focus.
     _ = try app.handleMouse(.{ .col = 5, .row = 7, .button = .wheel_down, .mods = .{}, .type = .press });
     try std.testing.expectEqual(model.Focus.commits, app.focus);
+}
+
+test "mouse wheel scrolls the operation and help dialogs" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // Operation dialog: wheel down advances op_scroll (clamped to the render-time
+    // max), wheel up walks it back. Other (non-wheel) mouse input is ignored.
+    app.mode = .operation;
+    app.op_max_scroll = 5;
+    const wheel_down: vaxis.Mouse = .{ .col = 10, .row = 10, .button = .wheel_down, .mods = .{}, .type = .press };
+    try std.testing.expect(try app.handleMouse(wheel_down));
+    try std.testing.expectEqual(@as(usize, 3), app.op_scroll);
+    try std.testing.expect(try app.handleMouse(wheel_down));
+    try std.testing.expectEqual(@as(usize, 5), app.op_scroll); // clamped
+    _ = try app.handleMouse(.{ .col = 10, .row = 10, .button = .wheel_up, .mods = .{}, .type = .press });
+    try std.testing.expectEqual(@as(usize, 2), app.op_scroll);
+    // A left click in a dialog does nothing (no scroll, no crash).
+    try std.testing.expect(!try app.handleMouse(.{ .col = 10, .row = 10, .button = .left, .mods = .{}, .type = .press }));
+    try std.testing.expectEqual(@as(usize, 2), app.op_scroll);
+
+    // Help dialog scrolls its own offset the same way.
+    app.mode = .help;
+    app.help_max_scroll = 10;
+    try std.testing.expect(try app.handleMouse(wheel_down));
+    try std.testing.expectEqual(@as(usize, 3), app.help_scroll);
 }
 
 test "escape clears active file filter before quitting" {
