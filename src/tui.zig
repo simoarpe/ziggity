@@ -60,7 +60,7 @@ fn asyncWorker(job: *AsyncJob) void {
     // prompt). The credential clone points GIT_ASKPASS back at this binary, so
     // git fetches the entered username/password from us instead.
     const env = if (job.cred_environ) |*e| e else job.environ;
-    const result = std.process.run(async_allocator, job.io, .{
+    const result = git_mod.runWithLockRetry(async_allocator, job.io, .{
         .argv = argv.items,
         .cwd = .{ .path = job.root },
         .environ_map = env,
@@ -1128,6 +1128,7 @@ fn drawConfirmPopup(root: vaxis.Window, app: *const app_mod.App) void {
         .remove_remote => "Remove remote",
         .undo => "Undo",
         .force_push, .force_push_plain => "Force push",
+        .delete_index_lock => "Git locked",
     };
     // Wrap the message so a long prompt (e.g. a worktree path) stays readable
     // inside the box instead of being clipped, growing the popup's height.

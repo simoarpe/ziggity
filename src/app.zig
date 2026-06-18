@@ -117,7 +117,30 @@ pub const Confirmation = enum {
     undo,
     force_push,
     force_push_plain,
+    /// Offered when a git command fails because a `.git` lock file is present
+    /// even after the automatic retries — almost always a stale lock left by a
+    /// crashed git. Confirming deletes the lock file and (for async ops) retries.
+    delete_index_lock,
 };
+
+/// What to re-run after the user confirms deleting a stale git lock file. Only
+/// the cleanly-replayable async paths auto-retry; a sync mutation just deletes
+/// the lock and the user re-triggers (re-running a captured multi-step command
+/// could be wrong).
+pub const RetryAction = union(enum) {
+    none,
+    async_op: AsyncOp,
+    /// An off-thread mutation to re-queue; owned by the page allocator.
+    mutation: Mutation,
+};
+
+/// Free whichever owned payload a `RetryAction` holds.
+fn freeRetryAction(action: RetryAction) void {
+    switch (action) {
+        .mutation => |m| m.deinit(page_alloc),
+        .none, .async_op => {},
+    }
+}
 
 /// Network operations that run off the UI loop so they don't freeze it.
 pub const AsyncOp = enum {
@@ -1220,6 +1243,11 @@ pub const App = struct {
     /// async worker, replaced on the next set-upstream push, freed at shutdown.
     push_upstream_remote: ?[]u8 = null,
     push_upstream_branch: ?[]u8 = null,
+    /// Lock-recovery state: the lock file path to delete (owned) and the action
+    /// to retry after deleting it. Set when a command fails with a lock error
+    /// that survived the automatic retries (see `offerLockRecovery`).
+    lock_path: ?[]u8 = null,
+    retry_action: RetryAction = .none,
 
     // Async preview pipeline. Switching panels / moving the selection only
     // computes a cache key and renders cached text (instant); the matching git
@@ -1349,6 +1377,7 @@ pub const App = struct {
         if (self.exe_path) |p| self.allocator.free(p);
         if (self.push_upstream_remote) |r| self.allocator.free(r);
         if (self.push_upstream_branch) |b| self.allocator.free(b);
+        self.clearLockRecovery();
         self.git.deinit();
         self.* = undefined;
     }
@@ -3012,6 +3041,12 @@ pub const App = struct {
             },
             .force_push => "Push rejected: the remote has commits you don't have. It will be force pushed WITH LEASE (--force-with-lease). Continue?",
             .force_push_plain => "Force push with lease (--force-with-lease) was rejected. It will be force pushed (--force). Continue?",
+            .delete_index_lock => blk: {
+                if (self.lock_path) |p| {
+                    break :blk std.fmt.bufPrint(buf, "git is locked ({s}). Another git process may be running. Delete this lock file and retry?", .{p}) catch "git is locked. Delete the lock file and retry?";
+                }
+                break :blk "git is locked. Delete the lock file and retry?";
+            },
         };
     }
 
@@ -4837,6 +4872,8 @@ pub const App = struct {
         if (self.isEscapeKey(key) or key.matches('n', .{})) {
             self.mode = .normal;
             self.pending_confirmation = null;
+            // Drop any lock-recovery state if this was the lock prompt.
+            self.clearLockRecovery();
             try self.setMessage("cancelled", .{});
             return;
         }
@@ -4915,6 +4952,7 @@ pub const App = struct {
             .undo => return self.requestMutation(.undo, .{ .gerund = "undoing", .command = "git reset (undo)", .refresh = Refresh.all }, "undone", .{}),
             .force_push => return self.requestAsync(.push_force),
             .force_push_plain => return self.requestAsync(.push_force_plain),
+            .delete_index_lock => return self.confirmDeleteIndexLock(),
         }
     }
 
@@ -5336,7 +5374,8 @@ pub const App = struct {
                 } else {
                     var label_buf: [64]u8 = undefined;
                     const summary = std.fmt.bufPrint(&label_buf, "{s} failed", .{op.label()}) catch "command failed";
-                    try self.reportFailure(summary, raw);
+                    // On a leftover lock, offer to delete it and retry this op.
+                    _ = try self.reportFailureOrLock(summary, raw, .{ .async_op = op });
                 }
             }
         } else {
@@ -5428,6 +5467,82 @@ pub const App = struct {
         try self.finishOp(false, summary, raw);
     }
 
+    /// Report a failed op, but if it failed on a leftover git lock (one that
+    /// survived the automatic retries), instead offer to delete the lock file
+    /// and retry. `action` is what to re-run on confirm (`.none` = delete only,
+    /// the user re-triggers). Returns true when it handled the lock case.
+    fn reportFailureOrLock(self: *App, summary: []const u8, raw: []const u8, action: RetryAction) !bool {
+        if (!git_mod.isRetryableLockError(raw)) {
+            freeRetryAction(action); // free an unused owned action, if any
+            try self.reportFailure(summary, raw);
+            return false;
+        }
+        self.clearLockRecovery();
+        self.retry_action = action;
+        try self.captureLockPath(raw);
+        self.dismissOpFrame();
+        self.pending_confirmation = .delete_index_lock;
+        self.mode = .confirmation;
+        try self.setMessage("git is locked — press y to delete the lock and retry", .{});
+        return true;
+    }
+
+    /// Parse the `'…lock'` path out of git's error (covers both "Unable to create
+    /// '….lock'" and "cannot lock ref … '….lock'"); fall back to the repo's
+    /// index.lock. Stores an owned copy in `lock_path`.
+    fn captureLockPath(self: *App, raw: []const u8) !void {
+        if (self.lock_path) |p| {
+            self.allocator.free(p);
+            self.lock_path = null;
+        }
+        if (std.mem.indexOf(u8, raw, ".lock")) |dot| {
+            const end = dot + ".lock".len;
+            if (std.mem.lastIndexOfScalar(u8, raw[0..dot], '\'')) |open| {
+                const path = raw[open + 1 .. end];
+                if (path.len > ".lock".len) {
+                    self.lock_path = try self.allocator.dupe(u8, path);
+                    return;
+                }
+            }
+        }
+        self.lock_path = try std.fmt.allocPrint(self.allocator, "{s}/.git/index.lock", .{self.git.root});
+    }
+
+    /// Drop any pending lock-recovery state (on confirm/cancel/shutdown).
+    fn clearLockRecovery(self: *App) void {
+        freeRetryAction(self.retry_action);
+        self.retry_action = .none;
+        if (self.lock_path) |p| {
+            self.allocator.free(p);
+            self.lock_path = null;
+        }
+    }
+
+    /// Delete the stale lock file the user confirmed removing, then re-run the
+    /// captured action (async only; a sync mutation is left for the user to
+    /// re-trigger).
+    fn confirmDeleteIndexLock(self: *App) !void {
+        if (self.lock_path) |path| {
+            std.Io.Dir.deleteFile(.cwd(), self.git.io, path) catch {};
+        }
+        const action = self.retry_action;
+        self.retry_action = .none; // ownership moves to `action`
+        if (self.lock_path) |p| {
+            self.allocator.free(p);
+            self.lock_path = null;
+        }
+        switch (action) {
+            .none => try self.setMessage("removed git lock", .{}),
+            .async_op => |op| return self.requestAsync(op),
+            .mutation => |m| {
+                if (self.mutation_requested) |old| old.deinit(page_alloc);
+                self.mutation_requested = m; // transfer ownership; meta still set
+                self.spinner_frame = 0;
+                try self.setMessage("{s}...", .{self.mutation_gerund});
+            },
+        }
+    }
+
     /// Named view-sets for the per-view refresh after a mutation
     /// ("refresh only what changed"). The Files view loads synchronously for
     /// instant feedback; the rest load off-thread.
@@ -5470,7 +5585,10 @@ pub const App = struct {
             try self.reportSuccess(summary, mutable.stdout);
         } else {
             const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
-            try self.reportFailure("command failed", if (stderr.len > 0) mutable.stderr else mutable.stdout);
+            const raw = if (stderr.len > 0) mutable.stderr else mutable.stdout;
+            // A leftover lock offers delete-and-retry; sync mutations don't
+            // auto-retry (the user re-triggers), so the action is `.none`.
+            _ = try self.reportFailureOrLock("command failed", raw, .none);
         }
         self.refreshViews(scopes);
     }
@@ -5551,7 +5669,14 @@ pub const App = struct {
                 try self.reportSuccess(if (line.len > 0) line else self.mutation_msg, mutable.stdout);
             } else {
                 const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
-                try self.reportFailure("command failed", if (stderr.len > 0) mutable.stderr else mutable.stdout);
+                const raw = if (stderr.len > 0) mutable.stderr else mutable.stdout;
+                // On a leftover lock, offer to delete it and re-queue this same
+                // mutation (its meta fields are still set). Dupe only then.
+                var action: RetryAction = .none;
+                if (git_mod.isRetryableLockError(raw)) {
+                    if (job.dupe(gpa)) |dup| action = .{ .mutation = dup } else |_| {}
+                }
+                _ = try self.reportFailureOrLock("command failed", raw, action);
             }
         } else {
             try self.reportFailure("command failed to start", "");
@@ -6584,6 +6709,49 @@ test "pushing a branch with no upstream prompts then sets upstream" {
     try std.testing.expectEqualStrings("feature/x", app.push_upstream_branch.?);
 }
 
+test "captureLockPath extracts the lock file from git's error" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = @constCast("/repo") };
+
+    try app.captureLockPath("fatal: Unable to create '/repo/.git/index.lock': File exists.");
+    try std.testing.expectEqualStrings("/repo/.git/index.lock", app.lock_path.?);
+
+    // Ref-lock errors quote a '<…>.lock' path too.
+    try app.captureLockPath("error: cannot lock ref 'refs/heads/main': Unable to create '/repo/.git/refs/heads/main.lock': File exists");
+    try std.testing.expectEqualStrings("/repo/.git/refs/heads/main.lock", app.lock_path.?);
+
+    // No path in the message -> fall back to the repo's index.lock.
+    try app.captureLockPath("some unrelated error");
+    try std.testing.expectEqualStrings("/repo/.git/index.lock", app.lock_path.?);
+}
+
+test "lock errors offer delete-and-retry; other failures report normally" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = @constCast("/repo") };
+    defer app.git.command_log.deinit(allocator);
+
+    // A leftover-lock failure sets up the confirmation + captured retry op.
+    const handled = try app.reportFailureOrLock("push failed", "fatal: Unable to create '/repo/.git/index.lock': File exists.", .{ .async_op = .push });
+    try std.testing.expect(handled);
+    try std.testing.expectEqual(Mode.confirmation, app.mode);
+    try std.testing.expectEqual(Confirmation.delete_index_lock, app.pending_confirmation.?);
+    try std.testing.expectEqual(AsyncOp.push, app.retry_action.async_op);
+    try std.testing.expectEqualStrings("/repo/.git/index.lock", app.lock_path.?);
+    app.clearLockRecovery();
+
+    // A non-lock failure reports normally and leaves no recovery state.
+    const handled2 = try app.reportFailureOrLock("push failed", "fatal: Authentication failed", .{ .async_op = .push });
+    try std.testing.expect(!handled2);
+    try std.testing.expect(std.meta.activeTag(app.retry_action) == .none);
+    try std.testing.expect(app.lock_path == null);
+}
+
 test "suggested push remote uses the configured remote list" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -6988,6 +7156,7 @@ fn deinitTestApp(app: *App) void {
     if (app.exe_path) |p| app.allocator.free(p);
     if (app.push_upstream_remote) |r| app.allocator.free(r);
     if (app.push_upstream_branch) |b| app.allocator.free(b);
+    app.clearLockRecovery();
     app.input_buffer.deinit(app.allocator);
     if (app.staging) |*parsed| parsed.deinit(app.allocator);
     app.allocator.free(app.staging_diff);

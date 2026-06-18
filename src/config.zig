@@ -147,6 +147,9 @@ pub const ConfirmSkips = struct {
     undo: bool = false,
     force_push: bool = false,
     force_push_plain: bool = false,
+    /// Field exists so `shouldSkipConfirm`'s comptime lookup covers every
+    /// Confirmation tag; the lock-recovery prompt is never auto-skipped.
+    delete_index_lock: bool = false,
 };
 
 pub const Config = struct {

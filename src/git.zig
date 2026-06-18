@@ -27,6 +27,45 @@ pub const ExecResult = struct {
     }
 };
 
+/// Up to this many attempts, waiting `lock_retry_wait` between them, when a git
+/// command fails with a transient lock error.
+const lock_retry_count = 5;
+const lock_retry_wait = std.Io.Duration.fromMilliseconds(50);
+
+/// True when git's output indicates a transient lock error worth retrying —
+/// another git process (a background refresh, or one the user ran elsewhere)
+/// briefly held `.git/index.lock` or a ref lock.
+pub fn isRetryableLockError(text: []const u8) bool {
+    // `index.lock` (rather than `.git/index.lock`) so linked-worktree paths
+    // (`.git/worktrees/<name>/index.lock`) and the bare message both match.
+    return std.mem.indexOf(u8, text, "index.lock") != null or
+        std.mem.indexOf(u8, text, "cannot lock ref") != null;
+}
+
+/// Run a process like `std.process.run`, but retry briefly on a transient git
+/// lock error instead of surfacing it. Returns the last result either way; the
+/// returned stdout/stderr are owned by `allocator`. Used for every git command
+/// so a momentary lock never reaches the user as a hard failure.
+pub fn runWithLockRetry(allocator: std.mem.Allocator, io: std.Io, options: std.process.RunOptions) std.process.RunError!std.process.RunResult {
+    var attempt: usize = 1;
+    while (true) : (attempt += 1) {
+        const result = try std.process.run(allocator, io, options);
+        const failed = switch (result.term) {
+            .exited => |code| code != 0,
+            else => true,
+        };
+        if (!failed or attempt >= lock_retry_count or
+            !(isRetryableLockError(result.stderr) or isRetryableLockError(result.stdout)))
+        {
+            return result;
+        }
+        // Transient lock: discard this attempt's output, wait, and retry.
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+        std.Io.sleep(io, lock_retry_wait, .awake) catch {};
+    }
+}
+
 pub const Git = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -203,7 +242,7 @@ pub const Git = struct {
             }
             self.command_log.append(self.allocator, e) catch self.allocator.free(e);
         }
-        const result = try std.process.run(self.allocator, self.io, .{
+        const result = try runWithLockRetry(self.allocator, self.io, .{
             .argv = &.{ "sh", "-c", command },
             .cwd = .{ .path = self.root },
             .stdout_limit = .limited(16 * 1024 * 1024),
@@ -219,7 +258,7 @@ pub const Git = struct {
         try argv.append(self.allocator, "git");
         try argv.appendSlice(self.allocator, args);
 
-        const result = try std.process.run(self.allocator, self.io, .{
+        const result = try runWithLockRetry(self.allocator, self.io, .{
             .argv = argv.items,
             .cwd = .{ .path = self.root },
             .stdout_limit = .limited(16 * 1024 * 1024),
@@ -362,7 +401,7 @@ pub const Git = struct {
 
         const argv = [_][]const u8{ "git", "rebase", "-i", "--autostash", base_ref };
         self.recordCommand(argv[1..]);
-        const result = try std.process.run(self.allocator, self.io, .{
+        const result = try runWithLockRetry(self.allocator, self.io, .{
             .argv = &argv,
             .cwd = .{ .path = self.root },
             .environ_map = &env,
@@ -1042,7 +1081,7 @@ pub const Git = struct {
         try env.put("GIT_EDITOR", "true");
         const argv = [_][]const u8{ "git", "rebase", "-i", "--autosquash", "--autostash", base };
         self.recordCommand(argv[1..]);
-        const result = try std.process.run(self.allocator, self.io, .{
+        const result = try runWithLockRetry(self.allocator, self.io, .{
             .argv = &argv,
             .cwd = .{ .path = self.root },
             .environ_map = &env,
@@ -1748,4 +1787,12 @@ test "parse commit files handles modifications and renames" {
     try std.testing.expectEqualSlices(u8, "renamed.zig", files[2].path);
     try std.testing.expectEqual(@as(u8, 'D'), files[3].status);
     try std.testing.expectEqualSlices(u8, "gone.zig", files[3].path);
+}
+
+test "retryable lock errors are detected, other errors are not" {
+    try std.testing.expect(isRetryableLockError("fatal: Unable to create '/repo/.git/index.lock': File exists."));
+    try std.testing.expect(isRetryableLockError("error: cannot lock ref 'refs/heads/main': is at ... but expected ..."));
+    try std.testing.expect(!isRetryableLockError("error: pathspec 'x' did not match any file(s)"));
+    try std.testing.expect(!isRetryableLockError("Everything up-to-date"));
+    try std.testing.expect(!isRetryableLockError(""));
 }
