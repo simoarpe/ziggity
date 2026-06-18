@@ -120,3 +120,21 @@ Implemented in `src/app.zig` (`runAskpassHelper`, `startCredentialPrompt`,
 `advanceCredentialPrompt`, `buildCredentialEnv`, `isAuthFailure`,
 `clearGitCredentials`, `completeAsync`), `src/main.zig` (askpass short-circuit),
 and `src/tui.zig` (`drawCredentialPopup`, credential-bearing `asyncWorker`).
+
+## Mouse text selection in dialogs
+
+**What lazygit does:** its popups (command output, menus, keybinding cheatsheet)
+aren't text-selectable from within the app; copying their text falls back to the
+terminal's own selection.
+
+**What Ziggity does:** the same character-precise click-drag selection as the
+Diff panel, extended to the read-only dialogs — the operation-result popup (git
+command output), the help/keybindings popup, and the command-log overlay.
+Drag to select; the span is highlighted as you drag, and on release it is copied
+to the system clipboard (OSC 52). Selection coordinates index the dialog's
+*rendered* rows, so it composes with wrapping; scrolling or closing the dialog
+clears it. The mouse wheel also scrolls the operation-result and help popups.
+
+Implemented in `src/app.zig` (`handleMouse` dialog branch, `beginDialogGrid`,
+`setDialogRow`, `dialogPointAt`, `dialogRowSelection`, `copyDialogSelection`,
+`dialogScroll`) and `src/tui.zig` (`drawDialogRow` in the dialog renderers).

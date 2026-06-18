@@ -1097,6 +1097,23 @@ pub const App = struct {
     diff_sel_anchor_col: usize = 0,
     diff_sel_head_line: usize = 0,
     diff_sel_head_col: usize = 0,
+    // Character-precise mouse text selection inside a read-only dialog (the
+    // operation-result, help, and command-log popups). Mirrors the diff
+    // selection, but coordinates index the dialog's *rendered* rows: `row` is a
+    // content row (0 at the top), `col` a column. The grid below is captured at
+    // render so the mouse handler can map screen coords to text and the copy can
+    // reconstruct the span. Selection is per-view: it clears when the dialog
+    // scrolls or closes.
+    dialog_sel_active: bool = false,
+    dialog_sel_dragged: bool = false,
+    dialog_sel_anchor_row: usize = 0,
+    dialog_sel_anchor_col: usize = 0,
+    dialog_sel_head_row: usize = 0,
+    dialog_sel_head_col: usize = 0,
+    dialog_origin_x: u16 = 0,
+    dialog_origin_y: u16 = 0,
+    dialog_rows: [256][]const u8 = [_][]const u8{""} ** 256,
+    dialog_row_count: usize = 0,
     branches_tab: BranchesTab = .local,
     commits_tab: CommitsTab = .commits,
     main_scroll: usize = 0,
@@ -1571,28 +1588,36 @@ pub const App = struct {
         if (self.mode == .operation) {
             // The result stays up until dismissed; arrows scroll long output.
             // Clamp at the last-rendered max so over-scrolling past the bottom
-            // doesn't accumulate (which would stall scrolling back up).
+            // doesn't accumulate (which would stall scrolling back up). Scrolling
+            // shifts the rendered rows, so any text selection is dropped.
             if (self.config.keymap.down.matches(key) or key.matches(vaxis.Key.down, .{})) {
                 self.op_scroll = @min(self.op_scroll + 1, self.op_max_scroll);
+                self.clearDialogSelection();
             } else if (self.config.keymap.up.matches(key) or key.matches(vaxis.Key.up, .{})) {
                 self.op_scroll -|= 1;
+                self.clearDialogSelection();
             } else if (self.isEnterKey(key) or self.isEscapeKey(key)) {
                 self.mode = .normal;
+                self.clearDialogSelection();
             }
             return;
         }
         if (self.mode == .command_log) {
             // Any key closes the command-log overlay.
             self.mode = .normal;
+            self.clearDialogSelection();
             return;
         }
         if (self.mode == .help) {
             if (self.config.keymap.down.matches(key) or key.matches(vaxis.Key.down, .{})) {
                 self.help_scroll = @min(self.help_scroll + 1, self.help_max_scroll);
+                self.clearDialogSelection();
             } else if (self.config.keymap.up.matches(key) or key.matches(vaxis.Key.up, .{})) {
                 self.help_scroll -|= 1;
+                self.clearDialogSelection();
             } else {
                 self.mode = .normal;
+                self.clearDialogSelection();
             }
             return;
         }
@@ -1779,16 +1804,49 @@ pub const App = struct {
     /// Returns true if the event changed state and a re-render is warranted.
     /// Motion/drag events (which flood with any-motion tracking) return false.
     pub fn handleMouse(self: *App, mouse: vaxis.Mouse) !bool {
-        // While a dialog is open the mouse only drives wheel scrolling of its
-        // content (the operation-result and help popups); all other mouse input
-        // is ignored until the dialog is dismissed.
+        // While a dialog is open the mouse drives wheel scrolling and
+        // character-precise text selection of its content (operation-result,
+        // help, and command-log popups). All other mouse input is ignored.
         if (self.mode != .normal) {
-            if (mouse.type == .press) {
-                switch (mouse.button) {
-                    .wheel_up => return self.dialogScroll(false),
-                    .wheel_down => return self.dialogScroll(true),
+            const c: u16 = if (mouse.col < 0) 0 else @intCast(mouse.col);
+            const rw: u16 = if (mouse.row < 0) 0 else @intCast(mouse.row);
+            switch (mouse.type) {
+                .press => switch (mouse.button) {
+                    .wheel_up => {
+                        self.clearDialogSelection();
+                        return self.dialogScroll(false);
+                    },
+                    .wheel_down => {
+                        self.clearDialogSelection();
+                        return self.dialogScroll(true);
+                    },
+                    .left => if (self.dialogPointAt(c, rw)) |pt| {
+                        self.dialog_sel_active = true;
+                        self.dialog_sel_dragged = false;
+                        self.dialog_sel_anchor_row = pt.row;
+                        self.dialog_sel_anchor_col = pt.col;
+                        self.dialog_sel_head_row = pt.row;
+                        self.dialog_sel_head_col = pt.col;
+                        return true;
+                    },
                     else => {},
-                }
+                },
+                .drag => if (self.dialog_sel_active) {
+                    if (self.dialogPointAt(c, rw)) |pt| {
+                        self.dialog_sel_head_row = pt.row;
+                        self.dialog_sel_head_col = pt.col;
+                        self.dialog_sel_dragged = true;
+                    }
+                    return true;
+                },
+                .release => if (self.dialog_sel_active) {
+                    if (self.dialog_sel_dragged) {
+                        try self.copyDialogSelection();
+                    }
+                    self.clearDialogSelection();
+                    return true;
+                },
+                else => {},
             }
             return false;
         }
@@ -2076,6 +2134,91 @@ pub const App = struct {
             },
             else => return false,
         }
+    }
+
+    // ---- Dialog text selection (mouse) ----------------------------------------
+
+    /// Reset the dialog selectable-row grid at the start of a dialog render.
+    /// `origin_x`/`origin_y` are the absolute screen coordinates of the content's
+    /// top-left cell; `rows` is the content height. Rows default to empty and are
+    /// filled in by `setDialogRow` as the dialog draws.
+    pub fn beginDialogGrid(self: *App, origin_x: u16, origin_y: u16, rows: usize) void {
+        self.dialog_origin_x = origin_x;
+        self.dialog_origin_y = origin_y;
+        self.dialog_row_count = @min(rows, self.dialog_rows.len);
+        for (self.dialog_rows[0..self.dialog_row_count]) |*r| r.* = "";
+    }
+
+    /// Record the text rendered on content row `idx` so it can be selected/copied.
+    pub fn setDialogRow(self: *App, idx: usize, text: []const u8) void {
+        if (idx < self.dialog_row_count) self.dialog_rows[idx] = text;
+    }
+
+    const DialogRange = struct { sr: usize, sc: usize, er: usize, ec: usize };
+
+    /// The selection normalized so (sr,sc) is the earlier point and (er,ec) the
+    /// later one.
+    fn dialogSelRange(self: *const App) DialogRange {
+        const a_row = self.dialog_sel_anchor_row;
+        const a_col = self.dialog_sel_anchor_col;
+        const h_row = self.dialog_sel_head_row;
+        const h_col = self.dialog_sel_head_col;
+        const anchor_first = a_row < h_row or (a_row == h_row and a_col <= h_col);
+        return if (anchor_first)
+            .{ .sr = a_row, .sc = a_col, .er = h_row, .ec = h_col }
+        else
+            .{ .sr = h_row, .sc = h_col, .er = a_row, .ec = a_col };
+    }
+
+    /// The selected column span `[lo, hi)` on rendered row `win_row`, or null when
+    /// nothing on that row is selected. Used by the renderer to highlight cells.
+    pub fn dialogRowSelection(self: *const App, win_row: usize) ?struct { lo: u16, hi: u16 } {
+        if (!self.dialog_sel_active or !self.dialog_sel_dragged) return null;
+        const r = self.dialogSelRange();
+        if (win_row < r.sr or win_row > r.er) return null;
+        const text = if (win_row < self.dialog_row_count) self.dialog_rows[win_row] else "";
+        const lo = if (win_row == r.sr) r.sc else 0;
+        const hi = if (win_row == r.er) @min(r.ec, text.len) else text.len;
+        return .{ .lo = @intCast(@min(lo, std.math.maxInt(u16))), .hi = @intCast(@min(hi, std.math.maxInt(u16))) };
+    }
+
+    /// Map an absolute screen cell to a (row, col) in the dialog grid, clamping
+    /// the column to the row's length. Null if the cell is outside the content.
+    fn dialogPointAt(self: *const App, col: u16, row: u16) ?struct { row: usize, col: usize } {
+        if (row < self.dialog_origin_y or col < self.dialog_origin_x) return null;
+        const wr: usize = row - self.dialog_origin_y;
+        if (wr >= self.dialog_row_count) return null;
+        const wc: usize = col - self.dialog_origin_x;
+        return .{ .row = wr, .col = @min(wc, self.dialog_rows[wr].len) };
+    }
+
+    /// Copy the current dialog selection to the system clipboard, joining
+    /// rendered rows with newlines (partial on the first/last row).
+    fn copyDialogSelection(self: *App) !void {
+        const r = self.dialogSelRange();
+        var buf: std.ArrayList(u8) = .empty;
+        errdefer buf.deinit(self.allocator);
+        var wr = r.sr;
+        while (wr <= r.er and wr < self.dialog_row_count) : (wr += 1) {
+            const text = self.dialog_rows[wr];
+            const lo = @min(if (wr == r.sr) r.sc else 0, text.len);
+            const hi = @min(if (wr == r.er) r.ec else text.len, text.len);
+            if (hi > lo) try buf.appendSlice(self.allocator, text[lo..hi]);
+            if (wr != r.er) try buf.append(self.allocator, '\n');
+        }
+        if (buf.items.len == 0) {
+            buf.deinit(self.allocator);
+            return;
+        }
+        if (self.clipboard_request) |c| self.allocator.free(c);
+        self.clipboard_request = try buf.toOwnedSlice(self.allocator);
+        try self.setMessage("copied selection", .{});
+    }
+
+    /// Clear any active dialog selection (on scroll or when the dialog closes).
+    pub fn clearDialogSelection(self: *App) void {
+        self.dialog_sel_active = false;
+        self.dialog_sel_dragged = false;
     }
 
     /// Select the item under a left-click in a list panel. The clicked item is
@@ -6252,6 +6395,43 @@ test "mouse wheel scrolls the operation and help dialogs" {
     app.help_max_scroll = 10;
     try std.testing.expect(try app.handleMouse(wheel_down));
     try std.testing.expectEqual(@as(usize, 3), app.help_scroll);
+}
+
+test "dialog text is mouse-selectable and copies to the clipboard" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.mode = .operation;
+    // Stand in for a render that captured the content rows at origin (2,3).
+    app.beginDialogGrid(2, 3, 3);
+    app.setDialogRow(0, "hello world");
+    app.setDialogRow(1, "second line");
+
+    // Drag across the first row's "hello" (cols 0..5) and release to copy.
+    _ = try app.handleMouse(.{ .col = 2, .row = 3, .button = .left, .mods = .{}, .type = .press });
+    try std.testing.expect(app.dialog_sel_active);
+    _ = try app.handleMouse(.{ .col = 7, .row = 3, .button = .left, .mods = .{}, .type = .drag });
+    try std.testing.expect(app.dialog_sel_dragged);
+    _ = try app.handleMouse(.{ .col = 7, .row = 3, .button = .left, .mods = .{}, .type = .release });
+    try std.testing.expect(!app.dialog_sel_active);
+    try std.testing.expectEqualStrings("hello", app.clipboard_request.?);
+
+    // A multi-row drag joins the partial rows with a newline.
+    app.beginDialogGrid(2, 3, 3);
+    app.setDialogRow(0, "hello world");
+    app.setDialogRow(1, "second line");
+    _ = try app.handleMouse(.{ .col = 8, .row = 3, .button = .left, .mods = .{}, .type = .press }); // row 0, col 6
+    _ = try app.handleMouse(.{ .col = 8, .row = 4, .button = .left, .mods = .{}, .type = .drag }); // row 1, col 6
+    _ = try app.handleMouse(.{ .col = 8, .row = 4, .button = .left, .mods = .{}, .type = .release });
+    try std.testing.expectEqualStrings("world\nsecond", app.clipboard_request.?);
+
+    // A plain click (no drag) selects nothing and leaves the prior clipboard.
+    _ = try app.handleMouse(.{ .col = 4, .row = 3, .button = .left, .mods = .{}, .type = .press });
+    _ = try app.handleMouse(.{ .col = 4, .row = 3, .button = .left, .mods = .{}, .type = .release });
+    try std.testing.expect(!app.dialog_sel_active);
+    try std.testing.expectEqualStrings("world\nsecond", app.clipboard_request.?);
 }
 
 test "escape clears active file filter before quitting" {

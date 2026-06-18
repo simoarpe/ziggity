@@ -820,23 +820,30 @@ fn drawHelpPopup(root: vaxis.Window, app: *app_mod.App) void {
     const h: u16 = @intCast(@min(@as(usize, root.height -| 1), total + 2));
     const win = popup(root, w, h, "Keybindings", .{ .len = total, .pos = app.help_scroll });
 
+    const px0: u16 = (root.width - w) / 2;
+    const py0: u16 = (root.height - h) / 2;
+    app.beginDialogGrid(px0 + 1, py0 + 1, win.height);
+
     const max_scroll = if (total > win.height) total - win.height else 0;
     app.help_max_scroll = max_scroll; // so key handlers can clamp scrolling
     const start = @min(app.help_scroll, max_scroll);
     var row: u16 = 0;
     for (wrapped[start..total]) |wl| {
         if (row >= win.height) break;
-        print(win, row, 0, wl.text, if (wl.header) st.bottom_accent else st.normal);
+        drawDialogRow(win, app, row, wl.text, if (wl.header) st.bottom_accent else st.normal);
         row += 1;
     }
 }
 
-fn drawCommandLogPopup(root: vaxis.Window, app: *const app_mod.App) void {
+fn drawCommandLogPopup(root: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
     const log = app.git.command_log.items;
     const w: u16 = @min(@as(u16, 90), root.width -| 4);
     const h: u16 = @min(@as(u16, 20), root.height -| 2);
     const win = popup(root, w, h, "Command log", null);
+    const px0: u16 = (root.width - w) / 2;
+    const py0: u16 = (root.height - h) / 2;
+    app.beginDialogGrid(px0 + 1, py0 + 1, win.height);
     if (log.len == 0) {
         print(win, 0, 0, "No commands run yet.", st.muted);
         return;
@@ -860,7 +867,7 @@ fn drawCommandLogPopup(root: vaxis.Window, app: *const app_mod.App) void {
     var row: u16 = 0;
     for (vis[start..total]) |line| {
         if (row >= win.height) break;
-        print(win, row, 0, line, st.normal);
+        drawDialogRow(win, app, row, line, st.normal);
         row += 1;
     }
 }
@@ -873,12 +880,17 @@ fn drawOperationPopup(root: vaxis.Window, app: *app_mod.App) void {
     const win = popup(root, w, h, title, null);
     const cw = win.width; // content width to wrap long lines into
 
+    // Capture this render's content rows so the text can be mouse-selected.
+    const px0: u16 = (root.width - w) / 2;
+    const py0: u16 = (root.height - h) / 2;
+    app.beginDialogGrid(px0 + 1, py0 + 1, win.height);
+
     // The command that is running / ran (wrapped).
     var cmd_lines: [3][]const u8 = undefined;
     const cmd_n = wrapText(app.op_command, cw, &cmd_lines);
     var row: u16 = 0;
     for (cmd_lines[0..cmd_n]) |ln| {
-        print(win, row, 0, ln, st.title);
+        drawDialogRow(win, app, row, ln, st.title);
         row += 1;
     }
 
@@ -892,7 +904,7 @@ fn drawOperationPopup(root: vaxis.Window, app: *app_mod.App) void {
     var sum_lines: [4][]const u8 = undefined;
     const sum_n = wrapText(app.op_summary, cw, &sum_lines);
     for (sum_lines[0..sum_n]) |ln| {
-        print(win, row, 0, ln, if (app.op_ok) st.normal else st.warning);
+        drawDialogRow(win, app, row, ln, if (app.op_ok) st.normal else st.warning);
         row += 1;
     }
 
@@ -907,14 +919,12 @@ fn drawOperationPopup(root: vaxis.Window, app: *app_mod.App) void {
         app.op_max_scroll = vis_n -| avail; // clamp target for the key handler
         var idx: usize = @min(app.op_scroll, app.op_max_scroll);
         while (idx < vis_n and row < footer_row) : (idx += 1) {
-            print(win, row, 0, vis[idx], st.muted);
+            drawDialogRow(win, app, row, vis[idx], st.muted);
             row += 1;
         }
         // Scrollbar over just the output region, on the popup's right border
         // (same centering as popup(), mapped back to root coordinates).
-        const px: u16 = (root.width - w) / 2;
-        const py: u16 = (root.height - h) / 2;
-        drawScrollbarRange(root, px + w - 1, py + 1 + output_top, avail, vis_n, app.op_scroll, true);
+        drawScrollbarRange(root, px0 + w - 1, py0 + 1 + output_top, avail, vis_n, app.op_scroll, true);
     } else {
         app.op_max_scroll = 0;
     }
@@ -1856,6 +1866,21 @@ fn applySgr(style: *vaxis.Style, base: vaxis.Style, params: []const u8) void {
             else => {},
         }
     }
+}
+
+/// Draw one selectable content row of a read-only dialog: record its text (so
+/// the mouse handler can map clicks to it and copy the span) and render it with
+/// any active selection highlight. Dialog text is plain, so `printAnsi` just
+/// draws it verbatim while shading the selected `[lo, hi)` columns.
+fn drawDialogRow(win: vaxis.Window, app: *app_mod.App, win_row: u16, text: []const u8, base: vaxis.Style) void {
+    app.setDialogRow(win_row, text);
+    var lo: u16 = 0;
+    var hi: u16 = 0;
+    if (app.dialogRowSelection(win_row)) |s| {
+        lo = s.lo;
+        hi = s.hi;
+    }
+    printAnsi(win, win_row, text, base, lo, hi);
 }
 
 /// Render one line into `win` at `row`, interpreting ANSI SGR escape sequences
