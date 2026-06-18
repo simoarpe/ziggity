@@ -411,32 +411,6 @@ pub const Git = struct {
         return .{ .stdout = result.stdout, .stderr = result.stderr, .term = result.term };
     }
 
-    pub fn loadRepoData(self: *Git) !model.RepoData {
-        var data = model.RepoData.empty();
-        errdefer data.deinit(self.allocator);
-
-        const status = try self.loadStatusSummary();
-        data.current_branch = status.current_branch;
-        data.upstream = status.upstream;
-        data.upstream_gone = status.upstream_gone;
-        data.ahead = status.ahead;
-        data.behind = status.behind;
-        data.files = try self.loadFiles();
-        data.branches = try self.loadBranches();
-        data.remote_branches = try self.loadRemoteBranches();
-        data.remotes = try self.loadRemotes();
-        data.tags = try self.loadTags();
-        data.worktrees = try self.loadWorktrees();
-        data.submodules = try self.loadSubmodules();
-        data.commits = try self.loadCommits("HEAD", 100);
-        data.reflog = try self.loadReflog(100);
-        data.stash = try self.loadStash();
-        data.state = self.detectState();
-        data.bisecting = self.gitPathExists("BISECT_LOG");
-
-        return data;
-    }
-
     fn gitPathExists(self: *Git, rel: []const u8) bool {
         const path = std.fmt.allocPrint(self.allocator, "{s}/.git/{s}", .{ self.root, rel }) catch return false;
         defer self.allocator.free(path);
@@ -449,6 +423,10 @@ pub const Git = struct {
         if (self.gitPathExists("CHERRY_PICK_HEAD")) return .cherry_picking;
         if (self.gitPathExists("MERGE_HEAD")) return .merging;
         return .clean;
+    }
+
+    pub fn isBisecting(self: *Git) bool {
+        return self.gitPathExists("BISECT_LOG");
     }
 
     /// Resolve a conflicted file by keeping our side (or theirs), then stage it.

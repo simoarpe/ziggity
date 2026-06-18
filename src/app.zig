@@ -651,19 +651,133 @@ pub const WorktreeSnapshot = struct {
     }
 };
 
-/// Worker-thread full repo load (async startup). Runs
-/// `git.loadRepoData` on a throwaway page-allocator `Git`; the result is
-/// page-owned and the UI thread deep-copies it into the gpa (see
-/// `App.applyRepoLoad`). Returns null on failure. `root`/`environ` are borrowed
-/// read-only. The throwaway Git's command log stays empty (loadRepoData is all
-/// read-only commands) but is freed defensively.
-pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, branch_sort: model.BranchSortOrder, untracked: git_mod.Git.UntrackedFiles) ?model.RepoData {
-    var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root, .branch_sort = branch_sort, .untracked_files = untracked };
-    defer {
-        for (wgit.command_log.items) |e| gpa.free(e);
-        wgit.command_log.deinit(gpa);
+/// Per-view result slots + shared inputs for the concurrent startup load. Each
+/// worker fills one slot using its own throwaway `Git` (the `git()` helper);
+/// `root`/`environ`/`io` are shared read-only and the page allocator is
+/// thread-safe, so the workers don't contend. All commands are read-only.
+const RepoLoadCtx = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    environ: *std.process.Environ.Map,
+    root: []u8,
+    branch_sort: model.BranchSortOrder,
+    untracked: git_mod.Git.UntrackedFiles,
+
+    status: ?model.StatusSummary = null,
+    state: model.RepoState = .clean,
+    bisecting: bool = false,
+    files: ?[]model.FileStatus = null,
+    branches: ?[]model.Branch = null,
+    remote_branches: ?[]model.Branch = null,
+    remotes: ?[][]u8 = null,
+    tags: ?[]model.Tag = null,
+    worktrees: ?[]model.Worktree = null,
+    submodules: ?[]model.Submodule = null,
+    commits: ?[]model.Commit = null,
+    reflog: ?[]model.Commit = null,
+    stash: ?[]model.StashEntry = null,
+
+    fn git(self: *const RepoLoadCtx) git_mod.Git {
+        return .{ .allocator = self.gpa, .io = self.io, .environ = self.environ, .root = self.root, .branch_sort = self.branch_sort, .untracked_files = self.untracked };
     }
-    return wgit.loadRepoData() catch null;
+};
+
+fn loadStatusW(ctx: *RepoLoadCtx) void {
+    var g = ctx.git();
+    ctx.status = g.loadStatusSummary() catch null;
+    ctx.state = g.detectState();
+    ctx.bisecting = g.isBisecting();
+}
+fn loadFilesW(ctx: *RepoLoadCtx) void {
+    var g = ctx.git();
+    ctx.files = g.loadFiles() catch null;
+}
+fn loadBranchesW(ctx: *RepoLoadCtx) void {
+    var g = ctx.git();
+    ctx.branches = g.loadBranches() catch null;
+}
+fn loadRemoteBranchesW(ctx: *RepoLoadCtx) void {
+    var g = ctx.git();
+    ctx.remote_branches = g.loadRemoteBranches() catch null;
+}
+fn loadRemotesW(ctx: *RepoLoadCtx) void {
+    var g = ctx.git();
+    ctx.remotes = g.loadRemotes() catch null;
+}
+fn loadTagsW(ctx: *RepoLoadCtx) void {
+    var g = ctx.git();
+    ctx.tags = g.loadTags() catch null;
+}
+fn loadWorktreesW(ctx: *RepoLoadCtx) void {
+    var g = ctx.git();
+    ctx.worktrees = g.loadWorktrees() catch null;
+}
+fn loadSubmodulesW(ctx: *RepoLoadCtx) void {
+    var g = ctx.git();
+    ctx.submodules = g.loadSubmodules() catch null;
+}
+fn loadCommitsW(ctx: *RepoLoadCtx) void {
+    var g = ctx.git();
+    ctx.commits = g.loadCommits("HEAD", 100) catch null;
+}
+fn loadReflogW(ctx: *RepoLoadCtx) void {
+    var g = ctx.git();
+    ctx.reflog = g.loadReflog(100) catch null;
+}
+fn loadStashW(ctx: *RepoLoadCtx) void {
+    var g = ctx.git();
+    ctx.stash = g.loadStash() catch null;
+}
+
+/// Worker-thread full repo load (async startup). Loads every panel's data
+/// CONCURRENTLY (one git subprocess per view, in parallel) rather than
+/// sequentially, so startup on a large repo takes ~the slowest single command
+/// instead of the sum of them all. The result is page-owned; the UI thread
+/// deep-copies it into the gpa (see `App.applyRepoLoad`). `root`/`environ` are
+/// borrowed read-only.
+pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, branch_sort: model.BranchSortOrder, untracked: git_mod.Git.UntrackedFiles) ?model.RepoData {
+    var ctx = RepoLoadCtx{ .gpa = gpa, .io = io, .environ = environ, .root = root, .branch_sort = branch_sort, .untracked = untracked };
+
+    // Ordered slowest-first (status/files/commits/branches are the heavy ones on
+    // a big repo) so that when the concurrency limit is reached, it's the cheap
+    // commands that fall back to running inline.
+    const workers = .{ loadStatusW, loadFilesW, loadCommitsW, loadBranchesW, loadReflogW, loadRemoteBranchesW, loadRemotesW, loadTagsW, loadWorktreesW, loadSubmodulesW, loadStashW };
+    var futures: [workers.len]?std.Io.Future(void) = .{null} ** workers.len;
+    // Spawn as many as the runtime allows concurrently (it returns an error,
+    // never blocks, once `cpu_count - 1` tasks are busy).
+    inline for (workers, 0..) |w, i| {
+        futures[i] = io.concurrent(w, .{&ctx}) catch null;
+    }
+    // Run whatever couldn't be spawned inline — after spawning, so it overlaps
+    // the concurrent ones rather than serializing them.
+    inline for (workers, 0..) |w, i| {
+        if (futures[i] == null) w(&ctx);
+    }
+    inline for (0..workers.len) |i| {
+        if (futures[i]) |*f| f.await(io);
+    }
+
+    var data = model.RepoData{};
+    if (ctx.status) |s| {
+        data.current_branch = s.current_branch;
+        data.upstream = s.upstream;
+        data.upstream_gone = s.upstream_gone;
+        data.ahead = s.ahead;
+        data.behind = s.behind;
+    }
+    data.state = ctx.state;
+    data.bisecting = ctx.bisecting;
+    data.files = ctx.files orelse &.{};
+    data.branches = ctx.branches orelse &.{};
+    data.remote_branches = ctx.remote_branches orelse &.{};
+    data.remotes = ctx.remotes orelse &.{};
+    data.tags = ctx.tags orelse &.{};
+    data.worktrees = ctx.worktrees orelse &.{};
+    data.submodules = ctx.submodules orelse &.{};
+    data.commits = ctx.commits orelse &.{};
+    data.reflog = ctx.reflog orelse &.{};
+    data.stash = ctx.stash orelse &.{};
+    return data;
 }
 
 /// The independently-refreshable data views. A
