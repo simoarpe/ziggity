@@ -1222,6 +1222,8 @@ pub const App = struct {
     status_filter_index: usize = 0,
     help_scroll: usize = 0,
     help_max_scroll: usize = 0,
+    command_log_scroll: usize = 0,
+    command_log_max_scroll: usize = 0,
     undo_label_buf: [160]u8 = undefined,
     undo_label_len: usize = 0,
     active_menu: ?Menu = null,
@@ -1699,9 +1701,16 @@ pub const App = struct {
             return;
         }
         if (self.mode == .command_log) {
-            // Any key closes the command-log overlay.
-            self.mode = .normal;
-            self.clearDialogSelection();
+            if (self.config.keymap.down.matches(key) or key.matches(vaxis.Key.down, .{})) {
+                self.command_log_scroll = @min(self.command_log_scroll + 1, self.command_log_max_scroll);
+                self.clearDialogSelection();
+            } else if (self.config.keymap.up.matches(key) or key.matches(vaxis.Key.up, .{})) {
+                self.command_log_scroll -|= 1;
+                self.clearDialogSelection();
+            } else if (self.isEnterKey(key) or self.isEscapeKey(key)) {
+                self.mode = .normal;
+                self.clearDialogSelection();
+            }
             return;
         }
         if (self.mode == .help) {
@@ -1846,6 +1855,8 @@ pub const App = struct {
             .toggle_tree => try self.toggleTreeView(),
             .command_log => {
                 self.mode = .command_log;
+                // Open scrolled to the newest entries (clamped to max at render).
+                self.command_log_scroll = std.math.maxInt(usize);
                 try self.setMessage("command log", .{});
             },
             .help => {
@@ -2226,6 +2237,10 @@ pub const App = struct {
             },
             .help => {
                 self.help_scroll = if (down) @min(self.help_scroll + lines, self.help_max_scroll) else self.help_scroll -| lines;
+                return true;
+            },
+            .command_log => {
+                self.command_log_scroll = if (down) @min(self.command_log_scroll + lines, self.command_log_max_scroll) else self.command_log_scroll -| lines;
                 return true;
             },
             else => return false,
@@ -7014,6 +7029,14 @@ test "mouse wheel scrolls the operation and help dialogs" {
     app.help_max_scroll = 10;
     try std.testing.expect(try app.handleMouse(wheel_down));
     try std.testing.expectEqual(@as(usize, 3), app.help_scroll);
+
+    // Command-log dialog scrolls too (clamped to its max).
+    app.mode = .command_log;
+    app.command_log_max_scroll = 2;
+    try std.testing.expect(try app.handleMouse(wheel_down));
+    try std.testing.expectEqual(@as(usize, 2), app.command_log_scroll); // clamped
+    _ = try app.handleMouse(.{ .col = 10, .row = 10, .button = .wheel_up, .mods = .{}, .type = .press });
+    try std.testing.expectEqual(@as(usize, 0), app.command_log_scroll);
 }
 
 test "dialog text is mouse-selectable and copies to the clipboard" {

@@ -865,17 +865,18 @@ fn drawCommandLogPopup(root: vaxis.Window, app: *app_mod.App) void {
     const px0: u16 = (root.width - w) / 2;
     const py0: u16 = (root.height - h) / 2;
     app.beginDialogGrid(px0 + 1, py0 + 1, win.height);
+    const footer_row: u16 = win.height -| 1;
     if (log.len == 0) {
         print(win, 0, 0, "No commands run yet.", st.muted);
+        print(win, footer_row, 0, "esc close", st.bottom_accent);
         return;
     }
-    // Wrap the most recent commands (a long command is wrapped, not cut), then
-    // show the tail that fits — oldest of the visible block at the top.
+    // Wrap every command into visual lines (long ones wrap, not cut), then show
+    // a scrolled window of them with the newest at the bottom.
     const cw = win.width;
-    const entry_start = if (log.len > win.height) log.len - win.height else 0;
     var vis: [512][]const u8 = undefined;
     var total: usize = 0;
-    for (log[entry_start..]) |entry| {
+    for (log) |entry| {
         var segs: [16][]const u8 = undefined;
         const n = wrapText(entry, cw, &segs);
         for (segs[0..n]) |s| {
@@ -884,13 +885,17 @@ fn drawCommandLogPopup(root: vaxis.Window, app: *app_mod.App) void {
             total += 1;
         }
     }
-    const start = if (total > win.height) total - win.height else 0;
+    const avail: usize = footer_row; // content rows above the footer
+    app.command_log_max_scroll = total -| avail;
+    app.command_log_scroll = @min(app.command_log_scroll, app.command_log_max_scroll);
+    var idx: usize = app.command_log_scroll;
     var row: u16 = 0;
-    for (vis[start..total]) |line| {
-        if (row >= win.height) break;
-        drawDialogRow(win, app, row, line, st.normal);
+    while (idx < total and row < footer_row) : (idx += 1) {
+        drawDialogRow(win, app, row, vis[idx], st.normal);
         row += 1;
     }
+    drawScrollbarRange(root, px0 + w - 1, py0 + 1, avail, total, app.command_log_scroll, true);
+    print(win, footer_row, 0, "up/down scroll   esc close", st.bottom_accent);
 }
 
 fn drawOperationPopup(root: vaxis.Window, app: *app_mod.App) void {
@@ -1732,7 +1737,7 @@ fn drawHints(win: vaxis.Window, row: u16, start_col: u16, hints: []const u8, key
 /// Keybinding hints for the focused panel only. A short global
 /// suffix (refresh/quit) is appended since those apply everywhere.
 fn contextHints(app: *const app_mod.App) []const u8 {
-    const global = "  ? help  z undo  R refresh  q quit";
+    const global = "  @ log  ? help  z undo  R refresh  q quit";
     if (app.staging_active) {
         return "j/k line  v range  space stage/unstage (@@=hunk)  [/] staged/unstaged  \\ split  c commit  esc back" ++ global;
     }
