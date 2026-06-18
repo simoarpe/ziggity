@@ -1089,6 +1089,9 @@ pub const App = struct {
     tree_cursor: usize = 0,
     collapsed_dirs: std.BufSet = undefined,
     branch_index: usize = 0,
+    /// Set after a successful checkout so the next branches load moves the
+    /// Branches selection onto the freshly checked-out (now current) branch.
+    select_current_branch_pending: bool = false,
     remote_index: usize = 0,
     tag_index: usize = 0,
     worktree_index: usize = 0,
@@ -1410,11 +1413,20 @@ pub const App = struct {
             self.setMessage("repository load failed (out of memory)", .{}) catch {};
             return;
         };
+        // Capture the selected branch name before the old list is freed, so the
+        // cursor follows the branch (not the row index) across the reload.
+        const prev_branch = self.capturedBranchName();
+        defer if (prev_branch) |n| self.allocator.free(n);
         self.data.deinit(self.allocator);
         self.data = gpa_data;
         self.refresh_generation +%= 1;
         self.preview_cache.clearAll(self.allocator);
         self.clampSelections();
+        self.restoreBranchSelection(prev_branch);
+        if (self.select_current_branch_pending) {
+            self.selectCurrentBranch();
+            self.select_current_branch_pending = false;
+        }
         if (self.tree_view) self.rebuildTree(null) catch {};
         self.updatePreview() catch {};
         self.setMessage("ready", .{}) catch {};
@@ -1521,7 +1533,12 @@ pub const App = struct {
             } else |_| {}
         }
         if (s.contains(.branches)) {
-            if (model.dupeBranches(a, src.branches)) |b| self.data.replaceBranches(a, b) else |_| {}
+            const prev_branch = self.capturedBranchName();
+            defer if (prev_branch) |n| a.free(n);
+            if (model.dupeBranches(a, src.branches)) |b| {
+                self.data.replaceBranches(a, b);
+                self.restoreBranchSelection(prev_branch);
+            } else |_| {}
         }
         if (s.contains(.remotes)) {
             if (model.dupeBranches(a, src.remote_branches)) |b| self.data.replaceRemoteBranches(a, b) else |_| {}
@@ -1547,6 +1564,10 @@ pub const App = struct {
         }
 
         self.clampSelections();
+        if (self.select_current_branch_pending and s.contains(.branches)) {
+            self.selectCurrentBranch();
+            self.select_current_branch_pending = false;
+        }
         if (s.contains(.commits) and self.commit_files_active) self.reloadCommitFilesAfterRefresh();
         self.updatePreview() catch {};
     }
@@ -5674,6 +5695,9 @@ pub const App = struct {
                 }
                 const line = if (self.mutation_echo) firstLine(mutable.stdout) else "";
                 try self.reportSuccess(if (line.len > 0) line else self.mutation_msg, mutable.stdout);
+                // A checkout changed the current branch — move the Branches
+                // selection onto it once the refreshed branch list lands.
+                if (std.meta.activeTag(job) == .checkout) self.select_current_branch_pending = true;
             } else {
                 const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
                 const raw = if (stderr.len > 0) mutable.stderr else mutable.stdout;
@@ -5737,6 +5761,42 @@ pub const App = struct {
         if (self.data.commits.len == 0) self.commit_index = 0 else self.commit_index = @min(self.commit_index, self.data.commits.len - 1);
         if (self.data.reflog.len == 0) self.reflog_index = 0 else self.reflog_index = @min(self.reflog_index, self.data.reflog.len - 1);
         if (self.data.stash.len == 0) self.stash_index = 0 else self.stash_index = @min(self.stash_index, self.data.stash.len - 1);
+    }
+
+    /// Move the Branches selection onto the current (checked-out) branch in the
+    /// local tab. Called after a checkout's refreshed branch list lands so the
+    /// panel highlights the branch you just switched to (it sits at the front).
+    fn selectCurrentBranch(self: *App) void {
+        self.branches_tab = .local;
+        for (self.data.branches, 0..) |branch, i| {
+            if (branch.current) {
+                self.branch_index = i;
+                return;
+            }
+        }
+        self.branch_index = 0;
+    }
+
+    /// Re-find the selected local branch by name after a reload so the cursor
+    /// follows the branch rather than staying on a row index whose branch may
+    /// have changed (the list reorders, e.g. current-branch-to-front). No-op if
+    /// the branch is gone (deleted) — `clampSelections` then keeps the index in
+    /// range. `name` is captured before the old branch list is freed.
+    fn restoreBranchSelection(self: *App, name: ?[]const u8) void {
+        const n = name orelse return;
+        for (self.data.branches, 0..) |branch, i| {
+            if (std.mem.eql(u8, branch.name, n)) {
+                self.branch_index = i;
+                return;
+            }
+        }
+    }
+
+    /// The selected local branch's name, duped (caller frees) — captured before a
+    /// reload frees the current branch list, for `restoreBranchSelection`.
+    fn capturedBranchName(self: *const App) ?[]u8 {
+        if (self.branch_index >= self.data.branches.len) return null;
+        return self.allocator.dupe(u8, self.data.branches[self.branch_index].name) catch null;
     }
 
     fn restoreFileSelection(self: *App, selected_path: ?[]const u8) void {
@@ -6757,6 +6817,65 @@ test "lock errors offer delete-and-retry; other failures report normally" {
     try std.testing.expect(!handled2);
     try std.testing.expect(std.meta.activeTag(app.retry_action) == .none);
     try std.testing.expect(app.lock_path == null);
+}
+
+test "selectCurrentBranch highlights the current branch in the local tab" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    var branches = [_]model.Branch{
+        .{ .name = @constCast("main"), .current = false },
+        .{ .name = @constCast("feature/x"), .current = true },
+        .{ .name = @constCast("dev"), .current = false },
+    };
+    app.data.branches = &branches;
+    // Pretend we triggered the checkout from a different tab/selection.
+    app.branches_tab = .remotes;
+    app.branch_index = 0;
+
+    app.selectCurrentBranch();
+    try std.testing.expectEqual(BranchesTab.local, app.branches_tab);
+    try std.testing.expectEqual(@as(usize, 1), app.branch_index);
+
+    // No current branch (detached) falls back to the top.
+    branches[1].current = false;
+    app.branch_index = 2;
+    app.selectCurrentBranch();
+    try std.testing.expectEqual(@as(usize, 0), app.branch_index);
+}
+
+test "branch selection follows the branch by name across a reload" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    var before = [_]model.Branch{
+        .{ .name = @constCast("main"), .current = true },
+        .{ .name = @constCast("feature/x") },
+        .{ .name = @constCast("dev") },
+    };
+    app.data.branches = &before;
+    app.branch_index = 2; // "dev"
+
+    const captured = app.capturedBranchName().?;
+    defer allocator.free(captured);
+    try std.testing.expectEqualStrings("dev", captured);
+
+    // A reload reorders the list (dev now first); the cursor should follow it.
+    var after = [_]model.Branch{
+        .{ .name = @constCast("dev") },
+        .{ .name = @constCast("main"), .current = true },
+        .{ .name = @constCast("feature/x") },
+    };
+    app.data.branches = &after;
+    app.restoreBranchSelection(captured);
+    try std.testing.expectEqual(@as(usize, 0), app.branch_index);
+
+    // A vanished branch (e.g. deleted) leaves the index untouched for clamping.
+    app.branch_index = 1;
+    app.restoreBranchSelection("nonexistent");
+    try std.testing.expectEqual(@as(usize, 1), app.branch_index);
 }
 
 test "suggested push remote uses the configured remote list" {
