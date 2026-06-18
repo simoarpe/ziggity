@@ -88,6 +88,7 @@ pub const TextPromptKind = enum {
     commit_grep,
     commit_author,
     commit_path,
+    push_upstream,
 
     pub fn title(self: TextPromptKind) []const u8 {
         return switch (self) {
@@ -100,6 +101,7 @@ pub const TextPromptKind = enum {
             .commit_grep => "Filter commits by message",
             .commit_author => "Filter commits by author",
             .commit_path => "Filter commits by path",
+            .push_upstream => "Set upstream (remote branch) to push to",
         };
     }
 };
@@ -129,12 +131,16 @@ pub const AsyncOp = enum {
     /// A plain `--force` push, offered if `--force-with-lease` is itself rejected
     /// (e.g. a stale lease). The last, unconditional step of the push chain.
     push_force_plain,
+    /// First push of a branch with no upstream: `push --set-upstream <remote>
+    /// <branch>`. The remote/branch are appended by the worker from
+    /// `push_upstream_remote`/`push_upstream_branch` (see `startPush`).
+    push_set_upstream,
 
     pub fn label(self: AsyncOp) []const u8 {
         return switch (self) {
             .fetch => "fetch",
             .pull => "pull",
-            .push, .push_force, .push_force_plain => "push",
+            .push, .push_force, .push_force_plain, .push_set_upstream => "push",
         };
     }
 
@@ -142,13 +148,14 @@ pub const AsyncOp = enum {
         return switch (self) {
             .fetch => "fetching",
             .pull => "pulling",
-            .push => "pushing",
+            .push, .push_set_upstream => "pushing",
             .push_force => "force push with lease",
             .push_force_plain => "force push",
         };
     }
 
-    /// Git args (without the leading "git") run for this operation.
+    /// Git args (without the leading "git") run for this operation. For
+    /// `push_set_upstream` the worker appends the remote and branch.
     pub fn argv(self: AsyncOp) []const []const u8 {
         return switch (self) {
             .fetch => &.{ "fetch", "--all", "--no-write-fetch-head" },
@@ -156,6 +163,7 @@ pub const AsyncOp = enum {
             .push => &.{"push"},
             .push_force => &.{ "push", "--force-with-lease" },
             .push_force_plain => &.{ "push", "--force" },
+            .push_set_upstream => &.{ "push", "--set-upstream" },
         };
     }
 };
@@ -1204,6 +1212,11 @@ pub const App = struct {
     credential_user: std.ArrayList(u8) = .empty,
     /// The op to re-run once both credential fields have been entered.
     credential_retry_op: ?AsyncOp = null,
+    /// Target for a `push --set-upstream` (a first push of a branch with no
+    /// upstream). Owned; set when the upstream prompt is confirmed, read by the
+    /// async worker, replaced on the next set-upstream push, freed at shutdown.
+    push_upstream_remote: ?[]u8 = null,
+    push_upstream_branch: ?[]u8 = null,
 
     // Async preview pipeline. Switching panels / moving the selection only
     // computes a cache key and renders cached text (instant); the matching git
@@ -1261,6 +1274,12 @@ pub const App = struct {
         // the controlling terminal and block, corrupting the screen. Credential
         // helpers still work; a missing credential now fails with a clear error.
         env_map.put("GIT_TERMINAL_PROMPT", "0") catch {};
+        // Don't take "optional" locks (e.g. the index refresh `git status` does):
+        // the frequent background status reads would otherwise contend on
+        // `.git/index.lock` with each other and with git commands the user runs
+        // elsewhere, surfacing as spurious "unable to create '.git/index.lock'"
+        // errors. Read-only views don't need the refreshed index written back.
+        env_map.put("GIT_OPTIONAL_LOCKS", "0") catch {};
 
         const cfg = try config_mod.Config.load(allocator, io, env_map, git.root);
         git.branch_sort = cfg.branch_sort_order;
@@ -1325,6 +1344,8 @@ pub const App = struct {
         self.clearGitCredentials();
         self.credential_user.deinit(self.allocator);
         if (self.exe_path) |p| self.allocator.free(p);
+        if (self.push_upstream_remote) |r| self.allocator.free(r);
+        if (self.push_upstream_branch) |b| self.allocator.free(b);
         self.git.deinit();
         self.* = undefined;
     }
@@ -1722,7 +1743,7 @@ pub const App = struct {
             },
             .fetch => try self.requestAsync(.fetch),
             .pull => try self.requestAsync(.pull),
-            .push => try self.requestAsync(.push),
+            .push => try self.startPush(),
             .move_up => if (self.staging_active) self.moveStagingCursor(-1) else try self.moveUp(),
             .move_down => if (self.staging_active) self.moveStagingCursor(1) else try self.moveDown(),
             .range_select => {
@@ -3497,11 +3518,21 @@ pub const App = struct {
                 self.focus = .branches;
             },
             .commit_grep, .commit_author, .commit_path => self.focus = .commits,
+            // Prefill handled below (it needs to format remote + branch).
+            .push_upstream => {},
         }
         self.mode = .text_prompt;
         self.text_prompt_kind = kind;
         self.input_buffer.clearRetainingCapacity();
-        if (prefill.len > 0) try self.input_buffer.appendSlice(self.allocator, prefill);
+        if (kind == .push_upstream) {
+            // Prefill "<suggested remote> <current branch>" so confirming with
+            // enter pushes to <remote>/<branch> and sets it as the upstream.
+            const pf = try std.fmt.allocPrint(self.allocator, "{s} {s}", .{ self.suggestedRemote(), self.data.current_branch });
+            defer self.allocator.free(pf);
+            try self.input_buffer.appendSlice(self.allocator, pf);
+        } else if (prefill.len > 0) {
+            try self.input_buffer.appendSlice(self.allocator, prefill);
+        }
         self.prompt_cursor = self.input_buffer.items.len;
         self.prompt_scroll = 0;
         try self.setMessage("{s}", .{kind.title()});
@@ -3862,6 +3893,14 @@ pub const App = struct {
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
                 return self.runMutationScoped(result, Refresh.remotes, "set URL for {s}", .{name});
+            },
+            .push_upstream => {
+                // Read `value` (it aliases the input buffer) before clearing it.
+                try self.submitPushUpstream(value);
+                self.mode = .normal;
+                self.text_prompt_kind = null;
+                self.input_buffer.clearRetainingCapacity();
+                return;
             },
             // Handled before the non-empty guard above.
             .commit_grep, .commit_author, .commit_path => unreachable,
@@ -5216,6 +5255,56 @@ pub const App = struct {
         try self.setMessage("{s}...", .{op.gerund()});
     }
 
+    /// True when the current branch tracks a remote branch (has an upstream).
+    fn currentBranchHasUpstream(self: *const App) bool {
+        return self.data.upstream != null and self.data.upstream.?.len > 0;
+    }
+
+    /// The remote to suggest for a first push: one literally named "origin" if
+    /// present, else the first remote seen among remote-tracking branches, else
+    /// "origin".
+    fn suggestedRemote(self: *const App) []const u8 {
+        var first: ?[]const u8 = null;
+        for (self.data.remote_branches) |b| {
+            const slash = std.mem.indexOfScalar(u8, b.name, '/') orelse continue;
+            const remote = b.name[0..slash];
+            if (std.mem.eql(u8, remote, "origin")) return "origin";
+            if (first == null) first = remote;
+        }
+        return first orelse "origin";
+    }
+
+    /// Push the current branch. With an upstream set, this is a normal push.
+    /// Without one, a plain `git push` would fail with "no upstream branch", so
+    /// prompt for `<remote> <branch>` (prefilled with the suggested remote and
+    /// the current branch) and push with `--set-upstream`.
+    fn startPush(self: *App) !void {
+        if (self.currentBranchHasUpstream() or self.data.current_branch.len == 0) {
+            return self.requestAsync(.push);
+        }
+        return self.startTextPrompt(.push_upstream);
+    }
+
+    /// Confirm the upstream prompt: parse "<remote> <branch>" (branch defaults to
+    /// the current branch), store the target, and push with `--set-upstream`.
+    fn submitPushUpstream(self: *App, value: []const u8) !void {
+        var it = std.mem.tokenizeAny(u8, value, " \t");
+        const remote = it.next() orelse {
+            try self.setMessage("enter a remote (e.g. origin)", .{});
+            return;
+        };
+        const branch = it.next() orelse self.data.current_branch;
+        if (branch.len == 0) {
+            try self.setMessage("no branch to push", .{});
+            return;
+        }
+        if (self.push_upstream_remote) |r| self.allocator.free(r);
+        if (self.push_upstream_branch) |b| self.allocator.free(b);
+        self.push_upstream_remote = try self.allocator.dupe(u8, remote);
+        self.push_upstream_branch = try self.allocator.dupe(u8, branch);
+        return self.requestAsync(.push_set_upstream);
+    }
+
     /// Called on the UI thread when an async op finishes. `result` is owned by
     /// `result_allocator` (the async path's allocator); null means the command
     /// failed to even start.
@@ -6468,6 +6557,50 @@ test "mouse wheel scrolls the panel under the cursor without changing focus" {
     try std.testing.expectEqual(model.Focus.commits, app.focus);
 }
 
+test "pushing a branch with no upstream prompts then sets upstream" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    // requestAsync records the command in the git log; a minimal Git suffices.
+    app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = undefined };
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    app.data.current_branch = @constCast("feature/x");
+    try std.testing.expect(!app.currentBranchHasUpstream());
+
+    // Push opens the upstream prompt, prefilled "<remote> <branch>".
+    try app.startPush();
+    try std.testing.expectEqual(Mode.text_prompt, app.mode);
+    try std.testing.expectEqual(TextPromptKind.push_upstream, app.text_prompt_kind.?);
+    try std.testing.expectEqualStrings("origin feature/x", app.input_buffer.items);
+
+    // Confirming stores the target and queues a `push --set-upstream`.
+    try app.submitTextPrompt();
+    try std.testing.expectEqual(AsyncOp.push_set_upstream, app.async_requested.?);
+    try std.testing.expectEqualStrings("origin", app.push_upstream_remote.?);
+    try std.testing.expectEqualStrings("feature/x", app.push_upstream_branch.?);
+}
+
+test "pushing a branch that already tracks an upstream pushes directly" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = undefined };
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    app.data.current_branch = @constCast("main");
+    app.data.upstream = @constCast("origin/main");
+    try std.testing.expect(app.currentBranchHasUpstream());
+
+    try app.startPush();
+    try std.testing.expectEqual(Mode.normal, app.mode);
+    try std.testing.expectEqual(AsyncOp.push, app.async_requested.?);
+}
+
 test "mouse wheel scrolls the operation and help dialogs" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -6831,6 +6964,8 @@ fn deinitTestApp(app: *App) void {
     app.clearGitCredentials();
     app.credential_user.deinit(app.allocator);
     if (app.exe_path) |p| app.allocator.free(p);
+    if (app.push_upstream_remote) |r| app.allocator.free(r);
+    if (app.push_upstream_branch) |b| app.allocator.free(b);
     app.input_buffer.deinit(app.allocator);
     if (app.staging) |*parsed| parsed.deinit(app.allocator);
     app.allocator.free(app.staging_diff);

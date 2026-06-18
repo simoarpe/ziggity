@@ -39,6 +39,10 @@ const AsyncJob = struct {
     /// freed when the op finishes; null otherwise.
     cred_environ: ?std.process.Environ.Map = null,
     op: app_mod.AsyncOp,
+    /// For `push_set_upstream`: the remote and branch appended after the op's
+    /// args (`push --set-upstream <remote> <branch>`). Borrowed from the app.
+    upstream_remote: ?[]const u8 = null,
+    upstream_branch: ?[]const u8 = null,
     result: ?git_mod.ExecResult = null,
 };
 
@@ -47,6 +51,9 @@ fn asyncWorker(job: *AsyncJob) void {
     defer argv.deinit(async_allocator);
     argv.append(async_allocator, "git") catch return postDone(job);
     argv.appendSlice(async_allocator, job.op.argv()) catch return postDone(job);
+    // A first push of an upstream-less branch appends "<remote> <branch>".
+    if (job.upstream_remote) |r| argv.append(async_allocator, r) catch return postDone(job);
+    if (job.upstream_branch) |b| argv.append(async_allocator, b) catch return postDone(job);
 
     // Use the credential-bearing clone when present, else the shared environment
     // (which sets GIT_TERMINAL_PROMPT=0 so git never blocks on a terminal
@@ -385,6 +392,11 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 app.async_requested = null;
                 app.async_active = true;
                 async_job = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ, .op = op };
+                // A first push of an upstream-less branch carries the target.
+                if (op == .push_set_upstream) {
+                    async_job.upstream_remote = app.push_upstream_remote;
+                    async_job.upstream_branch = app.push_upstream_branch;
+                }
                 // Attach entered credentials (a cloned, askpass-wired env) when
                 // available; on clone failure fall back to the bare env.
                 if (app.gitCredentialsSet()) {
