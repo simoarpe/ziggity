@@ -710,6 +710,9 @@ pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process
             d.remote_branches = b;
             loaded.insert(.remotes);
         } else |_| {}
+        if (wgit.loadRemotes()) |r| {
+            d.remotes = r;
+        } else |_| {}
     }
     if (scopes.contains(.tags)) {
         if (wgit.loadTags()) |t| {
@@ -1486,6 +1489,7 @@ pub const App = struct {
         }
         if (s.contains(.remotes)) {
             if (model.dupeBranches(a, src.remote_branches)) |b| self.data.replaceRemoteBranches(a, b) else |_| {}
+            if (model.dupeStringList(a, src.remotes)) |r| self.data.replaceRemotes(a, r) else |_| {}
         }
         if (s.contains(.tags)) {
             if (model.dupeTags(a, src.tags)) |t| self.data.replaceTags(a, t) else |_| {}
@@ -5261,17 +5265,14 @@ pub const App = struct {
     }
 
     /// The remote to suggest for a first push: one literally named "origin" if
-    /// present, else the first remote seen among remote-tracking branches, else
-    /// "origin".
+    /// configured, else the first configured remote, else "origin". Uses the
+    /// real remote list (`git remote`), so it's correct even before any fetch.
     fn suggestedRemote(self: *const App) []const u8 {
-        var first: ?[]const u8 = null;
-        for (self.data.remote_branches) |b| {
-            const slash = std.mem.indexOfScalar(u8, b.name, '/') orelse continue;
-            const remote = b.name[0..slash];
-            if (std.mem.eql(u8, remote, "origin")) return "origin";
-            if (first == null) first = remote;
+        for (self.data.remotes) |name| {
+            if (std.mem.eql(u8, name, "origin")) return "origin";
         }
-        return first orelse "origin";
+        if (self.data.remotes.len > 0) return self.data.remotes[0];
+        return "origin";
     }
 
     /// Push the current branch. With an upstream set, this is a normal push.
@@ -6581,6 +6582,27 @@ test "pushing a branch with no upstream prompts then sets upstream" {
     try std.testing.expectEqual(AsyncOp.push_set_upstream, app.async_requested.?);
     try std.testing.expectEqualStrings("origin", app.push_upstream_remote.?);
     try std.testing.expectEqualStrings("feature/x", app.push_upstream_branch.?);
+}
+
+test "suggested push remote uses the configured remote list" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // No remotes configured -> fall back to "origin".
+    try std.testing.expectEqualStrings("origin", app.suggestedRemote());
+
+    // A single non-origin remote is suggested even with no fetched branches
+    // (the bug the old remote-branch heuristic had).
+    var one = [_][]u8{@constCast("upstream")};
+    app.data.remotes = &one;
+    try std.testing.expectEqualStrings("upstream", app.suggestedRemote());
+
+    // With several remotes, "origin" is preferred regardless of order.
+    var many = [_][]u8{ @constCast("fork"), @constCast("origin"), @constCast("upstream") };
+    app.data.remotes = &many;
+    try std.testing.expectEqualStrings("origin", app.suggestedRemote());
 }
 
 test "pushing a branch that already tracks an upstream pushes directly" {

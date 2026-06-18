@@ -384,6 +384,7 @@ pub const Git = struct {
         data.files = try self.loadFiles();
         data.branches = try self.loadBranches();
         data.remote_branches = try self.loadRemoteBranches();
+        data.remotes = try self.loadRemotes();
         data.tags = try self.loadTags();
         data.worktrees = try self.loadWorktrees();
         data.submodules = try self.loadSubmodules();
@@ -606,6 +607,26 @@ pub const Git = struct {
             try kept.append(self.allocator, branch.*);
         }
         return kept.toOwnedSlice(self.allocator);
+    }
+
+    /// The configured remote names (`git remote`), one per line, independent of
+    /// whether any of their branches have been fetched.
+    pub fn loadRemotes(self: *Git) ![][]u8 {
+        var result = try self.exec(&.{"remote"});
+        defer result.deinit(self.allocator);
+        if (!result.ok()) return self.allocator.alloc([]u8, 0);
+        var names: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (names.items) |n| self.allocator.free(n);
+            names.deinit(self.allocator);
+        }
+        var it = std.mem.tokenizeScalar(u8, result.stdout, '\n');
+        while (it.next()) |line| {
+            const name = std.mem.trim(u8, line, " \t\r");
+            if (name.len == 0) continue;
+            try names.append(self.allocator, try self.allocator.dupe(u8, name));
+        }
+        return names.toOwnedSlice(self.allocator);
     }
 
     pub fn loadTags(self: *Git) ![]model.Tag {

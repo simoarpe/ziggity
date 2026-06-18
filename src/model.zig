@@ -256,6 +256,9 @@ pub const RepoData = struct {
     files: []FileStatus = &.{},
     branches: []Branch = &.{},
     remote_branches: []Branch = &.{},
+    /// Configured remote names (`git remote`), independent of whether any of
+    /// their branches have been fetched. Used to suggest a push target.
+    remotes: [][]u8 = &.{},
     tags: []Tag = &.{},
     worktrees: []Worktree = &.{},
     submodules: []Submodule = &.{},
@@ -275,6 +278,8 @@ pub const RepoData = struct {
         allocator.free(self.branches);
         for (self.remote_branches) |*branch| branch.deinit(allocator);
         allocator.free(self.remote_branches);
+        for (self.remotes) |name| allocator.free(name);
+        allocator.free(self.remotes);
         for (self.tags) |*tag| tag.deinit(allocator);
         allocator.free(self.tags);
         for (self.worktrees) |*wt| wt.deinit(allocator);
@@ -314,6 +319,12 @@ pub const RepoData = struct {
         for (self.remote_branches) |*b| b.deinit(allocator);
         allocator.free(self.remote_branches);
         self.remote_branches = branches;
+    }
+
+    pub fn replaceRemotes(self: *RepoData, allocator: std.mem.Allocator, remotes: [][]u8) void {
+        for (self.remotes) |name| allocator.free(name);
+        allocator.free(self.remotes);
+        self.remotes = remotes;
     }
 
     pub fn replaceTags(self: *RepoData, allocator: std.mem.Allocator, tags: []Tag) void {
@@ -367,6 +378,7 @@ pub const RepoData = struct {
         out.files = try dupeList(FileStatus, allocator, self.files, dupeFile);
         out.branches = try dupeList(Branch, allocator, self.branches, dupeBranch);
         out.remote_branches = try dupeList(Branch, allocator, self.remote_branches, dupeBranch);
+        out.remotes = try dupeStringList(allocator, self.remotes);
         out.tags = try dupeList(Tag, allocator, self.tags, dupeTag);
         out.worktrees = try dupeList(Worktree, allocator, self.worktrees, dupeWorktree);
         out.submodules = try dupeList(Submodule, allocator, self.submodules, dupeSubmodule);
@@ -494,6 +506,19 @@ pub fn dupeFiles(a: std.mem.Allocator, src: []const FileStatus) std.mem.Allocato
 }
 pub fn dupeBranches(a: std.mem.Allocator, src: []const Branch) std.mem.Allocator.Error![]Branch {
     return dupeList(Branch, a, src, dupeBranch);
+}
+pub fn dupeStringList(a: std.mem.Allocator, src: []const []const u8) std.mem.Allocator.Error![][]u8 {
+    const out = try a.alloc([]u8, src.len);
+    var n: usize = 0;
+    errdefer {
+        for (out[0..n]) |s| a.free(s);
+        a.free(out);
+    }
+    for (src) |s| {
+        out[n] = try a.dupe(u8, s);
+        n += 1;
+    }
+    return out;
 }
 pub fn dupeTags(a: std.mem.Allocator, src: []const Tag) std.mem.Allocator.Error![]Tag {
     return dupeList(Tag, a, src, dupeTag);
