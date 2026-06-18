@@ -1702,7 +1702,9 @@ pub const App = struct {
         }
         if (self.mode == .command_log) {
             if (self.config.keymap.down.matches(key) or key.matches(vaxis.Key.down, .{})) {
-                self.command_log_scroll = @min(self.command_log_scroll + 1, self.command_log_max_scroll);
+                // Saturating add: the scroll starts at maxInt ("open at bottom")
+                // and is only clamped at render, which the empty-log path skips.
+                self.command_log_scroll = @min(self.command_log_scroll +| 1, self.command_log_max_scroll);
                 self.clearDialogSelection();
             } else if (self.config.keymap.up.matches(key) or key.matches(vaxis.Key.up, .{})) {
                 self.command_log_scroll -|= 1;
@@ -2240,7 +2242,7 @@ pub const App = struct {
                 return true;
             },
             .command_log => {
-                self.command_log_scroll = if (down) @min(self.command_log_scroll + lines, self.command_log_max_scroll) else self.command_log_scroll -| lines;
+                self.command_log_scroll = if (down) @min(self.command_log_scroll +| lines, self.command_log_max_scroll) else self.command_log_scroll -| lines;
                 return true;
             },
             else => return false,
@@ -7036,6 +7038,21 @@ test "mouse wheel scrolls the operation and help dialogs" {
     try std.testing.expect(try app.handleMouse(wheel_down));
     try std.testing.expectEqual(@as(usize, 2), app.command_log_scroll); // clamped
     _ = try app.handleMouse(.{ .col = 10, .row = 10, .button = .wheel_up, .mods = .{}, .type = .press });
+    try std.testing.expectEqual(@as(usize, 0), app.command_log_scroll);
+}
+
+test "command log scroll-down does not overflow the open-at-bottom sentinel" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // Opened at the bottom (maxInt) but the empty-log render skips clamping, so a
+    // scroll keypress must saturate rather than overflow `maxInt + 1`.
+    app.mode = .command_log;
+    app.command_log_scroll = std.math.maxInt(usize);
+    app.command_log_max_scroll = 0;
+    try app.handleKey(.{ .codepoint = vaxis.Key.down });
     try std.testing.expectEqual(@as(usize, 0), app.command_log_scroll);
 }
 

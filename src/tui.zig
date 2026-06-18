@@ -867,6 +867,10 @@ fn drawCommandLogPopup(root: vaxis.Window, app: *app_mod.App) void {
     app.beginDialogGrid(px0 + 1, py0 + 1, win.height);
     const footer_row: u16 = win.height -| 1;
     if (log.len == 0) {
+        // Reset the scroll so the "open at bottom" sentinel (maxInt) can't
+        // linger and overflow the next scroll keypress.
+        app.command_log_max_scroll = 0;
+        app.command_log_scroll = 0;
         print(win, 0, 0, "No commands run yet.", st.muted);
         print(win, footer_row, 0, "esc close", st.bottom_accent);
         return;
