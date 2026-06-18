@@ -1413,16 +1413,16 @@ pub const App = struct {
             self.setMessage("repository load failed (out of memory)", .{}) catch {};
             return;
         };
-        // Capture the selected branch name before the old list is freed, so the
-        // cursor follows the branch (not the row index) across the reload.
-        const prev_branch = self.capturedBranchName();
-        defer if (prev_branch) |n| self.allocator.free(n);
+        // Capture each list's selection before the old data is freed, so cursors
+        // follow items by identity (not row index) across the reload.
+        const sel_keys = self.captureSelections();
+        defer sel_keys.deinit(self.allocator);
         self.data.deinit(self.allocator);
         self.data = gpa_data;
         self.refresh_generation +%= 1;
         self.preview_cache.clearAll(self.allocator);
+        self.restoreSelections(sel_keys);
         self.clampSelections();
-        self.restoreBranchSelection(prev_branch);
         if (self.select_current_branch_pending) {
             self.selectCurrentBranch();
             self.select_current_branch_pending = false;
@@ -1513,6 +1513,10 @@ pub const App = struct {
         defer sd.deinit(gpa);
         const a = self.allocator;
         const src = &sd.data;
+        // Capture each list's selection identity before the replaces, so the
+        // cursor follows items by identity rather than row index across reorders.
+        const sel_keys = self.captureSelections();
+        defer sel_keys.deinit(a);
         const s = sd.scopes;
 
         if (s.contains(.status)) {
@@ -1533,12 +1537,7 @@ pub const App = struct {
             } else |_| {}
         }
         if (s.contains(.branches)) {
-            const prev_branch = self.capturedBranchName();
-            defer if (prev_branch) |n| a.free(n);
-            if (model.dupeBranches(a, src.branches)) |b| {
-                self.data.replaceBranches(a, b);
-                self.restoreBranchSelection(prev_branch);
-            } else |_| {}
+            if (model.dupeBranches(a, src.branches)) |b| self.data.replaceBranches(a, b) else |_| {}
         }
         if (s.contains(.remotes)) {
             if (model.dupeBranches(a, src.remote_branches)) |b| self.data.replaceRemoteBranches(a, b) else |_| {}
@@ -1563,6 +1562,7 @@ pub const App = struct {
             if (model.dupeStashes(a, src.stash)) |st| self.data.replaceStash(a, st) else |_| {}
         }
 
+        self.restoreSelections(sel_keys);
         self.clampSelections();
         if (self.select_current_branch_pending and s.contains(.branches)) {
             self.selectCurrentBranch();
@@ -5777,26 +5777,83 @@ pub const App = struct {
         self.branch_index = 0;
     }
 
-    /// Re-find the selected local branch by name after a reload so the cursor
-    /// follows the branch rather than staying on a row index whose branch may
-    /// have changed (the list reorders, e.g. current-branch-to-front). No-op if
-    /// the branch is gone (deleted) — `clampSelections` then keeps the index in
-    /// range. `name` is captured before the old branch list is freed.
-    fn restoreBranchSelection(self: *App, name: ?[]const u8) void {
-        const n = name orelse return;
-        for (self.data.branches, 0..) |branch, i| {
-            if (std.mem.eql(u8, branch.name, n)) {
-                self.branch_index = i;
+    /// The selection keys (each list's selected item's identity) captured before
+    /// a reload, so the cursor can follow items by identity instead of by row
+    /// index — the list may reorder or have items inserted/removed. Mirrors how
+    /// the file list is preserved by path. Stash is omitted: its identity is
+    /// positional (`stash@{n}`), so index-clamping already matches it.
+    const SelectionKeys = struct {
+        branch: ?[]u8 = null,
+        commit: ?[]u8 = null,
+        reflog: ?[]u8 = null,
+        remote_branch: ?[]u8 = null,
+        tag: ?[]u8 = null,
+        worktree: ?[]u8 = null,
+        submodule: ?[]u8 = null,
+
+        fn deinit(self: SelectionKeys, a: std.mem.Allocator) void {
+            inline for (.{ self.branch, self.commit, self.reflog, self.remote_branch, self.tag, self.worktree, self.submodule }) |k| {
+                if (k) |s| a.free(s);
+            }
+        }
+    };
+
+    fn branchKey(b: model.Branch) []const u8 {
+        return b.name;
+    }
+    fn commitKey(c: model.Commit) []const u8 {
+        return c.hash;
+    }
+    fn tagKey(t: model.Tag) []const u8 {
+        return t.name;
+    }
+    fn worktreeKey(w: model.Worktree) []const u8 {
+        return w.path;
+    }
+    fn submoduleKey(m: model.Submodule) []const u8 {
+        return m.path;
+    }
+
+    /// Duped identity of the selected item in `items` (caller frees), or null.
+    fn dupSelKey(self: *const App, items: anytype, index: usize, keyOf: anytype) ?[]u8 {
+        if (index >= items.len) return null;
+        return self.allocator.dupe(u8, keyOf(items[index])) catch null;
+    }
+
+    /// Move `index_ptr` onto the item in `items` whose identity matches `key`.
+    /// No-op if the item is gone (`clampSelections` then keeps the index valid).
+    fn restoreSelKey(items: anytype, index_ptr: *usize, key: ?[]const u8, keyOf: anytype) void {
+        const k = key orelse return;
+        for (items, 0..) |item, i| {
+            if (std.mem.eql(u8, keyOf(item), k)) {
+                index_ptr.* = i;
                 return;
             }
         }
     }
 
-    /// The selected local branch's name, duped (caller frees) — captured before a
-    /// reload frees the current branch list, for `restoreBranchSelection`.
-    fn capturedBranchName(self: *const App) ?[]u8 {
-        if (self.branch_index >= self.data.branches.len) return null;
-        return self.allocator.dupe(u8, self.data.branches[self.branch_index].name) catch null;
+    /// Capture every list's selected-item identity before a reload.
+    fn captureSelections(self: *const App) SelectionKeys {
+        return .{
+            .branch = self.dupSelKey(self.data.branches, self.branch_index, branchKey),
+            .commit = self.dupSelKey(self.data.commits, self.commit_index, commitKey),
+            .reflog = self.dupSelKey(self.data.reflog, self.reflog_index, commitKey),
+            .remote_branch = self.dupSelKey(self.data.remote_branches, self.remote_index, branchKey),
+            .tag = self.dupSelKey(self.data.tags, self.tag_index, tagKey),
+            .worktree = self.dupSelKey(self.data.worktrees, self.worktree_index, worktreeKey),
+            .submodule = self.dupSelKey(self.data.submodules, self.submodule_index, submoduleKey),
+        };
+    }
+
+    /// Re-anchor each list's cursor onto its previously-selected item by identity.
+    fn restoreSelections(self: *App, keys: SelectionKeys) void {
+        restoreSelKey(self.data.branches, &self.branch_index, keys.branch, branchKey);
+        restoreSelKey(self.data.commits, &self.commit_index, keys.commit, commitKey);
+        restoreSelKey(self.data.reflog, &self.reflog_index, keys.reflog, commitKey);
+        restoreSelKey(self.data.remote_branches, &self.remote_index, keys.remote_branch, branchKey);
+        restoreSelKey(self.data.tags, &self.tag_index, keys.tag, tagKey);
+        restoreSelKey(self.data.worktrees, &self.worktree_index, keys.worktree, worktreeKey);
+        restoreSelKey(self.data.submodules, &self.submodule_index, keys.submodule, submoduleKey);
     }
 
     fn restoreFileSelection(self: *App, selected_path: ?[]const u8) void {
@@ -6845,7 +6902,7 @@ test "selectCurrentBranch highlights the current branch in the local tab" {
     try std.testing.expectEqual(@as(usize, 0), app.branch_index);
 }
 
-test "branch selection follows the branch by name across a reload" {
+test "list selections follow items by identity across a reload" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
     var app = try testApp(allocator, &no_files);
@@ -6855,26 +6912,40 @@ test "branch selection follows the branch by name across a reload" {
         .{ .name = @constCast("feature/x") },
         .{ .name = @constCast("dev") },
     };
+    var commits_before = [_]model.Commit{
+        .{ .hash = @constCast("aaa"), .short_hash = @constCast("aaa"), .author = @constCast("s"), .time = @constCast("t"), .refs = @constCast(""), .subject = @constCast("one") },
+        .{ .hash = @constCast("bbb"), .short_hash = @constCast("bbb"), .author = @constCast("s"), .time = @constCast("t"), .refs = @constCast(""), .subject = @constCast("two") },
+    };
     app.data.branches = &before;
+    app.data.commits = &commits_before;
     app.branch_index = 2; // "dev"
+    app.commit_index = 1; // "bbb"
 
-    const captured = app.capturedBranchName().?;
-    defer allocator.free(captured);
-    try std.testing.expectEqualStrings("dev", captured);
+    const keys = app.captureSelections();
+    defer keys.deinit(allocator);
 
-    // A reload reorders the list (dev now first); the cursor should follow it.
+    // A reload reorders branches (dev first) and prepends a new commit.
     var after = [_]model.Branch{
         .{ .name = @constCast("dev") },
         .{ .name = @constCast("main"), .current = true },
         .{ .name = @constCast("feature/x") },
     };
+    var commits_after = [_]model.Commit{
+        .{ .hash = @constCast("ccc"), .short_hash = @constCast("ccc"), .author = @constCast("s"), .time = @constCast("t"), .refs = @constCast(""), .subject = @constCast("new") },
+        .{ .hash = @constCast("aaa"), .short_hash = @constCast("aaa"), .author = @constCast("s"), .time = @constCast("t"), .refs = @constCast(""), .subject = @constCast("one") },
+        .{ .hash = @constCast("bbb"), .short_hash = @constCast("bbb"), .author = @constCast("s"), .time = @constCast("t"), .refs = @constCast(""), .subject = @constCast("two") },
+    };
     app.data.branches = &after;
-    app.restoreBranchSelection(captured);
-    try std.testing.expectEqual(@as(usize, 0), app.branch_index);
+    app.data.commits = &commits_after;
+    app.restoreSelections(keys);
+    try std.testing.expectEqual(@as(usize, 0), app.branch_index); // followed "dev"
+    try std.testing.expectEqual(@as(usize, 2), app.commit_index); // followed "bbb"
 
-    // A vanished branch (e.g. deleted) leaves the index untouched for clamping.
+    // A vanished item leaves its index untouched for clampSelections to fix.
     app.branch_index = 1;
-    app.restoreBranchSelection("nonexistent");
+    var single = [_]model.Branch{.{ .name = @constCast("only") }};
+    app.data.branches = &single;
+    app.restoreSelections(keys); // "dev" no longer present
     try std.testing.expectEqual(@as(usize, 1), app.branch_index);
 }
 
