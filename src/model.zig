@@ -520,6 +520,60 @@ pub const StatusFields = struct {
     conflict: bool,
 };
 
+/// Overwrite a file's porcelain status code and re-derive its staged/unstaged
+/// flags from it. Used both when parsing real `git status` output and for the
+/// optimistic staging update.
+pub fn setStatusFields(file: *FileStatus, short_status: [2]u8) void {
+    const d = deriveStatusFields(short_status);
+    file.short_status = short_status;
+    file.has_staged = d.has_staged;
+    file.has_unstaged = d.has_unstaged;
+    file.tracked = d.tracked;
+    file.added = d.added;
+    file.deleted = d.deleted;
+    file.conflict = d.conflict;
+}
+
+const StatusRemap = struct { from: [2]u8, to: [2]u8 };
+
+// The instant status-code transitions for staging / unstaging, used to update
+// the file list optimistically (before the real `git status` lands). Statuses
+// with no entry have no well-defined instant transition and are left for the
+// refresh to settle.
+const stage_remap = [_]StatusRemap{
+    .{ .from = .{ '?', '?' }, .to = .{ 'A', ' ' } }, // untracked -> added
+    .{ .from = .{ ' ', 'M' }, .to = .{ 'M', ' ' } }, // unstaged modified -> staged
+    .{ .from = .{ 'M', 'M' }, .to = .{ 'M', ' ' } }, // both -> staged only
+    .{ .from = .{ ' ', 'D' }, .to = .{ 'D', ' ' } }, // unstaged delete -> staged
+    .{ .from = .{ ' ', 'A' }, .to = .{ 'A', ' ' } },
+    .{ .from = .{ 'A', 'M' }, .to = .{ 'A', ' ' } }, // added w/ later mods -> added
+    .{ .from = .{ 'M', 'D' }, .to = .{ 'D', ' ' } }, // modified then deleted -> staged delete
+};
+
+const unstage_remap = [_]StatusRemap{
+    .{ .from = .{ 'A', ' ' }, .to = .{ '?', '?' } }, // staged add -> untracked
+    .{ .from = .{ 'M', ' ' }, .to = .{ ' ', 'M' } }, // staged modified -> unstaged
+    .{ .from = .{ 'D', ' ' }, .to = .{ ' ', 'D' } }, // staged delete -> unstaged
+    .{ .from = .{ 'M', 'M' }, .to = .{ ' ', 'M' } },
+};
+
+/// The new status code when `short_status` is staged, or null if there's no
+/// well-defined instant transition (leave it for the real refresh).
+pub fn optimisticStage(short_status: [2]u8) ?[2]u8 {
+    for (stage_remap) |m| {
+        if (m.from[0] == short_status[0] and m.from[1] == short_status[1]) return m.to;
+    }
+    return null;
+}
+
+/// The new status code when `short_status` is unstaged, or null (see above).
+pub fn optimisticUnstage(short_status: [2]u8) ?[2]u8 {
+    for (unstage_remap) |m| {
+        if (m.from[0] == short_status[0] and m.from[1] == short_status[1]) return m.to;
+    }
+    return null;
+}
+
 pub fn deriveStatusFields(short_status: [2]u8) StatusFields {
     const staged = short_status[0];
     const unstaged = short_status[1];
@@ -579,6 +633,28 @@ test "derive status fields follows porcelain status columns" {
 
     const conflict = deriveStatusFields(.{ 'U', 'U' });
     try std.testing.expect(conflict.conflict);
+}
+
+test "optimistic stage/unstage status remaps" {
+    // Stage transitions (porcelain XY -> XY).
+    try std.testing.expectEqual([2]u8{ 'A', ' ' }, optimisticStage(.{ '?', '?' }).?);
+    try std.testing.expectEqual([2]u8{ 'M', ' ' }, optimisticStage(.{ ' ', 'M' }).?);
+    try std.testing.expectEqual([2]u8{ 'M', ' ' }, optimisticStage(.{ 'M', 'M' }).?);
+    try std.testing.expectEqual([2]u8{ 'D', ' ' }, optimisticStage(.{ ' ', 'D' }).?);
+    // Already fully staged / unmapped code: no instant transition.
+    try std.testing.expect(optimisticStage(.{ 'A', ' ' }) == null);
+
+    // Unstage transitions (the reverse).
+    try std.testing.expectEqual([2]u8{ '?', '?' }, optimisticUnstage(.{ 'A', ' ' }).?);
+    try std.testing.expectEqual([2]u8{ ' ', 'M' }, optimisticUnstage(.{ 'M', ' ' }).?);
+    try std.testing.expectEqual([2]u8{ ' ', 'D' }, optimisticUnstage(.{ 'D', ' ' }).?);
+    try std.testing.expect(optimisticUnstage(.{ ' ', 'M' }) == null);
+
+    // setStatusFields rewrites the code and re-derives the flags.
+    var f = FileStatus{ .path = @constCast("x"), .short_status = .{ ' ', 'M' }, .has_staged = false, .has_unstaged = true, .tracked = true, .added = false, .deleted = false, .conflict = false };
+    setStatusFields(&f, .{ 'M', ' ' });
+    try std.testing.expectEqual([2]u8{ 'M', ' ' }, f.short_status);
+    try std.testing.expect(f.has_staged and !f.has_unstaged);
 }
 
 test "file display filter follows status filter semantics" {

@@ -162,6 +162,11 @@ pub const Config = struct {
     staging_split: bool = false,
     result_dialog: ResultDialog = .on_error,
     command_output: CommandOutput = .show,
+    /// Seconds between idle background working-tree refreshes (`git status` off
+    /// the UI thread). On a large repo a tighter interval makes git status
+    /// thrash, so the default is a relaxed 10s. 0 disables the periodic refresh
+    /// (it still refreshes after operations and on focus).
+    refresh_interval_secs: u16 = 10,
     /// Local Branches panel ordering: `date` (default), `recency`, or `alphabetical`.
     branch_sort_order: model.BranchSortOrder = .date,
     skip_confirm: ConfirmSkips = .{},
@@ -220,6 +225,10 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "diff_context")) {
             self.diff_context = std.fmt.parseInt(u8, value, 10) catch self.diff_context;
+            return;
+        }
+        if (std.mem.eql(u8, key, "refresh_interval_secs")) {
+            self.refresh_interval_secs = std.fmt.parseInt(u16, value, 10) catch self.refresh_interval_secs;
             return;
         }
         if (std.mem.eql(u8, key, "expand_focused_side_panel")) {

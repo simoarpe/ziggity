@@ -591,7 +591,7 @@ pub const WorktreeSnapshot = struct {
     /// Worker-thread entry point. `gpa` is the page allocator; everything
     /// returned is owned by it. Borrows `root`/`environ` read-only from the
     /// app's Git (never mutated by these read-only commands).
-    pub fn load(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8) !WorktreeSnapshot {
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, untracked: git_mod.Git.UntrackedFiles) !WorktreeSnapshot {
         // A throwaway Git bound to the page allocator. The commands it runs
         // (branch/rev-parse/rev-list/status) are all read-only, so its command
         // log stays empty and `root` is only ever read — no deinit needed.
@@ -600,6 +600,7 @@ pub const WorktreeSnapshot = struct {
             .io = io,
             .environ = environ,
             .root = root,
+            .untracked_files = untracked,
         };
         var status = try wgit.loadStatusSummary();
         errdefer status.deinit(gpa);
@@ -620,8 +621,8 @@ pub const WorktreeSnapshot = struct {
 /// `App.applyRepoLoad`). Returns null on failure. `root`/`environ` are borrowed
 /// read-only. The throwaway Git's command log stays empty (loadRepoData is all
 /// read-only commands) but is freed defensively.
-pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, branch_sort: model.BranchSortOrder) ?model.RepoData {
-    var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root, .branch_sort = branch_sort };
+pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, branch_sort: model.BranchSortOrder, untracked: git_mod.Git.UntrackedFiles) ?model.RepoData {
+    var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root, .branch_sort = branch_sort, .untracked_files = untracked };
     defer {
         for (wgit.command_log.items) |e| gpa.free(e);
         wgit.command_log.deinit(gpa);
@@ -657,8 +658,8 @@ pub const ScopedData = struct {
 /// Worker-thread entry: load just the requested views on a throwaway
 /// page-allocator `Git`. `filters` are applied to the commits load so an active
 /// Commits filter is preserved. Borrows `root`/`environ`/filter strings.
-pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, scopes: ScopeSet, filters: LogFilters, branch_sort: model.BranchSortOrder) ScopedData {
-    var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root, .branch_sort = branch_sort };
+pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, scopes: ScopeSet, filters: LogFilters, branch_sort: model.BranchSortOrder, untracked: git_mod.Git.UntrackedFiles) ScopedData {
+    var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root, .branch_sort = branch_sort, .untracked_files = untracked };
     // Borrowed filter strings (owned by the caller's run struct); wgit only
     // reads them and we never call clearLogFilters, so nothing is freed here.
     wgit.log_grep = @constCast(filters.grep);
@@ -1398,9 +1399,19 @@ pub const App = struct {
     /// load so the UI never blocks. Because Files is never loaded off-thread,
     /// the async loads can't race the synchronous file refresh.
     pub fn refreshViews(self: *App, scopes: ScopeSet) void {
-        if (scopes.contains(.files)) self.refreshFiles() catch {};
         var async_scopes = scopes;
-        async_scopes.remove(.files);
+        if (scopes.contains(.files)) {
+            // Reload the working tree (files + status summary) OFF the UI thread,
+            // via the background worktree snapshot, so a large repo's `git status`
+            // never blocks input after an operation. Bumping the generation drops
+            // any in-flight stale snapshot in favour of this one. The snapshot
+            // also refreshes the status summary, so drop both scopes from the
+            // separate async scoped load below.
+            self.refresh_generation +%= 1;
+            self.requestWorktreeRefresh();
+            async_scopes.remove(.files);
+            async_scopes.remove(.status);
+        }
         if (async_scopes.count() > 0) self.pending_scopes.setUnion(async_scopes);
     }
 
@@ -1496,8 +1507,11 @@ pub const App = struct {
     /// calls happen on a worker so the periodic auto-refresh never blocks
     /// navigation (see `WorktreeSnapshot`).
     pub fn requestWorktreeRefresh(self: *App) void {
-        if (self.worktree_refresh_active or self.worktree_refresh_requested) return;
-        if (self.backgroundRefreshPaused()) return;
+        // Always queue the request. Starting it is gated by `takeWorktreeRefresh`
+        // (which holds off while an operation is in flight and enforces
+        // single-in-flight via the loop's `worktree_future == null` guard), so a
+        // post-operation files refresh is never dropped just because an op or the
+        // periodic refresh was momentarily busy — it runs as soon as that clears.
         self.worktree_refresh_requested = true;
     }
 
@@ -2445,6 +2459,7 @@ pub const App = struct {
             const include = if (want_staged) file.has_unstaged else file.has_staged;
             if (include) try paths.append(self.allocator, file.path);
         }
+        self.applyOptimisticStage(want_staged, paths.items);
         if (want_staged) {
             return self.runMutationFiles(try self.git.stagePaths(paths.items), "staged {s}/", .{dir});
         }
@@ -3108,6 +3123,36 @@ pub const App = struct {
         return self.toggleFileStaged();
     }
 
+    /// Optimistically flip the staged/unstaged state of the matching files in the
+    /// in-memory model so the list reflects the change the instant the key is
+    /// pressed; the async `git status` refresh that follows reconciles it with
+    /// reality (a full replace — no merge). `paths == null` means every file
+    /// (stage/unstage all with no filter active). Statuses with no
+    /// well-defined instant transition are left untouched for the refresh. Files
+    /// are mutated in place — never reordered or removed — so selection holds.
+    fn applyOptimisticStage(self: *App, stage: bool, paths: ?[]const []const u8) void {
+        for (self.data.files) |*file| {
+            if (paths) |ps| {
+                var match = false;
+                for (ps) |p| {
+                    if (std.mem.eql(u8, file.path, p)) {
+                        match = true;
+                        break;
+                    }
+                }
+                if (!match) continue;
+            }
+            const new_status = if (stage)
+                model.optimisticStage(file.short_status)
+            else
+                model.optimisticUnstage(file.short_status);
+            if (new_status) |ns| model.setStatusFields(file, ns);
+        }
+        // A display filter (e.g. "unstaged only") may now hide a just-staged file;
+        // keep the selection index in range until the refresh re-anchors by path.
+        self.clampSelections();
+    }
+
     fn toggleFileStaged(self: *App) !void {
         const file = self.selectedFile() orelse {
             try self.setMessage("no file selected", .{});
@@ -3115,9 +3160,11 @@ pub const App = struct {
         };
         if (file.conflict) return self.startConflictResolveMenu();
         if (file.has_unstaged) {
+            self.applyOptimisticStage(true, &[_][]const u8{file.path});
             return self.runMutationFiles(try self.git.stageFile(file.path), "staged {s}", .{file.path});
         }
         if (file.has_staged) {
+            self.applyOptimisticStage(false, &[_][]const u8{file.path});
             return self.runMutationFiles(try self.git.unstageFile(file), "unstaged {s}", .{file.path});
         }
         try self.setMessage("file has no staged or unstaged changes", .{});
@@ -3129,8 +3176,10 @@ pub const App = struct {
                 var paths: std.ArrayList([]const u8) = .empty;
                 defer paths.deinit(self.allocator);
                 try self.collectVisiblePaths(&paths, .unstaged);
+                self.applyOptimisticStage(true, paths.items);
                 return self.runMutationFiles(try self.git.stagePaths(paths.items), "staged visible files", .{});
             }
+            self.applyOptimisticStage(true, null);
             return self.runMutationFiles(try self.git.stageAll(), "staged all files", .{});
         }
         if (self.visibleStagedCount() > 0) {
@@ -3138,8 +3187,10 @@ pub const App = struct {
                 var paths: std.ArrayList([]const u8) = .empty;
                 defer paths.deinit(self.allocator);
                 try self.collectVisiblePaths(&paths, .staged);
+                self.applyOptimisticStage(false, paths.items);
                 return self.runMutationFiles(try self.git.unstagePaths(paths.items), "unstaged visible files", .{});
             }
+            self.applyOptimisticStage(false, null);
             return self.runMutationFiles(try self.git.unstageAll(), "unstaged all files", .{});
         }
         try self.setMessage("no visible files to stage", .{});
@@ -5201,6 +5252,10 @@ pub const App = struct {
         } else {
             try self.setMessage("{s} failed to start", .{op.label()});
         }
+        // Refresh every view (matching what a fetch/pull/push can change — e.g. a
+        // fetch may bring new tags). This is now non-blocking: the working tree
+        // loads off-thread and the rest via the scoped loader, so a full refresh
+        // no longer stalls the UI on a big repo.
         self.refreshViews(Refresh.all);
     }
 
@@ -6083,23 +6138,67 @@ test "background worktree refresh is paused while an operation runs" {
     var app = try testApp(allocator, &no_files);
     defer deinitTestApp(&app);
 
-    // A network op in flight pauses the periodic refresh: nothing is queued.
+    // A request made while a network op is in flight is queued, but held back —
+    // `takeWorktreeRefresh` won't start it until the op clears. (It is queued
+    // rather than dropped so a post-operation refresh is never lost.)
     app.async_active = true;
     app.requestWorktreeRefresh();
-    try std.testing.expect(!app.worktree_refresh_requested);
-
-    // Even an already-queued request is held back while paused.
-    app.async_active = false;
-    app.requestWorktreeRefresh();
-    try std.testing.expect(app.worktree_refresh_requested);
-    app.async_active = true;
-    try std.testing.expect(app.takeWorktreeRefresh() == null);
+    try std.testing.expect(app.worktree_refresh_requested); // queued
+    try std.testing.expect(app.takeWorktreeRefresh() == null); // but not started
     try std.testing.expect(app.worktree_refresh_requested); // still pending
 
     // Once the op clears, the held request is claimed.
     app.async_active = false;
     try std.testing.expect(app.takeWorktreeRefresh() != null);
     try std.testing.expect(app.worktree_refresh_active);
+}
+
+test "optimistic staging flips file state in the model immediately" {
+    const allocator = std.testing.allocator;
+    var files = [_]model.FileStatus{
+        .{ .path = @constCast("a.zig"), .short_status = .{ ' ', 'M' }, .has_staged = false, .has_unstaged = true, .tracked = true, .added = false, .deleted = false, .conflict = false },
+        .{ .path = @constCast("b.zig"), .short_status = .{ '?', '?' }, .has_staged = false, .has_unstaged = false, .tracked = false, .added = true, .deleted = false, .conflict = false },
+    };
+    var app = try testApp(allocator, &files);
+    defer deinitTestApp(&app);
+
+    // Stage only a.zig: it becomes staged-modified; b.zig is untouched.
+    app.applyOptimisticStage(true, &[_][]const u8{"a.zig"});
+    try std.testing.expectEqual([2]u8{ 'M', ' ' }, app.data.files[0].short_status);
+    try std.testing.expect(app.data.files[0].has_staged and !app.data.files[0].has_unstaged);
+    try std.testing.expectEqual([2]u8{ '?', '?' }, app.data.files[1].short_status);
+
+    // Stage all (null = every file) stages the untracked b.zig too; a.zig (now
+    // "M ") has no further transition and is left as-is.
+    app.applyOptimisticStage(true, null);
+    try std.testing.expectEqual([2]u8{ 'A', ' ' }, app.data.files[1].short_status);
+    try std.testing.expectEqual([2]u8{ 'M', ' ' }, app.data.files[0].short_status);
+
+    // Unstage all returns both to the working-tree side.
+    app.applyOptimisticStage(false, null);
+    try std.testing.expectEqual([2]u8{ ' ', 'M' }, app.data.files[0].short_status);
+    try std.testing.expectEqual([2]u8{ '?', '?' }, app.data.files[1].short_status);
+}
+
+test "refreshViews loads the working tree off-thread, not synchronously" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    const gen0 = app.refresh_generation;
+    app.refreshViews(App.Refresh.commit); // {files, status, commits, branches}
+
+    // Files + status are reloaded via the async worktree snapshot (generation
+    // bumped, request queued) rather than a blocking `git status` on the loop.
+    try std.testing.expect(app.refresh_generation != gen0);
+    try std.testing.expect(app.worktree_refresh_requested);
+    // The remaining views are queued for the scoped loader; files/status are not
+    // (the worktree snapshot already covers them).
+    try std.testing.expect(app.pending_scopes.contains(.commits));
+    try std.testing.expect(app.pending_scopes.contains(.branches));
+    try std.testing.expect(!app.pending_scopes.contains(.files));
+    try std.testing.expect(!app.pending_scopes.contains(.status));
 }
 
 test "background worktree snapshot applies on the UI thread and honors generation" {

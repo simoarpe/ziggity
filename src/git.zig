@@ -40,8 +40,27 @@ pub const Git = struct {
     log_path: ?[]u8 = null,
     /// How `loadBranches` orders the local branch list.
     branch_sort: model.BranchSortOrder = .date,
+    /// Which untracked files `git status` lists. Mirrors git's own
+    /// `status.showUntrackedFiles` config (resolved in `init`); `all` is git's —
+    /// and our — default, but a large repo can set `normal`/`no` to make status
+    /// far cheaper.
+    untracked_files: UntrackedFiles = .all,
 
     pub const LogFilter = enum { grep, author, path };
+
+    pub const UntrackedFiles = enum {
+        all,
+        normal,
+        no,
+
+        pub fn flag(self: UntrackedFiles) []const u8 {
+            return switch (self) {
+                .all => "--untracked-files=all",
+                .normal => "--untracked-files=normal",
+                .no => "--untracked-files=no",
+            };
+        }
+    };
 
     const command_log_cap = 200;
 
@@ -67,7 +86,29 @@ pub const Git = struct {
             .io = io,
             .environ = environ,
             .root = root,
+            .untracked_files = resolveUntrackedFiles(allocator, io, environ, root),
         };
+    }
+
+    /// Read git's `status.showUntrackedFiles` config so `git status` matches what
+    /// the user configured (and so a big repo can opt into the cheaper `normal`).
+    /// Unset, unrecognized, or any error falls back to `all` — git's default.
+    fn resolveUntrackedFiles(allocator: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []const u8) UntrackedFiles {
+        var argv = [_][]const u8{ "git", "config", "--get", "status.showUntrackedFiles" };
+        const result = std.process.run(allocator, io, .{
+            .argv = &argv,
+            .cwd = .{ .path = root },
+            .environ_map = environ,
+            .stdout_limit = .limited(64 * 1024),
+            .stderr_limit = .limited(64 * 1024),
+        }) catch return .all;
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        const value = std.mem.trim(u8, result.stdout, " \t\r\n");
+        if (std.mem.eql(u8, value, "no")) return .no;
+        if (std.mem.eql(u8, value, "normal")) return .normal;
+        // "all", "yes" (git's alias for the default), unset, or anything else.
+        return .all;
     }
 
     pub fn deinit(self: *Git) void {
@@ -496,7 +537,7 @@ pub const Git = struct {
     /// background worker can capture the (slow) git output off the UI thread and
     /// let the UI thread do the cheap parsing with its own allocator.
     pub fn statusPorcelain(self: *Git) ![]u8 {
-        return self.output(&.{ "status", "--porcelain", "-z", "--untracked-files=all", "--find-renames=50%" });
+        return self.output(&.{ "status", "--porcelain", "-z", self.untracked_files.flag(), "--find-renames=50%" });
     }
 
     pub fn loadFiles(self: *Git) ![]model.FileStatus {
@@ -1451,6 +1492,12 @@ test "log filters set, report and clear" {
 
     git.clearLogFilters();
     try std.testing.expect(!git.hasLogFilter());
+}
+
+test "UntrackedFiles maps to git's status flag" {
+    try std.testing.expectEqualStrings("--untracked-files=all", Git.UntrackedFiles.all.flag());
+    try std.testing.expectEqualStrings("--untracked-files=normal", Git.UntrackedFiles.normal.flag());
+    try std.testing.expectEqualStrings("--untracked-files=no", Git.UntrackedFiles.no.flag());
 }
 
 test "parse porcelain status including rename" {

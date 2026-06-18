@@ -200,6 +200,12 @@ Supported settings:
 side_panel_width_percent = 34
 diff_context = 3
 
+# Seconds between idle background working-tree refreshes (git status, run off the
+# UI thread). On a big repo a tight interval makes git status thrash; default 10.
+# Set to 0 to disable the periodic refresh (it still refreshes after operations
+# and when the terminal regains focus).
+refresh_interval_secs = 10
+
 # Side-panel layout (lazygit-style): the Status panel is a fixed height, the
 # Files/Branches/Commits lists share the rest equally, and Stash stays small
 # unless it's focused. Enable the "accordion" to grow the focused list panel.

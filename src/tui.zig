@@ -103,12 +103,13 @@ const WorktreeRun = struct {
     loop: *vaxis.Loop(Event),
     root: []u8,
     environ: *std.process.Environ.Map,
+    untracked: git_mod.Git.UntrackedFiles = .all,
     generation: u64,
     result: ?app_mod.WorktreeSnapshot = null,
 };
 
 fn worktreeWorker(wr: *WorktreeRun) void {
-    wr.result = app_mod.WorktreeSnapshot.load(async_allocator, wr.io, wr.environ, wr.root) catch null;
+    wr.result = app_mod.WorktreeSnapshot.load(async_allocator, wr.io, wr.environ, wr.root, wr.untracked) catch null;
     _ = wr.loop.tryPostEvent(.worktree_done) catch false;
 }
 
@@ -138,11 +139,12 @@ const RepoLoadRun = struct {
     root: []u8,
     environ: *std.process.Environ.Map,
     branch_sort: model.BranchSortOrder = .date,
+    untracked: git_mod.Git.UntrackedFiles = .all,
     result: ?model.RepoData = null,
 };
 
 fn repoLoadWorker(rl: *RepoLoadRun) void {
-    rl.result = app_mod.loadRepoDataAsync(async_allocator, rl.io, rl.environ, rl.root, rl.branch_sort);
+    rl.result = app_mod.loadRepoDataAsync(async_allocator, rl.io, rl.environ, rl.root, rl.branch_sort, rl.untracked);
     _ = rl.loop.tryPostEvent(.repo_load_done) catch false;
 }
 
@@ -160,6 +162,7 @@ const ScopedLoadRun = struct {
     author: ?[]u8 = null,
     path: ?[]u8 = null,
     branch_sort: model.BranchSortOrder = .date,
+    untracked: git_mod.Git.UntrackedFiles = .all,
     result: ?app_mod.ScopedData = null,
 
     fn freeFilters(self: *ScopedLoadRun) void {
@@ -177,7 +180,7 @@ fn scopedLoadWorker(sr: *ScopedLoadRun) void {
         .grep = sr.grep,
         .author = sr.author,
         .path = sr.path,
-    }, sr.branch_sort);
+    }, sr.branch_sort, sr.untracked);
     _ = sr.loop.tryPostEvent(.scoped_load_done) catch false;
 }
 
@@ -186,8 +189,8 @@ fn scopedLoadWorker(sr: *ScopedLoadRun) void {
 // stuck on the first frame until a long idle sleep finishes.
 const spinner_tick_ms: u64 = 80;
 const spinner_tick = std.Io.Duration.fromMilliseconds(spinner_tick_ms);
-// Background working-tree refresh cadence while idle, accumulated from ticks.
-const refresh_interval_ms: u64 = 1500;
+// The idle background working-tree refresh cadence is configurable
+// (`refresh_interval_secs`); see `refreshTickerRun`.
 const focus_events_set = "\x1b[?1004h";
 const focus_events_reset = "\x1b[?1004l";
 
@@ -277,7 +280,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     // Load the repo off-thread: the loop's initial winsize event
     // paints the skeleton with "Loading…" placeholders right away, and the
     // panels fill in when `repo_load_done` lands — no startup freeze, no flash.
-    var repo_load_run: RepoLoadRun = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ, .branch_sort = app.git.branch_sort };
+    var repo_load_run: RepoLoadRun = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ, .branch_sort = app.git.branch_sort, .untracked = app.git.untracked_files };
     var repo_load_future: ?std.Io.Future(void) = null;
     defer if (repo_load_future) |*f| {
         f.cancel(io);
@@ -423,6 +426,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     .loop = &loop,
                     .root = app.git.root,
                     .environ = app.git.environ,
+                    .untracked = app.git.untracked_files,
                     .generation = generation,
                     .result = null,
                 };
@@ -462,6 +466,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     .author = if (filters.author) |x| async_allocator.dupe(u8, x) catch null else null,
                     .path = if (filters.path) |p| async_allocator.dupe(u8, p) catch null else null,
                     .branch_sort = app.git.branch_sort,
+                    .untracked = app.git.untracked_files,
                     .result = null,
                 };
                 scoped_load_future = io.concurrent(scopedLoadWorker, .{&scoped_load_run}) catch blk: {
@@ -488,6 +493,10 @@ fn spinnerGlyph(frame: usize) []const u8 {
 }
 
 fn refreshTickerRun(state: *RefreshTicker) void {
+    // Idle working-tree refresh cadence (configurable, default 10s). A tighter
+    // interval makes `git status` thrash a large repo; 0 disables the periodic
+    // refresh entirely (it still refreshes after ops and on focus).
+    const interval_ms: u64 = @as(u64, state.app.config.refresh_interval_secs) * 1000;
     var idle_ms: u64 = 0;
     while (!state.stop.load(.acquire)) {
         // Always sleep the short spinner tick so the ticker re-checks the
@@ -499,11 +508,11 @@ fn refreshTickerRun(state: *RefreshTicker) void {
             // Busy: animate the spinner on every fast tick.
             idle_ms = 0;
             _ = state.loop.tryPostEvent(.refresh_tick) catch false;
-        } else {
+        } else if (interval_ms > 0) {
             // Idle: fire the periodic working-tree refresh only at the slower
             // cadence (built up from the fast ticks), not every tick.
             idle_ms += spinner_tick_ms;
-            if (idle_ms >= refresh_interval_ms) {
+            if (idle_ms >= interval_ms) {
                 idle_ms = 0;
                 _ = state.loop.tryPostEvent(.refresh_tick) catch false;
             }
