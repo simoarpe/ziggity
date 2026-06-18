@@ -872,7 +872,7 @@ fn drawCommandLogPopup(root: vaxis.Window, app: *app_mod.App) void {
         app.command_log_max_scroll = 0;
         app.command_log_scroll = 0;
         print(win, 0, 0, "No commands run yet.", st.muted);
-        print(win, footer_row, 0, "esc close", st.bottom_accent);
+        print(win, footer_row, 0, "enter/esc close", st.bottom_accent);
         return;
     }
     // Wrap every command into visual lines (long ones wrap, not cut), then show
@@ -899,7 +899,7 @@ fn drawCommandLogPopup(root: vaxis.Window, app: *app_mod.App) void {
         row += 1;
     }
     drawScrollbarRange(root, px0 + w - 1, py0 + 1, avail, total, app.command_log_scroll, true);
-    print(win, footer_row, 0, "up/down scroll   esc close", st.bottom_accent);
+    print(win, footer_row, 0, "up/down scroll   enter/esc close", st.bottom_accent);
 }
 
 fn drawOperationPopup(root: vaxis.Window, app: *app_mod.App) void {

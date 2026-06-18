@@ -7041,6 +7041,35 @@ test "mouse wheel scrolls the operation and help dialogs" {
     try std.testing.expectEqual(@as(usize, 0), app.command_log_scroll);
 }
 
+test "command log closes only on esc/enter, not on other keys" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.mode = .command_log;
+    app.command_log_max_scroll = 5;
+    app.command_log_scroll = 2;
+
+    // Arbitrary keys do not close it (they're ignored).
+    try app.handleKey(.{ .codepoint = 'a' });
+    try std.testing.expectEqual(Mode.command_log, app.mode);
+    try app.handleKey(.{ .codepoint = 'x' });
+    try std.testing.expectEqual(Mode.command_log, app.mode);
+    try app.handleKey(.{ .codepoint = 'q' });
+    try std.testing.expectEqual(Mode.command_log, app.mode);
+
+    // j/k scroll, still open.
+    try app.handleKey(.{ .codepoint = 'j' });
+    try std.testing.expectEqual(Mode.command_log, app.mode);
+    try app.handleKey(.{ .codepoint = 'k' });
+    try std.testing.expectEqual(Mode.command_log, app.mode);
+
+    // esc closes.
+    try app.handleKey(.{ .codepoint = 0x1b });
+    try std.testing.expectEqual(Mode.normal, app.mode);
+}
+
 test "command log scroll-down does not overflow the open-at-bottom sentinel" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
