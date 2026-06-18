@@ -41,7 +41,19 @@ pub fn main(init: std.process.Init) !void {
     };
     defer app.deinit();
 
-    try ziggity.tui.run(init, &app);
+    ziggity.tui.run(init, &app) catch |err| {
+        var buf: [1024]u8 = undefined;
+        var w: std.Io.File.Writer = .init(.stderr(), init.io, &buf);
+        const writer = &w.interface;
+        // Coerce to `anyerror` so the switch is independent of run()'s exact
+        // inferred error set.
+        switch (@as(anyerror, err)) {
+            error.NoTerminal => writer.writeAll("ziggity: no interactive terminal available — run it from a terminal (not with input/output redirected, or in a non-interactive environment)\n") catch {},
+            else => writer.print("ziggity: terminal UI error: {s}\n", .{@errorName(err)}) catch {},
+        }
+        writer.flush() catch {};
+        std.process.exit(1);
+    };
 }
 
 /// Prompt (on the cooked terminal, before the TUI starts) to create a git repo

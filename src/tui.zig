@@ -214,7 +214,10 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     ui_theme = app.config.theme;
 
     var tty_buffer: [1024]u8 = undefined;
-    var tty = try vaxis.Tty.init(io, &tty_buffer);
+    // Opening /dev/tty (+ switching it to raw mode) fails when there's no
+    // controlling terminal — stdin/stdout redirected, a pipe, cron/CI, etc.
+    // Surface that as a typed error so `main` can print a clear message.
+    var tty = vaxis.Tty.init(io, &tty_buffer) catch return error.NoTerminal;
     defer tty.deinit();
 
     var vx = try vaxis.init(io, allocator, init.environ_map, .{
