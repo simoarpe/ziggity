@@ -1812,9 +1812,9 @@ fn contextHints(app: *const app_mod.App) []const u8 {
     }
     if (app.focus == .branches) {
         return switch (app.branches_tab) {
-            .local => "space checkout  n new  R rename  d delete  M merge  r rebase  f ff  [/] tabs" ++ global,
-            .remotes => "space checkout  n add  e edit  x remove  u upstream  d del-branch  [/] tabs" ++ global,
-            .tags => "space checkout  n new-tag  d delete-tag  [/] tabs" ++ global,
+            .local => "space checkout  n new  R rename  d delete  M merge  r rebase  f ff  W diff  [/] tabs" ++ global,
+            .remotes => "space checkout  n add  e edit  x remove  u upstream  d del-branch  W diff  [/] tabs" ++ global,
+            .tags => "space checkout  n new-tag  d delete-tag  W diff  [/] tabs" ++ global,
             .worktrees => "d remove  [/] tabs" ++ global,
             .submodules => "space init/update  [/] tabs" ++ global,
         };
