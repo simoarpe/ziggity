@@ -1080,6 +1080,10 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
 /// Centered, bordered, opaque popup window. Fills its region first so the
 /// panels underneath do not bleed through, draws a rounded border and a title,
 /// and returns the inner content window.
+/// One popup is visible at a time, so a single module-owned buffer backs its
+/// title (see the note in `popup`).
+var popup_title_buf: [256]u8 = undefined;
+
 fn popup(root: vaxis.Window, width: u16, height: u16, title: []const u8, scroll: ?ScrollInfo) vaxis.Window {
     const w = @min(@max(width, 8), root.width);
     const h = @min(@max(height, 3), root.height);
@@ -1095,7 +1099,14 @@ fn popup(root: vaxis.Window, width: u16, height: u16, title: []const u8, scroll:
             .glyphs = .single_rounded,
         },
     });
-    _ = raw.printSegment(.{ .text = title, .style = styles().active_title }, .{
+    // vaxis stores a cell's grapheme by reference and the frame is flushed after
+    // render() returns, so a title passed via `printSegment` must outlive this
+    // call. Copy it into the module buffer so callers may pass a stack-built
+    // string safely. (The local `print*` helpers map bytes through static glyphs,
+    // so list/body text drawn with them needs no such care.)
+    const n = @min(title.len, popup_title_buf.len);
+    @memcpy(popup_title_buf[0..n], title[0..n]);
+    _ = raw.printSegment(.{ .text = popup_title_buf[0..n], .style = styles().active_title }, .{
         .row_offset = 0,
         .col_offset = 2,
         .wrap = .none,
@@ -1176,6 +1187,9 @@ fn listScrollInfo(app: *const app_mod.App, focus: model.Focus) ScrollInfo {
     return .{ .len = app.activeListLen(focus), .pos = app.listScroll(focus) };
 }
 
+/// `title` is drawn via `printSegment`, which keeps a reference to the bytes
+/// until the post-render flush — so it must be a string literal or App-owned
+/// memory (e.g. `app.*_title_buf`), never a stack buffer local to `render`.
 fn panel(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, title: []const u8, focused: bool, scroll: ?ScrollInfo) vaxis.Window {
     const raw = root.child(.{ .x_off = @intCast(x), .y_off = @intCast(y), .width = w, .height = h });
     if (w < 4 or h < 3) return raw;

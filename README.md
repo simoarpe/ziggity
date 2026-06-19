@@ -291,6 +291,29 @@ The TUI layer uses libvaxis' low-level API:
 - `Window.printSegment` and cell styles for text rendering.
 - Alternate screen rendering with explicit redraws after each event.
 
+### Gotcha: cell graphemes are stored by reference
+
+libvaxis stores each screen cell's grapheme as a **slice into the source text**
+(`Window.print` does `.grapheme = grapheme.bytes(segment.text)` — it does not copy
+the bytes). The frame is flushed in `renderAndFlush` via `vx.render(writer)`
+**after** the `render()` function has returned. So any text drawn through vaxis'
+`printSegment`/`print` must be backed by memory that outlives `render()` — a
+string literal or App-owned buffer, **never a stack-local buffer**. A stack
+buffer dangles and renders as garbage / `U+FFFD`, and because it depends on what
+later overwrites that stack region it fails intermittently (works by luck, then
+breaks). This bit us with the dynamically-formatted panel titles (e.g. the
+diff-mode "Diff [base …]" title rendered as "�og").
+
+Rules of thumb in `src/tui.zig`:
+
+- The local `print` / `printSpan` / `printAnsi` helpers are **safe** with any
+  buffer lifetime: they map each byte through the static `glyph()`/`ascii_table`,
+  so the cell grapheme points at static memory. Use them for list rows, popup
+  bodies, the footer, etc. — formatting into a stack buffer is fine.
+- Only vaxis `printSegment` is by-reference, and it is used only for panel/popup
+  titles. Dynamic titles must live in an App-owned buffer (`app.*_title_buf`);
+  `popup()` self-copies its title into a module-owned buffer for the same reason.
+
 ## Architecture
 
 - `src/main.zig`: process entry point and startup error reporting.
