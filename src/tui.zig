@@ -1147,6 +1147,7 @@ fn drawConfirmPopup(root: vaxis.Window, app: *const app_mod.App) void {
         .undo => "Undo",
         .force_push, .force_push_plain => "Force push",
         .delete_index_lock => "Git locked",
+        .reset_patch => "Discard patch",
     };
     // Wrap the message so a long prompt (e.g. a worktree path) stays readable
     // inside the box instead of being clipped, growing the popup's height.
@@ -1390,7 +1391,7 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
     // Sub-commits drill: the Branches panel shows the ref's commits, or (one
     // level deeper) the selected commit's files.
     if (app.branch_commits_active) {
-        if (app.branchFilesActive()) return drawCommitFiles(win, app, .branches);
+        if (app.branchFilesActive()) return drawCommitFiles(win, app, app.branch_files, app.branch_file_index, .branches);
         if (app.branch_commits.len == 0) {
             print(win, 0, 0, "No commits", styles().muted);
             return;
@@ -1518,10 +1519,10 @@ fn drawSubmodules(win: vaxis.Window, app: *const app_mod.App) void {
     }
 }
 
-/// Render the commit-files list (drilled into a commit) in `panel` — either the
-/// Commits panel or the Branches-panel sub-commits drill.
-fn drawCommitFiles(win: vaxis.Window, app: *const app_mod.App, panel_focus: model.Focus) void {
-    if (app.commit_files.len == 0) {
+/// Render a commit-files list (drilled into a commit) in `panel_focus` — either
+/// the Commits panel or the Branches drill, each with its own `files`/`selected`.
+fn drawCommitFiles(win: vaxis.Window, app: *const app_mod.App, files: []const model.CommitFile, selected: usize, panel_focus: model.Focus) void {
+    if (files.len == 0) {
         print(win, 0, 0, "No files in this commit", styles().muted);
         return;
     }
@@ -1529,11 +1530,11 @@ fn drawCommitFiles(win: vaxis.Window, app: *const app_mod.App, panel_focus: mode
     const focused = app.focus == panel_focus;
     var row: u16 = 0;
     var idx = start;
-    while (idx < app.commit_files.len and row < win.height) : ({
+    while (idx < files.len and row < win.height) : ({
         idx += 1;
         row += 1;
     }) {
-        const file = app.commit_files[idx];
+        const file = files[idx];
         var buf: [512]u8 = undefined;
         // A leading '+' marks files added to the custom patch.
         const in_patch = app.patchHasFile(file.path);
@@ -1544,7 +1545,7 @@ fn drawCommitFiles(win: vaxis.Window, app: *const app_mod.App, panel_focus: mode
             'D' => styles().removed,
             else => styles().normal,
         };
-        drawSelectable(win, row, line, style, selOf(idx == app.commit_file_index, focused));
+        drawSelectable(win, row, line, style, selOf(idx == selected, focused));
     }
 }
 
@@ -1574,7 +1575,7 @@ fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const m
 
 fn drawCommits(win: vaxis.Window, app: *const app_mod.App) void {
     // The Commits panel's own commit-files drill (not the Branches one).
-    if (app.commitsFilesActive()) return drawCommitFiles(win, app, .commits);
+    if (app.commitsFilesActive()) return drawCommitFiles(win, app, app.commit_files, app.commit_file_index, .commits);
     const commits = app.activeCommits();
     if (commits.len == 0) {
         const empty_label = if (app.initial_load_pending) "Loading..." else if (app.commits_tab == .reflog) "No reflog entries" else "No commits";
