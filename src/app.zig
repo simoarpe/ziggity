@@ -1268,6 +1268,15 @@ pub const App = struct {
     /// Panel hit-boxes captured by the renderer for mouse handling.
     panel_rects: [6]PanelRect = undefined,
     panel_rect_count: usize = 0,
+    // Scratch buffers for dynamically-formatted panel titles. vaxis stores each
+    // cell's grapheme as a slice into the source text (it does not copy), and the
+    // frame is flushed *after* the render function returns — so a title built in
+    // a stack buffer would dangle and render as garbage. These App-owned buffers
+    // outlive the flush, like every other cell-backing string (paths, diffs).
+    branches_title_buf: [96]u8 = undefined,
+    commits_title_buf: [80]u8 = undefined,
+    commit_filter_label_buf: [64]u8 = undefined,
+    main_title_buf: [64]u8 = undefined,
     // Independent view scroll for the side list panels, so the mouse wheel
     // scrolls the view without moving the selection. The view re-anchors to the
     // selection only when the *selection* changes (keyboard/click/refresh), not

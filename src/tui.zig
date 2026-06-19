@@ -673,15 +673,14 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     y += status_h;
     drawFiles(panel(root, 0, y, side_w, files_h, "Files [2]", app.focus == .files, listScrollInfo(app, .files)), app);
     y += files_h;
-    var branches_title_buf: [96]u8 = undefined;
     const branches_title = if (app.branch_commits_active)
         (if (app.branchFilesActive())
             (if (app.branchFilesPatchCount() > 0)
-                (std.fmt.bufPrint(&branches_title_buf, "Commit files [3] (patch: {d})", .{app.branchFilesPatchCount()}) catch "Commit files [3]")
+                (std.fmt.bufPrint(&app.branches_title_buf, "Commit files [3] (patch: {d})", .{app.branchFilesPatchCount()}) catch "Commit files [3]")
             else
                 "Commit files [3]  (space: add to patch)")
         else
-            (std.fmt.bufPrint(&branches_title_buf, "Commits [3] ({s})", .{app.branch_commits_ref}) catch "Commits [3]"))
+            (std.fmt.bufPrint(&app.branches_title_buf, "Commits [3] ({s})", .{app.branch_commits_ref}) catch "Commits [3]"))
     else switch (app.branches_tab) {
         .local => "Branches [3]",
         .remotes => "Remotes [3]",
@@ -691,28 +690,25 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     };
     drawBranches(panel(root, 0, y, side_w, branches_h, branches_title, app.focus == .branches, listScrollInfo(app, .branches)), app);
     y += branches_h;
-    var commits_title_buf: [80]u8 = undefined;
-    var filter_label_buf: [64]u8 = undefined;
     const commits_title = if (app.commitsFilesActive())
         (if (app.commitFilesPatchCount() > 0)
-            (std.fmt.bufPrint(&commits_title_buf, "Commit files [4] (patch: {d})", .{app.commitFilesPatchCount()}) catch "Commit files [4]")
+            (std.fmt.bufPrint(&app.commits_title_buf, "Commit files [4] (patch: {d})", .{app.commitFilesPatchCount()}) catch "Commit files [4]")
         else
             "Commit files [4]  (space: add to patch)")
     else if (app.commits_tab == .reflog)
         "Reflog [4]"
-    else if (app.commitFilterLabel(&filter_label_buf)) |label|
-        (std.fmt.bufPrint(&commits_title_buf, "Commits [4] ({s})", .{label}) catch "Commits [4] (filtered)")
+    else if (app.commitFilterLabel(&app.commit_filter_label_buf)) |label|
+        (std.fmt.bufPrint(&app.commits_title_buf, "Commits [4] ({s})", .{label}) catch "Commits [4] (filtered)")
     else
         "Commits [4]";
     drawCommits(panel(root, 0, y, side_w, commits_h, commits_title, app.focus == .commits, listScrollInfo(app, .commits)), app);
     y += commits_h;
     drawStash(panel(root, 0, y, side_w, stash_h, "Stash [5]", app.focus == .stash, listScrollInfo(app, .stash)), app);
 
-    var title_buf: [64]u8 = undefined;
     const main_title = if (app.staging_active)
         (if (app.staging_staged_view) "Staging - staged" else "Staging - unstaged")
     else if (app.diff_base) |diff_ref|
-        (std.fmt.bufPrint(&title_buf, "Diff [base {s}]", .{diff_ref[0..@min(diff_ref.len, 16)]}) catch "Diff [diffing]")
+        (std.fmt.bufPrint(&app.main_title_buf, "Diff [base {s}]", .{diff_ref[0..@min(diff_ref.len, 16)]}) catch "Diff [diffing]")
     else if (app.contentFocus() == .branches and app.selectedBranchRefName() != null)
         // A selected branch/tag shows its commit graph, titled "Log".
         "Log"
