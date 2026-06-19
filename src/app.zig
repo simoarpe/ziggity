@@ -1998,12 +1998,15 @@ pub const App = struct {
             .focus_right => if (!self.staging_active) try self.focusNext(),
             // Tab toggles focus into the Diff (main) panel and back to the side
             // panel it came from. In the staging view it closes it (back to the
-            // Files panel); `[`/`]` switch the staged/unstaged side there.
+            // Files panel); `[`/`]` switch the staged/unstaged side there. In the
+            // Files panel it mirrors <enter>, opening the staging view.
             .toggle_main => {
                 if (self.staging_active) {
                     try self.closeStaging();
                 } else if (self.focus == .main) {
                     try self.leaveMain();
+                } else if (self.focus == .files) {
+                    try self.descendOrOpenCommitFiles();
                 } else {
                     try self.enterMain();
                 }
@@ -2181,9 +2184,16 @@ pub const App = struct {
                         // don't grab focus (that was the glitch).
                         self.diff_sel_active = false;
                     } else {
-                        // Fresh click on the diff (no prior selection): focus it.
+                        // Fresh click on the diff (no prior selection). When it
+                        // shows a working-tree file, open the staging view (the
+                        // same as <enter>/<tab> from the Files panel); otherwise
+                        // just focus the diff to scroll it.
                         self.diff_sel_active = false;
-                        try self.focusPanel(.main);
+                        if (self.contentFocus() == .files) {
+                            try self.openStaging();
+                        } else {
+                            try self.focusPanel(.main);
+                        }
                     }
                     self.diff_sel_dragged = false;
                     return true;
@@ -7244,6 +7254,24 @@ test "tab closes the staging view back to the files panel" {
     try std.testing.expectEqual(model.Focus.files, app.focus);
 }
 
+test "tab mirrors enter in the files panel (opens staging, not the diff)" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.focus = .files;
+    const tab = vaxis.Key{ .codepoint = vaxis.Key.tab };
+    try app.handleKey(tab);
+
+    // With no file selected, Tab routes into the staging path (which reports
+    // "no file selected" and stays in Files) rather than the old behaviour of
+    // focusing the read-only diff panel (which would set focus to .main).
+    try std.testing.expectEqual(model.Focus.files, app.focus);
+    try std.testing.expect(!app.staging_active);
+    try std.testing.expectEqualStrings("no file selected", app.message);
+}
+
 test "list view scrolls with the wheel but follows the selection on move" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -7317,6 +7345,45 @@ test "mouse wheel scrolls the panel under the cursor without changing focus" {
     // Wheel over an unfocused panel (files): does NOT steal focus.
     _ = try app.handleMouse(.{ .col = 5, .row = 7, .button = .wheel_down, .mods = .{}, .type = .press });
     try std.testing.expectEqual(model.Focus.commits, app.focus);
+}
+
+test "clicking the diff panel opens staging only when it shows a working-tree file" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.panel_rects = .{
+        .{ .focus = .status, .x = 0, .y = 0, .w = 20, .h = 6 },
+        .{ .focus = .files, .x = 0, .y = 6, .w = 20, .h = 5 },
+        .{ .focus = .branches, .x = 0, .y = 11, .w = 20, .h = 5 },
+        .{ .focus = .commits, .x = 0, .y = 16, .w = 20, .h = 5 },
+        .{ .focus = .stash, .x = 0, .y = 21, .w = 20, .h = 4 },
+        .{ .focus = .main, .x = 20, .y = 0, .w = 40, .h = 25 },
+    };
+    app.panel_rect_count = 6;
+    app.allocator.free(app.diff);
+    app.diff = try app.allocator.dupe(u8, "diff --git a/x b/x\n+y\n");
+
+    const press: vaxis.Mouse = .{ .col = 30, .row = 5, .button = .left, .mods = .{}, .type = .press };
+    const release: vaxis.Mouse = .{ .col = 30, .row = 5, .button = .left, .mods = .{}, .type = .release };
+
+    // In the Files context a plain click on the diff opens staging (mirrors
+    // <enter>/<tab> from Files). With no file selected it routes there — and
+    // reports "no file selected" — rather than just focusing the diff.
+    app.focus = .files;
+    _ = try app.handleMouse(press);
+    _ = try app.handleMouse(release);
+    try std.testing.expectEqual(model.Focus.files, app.focus);
+    try std.testing.expect(!app.staging_active);
+    try std.testing.expectEqualStrings("no file selected", app.message);
+
+    // In a non-file context (a commit diff), the same click just focuses the
+    // diff panel to scroll it, as before.
+    app.focus = .commits;
+    _ = try app.handleMouse(press);
+    _ = try app.handleMouse(release);
+    try std.testing.expectEqual(model.Focus.main, app.focus);
 }
 
 test "pushing a branch with no upstream prompts then sets upstream" {
