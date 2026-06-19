@@ -1611,7 +1611,7 @@ fn drawStash(win: vaxis.Window, app: *const app_mod.App) void {
 
 fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
     if (app.staging_active) {
-        return drawStagingPane(win, app, app.staging_diff, true, "No changes on this side - press [ or ] to switch");
+        return drawStagingPane(win, app, app.staging_diff, true, "No changes on this side - press [ or ] to switch", .main);
     }
 
     const text = app.diff;
@@ -1621,7 +1621,7 @@ fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
         if (lines.next() == null) return;
     }
 
-    const sel = app.diffSelectionRange();
+    const sel = app.diffSelectionRangeFor(.main);
 
     var row: u16 = 0;
     while (row < win.height) : (row += 1) {
@@ -1645,7 +1645,7 @@ fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
 /// per line; the `active` pane shows the line/range highlight and scrolls with
 /// `main_scroll`, while an inactive pane (the read-only side in split view)
 /// renders from the top with no highlight.
-fn drawStagingPane(win: vaxis.Window, app: *const app_mod.App, text: []const u8, active: bool, empty_msg: []const u8) void {
+fn drawStagingPane(win: vaxis.Window, app: *const app_mod.App, text: []const u8, active: bool, empty_msg: []const u8, pane: app_mod.SelPane) void {
     if (text.len == 0) {
         print(win, 0, 0, empty_msg, styles().muted);
         return;
@@ -1658,6 +1658,8 @@ fn drawStagingPane(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
         hl_end = @max(anchor, app.staging_cursor) + 1;
     }
     const scroll: usize = if (active) app.main_scroll else 0;
+    // Mouse text selection in this pane (if any), highlighted per column.
+    const sel = app.diffSelectionRangeFor(pane);
     var lines = std.mem.splitScalar(u8, text, '\n');
     var skipped: usize = 0;
     while (skipped < scroll) : (skipped += 1) {
@@ -1672,7 +1674,17 @@ fn drawStagingPane(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
             style.bg = .{ .index = 8 };
             fillRow(win, row, style);
         }
-        print(win, row, 0, line, style);
+        var sel_lo: u16 = 0;
+        var sel_hi: u16 = 0;
+        if (sel) |s| {
+            if (abs_line >= s.sl and abs_line <= s.el) {
+                sel_lo = if (abs_line == s.sl) @intCast(@min(s.sc, win.width)) else 0;
+                sel_hi = if (abs_line == s.el) @intCast(@min(s.ec, win.width)) else win.width;
+            }
+        }
+        // The staging diff is plain (--no-color) text; printAnsi renders it with
+        // `style` as the base and the selected column span highlighted.
+        printAnsi(win, row, line, style, sel_lo, sel_hi);
     }
 }
 
@@ -1691,8 +1703,12 @@ fn drawStagingSplit(root: vaxis.Window, app: *app_mod.App, x: u16, y: u16, w: u1
     const left = panel(root, x, y, left_w, h, "Unstaged", focused and unstaged_active, .{ .len = app_mod.diffLineCount(unstaged_text), .pos = unstaged_pos });
     const right = panel(root, x + left_w, y, w - left_w, h, "Staged", focused and !unstaged_active, .{ .len = app_mod.diffLineCount(staged_text), .pos = staged_pos });
     app.main_view_height = if (unstaged_active) left.height else right.height;
-    drawStagingPane(left, app, unstaged_text, unstaged_active, "No unstaged changes");
-    drawStagingPane(right, app, staged_text, !unstaged_active, "No staged changes");
+    // The active side (`staging_diff`) is the `.main` selection pane; the
+    // read-only side is `.other` — matching `App.paneRectFor`.
+    const left_pane: app_mod.SelPane = if (unstaged_active) .main else .other;
+    const right_pane: app_mod.SelPane = if (unstaged_active) .other else .main;
+    drawStagingPane(left, app, unstaged_text, unstaged_active, "No unstaged changes", left_pane);
+    drawStagingPane(right, app, staged_text, !unstaged_active, "No staged changes", right_pane);
 }
 
 fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {

@@ -228,6 +228,10 @@ pub const PanelRect = struct {
     }
 };
 
+/// A diff pane the mouse can select text in: the main diff or active staging
+/// pane (`.main`), or the read-only side of the split staging view (`.other`).
+pub const SelPane = enum { main, other };
+
 /// An interactive-rebase action applied to the selected commit.
 pub const RebaseAction = enum {
     drop,
@@ -1283,6 +1287,10 @@ pub const App = struct {
     diff_sel_anchor_col: usize = 0,
     diff_sel_head_line: usize = 0,
     diff_sel_head_col: usize = 0,
+    // Which diff pane the active selection belongs to: the main diff / active
+    // staging pane (`.main`), or the read-only side of the split staging view
+    // (`.other`). Lets selection work in the staging view, not just the diff.
+    diff_sel_pane: SelPane = .main,
     // Character-precise mouse text selection inside a read-only dialog (the
     // operation-result, help, and command-log popups). Mirrors the diff
     // selection, but coordinates index the dialog's *rendered* rows: `row` is a
@@ -2137,21 +2145,25 @@ pub const App = struct {
             return false;
         }
 
-        // Character-precise text selection in the Diff panel: left-drag selects,
-        // release copies to the clipboard. Works for whatever the diff currently
-        // shows (file/branch/commit/stash diff), but not in the staging view,
-        // which has its own keyboard line selection.
-        if (!self.staging_active) {
+        // Character-precise text selection: left-drag selects, release copies to
+        // the clipboard. Works in the main Diff panel (file/branch/commit/stash
+        // diff) and in the staging view's pane(s) — alongside their own keyboard
+        // line selection.
+        {
+            const c: u16 = if (mouse.col < 0) 0 else @intCast(mouse.col);
+            const rw: u16 = if (mouse.row < 0) 0 else @intCast(mouse.row);
             switch (mouse.type) {
                 .press => if (mouse.button == .left and mouse.col >= 0 and mouse.row >= 0) {
-                    if (self.mainRect()) |r| {
-                        if (r.contains(@intCast(mouse.col), @intCast(mouse.row)) and self.diff.len > 0) {
-                            const pt = self.diffPointAt(r, @intCast(mouse.col), @intCast(mouse.row));
+                    if (self.selPaneAt(c, rw)) |pane| {
+                        if (self.paneText(pane).len > 0) {
+                            const r = self.paneRectFor(pane).?;
+                            const pt = diffPointAt(r, self.paneScroll(pane), c, rw);
                             // Remember if a real selection was on screen, so a
                             // click that clears it doesn't also grab focus.
                             self.diff_sel_had_span = self.diff_sel_active and
                                 (self.diff_sel_anchor_line != self.diff_sel_head_line or
                                     self.diff_sel_anchor_col != self.diff_sel_head_col);
+                            self.diff_sel_pane = pane;
                             self.diff_sel_active = true;
                             self.diff_sel_dragged = false;
                             self.diff_sel_anchor_line = pt.line;
@@ -2160,16 +2172,14 @@ pub const App = struct {
                             self.diff_sel_head_col = pt.col;
                             // Don't change focus here: a drag selects text while
                             // keeping the left panel's context. A plain click
-                            // (no drag) focuses the diff on release, as before.
+                            // (no drag) is resolved on release.
                             return true;
                         }
                     }
                 },
                 .drag => if (self.diff_sel_active) {
-                    if (self.mainRect()) |r| {
-                        const c: u16 = if (mouse.col < 0) 0 else @intCast(mouse.col);
-                        const rw: u16 = if (mouse.row < 0) 0 else @intCast(mouse.row);
-                        const pt = self.diffPointAt(r, c, rw);
+                    if (self.paneRectFor(self.diff_sel_pane)) |r| {
+                        const pt = diffPointAt(r, self.paneScroll(self.diff_sel_pane), c, rw);
                         self.diff_sel_head_line = pt.line;
                         self.diff_sel_head_col = pt.col;
                         self.diff_sel_dragged = true;
@@ -2180,19 +2190,20 @@ pub const App = struct {
                     if (self.diff_sel_dragged) {
                         try self.copyDiffSelection(); // drag: copy, keep focus put
                     } else if (self.diff_sel_had_span) {
-                        // Click that dismisses a visible selection: just deselect,
-                        // don't grab focus (that was the glitch).
+                        // Click that dismisses a visible selection: just deselect.
                         self.diff_sel_active = false;
                     } else {
-                        // Fresh click on the diff (no prior selection). When it
-                        // shows a working-tree file, open the staging view (the
-                        // same as <enter>/<tab> from the Files panel); otherwise
-                        // just focus the diff to scroll it.
+                        // Fresh click (no prior selection). In the staging view it
+                        // just clears; on the main diff it opens staging when the
+                        // diff is a working-tree file (same as <enter>/<tab> from
+                        // Files), else focuses the diff to scroll it.
                         self.diff_sel_active = false;
-                        if (self.contentFocus() == .files) {
-                            try self.openStaging();
-                        } else {
-                            try self.focusPanel(.main);
+                        if (!self.staging_active) {
+                            if (self.contentFocus() == .files) {
+                                try self.openStaging();
+                            } else {
+                                try self.focusPanel(.main);
+                            }
                         }
                     }
                     self.diff_sel_dragged = false;
@@ -2326,12 +2337,62 @@ pub const App = struct {
         return null;
     }
 
+    /// The screen rect of a selectable diff pane, or null if it isn't on screen.
+    /// In the split staging view the main area is halved (active | read-only);
+    /// otherwise the whole main area is the `.main` pane and there is no `.other`.
+    pub fn paneRectFor(self: *const App, pane: SelPane) ?PanelRect {
+        const m = self.mainRect() orelse return null;
+        if (self.staging_active and self.staging_split) {
+            const left_w = m.w / 2;
+            const left: PanelRect = .{ .focus = .main, .x = m.x, .y = m.y, .w = left_w, .h = m.h };
+            const right: PanelRect = .{ .focus = .main, .x = m.x + left_w, .y = m.y, .w = m.w - left_w, .h = m.h };
+            // The active pane (`staging_diff`) is the unstaged (left) side unless
+            // the staged side is the one being edited.
+            const active_left = !self.staging_staged_view;
+            return switch (pane) {
+                .main => if (active_left) left else right,
+                .other => if (active_left) right else left,
+            };
+        }
+        return switch (pane) {
+            .main => m,
+            .other => null,
+        };
+    }
+
+    /// The text shown in a selectable pane.
+    pub fn paneText(self: *const App, pane: SelPane) []const u8 {
+        return switch (pane) {
+            .main => if (self.staging_active) self.staging_diff else self.diff,
+            .other => self.staging_other_diff,
+        };
+    }
+
+    /// The scroll offset of a pane. Only the active/main pane scrolls; the
+    /// read-only split side always renders from the top.
+    pub fn paneScroll(self: *const App, pane: SelPane) usize {
+        return switch (pane) {
+            .main => self.main_scroll,
+            .other => 0,
+        };
+    }
+
+    /// Which selectable pane (if any) is under a screen cell.
+    fn selPaneAt(self: *const App, col: u16, row: u16) ?SelPane {
+        inline for (.{ SelPane.main, SelPane.other }) |pane| {
+            if (self.paneRectFor(pane)) |r| {
+                if (r.contains(col, row)) return pane;
+            }
+        }
+        return null;
+    }
+
     const DiffPoint = struct { line: usize, col: usize };
 
-    /// Map an absolute screen cell to a position in the diff content: the line
-    /// index (accounting for the scroll offset) and the visible column, both
-    /// clamped to the panel's inner content area.
-    fn diffPointAt(self: *const App, r: PanelRect, col: u16, row: u16) DiffPoint {
+    /// Map an absolute screen cell to a position in a pane's content: the line
+    /// index (accounting for `scroll`) and the visible column, both clamped to
+    /// the pane's inner content area.
+    fn diffPointAt(r: PanelRect, scroll: usize, col: u16, row: u16) DiffPoint {
         const content_top = r.y + 1;
         const content_left = r.x + 1;
         const content_h = r.h -| 2;
@@ -2341,13 +2402,13 @@ pub const App = struct {
         else
             @min(row - content_top, content_h -| 1);
         const dcol: usize = if (col <= content_left) 0 else @min(col - content_left, content_w);
-        return .{ .line = self.main_scroll + rel_row, .col = dcol };
+        return .{ .line = scroll + rel_row, .col = dcol };
     }
 
-    /// Normalized (start <= end) diff selection, with the end line clamped to the
-    /// content. Null when there is no active selection.
-    pub fn diffSelectionRange(self: *const App) ?struct { sl: usize, sc: usize, el: usize, ec: usize } {
-        if (!self.diff_sel_active) return null;
+    /// Normalized (start <= end) selection for `pane`, clamped to its content.
+    /// Null when there is no active selection in that pane.
+    pub fn diffSelectionRangeFor(self: *const App, pane: SelPane) ?struct { sl: usize, sc: usize, el: usize, ec: usize } {
+        if (!self.diff_sel_active or self.diff_sel_pane != pane) return null;
         var sl = self.diff_sel_anchor_line;
         var sc = self.diff_sel_anchor_col;
         var el = self.diff_sel_head_line;
@@ -2356,7 +2417,7 @@ pub const App = struct {
             std.mem.swap(usize, &sl, &el);
             std.mem.swap(usize, &sc, &ec);
         }
-        const total = diffLineCount(self.diff);
+        const total = diffLineCount(self.paneText(pane));
         if (total == 0 or sl >= total) return null;
         if (el >= total) {
             el = total - 1;
@@ -2365,17 +2426,18 @@ pub const App = struct {
         return .{ .sl = sl, .sc = sc, .el = el, .ec = ec };
     }
 
-    /// Extract the selected diff text (ANSI colors stripped, tabs preserved) and
-    /// queue it for the system clipboard.
+    /// Extract the selected text (ANSI colors stripped, tabs preserved) from the
+    /// pane it was made in and queue it for the system clipboard.
     fn copyDiffSelection(self: *App) !void {
-        const sel = self.diffSelectionRange() orelse {
+        const pane = self.diff_sel_pane;
+        const sel = self.diffSelectionRangeFor(pane) orelse {
             self.diff_sel_active = false;
             return;
         };
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.allocator);
 
-        var lines = std.mem.splitScalar(u8, self.diff, '\n');
+        var lines = std.mem.splitScalar(u8, self.paneText(pane), '\n');
         var idx: usize = 0;
         while (lines.next()) |line| : (idx += 1) {
             if (idx < sel.sl) continue;
@@ -6557,6 +6619,39 @@ test "diff selection copies the highlighted span across lines" {
     try std.testing.expectEqualStrings("one\nline two", app.clipboard_request.?);
 }
 
+test "selection copies from the staging panes, each its own text" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.staging_active = true;
+    allocator.free(app.staging_diff);
+    app.staging_diff = try allocator.dupe(u8, "active one\nactive two\n");
+    allocator.free(app.staging_other_diff);
+    app.staging_other_diff = try allocator.dupe(u8, "other one\nother two\n");
+
+    // The `.main` pane copies from the active staging diff.
+    app.diff_sel_pane = .main;
+    app.diff_sel_active = true;
+    app.diff_sel_anchor_line = 0;
+    app.diff_sel_anchor_col = 7; // "one"
+    app.diff_sel_head_line = 1;
+    app.diff_sel_head_col = std.math.maxInt(usize);
+    try app.copyDiffSelection();
+    try std.testing.expectEqualStrings("one\nactive two", app.clipboard_request.?);
+
+    // The `.other` pane (read-only split side) copies from its own text.
+    app.diff_sel_pane = .other;
+    app.diff_sel_active = true;
+    app.diff_sel_anchor_line = 0;
+    app.diff_sel_anchor_col = 6; // "one"
+    app.diff_sel_head_line = 0;
+    app.diff_sel_head_col = std.math.maxInt(usize);
+    try app.copyDiffSelection();
+    try std.testing.expectEqualStrings("one", app.clipboard_request.?);
+}
+
 test "diffLineCount ignores a single trailing newline" {
     try std.testing.expectEqual(@as(usize, 0), diffLineCount(""));
     try std.testing.expectEqual(@as(usize, 3), diffLineCount("a\nb\nc\n"));
@@ -7988,6 +8083,7 @@ fn deinitTestApp(app: *App) void {
     app.input_buffer.deinit(app.allocator);
     if (app.staging) |*parsed| parsed.deinit(app.allocator);
     app.allocator.free(app.staging_diff);
+    app.allocator.free(app.staging_other_diff);
     app.allocator.free(app.staging_path);
     app.allocator.free(app.tree_rows);
     app.preview_cache.deinit(app.allocator);
