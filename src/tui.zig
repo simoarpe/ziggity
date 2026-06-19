@@ -1825,7 +1825,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
         .branches => unreachable,
         .commits => "g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  W diff  / filter  b bisect  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
-        .main => "j/k scroll  PgUp/PgDn page  esc back" ++ global,
+        .main => "j/k scroll  PgUp/PgDn page  drag select  ^o copy all  esc back" ++ global,
     };
 }
 

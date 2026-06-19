@@ -3810,6 +3810,9 @@ pub const App = struct {
     /// hash, branch/tag/remote ref, or stash selector, depending on the panel.
     /// The TUI loop performs the OSC 52 copy.
     fn requestClipboardCopy(self: *App) !void {
+        // On the Diff panel, copy the whole diff; elsewhere, the selected item's
+        // identifier (commit hash / branch ref / stash selector).
+        if (self.focus == .main) return self.copyWholeDiff();
         const text: []const u8 = switch (self.focus) {
             .commits => if (self.selectedCommit()) |commit| commit.hash else "",
             .branches => self.selectedBranchRefName() orelse "",
@@ -3823,6 +3826,30 @@ pub const App = struct {
         if (self.clipboard_request) |old| self.allocator.free(old);
         self.clipboard_request = try self.allocator.dupe(u8, text);
         try self.setMessage("copied to clipboard: {s}", .{text});
+    }
+
+    /// Copy the entire diff shown in the main panel (the staging diff while
+    /// staging, otherwise the preview), with ANSI color codes stripped.
+    fn copyWholeDiff(self: *App) !void {
+        const text = self.paneText(.main);
+        if (text.len == 0) {
+            try self.setMessage("nothing to copy here", .{});
+            return;
+        }
+        // Drop a single trailing newline so the copy has no dangling blank line.
+        const body = if (text[text.len - 1] == '\n') text[0 .. text.len - 1] else text;
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(self.allocator);
+        var lines = std.mem.splitScalar(u8, body, '\n');
+        var first = true;
+        while (lines.next()) |line| {
+            if (!first) try out.append(self.allocator, '\n');
+            first = false;
+            try appendDiffColumns(&out, self.allocator, line, 0, std.math.maxInt(usize));
+        }
+        if (self.clipboard_request) |old| self.allocator.free(old);
+        self.clipboard_request = try self.allocator.dupe(u8, out.items);
+        try self.setMessage("copied {d} line(s) to clipboard", .{diffLineCount(text)});
     }
 
     /// The ref the focused panel contributes to a diff: a commit hash in the
@@ -7214,6 +7241,19 @@ test "clipboard copy picks the focused panel's identifier" {
     app.focus = .status;
     try app.requestClipboardCopy();
     try std.testing.expectEqualStrings("aaaaaaa", app.clipboard_request.?);
+    try std.testing.expectEqualStrings("nothing to copy here", app.message);
+
+    // The Diff panel copies the entire diff (ANSI stripped, no trailing blank).
+    app.focus = .main;
+    allocator.free(app.diff);
+    app.diff = try allocator.dupe(u8, "\x1b[32m+added\x1b[m\n-removed\n");
+    try app.requestClipboardCopy();
+    try std.testing.expectEqualStrings("+added\n-removed", app.clipboard_request.?);
+
+    // An empty diff still reports nothing to copy.
+    allocator.free(app.diff);
+    app.diff = try allocator.dupe(u8, "");
+    try app.requestClipboardCopy();
     try std.testing.expectEqualStrings("nothing to copy here", app.message);
 }
 
