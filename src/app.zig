@@ -2911,6 +2911,27 @@ pub const App = struct {
         return self.patch_paths.items.len;
     }
 
+    /// Files in the in-progress patch if it belongs to `hash`, else 0. A patch
+    /// is tied to one commit, so a commit-files view only advertises its own.
+    fn patchCountForCommit(self: *const App, hash: []const u8) usize {
+        const src = self.patch_source orelse return 0;
+        return if (std.mem.eql(u8, src, hash)) self.patch_paths.items.len else 0;
+    }
+
+    /// Patch file count for the commit the Commits panel is showing files for.
+    pub fn commitFilesPatchCount(self: *const App) usize {
+        if (!self.commit_files_active) return 0;
+        const list = self.activeCommits();
+        if (list.len == 0) return 0;
+        return self.patchCountForCommit(list[@min(self.activeCommitIndex(), list.len - 1)].hash);
+    }
+
+    /// Patch file count for the sub-commit the Branches panel is showing files for.
+    pub fn branchFilesPatchCount(self: *const App) usize {
+        if (!self.branch_files_active or self.branch_commits.len == 0) return 0;
+        return self.patchCountForCommit(self.branch_commits[@min(self.branch_commit_index, self.branch_commits.len - 1)].hash);
+    }
+
     fn clearPatch(self: *App) void {
         if (self.patch_source) |s| self.allocator.free(s);
         self.patch_source = null;

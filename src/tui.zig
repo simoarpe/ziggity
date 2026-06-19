@@ -676,7 +676,10 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     var branches_title_buf: [96]u8 = undefined;
     const branches_title = if (app.branch_commits_active)
         (if (app.branchFilesActive())
-            (std.fmt.bufPrint(&branches_title_buf, "Commit files [3]  (space: add to patch)", .{}) catch "Commit files [3]")
+            (if (app.branchFilesPatchCount() > 0)
+                (std.fmt.bufPrint(&branches_title_buf, "Commit files [3] (patch: {d})", .{app.branchFilesPatchCount()}) catch "Commit files [3]")
+            else
+                "Commit files [3]  (space: add to patch)")
         else
             (std.fmt.bufPrint(&branches_title_buf, "Commits [3] ({s})", .{app.branch_commits_ref}) catch "Commits [3]"))
     else switch (app.branches_tab) {
@@ -691,8 +694,8 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     var commits_title_buf: [80]u8 = undefined;
     var filter_label_buf: [64]u8 = undefined;
     const commits_title = if (app.commitsFilesActive())
-        (if (app.patchFileCount() > 0)
-            (std.fmt.bufPrint(&commits_title_buf, "Commit files [4] (patch: {d})", .{app.patchFileCount()}) catch "Commit files [4]")
+        (if (app.commitFilesPatchCount() > 0)
+            (std.fmt.bufPrint(&commits_title_buf, "Commit files [4] (patch: {d})", .{app.commitFilesPatchCount()}) catch "Commit files [4]")
         else
             "Commit files [4]  (space: add to patch)")
     else if (app.commits_tab == .reflog)
@@ -1391,7 +1394,7 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
     // Sub-commits drill: the Branches panel shows the ref's commits, or (one
     // level deeper) the selected commit's files.
     if (app.branch_commits_active) {
-        if (app.branchFilesActive()) return drawCommitFiles(win, app, app.branch_files, app.branch_file_index, .branches);
+        if (app.branchFilesActive()) return drawCommitFiles(win, app, app.branch_files, app.branch_file_index, .branches, app.branchFilesPatchCount() > 0);
         if (app.branch_commits.len == 0) {
             print(win, 0, 0, "No commits", styles().muted);
             return;
@@ -1521,7 +1524,9 @@ fn drawSubmodules(win: vaxis.Window, app: *const app_mod.App) void {
 
 /// Render a commit-files list (drilled into a commit) in `panel_focus` — either
 /// the Commits panel or the Branches drill, each with its own `files`/`selected`.
-fn drawCommitFiles(win: vaxis.Window, app: *const app_mod.App, files: []const model.CommitFile, selected: usize, panel_focus: model.Focus) void {
+/// `patch_active` is true when the in-progress patch belongs to this view's
+/// commit, so the '+' markers reflect this commit rather than another's.
+fn drawCommitFiles(win: vaxis.Window, app: *const app_mod.App, files: []const model.CommitFile, selected: usize, panel_focus: model.Focus, patch_active: bool) void {
     if (files.len == 0) {
         print(win, 0, 0, "No files in this commit", styles().muted);
         return;
@@ -1536,8 +1541,8 @@ fn drawCommitFiles(win: vaxis.Window, app: *const app_mod.App, files: []const mo
     }) {
         const file = files[idx];
         var buf: [512]u8 = undefined;
-        // A leading '+' marks files added to the custom patch.
-        const in_patch = app.patchHasFile(file.path);
+        // A leading '+' marks files added to this commit's custom patch.
+        const in_patch = patch_active and app.patchHasFile(file.path);
         const marker: u8 = if (in_patch) '+' else ' ';
         const line = std.fmt.bufPrint(&buf, "{c}{c} {s}", .{ marker, file.status, file.path }) catch file.path;
         const style = if (in_patch) styles().staged else switch (file.status) {
@@ -1575,7 +1580,7 @@ fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const m
 
 fn drawCommits(win: vaxis.Window, app: *const app_mod.App) void {
     // The Commits panel's own commit-files drill (not the Branches one).
-    if (app.commitsFilesActive()) return drawCommitFiles(win, app, app.commit_files, app.commit_file_index, .commits);
+    if (app.commitsFilesActive()) return drawCommitFiles(win, app, app.commit_files, app.commit_file_index, .commits, app.commitFilesPatchCount() > 0);
     const commits = app.activeCommits();
     if (commits.len == 0) {
         const empty_label = if (app.initial_load_pending) "Loading..." else if (app.commits_tab == .reflog) "No reflog entries" else "No commits";
