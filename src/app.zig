@@ -1217,9 +1217,37 @@ pub const App = struct {
     copied_commits: std.ArrayList([]u8) = .empty,
     /// A commit marked as the base for a `rebase --onto` (full SHA), or null.
     marked_base: ?[]u8 = null,
+    // ---- Drill state model -------------------------------------------------
+    // Two panels can "drill" into commits, as nested levels reached by <enter>:
+    //
+    //   Commits panel:  log  ->  a commit's files  ->  a file's patch (in main)
+    //   Branches panel: branch list -> sub-commits -> a commit's files -> patch
+    //
+    // The commit-files level is a SINGLE shared view (`commit_files`), owned by
+    // whichever panel opened it (`commit_files_owner`). The Branches drill adds
+    // one level above that (`branch_commits`, the sub-commits list).
+    //
+    // Three rules govern when a panel keeps vs. resets its drill:
+    //   1. Plain focus changes (1-5, h/l, tab) PRESERVE every drill — only
+    //      <esc> backs out, one level at a time, in the focused panel.
+    //   2. Opening the files view in one panel pulls the single shared view out
+    //      of the other; that panel falls back to its base (the Commits panel to
+    //      its log, the Branches panel to the branch list, since the sub-commits
+    //      level had nothing but the files below it).
+    //   3. A sub-commits list and the other panel's files view can coexist (they
+    //      use separate buffers); only the shared files level is exclusive.
+    // The helpers `branchFilesActive`/`commitsFilesActive`/`inBranchCommitContext`
+    // encode which panel currently owns the files view and the active commit.
     commit_files: []model.CommitFile = &.{},
     commit_file_index: usize = 0,
     commit_files_active: bool = false,
+    // Which panel owns the shared commit-files view (see the model above).
+    commit_files_owner: model.Focus = .commits,
+    // The Branches-panel sub-commits list (drill level above its files view).
+    branch_commits_active: bool = false,
+    branch_commits: []model.Commit = &.{},
+    branch_commit_index: usize = 0,
+    branch_commits_ref: []u8 = &.{},
     staging_active: bool = false,
     staging_staged_view: bool = false,
     staging_path: []u8 = &.{},
@@ -1465,6 +1493,8 @@ pub const App = struct {
     pub fn deinit(self: *App) void {
         self.data.deinit(self.allocator);
         model.deinitCommitFiles(self.allocator, self.commit_files);
+        model.deinitCommits(self.allocator, self.branch_commits);
+        self.allocator.free(self.branch_commits_ref);
         self.allocator.free(self.tree_rows);
         self.collapsed_dirs.deinit();
         if (self.staging) |*parsed| parsed.deinit(self.allocator);
@@ -1684,7 +1714,14 @@ pub const App = struct {
             self.selectCurrentBranch();
             self.select_current_branch_pending = false;
         }
-        if (s.contains(.commits) and self.commit_files_active) self.reloadCommitFilesAfterRefresh();
+        // Keep open drills current with the refreshed repo. Reload the
+        // sub-commits list first (it may collapse the drill if its ref is gone),
+        // then the shared commit-files view, scoped to whichever panel owns it.
+        if (self.branch_commits_active and s.contains(.branches)) self.reloadBranchCommitsAfterRefresh();
+        if (self.commit_files_active) {
+            const owner_refreshed = if (self.commit_files_owner == .branches) s.contains(.branches) else s.contains(.commits);
+            if (owner_refreshed) self.reloadCommitFilesAfterRefresh();
+        }
         self.updatePreview() catch {};
     }
 
@@ -1873,7 +1910,19 @@ pub const App = struct {
             }
         }
 
-        const action = actions.fromNormalKey(key, self.config.keymap, self.focus) orelse return;
+        var action = actions.fromNormalKey(key, self.config.keymap, self.focus) orelse return;
+        // A panel drilled into a commit's files shows files, not its list, so
+        // the list-level bindings don't apply: the Branches sub-commits drill
+        // suppresses branch-list keys (rename, fast-forward, new/delete/...), and
+        // the Commits commit-files view suppresses commit-list keys (reset,
+        // revert, cherry-pick, fixup, ...). Re-resolve such a key against a
+        // neutral focus so it falls through to its global meaning instead
+        // (e.g. R=refresh, f=fetch), or does nothing if it has none.
+        const in_branch_drill = self.branch_commits_active and actions.isBranchManagement(action);
+        const in_commit_files = self.commitsFilesActive() and self.focus == .commits and actions.isCommitListAction(action);
+        if (in_branch_drill or in_commit_files) {
+            action = actions.fromNormalKey(key, self.config.keymap, .status) orelse return;
+        }
         // While a slow op runs, navigation/inspection stay live but mutating
         // keys are ignored so a second git command can't race the first.
         if (self.foregroundBusy() and actions.isMutating(action)) {
@@ -1906,8 +1955,13 @@ pub const App = struct {
                     try self.closeStaging();
                 } else if (self.focus == .main) {
                     try self.leaveMain();
-                } else if (self.commit_files_active) {
+                } else if (self.commit_files_active and self.focus == self.commit_files_owner) {
+                    // Pops the files level of the panel that owns it (Commits
+                    // panel or Branches drill); a drill in another panel stays.
                     try self.closeCommitFiles();
+                } else if (self.branch_commits_active and self.focus == .branches) {
+                    // Pops the sub-commits level back to the branch list.
+                    try self.closeBranchCommits();
                 } else {
                     // Top level: nothing to back out of. Esc does not quit.
                     try self.setMessage("press q to quit", .{});
@@ -1960,11 +2014,16 @@ pub const App = struct {
                     try self.applyStagingSelection();
                 } else switch (self.focus) {
                     .files => try self.toggleSelectedFileStaged(),
-                    .branches => try self.checkoutSelectedBranch(),
+                    // In the sub-commits drill, space on a file adds it to the
+                    // custom patch (as in the Commits panel); on the commit list
+                    // it does nothing; otherwise it checks out the branch.
+                    .branches => if (self.branch_commits_active) {
+                        if (self.branchFilesActive()) try self.toggleFileInPatch();
+                    } else try self.checkoutSelectedBranch(),
                     .stash => try self.applySelectedStash(),
                     // In a commit's file list, space toggles the file into the
                     // custom patch.
-                    .commits => if (self.commit_files_active) try self.toggleFileInPatch(),
+                    .commits => if (self.commitsFilesActive()) try self.toggleFileInPatch(),
                     .status, .main => {},
                 }
             },
@@ -2185,14 +2244,18 @@ pub const App = struct {
     pub fn activeListLen(self: *const App, focus: model.Focus) usize {
         return switch (focus) {
             .files => if (self.tree_view) self.tree_rows.len else self.visibleFileCount(),
-            .branches => switch (self.branches_tab) {
+            .branches => if (self.branchFilesActive())
+                self.commit_files.len
+            else if (self.branch_commits_active)
+                self.branch_commits.len
+            else switch (self.branches_tab) {
                 .local => self.data.branches.len,
                 .remotes => self.data.remote_branches.len,
                 .tags => self.data.tags.len,
                 .worktrees => self.data.worktrees.len,
                 .submodules => self.data.submodules.len,
             },
-            .commits => if (self.commit_files_active) self.commit_files.len else switch (self.commits_tab) {
+            .commits => if (self.commitsFilesActive()) self.commit_files.len else switch (self.commits_tab) {
                 .commits => self.data.commits.len,
                 .reflog => self.data.reflog.len,
             },
@@ -2205,14 +2268,18 @@ pub const App = struct {
     fn activeListSelected(self: *const App, focus: model.Focus) usize {
         return switch (focus) {
             .files => if (self.tree_view) self.tree_cursor else self.selectedFileVisibleOrdinal(),
-            .branches => switch (self.branches_tab) {
+            .branches => if (self.branchFilesActive())
+                self.commit_file_index
+            else if (self.branch_commits_active)
+                self.branch_commit_index
+            else switch (self.branches_tab) {
                 .local => self.branch_index,
                 .remotes => self.remote_index,
                 .tags => self.tag_index,
                 .worktrees => self.worktree_index,
                 .submodules => self.submodule_index,
             },
-            .commits => if (self.commit_files_active) self.commit_file_index else switch (self.commits_tab) {
+            .commits => if (self.commitsFilesActive()) self.commit_file_index else switch (self.commits_tab) {
                 .commits => self.commit_index,
                 .reflog => self.reflog_index,
             },
@@ -2470,7 +2537,13 @@ pub const App = struct {
                     if (self.fileIndexAtVisibleOrdinal(@min(clicked, vis - 1))) |idx| self.file_index = idx;
                 }
             },
-            .branches => switch (self.branches_tab) {
+            .branches => if (self.branchFilesActive()) {
+                if (self.commit_files.len == 0) return;
+                self.commit_file_index = @min(clicked, self.commit_files.len - 1);
+            } else if (self.branch_commits_active) {
+                if (self.branch_commits.len == 0) return;
+                self.branch_commit_index = @min(clicked, self.branch_commits.len - 1);
+            } else switch (self.branches_tab) {
                 .local => {
                     if (self.data.branches.len == 0) return;
                     self.branch_index = @min(clicked, self.data.branches.len - 1);
@@ -2493,7 +2566,7 @@ pub const App = struct {
                 },
             },
             .commits => {
-                if (self.commit_files_active) {
+                if (self.commitsFilesActive()) {
                     if (self.commit_files.len == 0) return;
                     self.commit_file_index = @min(clicked, self.commit_files.len - 1);
                 } else switch (self.commits_tab) {
@@ -2783,6 +2856,14 @@ pub const App = struct {
     }
 
     pub fn selectedCommit(self: *const App) ?model.Commit {
+        // In the Branches-panel drill, the "active commit" is the selected
+        // sub-commit (and stays fixed while drilled into its files) — but only
+        // when that panel is the active context, so a preserved drill doesn't
+        // shadow the Commits panel's own selection.
+        if (self.inBranchCommitContext()) {
+            if (self.branch_commits.len == 0) return null;
+            return self.branch_commits[@min(self.branch_commit_index, self.branch_commits.len - 1)];
+        }
         const list = self.activeCommits();
         if (list.len == 0) return null;
         return list[@min(self.activeCommitIndex(), list.len - 1)];
@@ -2791,6 +2872,25 @@ pub const App = struct {
     pub fn selectedCommitFile(self: *const App) ?model.CommitFile {
         if (self.commit_files.len == 0) return null;
         return self.commit_files[@min(self.commit_file_index, self.commit_files.len - 1)];
+    }
+
+    /// The Branches-panel sub-commits drill is the active commit context — i.e.
+    /// the panel is focused (directly, or via the main panel showing its patch).
+    /// Commit operations and previews then target the selected sub-commit.
+    fn inBranchCommitContext(self: *const App) bool {
+        return self.branch_commits_active and self.contentFocus() == .branches;
+    }
+
+    /// The shared commit-files view is currently showing the Branches drill's
+    /// files (a sub-commit's files), as opposed to the Commits panel's.
+    pub fn branchFilesActive(self: *const App) bool {
+        return self.branch_commits_active and self.commit_files_active and self.commit_files_owner == .branches;
+    }
+
+    /// The shared commit-files view is currently showing the Commits panel's
+    /// files (a log commit's files), as opposed to the Branches drill's.
+    pub fn commitsFilesActive(self: *const App) bool {
+        return self.commit_files_active and self.commit_files_owner == .commits;
     }
 
     pub fn patchHasFile(self: *const App, path: []const u8) bool {
@@ -2861,8 +2961,18 @@ pub const App = struct {
     /// commit's file list; on the Files panel it opens the hunk-staging view;
     /// elsewhere it descends into the main panel to scroll.
     fn descendOrOpenCommitFiles(self: *App) !void {
-        if (self.focus == .commits and self.commits_tab == .commits and !self.commit_files_active) {
-            return self.openCommitFiles();
+        if (self.focus == .commits and self.commits_tab == .commits and !self.commitsFilesActive()) {
+            return self.openCommitFiles(.commits);
+        }
+        // Branches-panel drill: branch -> its commits -> the commit's files ->
+        // the patch in main. <enter> descends one level at a time.
+        if (self.focus == .branches) {
+            if (self.branch_commits_active) {
+                if (!self.branchFilesActive()) return self.openCommitFiles(.branches); // commit -> files
+                return self.enterMain(); // file -> patch
+            }
+            // Enter on a local/remote branch or tag opens its commits.
+            if (self.selectedBranchRefName()) |ref| return self.openBranchCommits(ref);
         }
         if (self.focus == .files) {
             // In tree view, <enter> on a directory collapses/expands it.
@@ -3066,16 +3176,22 @@ pub const App = struct {
         self.staging_anchor = null;
     }
 
-    fn openCommitFiles(self: *App) !void {
+    fn openCommitFiles(self: *App, owner: model.Focus) !void {
         const commit = self.selectedCommit() orelse {
             try self.setMessage("no commit selected", .{});
             return;
         };
         const files = try self.git.loadCommitFiles(commit.hash);
+        // The commit-files view is one shared context: opening it here pulls it
+        // out of the other panel. If it was showing the Branches drill's files,
+        // that panel has nothing left below it, so it collapses to the branch
+        // list (the Commits panel's base is the log, which needs no teardown).
+        if (owner == .commits and self.branchFilesActive()) self.deactivateBranchCommits();
         model.deinitCommitFiles(self.allocator, self.commit_files);
         self.commit_files = files;
         self.commit_file_index = 0;
         self.commit_files_active = true;
+        self.commit_files_owner = owner;
         self.main_scroll = 0;
         try self.updatePreview();
         try self.setMessage("{d} files in {s}", .{ files.len, commit.short_hash });
@@ -3094,10 +3210,71 @@ pub const App = struct {
         self.commit_files_active = false;
     }
 
+    /// Drill from a branch/tag in the Branches panel into its commits (the
+    /// "sub-commits" view): the Branches panel then lists `ref`'s commits.
+    fn openBranchCommits(self: *App, ref: []const u8) !void {
+        const commits = try self.git.loadCommits(ref, 100);
+        model.deinitCommits(self.allocator, self.branch_commits);
+        self.branch_commits = commits;
+        self.branch_commit_index = 0;
+        self.allocator.free(self.branch_commits_ref);
+        self.branch_commits_ref = try self.allocator.dupe(u8, ref);
+        self.branch_commits_active = true;
+        if (self.listView(.branches)) |lv| lv.scroll = 0;
+        self.main_scroll = 0;
+        try self.updatePreview();
+        try self.setMessage("{d} commits in {s}", .{ commits.len, ref });
+    }
+
+    /// Exit the sub-commits view, back to the branch list.
+    fn closeBranchCommits(self: *App) !void {
+        self.deactivateBranchCommits();
+        if (self.listView(.branches)) |lv| lv.scroll = 0;
+        self.main_scroll = 0;
+        try self.updatePreview();
+    }
+
+    fn deactivateBranchCommits(self: *App) void {
+        model.deinitCommits(self.allocator, self.branch_commits);
+        self.branch_commits = &.{};
+        self.branch_commit_index = 0;
+        self.branch_commits_active = false;
+    }
+
+    /// Reload the sub-commits list from its ref after a refresh, keeping the
+    /// selection position. If the ref is gone (no commits come back), exit the
+    /// drill entirely — including a files level it owns — back to the branch list.
+    fn reloadBranchCommitsAfterRefresh(self: *App) void {
+        const commits = self.git.loadCommits(self.branch_commits_ref, 100) catch null;
+        if (commits == null or commits.?.len == 0) {
+            if (commits) |c| model.deinitCommits(self.allocator, c);
+            // The ref is gone: leave the drill entirely (including a files level
+            // it owns), back to the branch list.
+            if (self.branchFilesActive()) self.deactivateCommitFiles();
+            self.deactivateBranchCommits();
+            return;
+        }
+        model.deinitCommits(self.allocator, self.branch_commits);
+        self.branch_commits = commits.?;
+        self.branch_commit_index = @min(self.branch_commit_index, self.branch_commits.len - 1);
+    }
+
+    /// The commit whose files the shared commit-files view is showing, per its
+    /// owner — used to reload them after a refresh independent of focus.
+    fn commitFilesSourceCommit(self: *const App) ?model.Commit {
+        if (self.commit_files_owner == .branches) {
+            if (self.branch_commits.len == 0) return null;
+            return self.branch_commits[@min(self.branch_commit_index, self.branch_commits.len - 1)];
+        }
+        const list = self.activeCommits();
+        if (list.len == 0) return null;
+        return list[@min(self.activeCommitIndex(), list.len - 1)];
+    }
+
     /// Keep the drilled-in commit file list consistent after a full refresh
     /// (e.g. focus regain or a mutation); drop out if the commit is gone.
     fn reloadCommitFilesAfterRefresh(self: *App) void {
-        const commit = self.selectedCommit() orelse return self.deactivateCommitFiles();
+        const commit = self.commitFilesSourceCommit() orelse return self.deactivateCommitFiles();
         const files = self.git.loadCommitFiles(commit.hash) catch return self.deactivateCommitFiles();
         model.deinitCommitFiles(self.allocator, self.commit_files);
         self.commit_files = files;
@@ -3113,6 +3290,9 @@ pub const App = struct {
     fn cycleTab(self: *App, direction: TabDirection) !void {
         switch (self.focus) {
             .branches => {
+                // The sub-commits drill has no tabs; leave it intact (<esc>
+                // backs out of it) rather than switching the hidden branch tab.
+                if (self.branch_commits_active) return;
                 self.branches_tab = switch (direction) {
                     .next => switch (self.branches_tab) {
                         .local => .remotes,
@@ -3134,7 +3314,9 @@ pub const App = struct {
                 try self.setMessage("{s}", .{self.branches_tab.label()});
             },
             .commits => {
-                if (self.commit_files_active) self.deactivateCommitFiles();
+                // The commit-files view has no tabs; leave it intact (<esc>
+                // backs out of it) rather than switching the hidden log tab.
+                if (self.commitsFilesActive()) return;
                 // Only two tabs, so prev and next are equivalent here.
                 self.commits_tab = switch (self.commits_tab) {
                     .commits => .reflog,
@@ -3210,7 +3392,9 @@ pub const App = struct {
     }
 
     fn setFocus(self: *App, focus: model.Focus) !void {
-        if (self.commit_files_active) self.deactivateCommitFiles();
+        // Sub-commits / commit-files drills persist across focus changes (each
+        // panel keeps its own context); only <esc> backs out of them. Staging
+        // is modal, so it is closed.
         if (self.staging_active) self.clearStaging();
         self.focus = focus;
         self.main_scroll = 0;
@@ -3234,7 +3418,6 @@ pub const App = struct {
 
     fn focusNext(self: *App) !void {
         if (self.focus == .main) return self.leaveMain();
-        if (self.commit_files_active) self.deactivateCommitFiles();
         self.focus = switch (self.focus) {
             .status => .files,
             .files => .branches,
@@ -3249,7 +3432,6 @@ pub const App = struct {
 
     fn focusPrevious(self: *App) !void {
         if (self.focus == .main) return self.leaveMain();
-        if (self.commit_files_active) self.deactivateCommitFiles();
         self.focus = switch (self.focus) {
             .status => .stash,
             .files => .status,
@@ -3281,7 +3463,11 @@ pub const App = struct {
         switch (panel) {
             .status, .main => {},
             .files => if (self.tree_view) self.moveTreeCursor(if (down) 1 else -1) else (if (down) self.moveFileDown() else self.moveFileUp()),
-            .branches => switch (self.branches_tab) {
+            .branches => if (self.branchFilesActive()) {
+                self.commit_file_index = step(self.commit_file_index, down, self.commit_files.len);
+            } else if (self.branch_commits_active) {
+                self.branch_commit_index = step(self.branch_commit_index, down, self.branch_commits.len);
+            } else switch (self.branches_tab) {
                 .local => self.branch_index = step(self.branch_index, down, self.data.branches.len),
                 .remotes => self.remote_index = step(self.remote_index, down, self.data.remote_branches.len),
                 .tags => self.tag_index = step(self.tag_index, down, self.data.tags.len),
@@ -3289,7 +3475,7 @@ pub const App = struct {
                 .submodules => self.submodule_index = step(self.submodule_index, down, self.data.submodules.len),
             },
             .commits => {
-                if (self.commit_files_active) {
+                if (self.commitsFilesActive()) {
                     self.commit_file_index = step(self.commit_file_index, down, self.commit_files.len);
                 } else switch (self.commits_tab) {
                     .commits => self.commit_index = step(self.commit_index, down, self.data.commits.len),
@@ -5174,6 +5360,16 @@ pub const App = struct {
                 return self.setCheapPreview(try self.allocator.dupe(u8, "Working tree clean.\n"));
             },
             .branches => {
+                // Sub-commits drill: show the selected commit's diff, or (one
+                // level deeper) the selected file's patch within that commit.
+                if (self.branch_commits_active) {
+                    const commit = self.selectedCommit() orelse return self.setCheapPreview(try self.allocator.dupe(u8, "No commits.\n"));
+                    if (self.branchFilesActive()) {
+                        if (self.selectedCommitFile()) |file| return self.requestGitPreview(.{ .commit_file = .{ .hash = commit.hash, .path = file.path } });
+                        return self.setCheapPreview(try self.allocator.dupe(u8, "This commit changed no files.\n"));
+                    }
+                    return self.requestGitPreview(.{ .commit = commit.hash });
+                }
                 if (self.branches_tab == .worktrees) {
                     if (self.selectedWorktree()) |wt|
                         return self.setCheapPreview(try std.fmt.allocPrint(self.allocator, "Worktree{s}\nPath:   {s}\nBranch: {s}\n", .{ if (wt.is_current) " (current)" else "", wt.path, wt.branch }));
@@ -5189,7 +5385,7 @@ pub const App = struct {
             },
             .commits => {
                 const commit = self.selectedCommit() orelse return self.setCheapPreview(try self.allocator.dupe(u8, "No commits found.\n"));
-                if (self.commit_files_active) {
+                if (self.commitsFilesActive()) {
                     if (self.selectedCommitFile()) |file| return self.requestGitPreview(.{ .commit_file = .{ .hash = commit.hash, .path = file.path } });
                     return self.setCheapPreview(try self.allocator.dupe(u8, "This commit changed no files.\n"));
                 }
@@ -6506,6 +6702,95 @@ test "custom patch toggles commit files and is tied to one commit" {
     try app.toggleFileInPatch();
     try std.testing.expectEqualStrings("patch is from another commit - reset it first (ctrl+p)", app.message);
     try std.testing.expectEqual(@as(usize, 1), app.patchFileCount());
+}
+
+test "branches sub-commits drill: selection, navigation, and teardown" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("h0"), .short_hash = @constCast("h0"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("zero") },
+        .{ .hash = @constCast("h1"), .short_hash = @constCast("h1"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("one") },
+        .{ .hash = @constCast("h2"), .short_hash = @constCast("h2"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("two") },
+    };
+    app.focus = .branches;
+    app.branch_commits = &commits;
+    app.branch_commits_active = true;
+    app.branch_commit_index = 0;
+
+    // Level 1: the Branches panel lists the branch's commits.
+    try std.testing.expectEqual(@as(usize, 3), app.activeListLen(.branches));
+    try std.testing.expectEqual(@as(usize, 0), app.activeListSelected(.branches));
+    try std.testing.expectEqualStrings("h0", app.selectedCommit().?.hash);
+
+    app.moveSelection(.branches, true);
+    try std.testing.expectEqual(@as(usize, 1), app.branch_commit_index);
+    try std.testing.expectEqualStrings("h1", app.selectedCommit().?.hash);
+
+    // Level 2: drill into the selected commit's files.
+    var cfiles = [_]model.CommitFile{
+        .{ .status = 'M', .path = @constCast("f.txt") },
+        .{ .status = 'M', .path = @constCast("g.txt") },
+    };
+    app.commit_files = &cfiles;
+    app.commit_files_active = true;
+    app.commit_files_owner = .branches;
+    try std.testing.expectEqual(@as(usize, 2), app.activeListLen(.branches));
+    app.moveSelection(.branches, true);
+    try std.testing.expectEqual(@as(usize, 1), app.commit_file_index);
+    // The drilled commit is unchanged while moving inside the file list.
+    try std.testing.expectEqualStrings("h1", app.selectedCommit().?.hash);
+
+    // <esc> pops one level at a time: files first, then the sub-commits list.
+    app.commit_files = &.{};
+    app.branch_commits = &.{};
+    app.deactivateCommitFiles();
+    try std.testing.expect(!app.commit_files_active);
+    try std.testing.expect(app.branch_commits_active); // still drilled into commits
+    app.deactivateBranchCommits();
+    try std.testing.expect(!app.branch_commits_active);
+}
+
+test "drill state survives switching focus and stays isolated per panel" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var log = [_]model.Commit{
+        .{ .hash = @constCast("c0"), .short_hash = @constCast("c0"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("log0") },
+        .{ .hash = @constCast("c1"), .short_hash = @constCast("c1"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("log1") },
+    };
+    app.data.commits = &log;
+    app.commit_index = 1;
+
+    var sub = [_]model.Commit{
+        .{ .hash = @constCast("s0"), .short_hash = @constCast("s0"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("sub0") },
+    };
+    app.branch_commits = &sub;
+    app.branch_commits_active = true;
+    app.branch_commit_index = 0;
+
+    // Focused on the Branches drill: the active commit is the sub-commit.
+    app.focus = .branches;
+    try std.testing.expectEqualStrings("s0", app.selectedCommit().?.hash);
+    try std.testing.expectEqual(@as(usize, 1), app.activeListLen(.branches));
+
+    // Switch focus to the Commits panel: the drill is preserved but no longer
+    // the active context, so commit operations target the log selection.
+    try app.setFocus(.commits);
+    try std.testing.expect(app.branch_commits_active); // preserved
+    try std.testing.expectEqualStrings("c1", app.selectedCommit().?.hash);
+
+    // Back to Branches: still drilled in, at the same sub-commit.
+    try app.setFocus(.branches);
+    try std.testing.expect(app.branch_commits_active);
+    try std.testing.expectEqualStrings("s0", app.selectedCommit().?.hash);
+
+    app.branch_commits = &.{};
+    app.branch_commits_active = false;
 }
 
 test "bisect menu reflects whether a bisect is in progress" {

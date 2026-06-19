@@ -179,6 +179,11 @@ pub fn deinitCommitFiles(allocator: std.mem.Allocator, files: []CommitFile) void
     allocator.free(files);
 }
 
+pub fn deinitCommits(allocator: std.mem.Allocator, commits: []Commit) void {
+    for (commits) |*commit| commit.deinit(allocator);
+    allocator.free(commits);
+}
+
 pub const Commit = struct {
     hash: []u8,
     short_hash: []u8,

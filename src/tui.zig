@@ -673,7 +673,13 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     y += status_h;
     drawFiles(panel(root, 0, y, side_w, files_h, "Files [2]", app.focus == .files, listScrollInfo(app, .files)), app);
     y += files_h;
-    const branches_title = switch (app.branches_tab) {
+    var branches_title_buf: [96]u8 = undefined;
+    const branches_title = if (app.branch_commits_active)
+        (if (app.branchFilesActive())
+            (std.fmt.bufPrint(&branches_title_buf, "Commit files [3]  (space: add to patch)", .{}) catch "Commit files [3]")
+        else
+            (std.fmt.bufPrint(&branches_title_buf, "Commits [3] ({s})", .{app.branch_commits_ref}) catch "Commits [3]"))
+    else switch (app.branches_tab) {
         .local => "Branches [3]",
         .remotes => "Remotes [3]",
         .tags => "Tags [3]",
@@ -684,7 +690,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     y += branches_h;
     var commits_title_buf: [80]u8 = undefined;
     var filter_label_buf: [64]u8 = undefined;
-    const commits_title = if (app.commit_files_active)
+    const commits_title = if (app.commitsFilesActive())
         (if (app.patchFileCount() > 0)
             (std.fmt.bufPrint(&commits_title_buf, "Commit files [4] (patch: {d})", .{app.patchFileCount()}) catch "Commit files [4]")
         else
@@ -1381,6 +1387,16 @@ fn drawFileTree(win: vaxis.Window, app: *const app_mod.App) void {
 }
 
 fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
+    // Sub-commits drill: the Branches panel shows the ref's commits, or (one
+    // level deeper) the selected commit's files.
+    if (app.branch_commits_active) {
+        if (app.branchFilesActive()) return drawCommitFiles(win, app, .branches);
+        if (app.branch_commits.len == 0) {
+            print(win, 0, 0, "No commits", styles().muted);
+            return;
+        }
+        return drawCommitRows(win, app, app.branch_commits, app.branch_commit_index, .branches);
+    }
     if (app.branches_tab == .tags) return drawTags(win, app);
     if (app.branches_tab == .worktrees) return drawWorktrees(win, app);
     if (app.branches_tab == .submodules) return drawSubmodules(win, app);
@@ -1502,12 +1518,15 @@ fn drawSubmodules(win: vaxis.Window, app: *const app_mod.App) void {
     }
 }
 
-fn drawCommitFiles(win: vaxis.Window, app: *const app_mod.App) void {
+/// Render the commit-files list (drilled into a commit) in `panel` — either the
+/// Commits panel or the Branches-panel sub-commits drill.
+fn drawCommitFiles(win: vaxis.Window, app: *const app_mod.App, panel_focus: model.Focus) void {
     if (app.commit_files.len == 0) {
         print(win, 0, 0, "No files in this commit", styles().muted);
         return;
     }
-    const start = app.listScroll(.commits);
+    const start = app.listScroll(panel_focus);
+    const focused = app.focus == panel_focus;
     var row: u16 = 0;
     var idx = start;
     while (idx < app.commit_files.len and row < win.height) : ({
@@ -1525,20 +1544,15 @@ fn drawCommitFiles(win: vaxis.Window, app: *const app_mod.App) void {
             'D' => styles().removed,
             else => styles().normal,
         };
-        drawSelectable(win, row, line, style, selOf(idx == app.commit_file_index, app.focus == .commits));
+        drawSelectable(win, row, line, style, selOf(idx == app.commit_file_index, focused));
     }
 }
 
-fn drawCommits(win: vaxis.Window, app: *const app_mod.App) void {
-    if (app.commit_files_active) return drawCommitFiles(win, app);
-    const commits = app.activeCommits();
-    if (commits.len == 0) {
-        const empty_label = if (app.initial_load_pending) "Loading..." else if (app.commits_tab == .reflog) "No reflog entries" else "No commits";
-        print(win, 0, 0, empty_label, styles().muted);
-        return;
-    }
-    const selected = app.activeCommitIndex();
-    const start = app.listScroll(.commits);
+/// Render a commit list (`commits`, `selected` index) into `panel` — shared by
+/// the Commits panel and the Branches-panel sub-commits drill.
+fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const model.Commit, selected: usize, panel_focus: model.Focus) void {
+    const start = app.listScroll(panel_focus);
+    const focused = app.focus == panel_focus;
     var row: u16 = 0;
     var idx = start;
     while (idx < commits.len and row < win.height) : ({
@@ -1554,8 +1568,20 @@ fn drawCommits(win: vaxis.Window, app: *const app_mod.App) void {
         const marker: u8 = if (marked) 'B' else if (copied) '*' else ' ';
         const line = std.fmt.bufPrint(&buf, "{c}{s} {s}", .{ marker, commit.short_hash, commit.subject }) catch commit.subject;
         const style = if (marked) styles().warning else if (copied) styles().staged else styles().normal;
-        drawSelectable(win, row, line, style, selOf(idx == selected, app.focus == .commits));
+        drawSelectable(win, row, line, style, selOf(idx == selected, focused));
     }
+}
+
+fn drawCommits(win: vaxis.Window, app: *const app_mod.App) void {
+    // The Commits panel's own commit-files drill (not the Branches one).
+    if (app.commitsFilesActive()) return drawCommitFiles(win, app, .commits);
+    const commits = app.activeCommits();
+    if (commits.len == 0) {
+        const empty_label = if (app.initial_load_pending) "Loading..." else if (app.commits_tab == .reflog) "No reflog entries" else "No commits";
+        print(win, 0, 0, empty_label, styles().muted);
+        return;
+    }
+    drawCommitRows(win, app, commits, app.activeCommitIndex(), .commits);
 }
 
 fn drawStash(win: vaxis.Window, app: *const app_mod.App) void {
@@ -1748,8 +1774,16 @@ fn contextHints(app: *const app_mod.App) []const u8 {
     if (app.staging_active) {
         return "j/k line  v range  space stage/unstage (@@=hunk)  [/] staged/unstaged  \\ split  c commit  esc back" ++ global;
     }
-    if (app.commit_files_active and app.focus == .commits) {
+    if (app.commitsFilesActive() and app.focus == .commits) {
         return "j/k file  enter diff  esc back" ++ global;
+    }
+    // Branches-panel sub-commits drill: commit list, or the selected commit's
+    // file list — branch-management keys don't apply here.
+    if (app.branch_commits_active and app.focus == .branches) {
+        return if (app.branchFilesActive())
+            "j/k file  space add-to-patch  enter diff  esc back" ++ global
+        else
+            "j/k commit  enter files  esc back" ++ global;
     }
     if (app.data.state != .clean and app.focus == .files) {
         return "space resolve (ours/theirs)  m continue/abort  d discard  esc back" ++ global;

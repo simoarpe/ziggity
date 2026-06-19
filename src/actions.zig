@@ -79,6 +79,49 @@ pub const Action = enum {
 /// toward gating: menu-openers (which lead to mutations) and clipboard/cherry
 /// toggles count, since allowing them mid-op would be confusing. The allowed
 /// set is pure navigation/inspection/quit.
+/// Branch-management actions: they act on the selected branch. While the
+/// Branches panel is drilled into a branch's sub-commits, the selection is a
+/// commit, not a branch, so these don't apply and are suppressed.
+pub fn isBranchManagement(self: Action) bool {
+    return switch (self) {
+        .new_branch,
+        .delete_branch,
+        .merge_branch,
+        .rebase_branch,
+        .rename_branch,
+        .fast_forward_branch,
+        .edit_remote,
+        .remove_remote,
+        .set_upstream,
+        => true,
+        else => false,
+    };
+}
+
+/// Commit-list actions: they act on the selected commit in the Commits panel's
+/// log. While that panel is drilled into a commit's files, the panel shows
+/// files rather than the log, so these don't apply and are suppressed.
+pub fn isCommitListAction(self: Action) bool {
+    return switch (self) {
+        .reset_commit,
+        .revert_commit,
+        .rebase_drop,
+        .rebase_squash,
+        .rebase_edit,
+        .rebase_reword,
+        .rebase_move_down,
+        .rebase_move_up,
+        .rebase_create_fixup,
+        .rebase_autosquash,
+        .rebase_fixup,
+        .mark_base,
+        .bisect_menu,
+        .cherry_pick,
+        => true,
+        else => false,
+    };
+}
+
 pub fn isMutating(self: Action) bool {
     return switch (self) {
         // Navigation, inspection, and global view toggles — always allowed.
@@ -269,4 +312,23 @@ test "normal key mapping handles global and focused actions" {
     try std.testing.expectEqual(Action.select, fromNormalKey(space, keymap, .stash).?);
     try std.testing.expectEqual(Action.select, fromNormalKey(space, keymap, .commits).?);
     try std.testing.expectEqual(Action.select, fromNormalKey(space, keymap, .main).?);
+}
+
+test "list-level bindings are classified, and resolve to globals at neutral focus" {
+    const keymap: config_mod.KeyMap = .{};
+
+    // In the Branches panel, R/f are branch-list bindings; a panel drilled into
+    // sub-commits re-resolves them at a neutral focus to their global meaning.
+    try std.testing.expect(isBranchManagement(fromNormalKey(testKey('R'), keymap, .branches).?));
+    try std.testing.expect(isBranchManagement(fromNormalKey(testKey('f'), keymap, .branches).?));
+    try std.testing.expectEqual(Action.refresh, fromNormalKey(testKey('R'), keymap, .status).?);
+    try std.testing.expectEqual(Action.fetch, fromNormalKey(testKey('f'), keymap, .status).?);
+
+    // In the Commits panel, f is fixup and g/t are reset/revert — all commit-list
+    // bindings the commit-files view suppresses; f then falls through to fetch.
+    try std.testing.expect(isCommitListAction(fromNormalKey(testKey('f'), keymap, .commits).?));
+    try std.testing.expect(isCommitListAction(fromNormalKey(testKey('g'), keymap, .commits).?));
+    try std.testing.expect(isCommitListAction(fromNormalKey(testKey('t'), keymap, .commits).?));
+    // A neutral focus has no binding for g/t, so they become no-ops in the view.
+    try std.testing.expect(fromNormalKey(testKey('g'), keymap, .status) == null);
 }
