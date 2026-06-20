@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/ziggity-icon.svg" alt="Ziggity icon" width="128" height="128">
+</p>
+
 # ziggity
 
 `ziggity` is a small Zig terminal UI Git client inspired by

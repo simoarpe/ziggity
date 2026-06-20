@@ -1,0 +1,38 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Ziggity icon</title>
+  <desc id="desc">A terminal tile containing a git branch line shaped like the letter Z.</desc>
+  <defs>
+    <linearGradient id="tile" x1="38" y1="28" x2="220" y2="228" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#172033"/>
+      <stop offset="1" stop-color="#07111F"/>
+    </linearGradient>
+    <linearGradient id="zig" x1="68" y1="67" x2="196" y2="190" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F7A41D"/>
+      <stop offset="0.48" stop-color="#F25F29"/>
+      <stop offset="1" stop-color="#E54532"/>
+    </linearGradient>
+    <filter id="shadow" x="20" y="20" width="216" height="220" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000814" flood-opacity="0.26"/>
+    </filter>
+  </defs>
+
+  <rect width="256" height="256" rx="56" fill="#F7A41D"/>
+  <path d="M74 32H202C214.15 32 224 41.8497 224 54V182C224 206.301 204.301 226 180 226H54C41.8497 226 32 216.15 32 204V76C32 51.6995 51.6995 32 76 32H74Z" fill="#F25F29" opacity="0.36"/>
+
+  <g filter="url(#shadow)">
+    <rect x="36" y="34" width="184" height="188" rx="32" fill="url(#tile)"/>
+    <rect x="49" y="50" width="158" height="154" rx="20" stroke="#F9D89A" stroke-opacity="0.18" stroke-width="3"/>
+  </g>
+
+  <path d="M76 82H180L86 178H190" stroke="url(#zig)" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M82 82H168" stroke="#FFD68A" stroke-width="7" stroke-linecap="round" opacity="0.58"/>
+  <path d="M96 178H183" stroke="#FFD68A" stroke-width="7" stroke-linecap="round" opacity="0.46"/>
+
+  <circle cx="76" cy="82" r="16" fill="#07111F" stroke="#FFCE73" stroke-width="8"/>
+  <circle cx="180" cy="82" r="16" fill="#07111F" stroke="#FFCE73" stroke-width="8"/>
+  <circle cx="86" cy="178" r="16" fill="#07111F" stroke="#F25F29" stroke-width="8"/>
+  <circle cx="190" cy="178" r="16" fill="#07111F" stroke="#F25F29" stroke-width="8"/>
+
+  <path d="M73 130L92 146L73 162" stroke="#C7D2E8" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M108 162H145" stroke="#C7D2E8" stroke-width="10" stroke-linecap="round"/>
+</svg>
