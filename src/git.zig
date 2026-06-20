@@ -71,6 +71,9 @@ pub const Git = struct {
     io: std.Io,
     environ: *std.process.Environ.Map,
     root: []u8,
+    /// Absolute path to the git directory (`.git`), for storing side files like
+    /// the pending-commit draft. Empty on throwaway worker `Git`s that don't need it.
+    git_dir: []u8 = &.{},
     /// Ring of recently-run mutating commands, for the command-log view.
     command_log: std.ArrayList([]u8) = .empty,
     // Active filters for the Commits list, applied on every load. Owned.
@@ -104,7 +107,8 @@ pub const Git = struct {
     const command_log_cap = 200;
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map) !Git {
-        var argv = [_][]const u8{ "git", "rev-parse", "--show-toplevel" };
+        // One call yields both the worktree root and the absolute `.git` dir.
+        var argv = [_][]const u8{ "git", "rev-parse", "--show-toplevel", "--absolute-git-dir" };
         const result = try std.process.run(allocator, io, .{
             .argv = &argv,
             .stdout_limit = .limited(1024 * 1024),
@@ -119,12 +123,16 @@ pub const Git = struct {
         };
         if (!ok) return GitError.NotGitRepository;
 
-        const root = try allocator.dupe(u8, std.mem.trim(u8, result.stdout, " \t\r\n"));
+        var lines = std.mem.splitScalar(u8, std.mem.trim(u8, result.stdout, " \t\r\n"), '\n');
+        const root = try allocator.dupe(u8, std.mem.trim(u8, lines.next() orelse "", " \t\r\n"));
+        errdefer allocator.free(root);
+        const git_dir = try allocator.dupe(u8, std.mem.trim(u8, lines.next() orelse "", " \t\r\n"));
         return .{
             .allocator = allocator,
             .io = io,
             .environ = environ,
             .root = root,
+            .git_dir = git_dir,
             .untracked_files = resolveUntrackedFiles(allocator, io, environ, root),
         };
     }
@@ -152,6 +160,7 @@ pub const Git = struct {
 
     pub fn deinit(self: *Git) void {
         self.allocator.free(self.root);
+        self.allocator.free(self.git_dir);
         for (self.command_log.items) |entry| self.allocator.free(entry);
         self.command_log.deinit(self.allocator);
         self.clearLogFilters();

@@ -1347,6 +1347,11 @@ pub const App = struct {
     // does not clobber it.
     commit_preserved_subject: []u8 = &.{},
     commit_preserved_body: []u8 = &.{},
+    // Absolute path of the on-disk draft (in the .git dir), so an unfinalized
+    // message survives quitting. Null disables persistence (no repo / tests).
+    commit_draft_path: ?[]u8 = null,
+    // Whether this session has already tried loading the on-disk draft.
+    commit_draft_loaded: bool = false,
     commit_field: CommitField = .subject,
     // Byte offsets of the editing caret within each typed-input buffer, so the
     // cursor can be moved with the arrow keys / Home / End instead of always
@@ -1527,6 +1532,12 @@ pub const App = struct {
         // unavailable, and a missing credential keeps failing cleanly.
         app.exe_path = std.process.executablePathAlloc(io, allocator) catch null;
 
+        // Where an unfinalized commit message is persisted across restarts
+        // (best-effort; null disables the on-disk draft, e.g. in tests).
+        if (app.git.git_dir.len > 0) {
+            app.commit_draft_path = std.fs.path.join(allocator, &.{ app.git.git_dir, "ZIGGITY_PENDING_COMMIT" }) catch null;
+        }
+
         // The initial repo load runs off-thread, started by the TUI loop (see
         // `beginInitialLoad`/`applyRepoLoad`), so the UI paints a "Loading…"
         // skeleton immediately instead of blocking on a large-repo load.
@@ -1556,6 +1567,7 @@ pub const App = struct {
         self.commit_body_buffer.deinit(self.allocator);
         self.allocator.free(self.commit_preserved_subject);
         self.allocator.free(self.commit_preserved_body);
+        if (self.commit_draft_path) |p| self.allocator.free(p);
         self.file_filter_buffer.deinit(self.allocator);
         for (self.filter_history.items) |entry| self.allocator.free(entry);
         self.filter_history.deinit(self.allocator);
@@ -3781,6 +3793,12 @@ pub const App = struct {
         self.commit_field = .subject;
         self.commit_buffer.clearRetainingCapacity();
         self.commit_body_buffer.clearRetainingCapacity();
+        // The first time the dialog opens this session, pick up a draft left on
+        // disk by a previous run (if nothing is preserved in memory already).
+        if (!self.commit_draft_loaded) {
+            self.commit_draft_loaded = true;
+            if (self.commit_preserved_subject.len == 0 and self.commit_preserved_body.len == 0) self.loadCommitDraftFile();
+        }
         // Restore an unfinalized message from a previous (cancelled) attempt.
         const restored = self.commit_preserved_subject.len > 0 or self.commit_preserved_body.len > 0;
         if (restored) {
@@ -3812,6 +3830,7 @@ pub const App = struct {
         self.allocator.free(self.commit_preserved_body);
         self.commit_preserved_subject = subj;
         self.commit_preserved_body = body;
+        self.writeCommitDraftFile();
     }
 
     fn clearPreservedCommitMessage(self: *App) void {
@@ -3819,6 +3838,37 @@ pub const App = struct {
         self.allocator.free(self.commit_preserved_body);
         self.commit_preserved_subject = &.{};
         self.commit_preserved_body = &.{};
+        if (self.commit_draft_path) |path| std.Io.Dir.deleteFile(.cwd(), self.git.io, path) catch {};
+    }
+
+    /// Persist the in-memory draft to `.git/ZIGGITY_PENDING_COMMIT` so it
+    /// survives quitting (best-effort; stored as "subject\n<body>").
+    fn writeCommitDraftFile(self: *App) void {
+        const path = self.commit_draft_path orelse return;
+        const bytes = std.fmt.allocPrint(self.allocator, "{s}\n{s}", .{ self.commit_preserved_subject, self.commit_preserved_body }) catch return;
+        defer self.allocator.free(bytes);
+        std.Io.Dir.writeFile(.cwd(), self.git.io, .{ .sub_path = path, .data = bytes }) catch {};
+    }
+
+    /// Load a draft persisted by a previous run into the in-memory fields. The
+    /// stored format splits subject from body at the first newline.
+    fn loadCommitDraftFile(self: *App) void {
+        const path = self.commit_draft_path orelse return;
+        const bytes = std.Io.Dir.readFileAlloc(.cwd(), self.git.io, path, self.allocator, .limited(1 << 20)) catch return;
+        defer self.allocator.free(bytes);
+        const nl = std.mem.indexOfScalar(u8, bytes, '\n');
+        const subject = if (nl) |i| bytes[0..i] else bytes;
+        const body = if (nl) |i| bytes[i + 1 ..] else "";
+        if (subject.len == 0 and body.len == 0) return;
+        const subj = self.allocator.dupe(u8, subject) catch return;
+        const bod = self.allocator.dupe(u8, body) catch {
+            self.allocator.free(subj);
+            return;
+        };
+        self.allocator.free(self.commit_preserved_subject);
+        self.allocator.free(self.commit_preserved_body);
+        self.commit_preserved_subject = subj;
+        self.commit_preserved_body = bod;
     }
 
     /// Open the commit editor pre-filled with a commit's subject/body to reword
@@ -8295,6 +8345,7 @@ fn deinitTestApp(app: *App) void {
     app.commit_body_buffer.deinit(app.allocator);
     app.allocator.free(app.commit_preserved_subject);
     app.allocator.free(app.commit_preserved_body);
+    if (app.commit_draft_path) |p| app.allocator.free(p);
     app.file_filter_buffer.deinit(app.allocator);
     for (app.filter_history.items) |entry| app.allocator.free(entry);
     app.filter_history.deinit(app.allocator);
