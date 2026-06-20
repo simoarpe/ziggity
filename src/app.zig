@@ -89,6 +89,7 @@ pub const TextPromptKind = enum {
     commit_author,
     commit_path,
     push_upstream,
+    diff_ref,
 
     pub fn title(self: TextPromptKind) []const u8 {
         return switch (self) {
@@ -102,6 +103,7 @@ pub const TextPromptKind = enum {
             .commit_author => "Filter commits by author",
             .commit_path => "Filter commits by path",
             .push_upstream => "Set upstream (remote branch) to push to",
+            .diff_ref => "Enter a ref to diff against",
         };
     }
 };
@@ -333,6 +335,10 @@ pub const MenuAction = enum {
     patch_apply_reverse,
     patch_remove_from_commit,
     patch_reset,
+    diff_against_selected,
+    diff_enter_ref,
+    diff_reverse_direction,
+    diff_exit,
 };
 
 pub const MenuItem = struct {
@@ -376,6 +382,19 @@ const conflict_resolve_menu = [_]MenuItem{
 const conflict_actions_menu = [_]MenuItem{
     .{ .label = "Continue", .action = .conflict_continue },
     .{ .label = "Abort", .action = .conflict_abort },
+};
+
+/// The Diffing menu (W). The first two entries are always shown; the reverse /
+/// exit entries appear only while diffing is active.
+const diffing_menu_inactive = [_]MenuItem{
+    .{ .label = "Diff the selected ref", .action = .diff_against_selected },
+    .{ .label = "Enter a ref to diff against...", .action = .diff_enter_ref },
+};
+const diffing_menu_active = [_]MenuItem{
+    .{ .label = "Diff the selected ref", .action = .diff_against_selected },
+    .{ .label = "Enter a ref to diff against...", .action = .diff_enter_ref },
+    .{ .label = "Reverse diff direction", .action = .diff_reverse_direction },
+    .{ .label = "Exit diff mode", .action = .diff_exit },
 };
 
 /// Shown for an in-progress rebase: an `edit` stop additionally offers
@@ -1363,6 +1382,8 @@ pub const App = struct {
     // Diffing mode: the ref (commit hash or branch) marked as the diff base.
     // When set, the main panel shows `git diff <base> <selected ref>`.
     diff_base: ?[]u8 = null,
+    // Whether the diff direction is reversed (target..base instead of base..target).
+    diff_reverse: bool = false,
     // Custom patch: paths added from a single source commit. The patch bytes
     // are rebuilt on demand from `patch_source` and these paths.
     patch_source: ?[]u8 = null,
@@ -2063,7 +2084,7 @@ pub const App = struct {
             .undo => try self.startUndoConfirm(),
             .copy_to_clipboard => try self.requestClipboardCopy(),
             .open_browser => try self.openSelectionInBrowser(),
-            .diff_mark => try self.toggleDiffMark(),
+            .diff_mark => try self.startDiffingMenu(),
             .patch_menu => try self.startPatchMenu(),
             .conflict_menu => try self.startConflictActionsMenu(),
             .stage_all => try self.toggleAllStaged(),
@@ -3874,27 +3895,37 @@ pub const App = struct {
     fn clearDiffBase(self: *App) void {
         if (self.diff_base) |b| self.allocator.free(b);
         self.diff_base = null;
+        self.diff_reverse = false;
     }
 
-    /// Mark the focused ref as the diff base (entering diffing mode); pressing
-    /// it again on that same ref exits. While active, the main panel shows the
-    /// diff from the base to whatever ref is selected. Esc also exits.
-    fn toggleDiffMark(self: *App) !void {
+    /// The Diffing menu (W): diff against the selected ref, enter an arbitrary
+    /// ref, and (while active) reverse the direction or exit.
+    fn startDiffingMenu(self: *App) !void {
+        const items: []const MenuItem = if (self.diff_base != null) &diffing_menu_active else &diffing_menu_inactive;
+        self.mode = .menu;
+        self.active_menu = .{ .title = "Diffing", .items = items, .index = 0 };
+        try self.setMessage("diffing", .{});
+    }
+
+    /// Mark the selected commit/branch/tag as the diff base. While active, the
+    /// main panel shows the diff from the base to whatever ref is selected.
+    fn diffAgainstSelected(self: *App) !void {
         const ref = self.selectedRefForDiff() orelse {
             try self.setMessage("select a commit or branch to diff", .{});
             return;
         };
-        if (self.diff_base) |base| {
-            if (std.mem.eql(u8, base, ref)) {
-                self.clearDiffBase();
-                try self.setMessage("exited diffing mode", .{});
-                try self.updatePreview();
-                return;
-            }
-        }
         self.clearDiffBase();
         self.diff_base = try self.allocator.dupe(u8, ref);
         try self.setMessage("diffing from {s} - select another ref (esc to exit)", .{ref});
+        try self.updatePreview();
+    }
+
+    /// Set the diff base to an arbitrary, typed ref name.
+    fn diffAgainstRef(self: *App, ref: []const u8) !void {
+        const owned = try self.allocator.dupe(u8, ref);
+        self.clearDiffBase();
+        self.diff_base = owned;
+        try self.setMessage("diffing from {s} - select another ref (esc to exit)", .{owned});
         try self.updatePreview();
     }
 
@@ -4072,6 +4103,8 @@ pub const App = struct {
             .commit_grep, .commit_author, .commit_path => self.focus = .commits,
             // Prefill handled below (it needs to format remote + branch).
             .push_upstream => {},
+            // Diff against a typed ref: no focus change or prefill.
+            .diff_ref => {},
         }
         self.mode = .text_prompt;
         self.text_prompt_kind = kind;
@@ -4454,6 +4487,14 @@ pub const App = struct {
                 self.input_buffer.clearRetainingCapacity();
                 return;
             },
+            .diff_ref => {
+                // `value` aliases the input buffer; diffAgainstRef dupes it first.
+                try self.diffAgainstRef(value);
+                self.mode = .normal;
+                self.text_prompt_kind = null;
+                self.input_buffer.clearRetainingCapacity();
+                return;
+            },
             // Handled before the non-empty guard above.
             .commit_grep, .commit_author, .commit_path => unreachable,
         }
@@ -4786,6 +4827,18 @@ pub const App = struct {
             .patch_reset => {
                 self.clearPatch();
                 try self.setMessage("patch reset", .{});
+            },
+            .diff_against_selected => try self.diffAgainstSelected(),
+            .diff_enter_ref => try self.startTextPrompt(.diff_ref),
+            .diff_reverse_direction => {
+                self.diff_reverse = !self.diff_reverse;
+                try self.setMessage("reversed diff direction", .{});
+                try self.updatePreview();
+            },
+            .diff_exit => {
+                self.clearDiffBase();
+                try self.setMessage("exited diffing mode", .{});
+                try self.updatePreview();
             },
         }
     }
@@ -5518,7 +5571,11 @@ pub const App = struct {
                 return self.setCheapPreview(try std.fmt.allocPrint(self.allocator, "Diffing from {s}.\n\nSelect a commit or branch to compare against.\n", .{base}));
             if (std.mem.eql(u8, base, target.?))
                 return self.setCheapPreview(try std.fmt.allocPrint(self.allocator, "Diffing from {s}.\n\nThat is the base itself - move to another ref.\n", .{base}));
-            return self.requestGitPreview(.{ .diff_refs = .{ .base = base, .target = target.? } });
+            // Reverse swaps which side is the diff's "from" and "to".
+            return self.requestGitPreview(.{ .diff_refs = .{
+                .base = if (self.diff_reverse) target.? else base,
+                .target = if (self.diff_reverse) base else target.?,
+            } });
         }
 
         switch (self.contentFocus()) {
@@ -7051,9 +7108,16 @@ test "diffing mode marks a ref base and clears cleanly" {
     var app = try testApp(allocator, &no_files);
     defer deinitTestApp(&app);
 
-    // A panel without a ref refuses to start diffing.
+    // W opens the Diffing menu; with no base yet it offers the two base options.
     app.focus = .status;
-    try app.toggleDiffMark();
+    try app.startDiffingMenu();
+    try std.testing.expectEqual(Mode.menu, app.mode);
+    try std.testing.expectEqual(@as(usize, diffing_menu_inactive.len), app.active_menu.?.items.len);
+    app.closeMenu();
+
+    // "Diff the selected ref" from a panel without a ref refuses.
+    app.focus = .status;
+    try app.diffAgainstSelected();
     try std.testing.expect(app.diff_base == null);
     try std.testing.expectEqualStrings("select a commit or branch to diff", app.message);
 
@@ -7064,10 +7128,22 @@ test "diffing mode marks a ref base and clears cleanly" {
     app.data.commits = &commits;
     app.focus = .commits;
     app.commit_index = 0;
-    try std.testing.expectEqualStrings("aaaaaaa", app.selectedRefForDiff().?);
+    try app.diffAgainstSelected();
+    try std.testing.expectEqualStrings("aaaaaaa", app.diff_base.?);
 
-    app.diff_base = try allocator.dupe(u8, "aaaaaaa");
-    app.clearDiffBase();
+    // While active, the menu adds reverse/exit; reversing flips the flag.
+    try app.startDiffingMenu();
+    try std.testing.expectEqual(@as(usize, diffing_menu_active.len), app.active_menu.?.items.len);
+    app.closeMenu();
+    try std.testing.expect(!app.diff_reverse);
+    try app.runMenuAction(.diff_reverse_direction);
+    try std.testing.expect(app.diff_reverse);
+
+    // An arbitrary ref can be set directly; exit clears base and reverse.
+    try app.diffAgainstRef("v1.0");
+    try std.testing.expectEqualStrings("v1.0", app.diff_base.?);
+    try std.testing.expect(!app.diff_reverse); // reset when the base was replaced
+    try app.runMenuAction(.diff_exit);
     try std.testing.expect(app.diff_base == null);
 }
 
