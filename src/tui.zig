@@ -676,11 +676,11 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     const branches_title = if (app.branch_commits_active)
         (if (app.branchFilesActive())
             (if (app.branchFilesPatchCount() > 0)
-                (std.fmt.bufPrint(&app.branches_title_buf, "Commit files [3] (patch: {d})", .{app.branchFilesPatchCount()}) catch "Commit files [3]")
+                (std.fmt.bufPrint(&app.branches_title_buf, "Commit files [3] (patch: {d}) (esc back)", .{app.branchFilesPatchCount()}) catch "Commit files [3] (esc back)")
             else
-                "Commit files [3]  (space: add to patch)")
+                "Commit files [3]  (space: add to patch) (esc back)")
         else
-            (std.fmt.bufPrint(&app.branches_title_buf, "Commits [3] ({s})", .{app.branch_commits_ref}) catch "Commits [3]"))
+            (std.fmt.bufPrint(&app.branches_title_buf, "Commits [3] ({s}) (esc back)", .{app.branch_commits_ref}) catch "Commits [3] (esc back)"))
     else switch (app.branches_tab) {
         .local => "Branches [3]",
         .remotes => "Remotes [3]",
@@ -692,9 +692,9 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     y += branches_h;
     const commits_title = if (app.commitsFilesActive())
         (if (app.commitFilesPatchCount() > 0)
-            (std.fmt.bufPrint(&app.commits_title_buf, "Commit files [4] (patch: {d})", .{app.commitFilesPatchCount()}) catch "Commit files [4]")
+            (std.fmt.bufPrint(&app.commits_title_buf, "Commit files [4] (patch: {d}) (esc back)", .{app.commitFilesPatchCount()}) catch "Commit files [4] (esc back)")
         else
-            "Commit files [4]  (space: add to patch)")
+            "Commit files [4]  (space: add to patch) (esc back)")
     else if (app.commits_tab == .reflog)
         "Reflog [4]"
     else if (app.commitFilterLabel(&app.commit_filter_label_buf)) |label|
