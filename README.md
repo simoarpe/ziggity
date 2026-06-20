@@ -211,7 +211,7 @@ refresh_interval_secs = 10
 # unless it's focused. Enable the "accordion" to grow the focused list panel.
 expand_focused_side_panel = false  # focused list panel expands, others shrink
 expanded_side_panel_weight = 2     # how much bigger the focused panel gets
-staging_split = false              # default staging layout: false=single, true=split (\ toggles)
+staging_split = auto               # staging layout: off | on | auto (default). See "Staging layout" below.
 
 # Action feedback (lazygit-style). Default: actions succeed silently with a
 # one-line summary in the bottom bar, and only failures pop a dialog.
@@ -280,6 +280,34 @@ command.ctrl+t = ctags -R .
 
 Custom commands take precedence over built-in bindings and only run when you
 press their key, so a repo-local `.ziggity.ini` cannot run anything on its own.
+
+### Staging layout (`staging_split`)
+
+The staging view (`enter`/`tab` on a file) can show one pane (the active side)
+or two panes side by side (Unstaged | Staged). `\` toggles between them. The
+`staging_split` config value sets the policy:
+
+| `staging_split` | One-sided file (all-staged *or* all-unstaged) | Mixed file (staged **and** unstaged) | `\` choice remembered for the next file? |
+|---|---|---|---|
+| `off` | single | single | yes — one preference, applied to every file |
+| `on` | split (empty side shows "No changes") | split | yes — one preference, applied to every file |
+| **`auto`** *(default)* | single | **split** | one-sided: **yes** · mixed: **no** (mixed always reopens split) |
+
+How to read it:
+
+- `off` / `on` keep a single remembered preference; `\` flips it and it sticks
+  for every file you open afterwards.
+- `auto` is `off`'s behavior **plus** "open split when a file has changes on
+  both sides." For one-sided files the `\` choice is remembered (so once you
+  press `\`, later one-sided files use it too); for mixed files `\` only changes
+  the current view and is forgotten — the next mixed file opens split again.
+- The remembered preference lives only for the running session (it resets to the
+  config value on restart). `true`/`false` are still accepted as aliases for
+  `on`/`off`.
+- The layout is decided when a file is opened; it is not re-decided mid-edit if
+  staging changes the file from mixed to one-sided (or vice versa). Separately,
+  the active side auto-switches to the staged side when the unstaged side is
+  empty.
 
 ## libvaxis Usage
 

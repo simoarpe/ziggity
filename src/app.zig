@@ -1282,6 +1282,12 @@ pub const App = struct {
     // side. The active side (`staging_staged_view`) is interactive; the other is
     // a read-only preview. Toggled by a command; its default comes from config.
     staging_split: bool = false,
+    // Remembered split preference (the `\` choice), reused when opening the next
+    // file. For `auto` it applies to one-sided files only; mixed files always
+    // open split and their `\` toggle is not remembered. `staging_opened_mixed`
+    // records whether the open file was mixed, to drive that rule.
+    staging_split_pref: bool = false,
+    staging_opened_mixed: bool = false,
     staging_other_diff: []u8 = &.{},
     main_view_height: u16 = 0,
     /// Panel hit-boxes captured by the renderer for mouse handling.
@@ -1527,13 +1533,15 @@ pub const App = struct {
 
         const cfg = try config_mod.Config.load(allocator, io, env_map, git.root);
         git.branch_sort = cfg.branch_sort_order;
+        // Seed the remembered split preference from config (`on` => split,
+        // `off`/`auto` => single). `openStaging` recomputes the per-file layout.
+        const split_default = cfg.staging_split == .on;
         var app = App{
             .allocator = allocator,
             .git = git,
             .config = cfg,
-            // Seed the staging layout from config; thereafter the `\` toggle
-            // updates it and the last-chosen mode is reused on the next open.
-            .staging_split = cfg.staging_split,
+            .staging_split = split_default,
+            .staging_split_pref = split_default,
         };
         app.collapsed_dirs = std.BufSet.init(allocator);
         errdefer app.deinit();
@@ -3400,8 +3408,11 @@ pub const App = struct {
         self.main_origin = .files;
         self.focus = .main;
         self.staging_active = true;
-        // staging_split is not reset here: it keeps the last layout chosen with
-        // the `\` toggle (initialized from config at startup).
+        // Decide the layout for this file (recomputed only on (re)open):
+        //   off/on -> the remembered preference; auto -> split for a file with
+        //   both staged and unstaged changes, else the remembered preference.
+        self.staging_opened_mixed = file.has_staged and file.has_unstaged;
+        self.staging_split = stagingLayoutForOpen(self.config.staging_split, self.staging_split_pref, self.staging_opened_mixed);
         try self.loadStaging(false);
         try self.setMessage("staging {s}", .{file.path});
     }
@@ -3459,8 +3470,27 @@ pub const App = struct {
         try self.setMessage("{s} changes", .{if (self.staging_staged_view) "staged" else "unstaged"});
     }
 
+    /// The staging layout to use when a file opens, per the config mode, the
+    /// remembered `\` preference, and whether the file has both staged and
+    /// unstaged changes ("mixed").
+    fn stagingLayoutForOpen(mode: config_mod.StagingSplitMode, pref: bool, mixed: bool) bool {
+        return switch (mode) {
+            .off, .on => pref,
+            .auto => if (mixed) true else pref,
+        };
+    }
+
+    /// Whether toggling `\` should be remembered for the next file. In `auto`, a
+    /// mixed file always reopens split, so its toggle is transient.
+    fn stagingTogglePersists(mode: config_mod.StagingSplitMode, mixed: bool) bool {
+        return !(mode == .auto and mixed);
+    }
+
     fn toggleStagingSplit(self: *App) !void {
         self.staging_split = !self.staging_split;
+        if (stagingTogglePersists(self.config.staging_split, self.staging_opened_mixed)) {
+            self.staging_split_pref = self.staging_split;
+        }
         try self.loadStaging(true); // (re)load or drop the other side's diff
         try self.setMessage("{s} staging view", .{if (self.staging_split) "split" else "single"});
     }
@@ -7882,6 +7912,27 @@ test "tab closes the staging view back to the files panel" {
     try app.handleKey(tab);
     try std.testing.expect(!app.staging_active);
     try std.testing.expectEqual(model.Focus.files, app.focus);
+}
+
+test "staging split layout + remember rules per off/on/auto" {
+    // off: layout follows the remembered preference; mixed isn't special.
+    try std.testing.expect(!App.stagingLayoutForOpen(.off, false, false));
+    try std.testing.expect(!App.stagingLayoutForOpen(.off, false, true));
+    try std.testing.expect(App.stagingLayoutForOpen(.off, true, false));
+    // on: same, just with a split-by-default preference.
+    try std.testing.expect(App.stagingLayoutForOpen(.on, true, true));
+    try std.testing.expect(!App.stagingLayoutForOpen(.on, false, false));
+    // auto: one-sided follows the preference; mixed is always split.
+    try std.testing.expect(!App.stagingLayoutForOpen(.auto, false, false)); // one-sided default single
+    try std.testing.expect(App.stagingLayoutForOpen(.auto, true, false)); // one-sided remembered split
+    try std.testing.expect(App.stagingLayoutForOpen(.auto, false, true)); // mixed -> split regardless
+    try std.testing.expect(App.stagingLayoutForOpen(.auto, true, true));
+
+    // The `\` toggle persists everywhere except a mixed file in auto.
+    try std.testing.expect(App.stagingTogglePersists(.off, true));
+    try std.testing.expect(App.stagingTogglePersists(.on, false));
+    try std.testing.expect(App.stagingTogglePersists(.auto, false)); // one-sided remembers
+    try std.testing.expect(!App.stagingTogglePersists(.auto, true)); // mixed is transient
 }
 
 test "tab mirrors enter in the files panel (opens staging, not the diff)" {

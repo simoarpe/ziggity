@@ -127,6 +127,11 @@ pub const max_custom_commands = 16;
 /// `on_error` (default): silent on success, dialog on failure.
 pub const ResultDialog = enum { on_error, always, never };
 
+/// Default staging-view layout. `off` = always single, `on` = always split,
+/// `auto` = single for a file with changes on one side only, split for a file
+/// with both staged and unstaged changes.
+pub const StagingSplitMode = enum { off, on, auto };
+
 /// Whether a custom shell command's output pops a dialog (`show`, the default,
 /// since custom commands are usually run to read output) or follows
 /// `result_dialog` like any other action (`silent`).
@@ -162,10 +167,10 @@ pub const Config = struct {
     /// `expanded_side_panel_weight` while the others shrink. Default off.
     expand_focused_side_panel: bool = false,
     expanded_side_panel_weight: u8 = 2,
-    /// Default staging-view layout: `false` (single pane, the default) or `true`
-    /// (split — unstaged and staged side by side). Toggle at runtime with the
-    /// `staging_split` key.
-    staging_split: bool = false,
+    /// Default staging-view layout: `off`, `on`, or `auto` (the default — split
+    /// only when a file has both staged and unstaged changes). `\` toggles the
+    /// view at runtime; see README for the full remember-vs-reset behavior.
+    staging_split: StagingSplitMode = .auto,
     result_dialog: ResultDialog = .on_error,
     command_output: CommandOutput = .show,
     /// Seconds between idle background working-tree refreshes (`git status` off
@@ -242,7 +247,12 @@ pub const Config = struct {
             return;
         }
         if (std.mem.eql(u8, key, "staging_split")) {
-            if (parseBool(value)) |on| self.staging_split = on;
+            if (std.ascii.eqlIgnoreCase(value, "auto")) {
+                self.staging_split = .auto;
+            } else if (parseBool(value)) |on| {
+                // `true`/`false` (and yes/no/1/0) still work, mapping to on/off.
+                self.staging_split = if (on) .on else .off;
+            }
             return;
         }
         if (std.mem.eql(u8, key, "expanded_side_panel_weight")) {
@@ -370,7 +380,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     try std.testing.expectEqual(ResultDialog.on_error, cfg.result_dialog);
     try std.testing.expectEqual(CommandOutput.show, cfg.command_output);
     try std.testing.expectEqual(model.BranchSortOrder.date, cfg.branch_sort_order);
-    try std.testing.expect(!cfg.staging_split); // single by default
+    try std.testing.expectEqual(StagingSplitMode.auto, cfg.staging_split); // auto by default
     try std.testing.expect(!cfg.skip_confirm.discard_all);
 
     cfg.applyBytes(
@@ -385,10 +395,12 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
         \\expanded_side_panel_weight = 3
         \\staging_split = true
     );
+    try std.testing.expectEqual(StagingSplitMode.on, cfg.staging_split); // "true" maps to on
     try std.testing.expectEqual(ResultDialog.always, cfg.result_dialog); // valid set; bad value ignored
     try std.testing.expectEqual(CommandOutput.silent, cfg.command_output);
     try std.testing.expectEqual(model.BranchSortOrder.recency, cfg.branch_sort_order);
-    try std.testing.expect(cfg.staging_split);
+    cfg.applyBytes("staging_split = auto");
+    try std.testing.expectEqual(StagingSplitMode.auto, cfg.staging_split);
     try std.testing.expect(cfg.skip_confirm.discard_all);
     try std.testing.expect(cfg.skip_confirm.undo);
     try std.testing.expect(!cfg.skip_confirm.merge_branch); // untouched
