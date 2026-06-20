@@ -80,6 +80,7 @@ pub const CommitAction = enum { create, reword };
 /// to do with the submitted text.
 pub const TextPromptKind = enum {
     new_branch,
+    checkout_by_name,
     rename_branch,
     new_tag,
     add_remote_name,
@@ -94,6 +95,7 @@ pub const TextPromptKind = enum {
     pub fn title(self: TextPromptKind) []const u8 {
         return switch (self) {
             .new_branch => "New branch name",
+            .checkout_by_name => "Checkout branch by name",
             .rename_branch => "Rename branch",
             .new_tag => "New tag name",
             .add_remote_name => "New remote name",
@@ -2143,6 +2145,7 @@ pub const App = struct {
             .amend_commit => try self.amendLastCommit(),
             .cherry_pick => try self.toggleCommitCopy(),
             .new_branch => try self.startNewForBranchTab(),
+            .checkout_by_name => try self.startTextPrompt(.checkout_by_name),
             .delete_branch => try self.startDeleteForBranchTab(),
             .merge_branch => try self.startBranchConfirm(.merge_branch),
             .rebase_branch => try self.startBranchConfirm(.rebase_branch),
@@ -4464,6 +4467,12 @@ pub const App = struct {
                 if (self.branches_tab != .local) self.branches_tab = .local;
                 self.focus = .branches;
             },
+            // Checking out by name lands on a local branch (or creates a
+            // detached HEAD for a tag/commit), so anchor the panel on Local.
+            .checkout_by_name => {
+                if (self.branches_tab != .local) self.branches_tab = .local;
+                self.focus = .branches;
+            },
             .rename_branch => {
                 const branch = try self.localBranchForAction() orelse return;
                 self.focus = .branches;
@@ -4806,6 +4815,18 @@ pub const App = struct {
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
                 return self.runMutationScoped(result, Refresh.branches, "created branch {s}", .{value});
+            },
+            // Checkout by typed name: `git checkout <value>` resolves a local
+            // branch, DWIM-tracks a remote branch, detaches onto a tag/commit,
+            // or (with "-") switches to the previous branch. `requestMutation`
+            // dupes `value` before the input buffer is cleared.
+            .checkout_by_name => {
+                defer {
+                    self.mode = .normal;
+                    self.text_prompt_kind = null;
+                    self.input_buffer.clearRetainingCapacity();
+                }
+                return self.requestMutation(.{ .checkout = value }, .{ .gerund = "checking out", .command = "git checkout", .refresh = Refresh.checkout }, "checked out {s}", .{value});
             },
             .rename_branch => {
                 const branch = self.selectedBranch() orelse {

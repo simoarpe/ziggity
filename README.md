@@ -38,7 +38,7 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 - Worktrees tab: list worktrees (current marked) and remove one (`d`, confirmed).
 - Submodules tab: list submodules with state and init/update one (`space`).
 - Branch workflows: new, rename, delete, merge, rebase, fast-forward,
-  remote/tag checkout.
+  remote/tag checkout, checkout-by-name (`c`).
 - Tag actions (Tags tab): create (`n`), delete (`d`). Remote-branch delete
   (`d` on the Remotes tab).
 - Merge/rebase conflict resolution: take ours/theirs on conflicted files and
@@ -162,6 +162,9 @@ Useful keys:
   `esc` goes back)
 - `space`: stage/unstage file, checkout branch, or apply stash depending on focus
 - `n`: create a new branch from HEAD (branches panel, Local tab)
+- `c`: checkout a branch/ref by typing its name (branches panel); resolves a
+  local branch, DWIM-tracks a remote branch, detaches onto a tag/commit, or
+  switches to the previous branch with `-`
 - `R`: rename the selected local branch (branches panel; refresh elsewhere)
 - `f`: fast-forward the selected local branch to its upstream (branches panel;
   fetch elsewhere)

@@ -34,6 +34,7 @@ pub const Action = enum {
     patch_menu,
     toggle_tree,
     new_branch,
+    checkout_by_name,
     delete_branch,
     merge_branch,
     rebase_branch,
@@ -233,6 +234,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
         },
         .branches => {
             if (keymap.new_branch.matches(key)) return .new_branch;
+            if (keymap.checkout_by_name.matches(key)) return .checkout_by_name;
             if (keymap.discard.matches(key)) return .delete_branch;
             if (keymap.merge.matches(key)) return .merge_branch;
             if (keymap.rebase.matches(key)) return .rebase_branch;
@@ -295,6 +297,12 @@ test "normal key mapping handles global and focused actions" {
     try std.testing.expect(fromNormalKey(testKey('c'), keymap, .main) == null);
     try std.testing.expectEqual(Action.stash_pop, fromNormalKey(testKey('g'), keymap, .stash).?);
     try std.testing.expect(fromNormalKey(testKey('g'), keymap, .files) == null);
+
+    // `c` is context-dependent: commit in Files, cherry-pick in Commits, and
+    // checkout-by-name in Branches.
+    try std.testing.expectEqual(Action.start_commit, fromNormalKey(testKey('c'), keymap, .files).?);
+    try std.testing.expectEqual(Action.cherry_pick, fromNormalKey(testKey('c'), keymap, .commits).?);
+    try std.testing.expectEqual(Action.checkout_by_name, fromNormalKey(testKey('c'), keymap, .branches).?);
 
     // <enter> descends into the main panel from any side panel, but does
     // nothing once the main panel already has focus.

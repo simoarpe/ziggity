@@ -783,6 +783,7 @@ const help_lines = [_][]const u8{
     "",
     "Branches  (tabs: Local / Remotes / Tags / Worktrees / Submodules)",
     "  space          checkout / apply / init-update",
+    "  c              checkout by name (type a branch/ref; \"-\" = previous)",
     "  n              new branch (new tag / add remote by tab)",
     "  R              rename branch",
     "  d              delete branch / tag / remote branch / worktree",
@@ -1863,7 +1864,7 @@ fn footerHints(c: FooterCtx) []const u8 {
     }
     if (c.focus == .branches) {
         return switch (c.branches_tab) {
-            .local => "space checkout  n new  R rename  d delete  M merge  r rebase  f ff  W diff  [/] tabs" ++ global_branches,
+            .local => "space checkout  c by-name  n new  R rename  d delete  M merge  r rebase  f ff  W diff  [/] tabs" ++ global_branches,
             .remotes => "space checkout  n add  e edit  x remove  u upstream  d del-branch  W diff  [/] tabs" ++ global_branches,
             .tags => "space checkout  n new-tag  d delete-tag  W diff  [/] tabs" ++ global_branches,
             .worktrees => "d remove  [/] tabs" ++ global_branches,
@@ -2292,6 +2293,8 @@ test "footer hints have no key contradictions per stage" {
     // Only the local tab renames with `R`; the others leave it unbound rather
     // than claiming refresh.
     try std.testing.expect(has(footerHints(.{ .focus = .branches, .branches_tab = .local }), "R rename"));
+    // Local tab advertises checkout-by-name (`c`).
+    try std.testing.expect(has(footerHints(.{ .focus = .branches, .branches_tab = .local }), "by-name"));
 
     // Everywhere `R` actually refreshes, the global suffix advertises it.
     inline for ([_]model.Focus{ .status, .files, .commits, .stash, .main }) |f| {
