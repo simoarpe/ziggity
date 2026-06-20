@@ -1857,7 +1857,9 @@ fn footerHints(c: FooterCtx) []const u8 {
             "j/k commit  enter files  esc back" ++ global;
     }
     if (c.conflict and c.focus == .files) {
-        return "space resolve (ours/theirs)  m continue/abort  d discard  esc back" ++ global;
+        // No "esc back" here: the Files panel is at the top level during a
+        // conflict, so esc has nothing to back out to (only `q` quits).
+        return "space resolve (ours/theirs)  m continue/abort  d discard" ++ global;
     }
     if (c.focus == .branches) {
         return switch (c.branches_tab) {
@@ -2318,6 +2320,40 @@ test "footer hints have no key contradictions per stage" {
 
     // Patch line view advertises the patch menu to apply/reset the selection.
     try std.testing.expect(has(footerHints(.{ .staging_patch = true }), "^p patch"));
+
+    // Conflict state (Files panel): advertises the resolve/continue keys, and
+    // must NOT promise "esc back" — the panel is top-level during a conflict,
+    // so esc has nothing to back out to.
+    const conflict = footerHints(.{ .focus = .files, .conflict = true });
+    try std.testing.expect(has(conflict, "resolve"));
+    try std.testing.expect(has(conflict, "continue/abort"));
+    try std.testing.expect(!has(conflict, "esc back"));
+
+    // "esc back" must appear only where esc actually backs out of a sub-view
+    // (drills, staging, the main diff) — never at a top-level panel where esc
+    // is inert.
+    const top_level = [_]FooterCtx{
+        .{ .focus = .status },
+        .{ .focus = .files },
+        .{ .focus = .files, .conflict = true },
+        .{ .focus = .commits },
+        .{ .focus = .stash },
+        .{ .focus = .branches, .branches_tab = .local },
+        .{ .focus = .branches, .branches_tab = .remotes },
+        .{ .focus = .branches, .branches_tab = .tags },
+        .{ .focus = .branches, .branches_tab = .worktrees },
+        .{ .focus = .branches, .branches_tab = .submodules },
+    };
+    for (top_level) |c| try std.testing.expect(!has(footerHints(c), "esc back"));
+    const sub_view = [_]FooterCtx{
+        .{ .focus = .main },
+        .{ .staging = true, .focus = .main },
+        .{ .staging_patch = true, .focus = .main },
+        .{ .focus = .commits, .commits_files = true },
+        .{ .focus = .branches, .branch_commits = true },
+        .{ .focus = .branches, .branch_commits = true, .branch_files = true },
+    };
+    for (sub_view) |c| try std.testing.expect(has(footerHints(c), "esc back"));
 
     // Every reachable stage yields a non-empty footer (the `.branches`
     // arm of the final switch is `unreachable` — exercised only via the
