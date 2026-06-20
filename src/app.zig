@@ -1341,6 +1341,12 @@ pub const App = struct {
     main_scroll: usize = 0,
     file_display_filter: model.FileDisplayFilter = .all,
     commit_body_buffer: std.ArrayList(u8) = .empty,
+    // An unfinalized "create commit" message (subject + body), preserved when the
+    // commit dialog is cancelled and restored when it is reopened; cleared on a
+    // successful commit. Kept separate from the live editor buffers so reword
+    // does not clobber it.
+    commit_preserved_subject: []u8 = &.{},
+    commit_preserved_body: []u8 = &.{},
     commit_field: CommitField = .subject,
     // Byte offsets of the editing caret within each typed-input buffer, so the
     // cursor can be moved with the arrow keys / Home / End instead of always
@@ -1548,6 +1554,8 @@ pub const App = struct {
         self.allocator.free(self.op_output);
         self.commit_buffer.deinit(self.allocator);
         self.commit_body_buffer.deinit(self.allocator);
+        self.allocator.free(self.commit_preserved_subject);
+        self.allocator.free(self.commit_preserved_body);
         self.file_filter_buffer.deinit(self.allocator);
         for (self.filter_history.items) |entry| self.allocator.free(entry);
         self.filter_history.deinit(self.allocator);
@@ -3773,12 +3781,44 @@ pub const App = struct {
         self.commit_field = .subject;
         self.commit_buffer.clearRetainingCapacity();
         self.commit_body_buffer.clearRetainingCapacity();
-        self.commit_cursor = 0;
-        self.commit_body_cursor = 0;
+        // Restore an unfinalized message from a previous (cancelled) attempt.
+        const restored = self.commit_preserved_subject.len > 0 or self.commit_preserved_body.len > 0;
+        if (restored) {
+            try self.commit_buffer.appendSlice(self.allocator, self.commit_preserved_subject);
+            try self.commit_body_buffer.appendSlice(self.allocator, self.commit_preserved_body);
+        }
+        self.commit_cursor = self.commit_buffer.items.len;
+        self.commit_body_cursor = self.commit_body_buffer.items.len;
         self.commit_scroll = 0;
         self.commit_body_scroll_x = 0;
         self.commit_body_scroll_y = 0;
-        try self.setMessage("enter commit message", .{});
+        if (restored) {
+            try self.setMessage("enter commit message (restored draft)", .{});
+        } else {
+            try self.setMessage("enter commit message", .{});
+        }
+    }
+
+    /// Preserve the live editor's content as the unfinalized create-commit
+    /// message, or drop any prior draft if the editor is now empty.
+    fn savePreservedCommitMessage(self: *App) !void {
+        const subj_empty = std.mem.trim(u8, self.commit_buffer.items, " \t\r\n").len == 0;
+        const body_empty = std.mem.trim(u8, self.commit_body_buffer.items, " \t\r\n").len == 0;
+        if (subj_empty and body_empty) return self.clearPreservedCommitMessage();
+        const subj = try self.allocator.dupe(u8, self.commit_buffer.items);
+        errdefer self.allocator.free(subj);
+        const body = try self.allocator.dupe(u8, self.commit_body_buffer.items);
+        self.allocator.free(self.commit_preserved_subject);
+        self.allocator.free(self.commit_preserved_body);
+        self.commit_preserved_subject = subj;
+        self.commit_preserved_body = body;
+    }
+
+    fn clearPreservedCommitMessage(self: *App) void {
+        self.allocator.free(self.commit_preserved_subject);
+        self.allocator.free(self.commit_preserved_body);
+        self.commit_preserved_subject = &.{};
+        self.commit_preserved_body = &.{};
     }
 
     /// Open the commit editor pre-filled with a commit's subject/body to reword
@@ -5327,6 +5367,9 @@ pub const App = struct {
     fn handleCommitPromptKey(self: *App, key: vaxis.Key) !void {
         if (self.isEscapeKey(key)) {
             self.mode = .normal;
+            // Keep an unfinalized "create" message so reopening restores it; a
+            // reword's text is tied to its commit, so it is not preserved.
+            if (self.commit_action == .create) try self.savePreservedCommitMessage();
             self.commit_buffer.clearRetainingCapacity();
             self.commit_body_buffer.clearRetainingCapacity();
             try self.setMessage("commit cancelled", .{});
@@ -5369,6 +5412,8 @@ pub const App = struct {
         self.mode = .normal;
         self.commit_buffer.clearRetainingCapacity();
         self.commit_body_buffer.clearRetainingCapacity();
+        // The message is being committed: drop any preserved draft.
+        self.clearPreservedCommitMessage();
 
         switch (action) {
             // Run the commit off-thread (close the panel first, then
@@ -7460,6 +7505,61 @@ test "commit works from the staging view but not the generic diff view" {
     try std.testing.expect(app.mode == .commit_prompt);
 }
 
+test "an unfinalized commit message is preserved on cancel and restored on reopen" {
+    const allocator = std.testing.allocator;
+    var files = [_]model.FileStatus{.{
+        .path = @constCast("f.txt"),
+        .short_status = .{ 'M', ' ' },
+        .has_staged = true,
+        .has_unstaged = false,
+        .tracked = true,
+        .added = false,
+        .deleted = false,
+        .conflict = false,
+    }};
+    var app = try testApp(allocator, &files);
+    defer deinitTestApp(&app);
+    const esc = vaxis.Key{ .codepoint = vaxis.Key.escape };
+
+    // Type a subject + multi-line body, then cancel with <esc>.
+    try app.startCommitPrompt();
+    try app.commit_buffer.appendSlice(allocator, "wip subject");
+    try app.commit_body_buffer.appendSlice(allocator, "line one\nline two");
+    try app.handleKey(esc);
+    try std.testing.expect(app.mode == .normal);
+    try std.testing.expectEqual(@as(usize, 0), app.commit_buffer.items.len); // live editor cleared
+    try std.testing.expectEqualStrings("wip subject", app.commit_preserved_subject);
+    try std.testing.expectEqualStrings("line one\nline two", app.commit_preserved_body);
+
+    // Reopening restores the draft into the editor, caret at the end.
+    try app.startCommitPrompt();
+    try std.testing.expectEqualStrings("wip subject", app.commit_buffer.items);
+    try std.testing.expectEqualStrings("line one\nline two", app.commit_body_buffer.items);
+    try std.testing.expectEqual(app.commit_buffer.items.len, app.commit_cursor);
+
+    // A successful commit drops the draft (submitCommit calls this on submit).
+    app.clearPreservedCommitMessage();
+    try std.testing.expectEqual(@as(usize, 0), app.commit_preserved_subject.len);
+
+    // Emptying the editor and cancelling drops the preserved draft too.
+    try app.startCommitPrompt();
+    try app.commit_buffer.appendSlice(allocator, "draft");
+    try app.handleKey(esc);
+    try std.testing.expect(app.commit_preserved_subject.len > 0);
+    try app.startCommitPrompt(); // restores "draft"
+    app.commit_buffer.clearRetainingCapacity();
+    app.commit_body_buffer.clearRetainingCapacity();
+    try app.handleKey(esc);
+    try std.testing.expectEqual(@as(usize, 0), app.commit_preserved_subject.len);
+
+    // A reword's text is NOT preserved (it belongs to its commit).
+    try app.startCommitPrompt();
+    app.commit_action = .reword;
+    try app.commit_buffer.appendSlice(allocator, "reworded");
+    try app.handleKey(esc);
+    try std.testing.expectEqual(@as(usize, 0), app.commit_preserved_subject.len);
+}
+
 test "tab closes the staging view back to the files panel" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -8193,6 +8293,8 @@ fn deinitTestApp(app: *App) void {
     app.patch_paths.deinit(app.allocator);
     app.commit_buffer.deinit(app.allocator);
     app.commit_body_buffer.deinit(app.allocator);
+    app.allocator.free(app.commit_preserved_subject);
+    app.allocator.free(app.commit_preserved_body);
     app.file_filter_buffer.deinit(app.allocator);
     for (app.filter_history.items) |entry| app.allocator.free(entry);
     app.filter_history.deinit(app.allocator);
