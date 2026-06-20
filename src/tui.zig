@@ -758,7 +758,7 @@ const help_lines = [_][]const u8{
     "  z              undo the last operation (reflog reset)",
     "  ctrl+o         copy selected hash / branch / tag to the clipboard",
     "  o              open the selected commit / branch on its remote host",
-    "  W              diff mode: mark a ref, then select another to compare",
+    "  W              open the diffing menu (compare/reverse against a ref)",
     "  f / p / P      fetch / pull / push (async)",
     "  mouse drag     select text in the Diff panel (auto-copies on release)",
     "",
@@ -800,7 +800,8 @@ const help_lines = [_][]const u8{
     "  W              diff mode: compare against another ref",
     "  /              filter the log by message / author / path (esc clears)",
     "  b              bisect menu (start, then mark good/bad/skip/reset)",
-    "  enter, space   open a commit's files; space adds a file to the patch",
+    "  in a commit's files: space toggles a whole file into the patch,",
+    "                 enter opens that file to pick individual lines",
     "  ctrl+p         custom patch menu (apply / remove from commit / reset)",
     "  ctrl+j/ctrl+k  move commit down / up",
     "",
@@ -1809,47 +1810,86 @@ fn drawHints(win: vaxis.Window, row: u16, start_col: u16, hints: []const u8, key
     return col;
 }
 
-/// Keybinding hints for the focused panel only. A short global
-/// suffix (refresh/quit) is appended since those apply everywhere.
-fn contextHints(app: *const app_mod.App) []const u8 {
+/// The view state that selects a footer hint line. A small value type so the
+/// footer copy can be unit-tested without constructing a whole `App`.
+const FooterCtx = struct {
+    focus: model.Focus = .status,
+    branches_tab: app_mod.BranchesTab = .local,
+    /// Building a patch line-by-line (the per-line selection view).
+    staging_patch: bool = false,
+    /// The hunk/line staging view is open.
+    staging: bool = false,
+    /// Commits panel drilled into a commit's file list.
+    commits_files: bool = false,
+    /// Branches panel drilled into a branch's commit list.
+    branch_commits: bool = false,
+    /// Within the Branches drill, showing a commit's file list (vs the commits).
+    branch_files: bool = false,
+    /// A merge/rebase/conflict is in progress (data.state != .clean).
+    conflict: bool = false,
+};
+
+/// Keybinding hints for the current stage. A global suffix is appended since
+/// those keys apply everywhere — except in the Branches list, where `R` renames
+/// rather than refreshes, so that footer uses a suffix without "R refresh".
+fn footerHints(c: FooterCtx) []const u8 {
     const global = "  @ log  ? help  z undo  R refresh  q quit";
-    if (app.staging_patch_mode) {
-        return "j/k line  v range  space add/remove line (@@=hunk)  esc back" ++ global;
+    const global_branches = "  @ log  ? help  z undo  q quit";
+    if (c.staging_patch) {
+        return "j/k line  v range  space add/remove line (@@=hunk)  ^p patch  esc back" ++ global;
     }
-    if (app.staging_active) {
-        return "j/k line  v range  space stage/unstage (@@=hunk)  [/] staged/unstaged  \\ split  c commit  esc back" ++ global;
+    if (c.staging) {
+        return "j/k line  v range  space stage/unstage (@@=hunk)  [/] staged/unstaged  \\ split  c/A commit/amend  esc back" ++ global;
     }
-    if (app.commitsFilesActive() and app.focus == .commits) {
-        return "j/k file  enter diff  esc back" ++ global;
+    // A commit's file list, building a custom patch: `space` toggles the whole
+    // file, `enter` opens per-line selection, `^p` opens the patch menu. Shared
+    // by the Commits drill and the Branches sub-commits drill.
+    const commit_files_hint = "j/k file  space toggle file  enter pick lines  ^p patch  esc back";
+    if (c.commits_files and c.focus == .commits) {
+        return commit_files_hint ++ global;
     }
     // Branches-panel sub-commits drill: commit list, or the selected commit's
     // file list — branch-management keys don't apply here.
-    if (app.branch_commits_active and app.focus == .branches) {
-        return if (app.branchFilesActive())
-            "j/k file  space add-to-patch  enter diff  esc back" ++ global
+    if (c.branch_commits and c.focus == .branches) {
+        return if (c.branch_files)
+            commit_files_hint ++ global
         else
             "j/k commit  enter files  esc back" ++ global;
     }
-    if (app.data.state != .clean and app.focus == .files) {
+    if (c.conflict and c.focus == .files) {
         return "space resolve (ours/theirs)  m continue/abort  d discard  esc back" ++ global;
     }
-    if (app.focus == .branches) {
-        return switch (app.branches_tab) {
-            .local => "space checkout  n new  R rename  d delete  M merge  r rebase  f ff  W diff  [/] tabs" ++ global,
-            .remotes => "space checkout  n add  e edit  x remove  u upstream  d del-branch  W diff  [/] tabs" ++ global,
-            .tags => "space checkout  n new-tag  d delete-tag  W diff  [/] tabs" ++ global,
-            .worktrees => "d remove  [/] tabs" ++ global,
-            .submodules => "space init/update  [/] tabs" ++ global,
+    if (c.focus == .branches) {
+        return switch (c.branches_tab) {
+            .local => "space checkout  n new  R rename  d delete  M merge  r rebase  f ff  W diff  [/] tabs" ++ global_branches,
+            .remotes => "space checkout  n add  e edit  x remove  u upstream  d del-branch  W diff  [/] tabs" ++ global_branches,
+            .tags => "space checkout  n new-tag  d delete-tag  W diff  [/] tabs" ++ global_branches,
+            .worktrees => "d remove  [/] tabs" ++ global_branches,
+            .submodules => "space init/update  [/] tabs" ++ global_branches,
         };
     }
-    return switch (app.focus) {
-        .status => "1-5 panels  enter inspect  f fetch  p pull  P push  @ log" ++ global,
+    return switch (c.focus) {
+        .status => "1-5 panels  enter inspect  f fetch  p pull  P push" ++ global,
         .files => "space stage  a all  c commit  A amend  d discard  s stash  / filter  ` tree  enter hunks" ++ global,
         .branches => unreachable,
-        .commits => "g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  W diff  / filter  b bisect  ^j/^k move" ++ global,
+        .commits => "enter files  g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  W diff  / filter  b bisect  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => "j/k scroll  PgUp/PgDn page  drag select  ^o copy all  esc back" ++ global,
     };
+}
+
+/// Footer hints for the live app — projects `App` state onto `FooterCtx`.
+fn contextHints(app: *const app_mod.App) []const u8 {
+    return footerHints(.{
+        .focus = app.focus,
+        .branches_tab = app.branches_tab,
+        .staging_patch = app.staging_patch_mode,
+        .staging = app.staging_active,
+        .commits_files = app.commitsFilesActive(),
+        .branch_commits = app.branch_commits_active,
+        .branch_files = app.branchFilesActive(),
+        .conflict = app.data.state != .clean,
+    });
 }
 
 /// How a row's selection is drawn: not selected, selected in an unfocused panel
@@ -2232,6 +2272,57 @@ fn withFg(base: vaxis.Style, index: u8) vaxis.Style {
     var s = base;
     s.fg = .{ .index = index };
     return s;
+}
+
+test "footer hints have no key contradictions per stage" {
+    const has = struct {
+        fn f(hay: []const u8, needle: []const u8) bool {
+            return std.mem.indexOf(u8, hay, needle) != null;
+        }
+    }.f;
+
+    // Branches list: `R` renames here, so the footer must advertise rename and
+    // must NOT also claim "R refresh" (the global key is shadowed).
+    inline for ([_]app_mod.BranchesTab{ .local, .remotes, .tags, .worktrees, .submodules }) |tab| {
+        const s = footerHints(.{ .focus = .branches, .branches_tab = tab });
+        try std.testing.expect(!has(s, "R refresh"));
+    }
+    // Only the local tab renames with `R`; the others leave it unbound rather
+    // than claiming refresh.
+    try std.testing.expect(has(footerHints(.{ .focus = .branches, .branches_tab = .local }), "R rename"));
+
+    // Everywhere `R` actually refreshes, the global suffix advertises it.
+    inline for ([_]model.Focus{ .status, .files, .commits, .stash, .main }) |f| {
+        try std.testing.expect(has(footerHints(.{ .focus = f }), "R refresh"));
+    }
+    // The Branches drill re-binds `R` to refresh, so its footer keeps the hint.
+    try std.testing.expect(has(footerHints(.{ .focus = .branches, .branch_commits = true }), "R refresh"));
+
+    // Status: `@ log` lives in the global suffix only — not duplicated.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, footerHints(.{ .focus = .status }), "@ log"));
+
+    // Commits: drilling into a commit's files is the headline action.
+    try std.testing.expect(has(footerHints(.{ .focus = .commits }), "enter files"));
+
+    // Commit-files (patch building): both the Commits and Branches drills show
+    // the same accurate hints — toggle file, pick lines, patch menu — and never
+    // the stale "enter diff".
+    const cf_commits = footerHints(.{ .focus = .commits, .commits_files = true });
+    const cf_branches = footerHints(.{ .focus = .branches, .branch_commits = true, .branch_files = true });
+    inline for ([_][]const u8{ cf_commits, cf_branches }) |s| {
+        try std.testing.expect(has(s, "toggle file"));
+        try std.testing.expect(has(s, "pick lines"));
+        try std.testing.expect(has(s, "^p patch"));
+        try std.testing.expect(!has(s, "enter diff"));
+    }
+
+    // Patch line view advertises the patch menu to apply/reset the selection.
+    try std.testing.expect(has(footerHints(.{ .staging_patch = true }), "^p patch"));
+
+    // Every reachable stage yields a non-empty footer (the `.branches`
+    // arm of the final switch is `unreachable` — exercised only via the
+    // dedicated branches block above).
+    try std.testing.expect(footerHints(.{ .focus = .main }).len > 0);
 }
 
 test "scrollbar thumb sizes and positions to the content" {
