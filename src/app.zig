@@ -3418,6 +3418,22 @@ pub const App = struct {
 
         self.staging_diff = self.git.rawFileDiff(self.staging_path, self.staging_staged_view, self.config.diff_context) catch
             try self.allocator.dupe(u8, "");
+
+        // If the active side has no diff but the other side does, switch to it —
+        // e.g. opening a fully-staged file shows the staged changes rather than a
+        // blank unstaged pane (and after staging the last change, flip to staged).
+        if (self.staging_diff.len == 0) {
+            const other = self.git.rawFileDiff(self.staging_path, !self.staging_staged_view, self.config.diff_context) catch
+                try self.allocator.dupe(u8, "");
+            if (other.len > 0) {
+                self.allocator.free(self.staging_diff);
+                self.staging_diff = other;
+                self.staging_staged_view = !self.staging_staged_view;
+            } else {
+                self.allocator.free(other);
+            }
+        }
+
         self.staging = try diff_mod.parse(self.allocator, self.staging_diff);
 
         // In split view, also load the other side's diff for the read-only pane.
