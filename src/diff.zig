@@ -193,6 +193,151 @@ pub fn buildLinePatch(
     return patch.toOwnedSlice();
 }
 
+/// Build a forward (apply) patch from a file's full diff including only the body
+/// lines for which `included[abs_line]` is true (`abs_line` is the 0-based line
+/// index into `diff`). The file header is written once, then every hunk that
+/// keeps at least one change, with `@@` counts recomputed. Unselected additions
+/// are dropped and unselected deletions become context. Returns
+/// `error.EmptySelection` if nothing is included, or `error.NoNewlineHunk` if a
+/// partial selection would split a no-newline marker (caller should include the
+/// whole hunk instead).
+pub fn buildPartialFilePatch(
+    allocator: std.mem.Allocator,
+    diff: []const u8,
+    parsed: ParsedDiff,
+    included: []const bool,
+) ![]u8 {
+    const header = diff[0..parsed.header_end];
+    var hunks_out: std.Io.Writer.Allocating = .init(allocator);
+    defer hunks_out.deinit();
+    var any_change = false;
+
+    for (parsed.hunks) |hunk| {
+        const hunk_text = diff[hunk.start..hunk.end];
+        const nl = std.mem.indexOfScalar(u8, hunk_text, '\n') orelse continue;
+        const old_start = parseOldStart(hunk_text[0..nl]) orelse continue;
+
+        var body: std.Io.Writer.Allocating = .init(allocator);
+        defer body.deinit();
+        const w = &body.writer;
+        var old_count: usize = 0;
+        var new_count: usize = 0;
+        var changed = false;
+
+        // Absolute diff-line index of this hunk's first body line.
+        const body_first_abs = hunk.start_line + 1;
+        var lines = std.mem.splitScalar(u8, hunk_text[nl + 1 ..], '\n');
+        var j: usize = 0;
+        while (lines.next()) |line| : (j += 1) {
+            if (line.len == 0) break; // trailing element after the final newline
+            const abs = body_first_abs + j;
+            const sel = abs < included.len and included[abs];
+            switch (line[0]) {
+                ' ' => {
+                    try w.print("{s}\n", .{line});
+                    old_count += 1;
+                    new_count += 1;
+                },
+                '-' => {
+                    if (sel) {
+                        try w.print("{s}\n", .{line});
+                        old_count += 1;
+                        changed = true;
+                    } else {
+                        try w.print(" {s}\n", .{line[1..]});
+                        old_count += 1;
+                        new_count += 1;
+                    }
+                },
+                '+' => {
+                    if (sel) {
+                        try w.print("{s}\n", .{line});
+                        new_count += 1;
+                        changed = true;
+                    }
+                    // Unselected additions are dropped.
+                },
+                '\\' => return error.NoNewlineHunk,
+                else => try w.print("{s}\n", .{line}),
+            }
+        }
+
+        if (!changed) continue;
+        any_change = true;
+        const body_bytes = try body.toOwnedSlice();
+        defer allocator.free(body_bytes);
+        try hunks_out.writer.print("@@ -{d},{d} +{d},{d} @@\n", .{ old_start, old_count, old_start, new_count });
+        try hunks_out.writer.writeAll(body_bytes);
+    }
+
+    if (!any_change) return error.EmptySelection;
+    const hunk_bytes = try hunks_out.toOwnedSlice();
+    defer allocator.free(hunk_bytes);
+    var patch: std.Io.Writer.Allocating = .init(allocator);
+    errdefer patch.deinit();
+    try patch.writer.writeAll(header);
+    try patch.writer.writeAll(hunk_bytes);
+    return patch.toOwnedSlice();
+}
+
+test "buildPartialFilePatch keeps only included lines across hunks" {
+    const diff =
+        "diff --git a/f b/f\n" ++ // 0
+        "index 111..222 100644\n" ++ // 1
+        "--- a/f\n" ++ // 2
+        "+++ b/f\n" ++ // 3
+        "@@ -1,3 +1,4 @@\n" ++ // 4  (hunk 0)
+        " a\n" ++ // 5
+        "+b\n" ++ // 6
+        " c\n" ++ // 7
+        " d\n" ++ // 8
+        "@@ -10,2 +11,3 @@\n" ++ // 9  (hunk 1)
+        " x\n" ++ // 10
+        "+y\n" ++ // 11
+        " z\n"; // 12
+    var parsed = try parse(std.testing.allocator, diff);
+    defer parsed.deinit(std.testing.allocator);
+
+    // Include only the "+b" addition (line 6); the "+y" in hunk 1 is excluded,
+    // so hunk 1 drops out entirely.
+    var included = [_]bool{false} ** 13;
+    included[6] = true;
+    const patch = try buildPartialFilePatch(std.testing.allocator, diff, parsed, &included);
+    defer std.testing.allocator.free(patch);
+    try std.testing.expectEqualStrings(
+        "diff --git a/f b/f\nindex 111..222 100644\n--- a/f\n+++ b/f\n@@ -1,3 +1,4 @@\n a\n+b\n c\n d\n",
+        patch,
+    );
+
+    // Including nothing yields EmptySelection.
+    var none = [_]bool{false} ** 13;
+    try std.testing.expectError(error.EmptySelection, buildPartialFilePatch(std.testing.allocator, diff, parsed, &none));
+}
+
+test "buildPartialFilePatch turns an unselected deletion into context" {
+    const diff =
+        "diff --git a/f b/f\n" ++ // 0
+        "index 111..222 100644\n" ++ // 1
+        "--- a/f\n" ++ // 2
+        "+++ b/f\n" ++ // 3
+        "@@ -1,3 +1,2 @@\n" ++ // 4
+        " a\n" ++ // 5
+        "-b\n" ++ // 6
+        "-c\n"; // 7
+    var parsed = try parse(std.testing.allocator, diff);
+    defer parsed.deinit(std.testing.allocator);
+
+    // Include only the "-b" deletion; "-c" stays as context.
+    var included = [_]bool{false} ** 8;
+    included[6] = true;
+    const patch = try buildPartialFilePatch(std.testing.allocator, diff, parsed, &included);
+    defer std.testing.allocator.free(patch);
+    try std.testing.expectEqualStrings(
+        "diff --git a/f b/f\nindex 111..222 100644\n--- a/f\n+++ b/f\n@@ -1,3 +1,2 @@\n a\n-b\n c\n",
+        patch,
+    );
+}
+
 test "parse splits header and hunks" {
     const diff =
         "diff --git a/f b/f\n" ++

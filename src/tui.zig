@@ -705,7 +705,9 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     y += commits_h;
     drawStash(panel(root, 0, y, side_w, stash_h, "Stash [5]", app.focus == .stash, listScrollInfo(app, .stash)), app);
 
-    const main_title = if (app.staging_active)
+    const main_title = if (app.staging_patch_mode)
+        "Building patch (esc back)"
+    else if (app.staging_active)
         (if (app.staging_staged_view) "Staging - staged" else "Staging - unstaged")
     else if (app.diff_base) |diff_ref|
         (std.fmt.bufPrint(&app.main_title_buf, "Diff [base {s}]", .{diff_ref[0..@min(diff_ref.len, 16)]}) catch "Diff [diffing]")
@@ -714,7 +716,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         "Log"
     else
         "Diff";
-    if (app.staging_active and app.staging_split) {
+    if (app.staging_active and app.staging_split and !app.staging_patch_mode) {
         // Split staging view: two panes (Unstaged | Staged) fill the main area.
         drawStagingSplit(root, app, side_w, 0, main_w, body_h);
     } else {
@@ -1680,6 +1682,14 @@ fn drawStagingPane(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
         const line = lines.next() orelse break;
         const abs_line = scroll + row;
         var style = diffStyle(line);
+        // Patch builder: add/remove lines included in the patch get a green
+        // background so the selection is visible at a glance.
+        if (app.staging_patch_mode and abs_line < app.patch_work_included.len and
+            app.patch_work_included[abs_line] and line.len > 0 and (line[0] == '+' or line[0] == '-'))
+        {
+            style.bg = .{ .index = 22 };
+            fillRow(win, row, style);
+        }
         if (active and abs_line >= hl_start and abs_line < hl_end) {
             style.bg = .{ .index = 8 };
             fillRow(win, row, style);
@@ -1803,6 +1813,9 @@ fn drawHints(win: vaxis.Window, row: u16, start_col: u16, hints: []const u8, key
 /// suffix (refresh/quit) is appended since those apply everywhere.
 fn contextHints(app: *const app_mod.App) []const u8 {
     const global = "  @ log  ? help  z undo  R refresh  q quit";
+    if (app.staging_patch_mode) {
+        return "j/k line  v range  space add/remove line (@@=hunk)  esc back" ++ global;
+    }
     if (app.staging_active) {
         return "j/k line  v range  space stage/unstage (@@=hunk)  [/] staged/unstaged  \\ split  c commit  esc back" ++ global;
     }
