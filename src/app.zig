@@ -205,6 +205,25 @@ pub const AsyncOp = enum {
     }
 };
 
+/// The help-screen section header that best matches the current context, so the
+/// help dialog can open scrolled to (and highlighting) it. Returns a prefix of
+/// the actual header line (e.g. "Branches" for "Branches  (tabs: ...)"); the
+/// renderer matches by prefix. The returned strings are kept in sync with the
+/// help headers by a test in tui.zig. Null when nothing specific matches.
+pub fn helpSectionKeyword(focus: model.Focus, staging_active: bool) ?[]const u8 {
+    // The hunk/line staging view has its own section regardless of focus.
+    if (staging_active) return "Staging view";
+    return switch (focus) {
+        .files => "Files",
+        .branches => "Branches",
+        .commits => "Commits",
+        .stash => "Stash",
+        // The Status panel and the read-only Diff (main) panel are best served
+        // by the Global keys (navigation, fetch/pull/push, scroll, copy).
+        .status, .main => "Global",
+    };
+}
+
 /// Per-list-panel view state: `scroll` is the top visible item index, `view_h`
 /// the last-rendered visible row count, and `last_sel` the selection index at
 /// the previous render (used to detect when to re-anchor the view).
@@ -1432,6 +1451,12 @@ pub const App = struct {
     status_filter_index: usize = 0,
     help_scroll: usize = 0,
     help_max_scroll: usize = 0,
+    /// When the help dialog opens, the section header matching the current
+    /// context (e.g. "Branches"); the renderer highlights it. Null = none.
+    help_focus_header: ?[]const u8 = null,
+    /// One-shot: on the first help render, scroll so `help_focus_header` is in
+    /// view. Cleared by the renderer so the user can scroll freely afterward.
+    help_scroll_to_focus: bool = false,
     command_log_scroll: usize = 0,
     command_log_max_scroll: usize = 0,
     undo_label_buf: [160]u8 = undefined,
@@ -2126,6 +2151,10 @@ pub const App = struct {
             .help => {
                 self.mode = .help;
                 self.help_scroll = 0;
+                // Open the help scrolled to (and highlighting) the section that
+                // matches where the user pressed `?`.
+                self.help_focus_header = helpSectionKeyword(self.focus, self.staging_active);
+                self.help_scroll_to_focus = self.help_focus_header != null;
                 try self.setMessage("help", .{});
             },
             .undo => try self.startUndoConfirm(),

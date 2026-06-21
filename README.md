@@ -136,7 +136,9 @@ Useful keys:
 
 - `q` or `ctrl+c`: quit
 - `R`: refresh
-- `?`: keybindings help overlay (`j`/`k` to scroll)
+- `?`: keybindings help overlay (`j`/`k` to scroll). Opens scrolled to — and
+  highlighting — the section that matches where you pressed it (e.g. the
+  Branches panel jumps to the Branches section).
 - `z`: undo the last operation (reflog reset, after confirmation)
 - `@`: show the command log (recent git commands ziggity ran)
 - `ctrl+o`: copy the selected hash / branch / tag to the system clipboard

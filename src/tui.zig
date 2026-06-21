@@ -828,42 +828,78 @@ fn drawHelpPopup(root: vaxis.Window, app: *app_mod.App) void {
     const w: u16 = @intCast(@min(@as(usize, root.width -| 2), longest + 4));
     const content_w: u16 = w -| 2;
 
-    const HelpLine = struct { text: []const u8, header: bool };
+    const HelpLine = struct { text: []const u8, header: bool, focus: bool };
     var wrapped: [320]HelpLine = undefined;
     var total: usize = 0;
+    // The first wrapped-line index of the section matching the current context,
+    // so the dialog can open scrolled to it.
+    var focus_start: ?usize = null;
+    const want = app.help_focus_header;
     for (help_lines) |line| {
         // Section headers have no leading indent; their wrapped parts keep the style.
         const header = line.len > 0 and line[0] != ' ';
         if (line.len == 0) {
             if (total < wrapped.len) {
-                wrapped[total] = .{ .text = "", .header = false };
+                wrapped[total] = .{ .text = "", .header = false, .focus = false };
                 total += 1;
             }
             continue;
         }
+        // Mark the (first) header that matches the wanted section as focused.
+        const is_focus = header and focus_start == null and
+            want != null and std.mem.startsWith(u8, line, want.?);
         var segs: [8][]const u8 = undefined;
         const n = wrapText(line, content_w, &segs);
         for (segs[0..n]) |s| {
             if (total >= wrapped.len) break;
-            wrapped[total] = .{ .text = s, .header = header };
+            if (is_focus and focus_start == null) focus_start = total;
+            wrapped[total] = .{ .text = s, .header = header, .focus = is_focus };
             total += 1;
         }
     }
 
     const h: u16 = @intCast(@min(@as(usize, root.height -| 1), total + 2));
+    // The inner content height is `h` minus the top and bottom border rows; the
+    // max scroll follows from it. Computed before `popup()` so the one-shot
+    // jump below is reflected in the scrollbar it draws (no first-frame mismatch).
+    const win_height: u16 = h -| 2;
+    const max_scroll = if (total > win_height) total - win_height else 0;
+    app.help_max_scroll = max_scroll; // so key handlers can clamp scrolling
+
+    // One-shot on open: jump so the matched section header sits at the top
+    // (clamped). Cleared here so subsequent up/down scrolling is left alone.
+    if (app.help_scroll_to_focus) {
+        if (focus_start) |fs| app.help_scroll = @min(fs, max_scroll);
+        app.help_scroll_to_focus = false;
+    }
+
     const win = popup(root, w, h, "Keybindings", .{ .len = total, .pos = app.help_scroll });
 
     const px0: u16 = (root.width - w) / 2;
     const py0: u16 = (root.height - h) / 2;
     app.beginDialogGrid(px0 + 1, py0 + 1, win.height);
 
-    const max_scroll = if (total > win.height) total - win.height else 0;
-    app.help_max_scroll = max_scroll; // so key handlers can clamp scrolling
+    // The matched header is drawn as a full-width highlighted bar (an arrow
+    // marker plus a selected-row background) so it stands out from the other,
+    // plain-accent section headers.
+    const focus_style: vaxis.Style = .{
+        .fg = .{ .index = ui_theme.accent },
+        .bg = .{ .index = ui_theme.selected_bg },
+        .bold = true,
+    };
     const start = @min(app.help_scroll, max_scroll);
     var row: u16 = 0;
     for (wrapped[start..total]) |wl| {
         if (row >= win.height) break;
-        drawDialogRow(win, app, row, wl.text, if (wl.header) st.bottom_accent else st.normal);
+        if (wl.focus) {
+            fillRow(win, row, focus_style);
+            drawDialogRow(win, app, row, wl.text, focus_style);
+            // A right-edge "◀" pointer reinforces the highlight (drawn as a
+            // static glyph so it survives the post-render flush).
+            _ = printGlyph(win, row, win.width -| 2, glyph_focus_pointer, focus_style);
+        } else {
+            drawDialogRow(win, app, row, wl.text, if (wl.header) st.bottom_accent else st.normal);
+        }
         row += 1;
     }
 }
@@ -2247,6 +2283,7 @@ const glyph_ahead = "↑"; // U+2191 (commits to push)
 const glyph_behind = "↓"; // U+2193 (commits to pull)
 const glyph_uptodate = "✓"; // U+2713
 const glyph_collapsed = "▸"; // U+25B8
+const glyph_focus_pointer = "◀"; // U+25C0 (marks the help section for the current context)
 const glyph_expanded = "▾"; // U+25BE
 const indent_spaces = " " ** 32;
 
@@ -2275,6 +2312,37 @@ fn withFg(base: vaxis.Style, index: u8) vaxis.Style {
     var s = base;
     s.fg = .{ .index = index };
     return s;
+}
+
+test "every help-section keyword matches a real help header" {
+    const isHeader = struct {
+        fn f(line: []const u8) bool {
+            return line.len > 0 and line[0] != ' ';
+        }
+    }.f;
+    // Every (focus, staging) the app can be in must map to a keyword that is a
+    // prefix of an actual help section header — otherwise the auto-scroll/
+    // highlight would silently find nothing.
+    const cases = [_]struct { focus: model.Focus, staging: bool }{
+        .{ .focus = .status, .staging = false },
+        .{ .focus = .files, .staging = false },
+        .{ .focus = .files, .staging = true },
+        .{ .focus = .branches, .staging = false },
+        .{ .focus = .commits, .staging = false },
+        .{ .focus = .stash, .staging = false },
+        .{ .focus = .main, .staging = false },
+    };
+    for (cases) |c| {
+        const kw = app_mod.helpSectionKeyword(c.focus, c.staging) orelse continue;
+        var found = false;
+        for (help_lines) |line| {
+            if (isHeader(line) and std.mem.startsWith(u8, line, kw)) {
+                found = true;
+                break;
+            }
+        }
+        try std.testing.expect(found);
+    }
 }
 
 test "footer hints have no key contradictions per stage" {
