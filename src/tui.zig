@@ -671,7 +671,12 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
 
     drawStatus(panel(root, 0, y, side_w, status_h, "Status [1]", app.focus == .status, null), app);
     y += status_h;
-    drawFiles(panel(root, 0, y, side_w, files_h, "Files [2]", app.focus == .files, listScrollInfo(app, .files)), app);
+    {
+        const w = panel(root, 0, y, side_w, files_h, "Files [2]", app.focus == .files, listScrollInfo(app, .files));
+        beginListPan(app, .files);
+        drawFiles(w, app);
+        endListPan(app, .files, w.width);
+    }
     y += files_h;
     const branches_title = if (app.branch_commits_active)
         (if (app.branchFilesActive())
@@ -688,7 +693,12 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         .worktrees => "Worktrees [3]",
         .submodules => "Submodules [3]",
     };
-    drawBranches(panel(root, 0, y, side_w, branches_h, branches_title, app.focus == .branches, listScrollInfo(app, .branches)), app);
+    {
+        const w = panel(root, 0, y, side_w, branches_h, branches_title, app.focus == .branches, listScrollInfo(app, .branches));
+        beginListPan(app, .branches);
+        drawBranches(w, app);
+        endListPan(app, .branches, w.width);
+    }
     y += branches_h;
     const commits_title = if (app.commitsFilesActive())
         (if (app.commitFilesPatchCount() > 0)
@@ -701,9 +711,19 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         (std.fmt.bufPrint(&app.commits_title_buf, "Commits [4] ({s})", .{label}) catch "Commits [4] (filtered)")
     else
         "Commits [4]";
-    drawCommits(panel(root, 0, y, side_w, commits_h, commits_title, app.focus == .commits, listScrollInfo(app, .commits)), app);
+    {
+        const w = panel(root, 0, y, side_w, commits_h, commits_title, app.focus == .commits, listScrollInfo(app, .commits));
+        beginListPan(app, .commits);
+        drawCommits(w, app);
+        endListPan(app, .commits, w.width);
+    }
     y += commits_h;
-    drawStash(panel(root, 0, y, side_w, stash_h, "Stash [5]", app.focus == .stash, listScrollInfo(app, .stash)), app);
+    {
+        const w = panel(root, 0, y, side_w, stash_h, "Stash [5]", app.focus == .stash, listScrollInfo(app, .stash));
+        beginListPan(app, .stash);
+        drawStash(w, app);
+        endListPan(app, .stash, w.width);
+    }
 
     const main_title = if (app.staging_patch_mode)
         "Building patch (esc back)"
@@ -722,6 +742,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     } else {
         const main = panel(root, side_w, 0, main_w, body_h, main_title, app.focus == .main, .{ .len = app.mainContentLines(), .pos = app.main_scroll });
         app.main_view_height = main.height;
+        app.main_view_width = main.width;
         drawDiff(main, app);
     }
     // Indent the footer by one column so it lines up with the panel content
@@ -752,6 +773,7 @@ const help_lines = [_][]const u8{
     "  h/l, arrows    move between side panels",
     "  tab            focus the Diff panel (tab again returns)",
     "  j/k, arrows    move selection",
+    "  H / L          scroll the focused panel left / right (long rows)",
     "  [ / ]          switch panel tabs / staging side",
     "  enter / esc    inspect in main panel / go back",
     "  @ / ?          command log / this help",
@@ -1672,23 +1694,32 @@ fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
     }
 
     const sel = app.diffSelectionRangeFor(.main);
+    const h_off = app.main_hscroll;
 
     var row: u16 = 0;
     while (row < win.height) : (row += 1) {
         const line = lines.next() orelse break;
         const abs_line = app.main_scroll + row;
         // Preview text carries git's own ANSI colors (--color=always). The mouse
-        // text selection (if any) highlights columns on this line.
+        // text selection (if any) highlights columns on this line; selection
+        // columns are text columns, shifted into screen space by `h_off`.
         var sel_lo: u16 = 0;
         var sel_hi: u16 = 0;
         if (sel) |s| {
             if (abs_line >= s.sl and abs_line <= s.el) {
-                sel_lo = if (abs_line == s.sl) @intCast(@min(s.sc, win.width)) else 0;
-                sel_hi = if (abs_line == s.el) @intCast(@min(s.ec, win.width)) else win.width;
+                sel_lo = if (abs_line == s.sl) selScreenCol(s.sc, h_off, win.width) else 0;
+                sel_hi = if (abs_line == s.el) selScreenCol(s.ec, h_off, win.width) else win.width;
             }
         }
-        printAnsi(win, row, line, styles().normal, sel_lo, sel_hi);
+        printAnsi(win, row, line, styles().normal, sel_lo, sel_hi, h_off);
     }
+}
+
+/// Map a text column to an on-screen column for the selection highlight: shift
+/// left by the horizontal offset (saturating) and clamp to the panel width.
+fn selScreenCol(text_col: usize, h_off: u16, width: u16) u16 {
+    const shifted = text_col -| h_off;
+    return @intCast(@min(shifted, width));
 }
 
 /// Render one side of the staging diff. The plain (--no-color) text is colorized
@@ -1708,6 +1739,9 @@ fn drawStagingPane(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
         hl_end = @max(anchor, app.staging_cursor) + 1;
     }
     const scroll: usize = if (active) app.main_scroll else 0;
+    // Only the active pane scrolls horizontally; the read-only side stays at the
+    // left so both halves of a split stay legible.
+    const h_off: u16 = if (active) app.main_hscroll else 0;
     // Mouse text selection in this pane (if any), highlighted per column.
     const sel = app.diffSelectionRangeFor(pane);
     var lines = std.mem.splitScalar(u8, text, '\n');
@@ -1736,13 +1770,13 @@ fn drawStagingPane(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
         var sel_hi: u16 = 0;
         if (sel) |s| {
             if (abs_line >= s.sl and abs_line <= s.el) {
-                sel_lo = if (abs_line == s.sl) @intCast(@min(s.sc, win.width)) else 0;
-                sel_hi = if (abs_line == s.el) @intCast(@min(s.ec, win.width)) else win.width;
+                sel_lo = if (abs_line == s.sl) selScreenCol(s.sc, h_off, win.width) else 0;
+                sel_hi = if (abs_line == s.el) selScreenCol(s.ec, h_off, win.width) else win.width;
             }
         }
         // The staging diff is plain (--no-color) text; printAnsi renders it with
         // `style` as the base and the selected column span highlighted.
-        printAnsi(win, row, line, style, sel_lo, sel_hi);
+        printAnsi(win, row, line, style, sel_lo, sel_hi, h_off);
     }
 }
 
@@ -1761,6 +1795,7 @@ fn drawStagingSplit(root: vaxis.Window, app: *app_mod.App, x: u16, y: u16, w: u1
     const left = panel(root, x, y, left_w, h, "Unstaged", focused and unstaged_active, .{ .len = app_mod.diffLineCount(unstaged_text), .pos = unstaged_pos });
     const right = panel(root, x + left_w, y, w - left_w, h, "Staged", focused and !unstaged_active, .{ .len = app_mod.diffLineCount(staged_text), .pos = staged_pos });
     app.main_view_height = if (unstaged_active) left.height else right.height;
+    app.main_view_width = if (unstaged_active) left.width else right.width;
     // The active side (`staging_diff`) is the `.main` selection pane; the
     // read-only side is `.other` — matching `App.paneRectFor`.
     const left_pane: app_mod.SelPane = if (unstaged_active) .main else .other;
@@ -1913,7 +1948,7 @@ fn footerHints(c: FooterCtx) []const u8 {
         .branches => unreachable,
         .commits => "enter files  g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  W diff  / filter  b bisect  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
-        .main => "j/k scroll  PgUp/PgDn page  drag select  ^o copy all  esc back" ++ global,
+        .main => "j/k scroll  H/L pan  PgUp/PgDn page  drag select  ^o copy all  esc back" ++ global,
     };
 }
 
@@ -1966,28 +2001,61 @@ fn print(win: vaxis.Window, row: u16, col: u16, text: []const u8, style: vaxis.S
     _ = printSpan(win, row, col, text, style);
 }
 
+/// Horizontal scroll offset (cells) applied by `printSpan`/`printGlyph` to the
+/// current row: the first `row_h_off` columns are skipped and the rest shift
+/// left, so list rows pan with H/L. A panel's draw sets it (and resets to 0 via
+/// `endListPan`); it is 0 everywhere else — the footer, popups, borders, titles.
+var row_h_off: u16 = 0;
+/// Widest absolute column reached since the last reset, so a panel can learn its
+/// content width from the render pass (to bound horizontal scrolling).
+var row_max_col: u16 = 0;
+
+/// Begin horizontal panning for a list panel: load its offset into the row
+/// primitives and reset the content-width tracker. Pair with `endListPan`.
+fn beginListPan(app: *app_mod.App, focus: model.Focus) void {
+    row_max_col = 0;
+    row_h_off = if (app.listView(focus)) |lv| lv.hscroll else 0;
+}
+
+/// End panning: record the measured content width and inner width (so H/L can
+/// bound the offset), then clear `row_h_off` so later drawing never pans.
+fn endListPan(app: *app_mod.App, focus: model.Focus, inner_w: u16) void {
+    if (app.listView(focus)) |lv| {
+        lv.content_width = row_max_col;
+        lv.view_w = inner_w;
+    }
+    row_h_off = 0;
+}
+
+/// Write one cell of absolute column `abs_col`, shifted left by `row_h_off`;
+/// skipped when it falls off the left or right edge. Tracks the widest column.
+fn emitRowCell(win: vaxis.Window, abs_col: u16, row: u16, grapheme: []const u8, style: vaxis.Style) void {
+    if (abs_col >= row_h_off) {
+        const sc = abs_col - row_h_off;
+        if (sc < win.width) win.writeCell(sc, row, .{ .char = .{ .grapheme = grapheme, .width = 1 }, .style = style });
+    }
+    if (abs_col + 1 > row_max_col) row_max_col = abs_col + 1;
+}
+
 /// Like `print`, but returns the column after the last cell written so spans
 /// (including static UTF-8 glyphs via `printGlyph`) can be composed on a row.
+/// Columns are absolute (pre-`row_h_off`), so composition is unaffected by
+/// horizontal scrolling; the full row is walked (even past the right edge) so
+/// `row_max_col` reflects the true content width.
 fn printSpan(win: vaxis.Window, row: u16, col: u16, text: []const u8, style: vaxis.Style) u16 {
     if (row >= win.height) return col;
     var out_col = col;
     for (text) |byte| {
-        if (out_col >= win.width or byte == '\n' or byte == '\r') break;
+        if (byte == '\n' or byte == '\r') break;
         if (byte == '\t') {
             var spaces: u8 = 0;
-            while (spaces < 4 and out_col < win.width) : (spaces += 1) {
-                win.writeCell(out_col, row, .{
-                    .char = .{ .grapheme = " ", .width = 1 },
-                    .style = style,
-                });
+            while (spaces < 4) : (spaces += 1) {
+                emitRowCell(win, out_col, row, " ", style);
                 out_col += 1;
             }
             continue;
         }
-        win.writeCell(out_col, row, .{
-            .char = .{ .grapheme = glyph(byte), .width = 1 },
-            .style = style,
-        });
+        emitRowCell(win, out_col, row, glyph(byte), style);
         out_col += 1;
     }
     return out_col;
@@ -2078,28 +2146,36 @@ fn drawDialogRow(win: vaxis.Window, app: *app_mod.App, win_row: u16, text: []con
         lo = s.lo;
         hi = s.hi;
     }
-    printAnsi(win, win_row, text, base, lo, hi);
+    printAnsi(win, win_row, text, base, lo, hi, 0);
 }
 
 /// Render one line into `win` at `row`, interpreting ANSI SGR escape sequences
 /// (git's `--color=always` output) as styles instead of printing them as raw
 /// bytes. Non-SGR CSI sequences are skipped. `base` is the default/reset style.
-/// Like `printSpan`, one cell is written per byte (ASCII-oriented). Cells whose
-/// column falls in `[sel_lo, sel_hi)` get the selection background (mouse text
-/// selection); pass an empty range (0,0) for none.
-fn printAnsi(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, sel_lo: u16, sel_hi: u16) void {
+/// Like `printSpan`, one cell is written per byte (ASCII-oriented). `h_off` is
+/// the horizontal scroll offset: the first `h_off` visible columns are skipped
+/// (their SGR state is still tracked), and the rest shift left by `h_off`. Cells
+/// whose on-screen column falls in `[sel_lo, sel_hi)` get the selection
+/// background (mouse text selection); pass an empty range (0,0) for none.
+fn printAnsi(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, sel_lo: u16, sel_hi: u16, h_off: u16) void {
     if (row >= win.height) return;
     var style = base;
-    var out_col: u16 = 0;
+    var vis_col: u16 = 0; // column in the unscrolled line
     var i: usize = 0;
-    const writeAt = struct {
-        fn f(w: vaxis.Window, c: u16, r: u16, g: []const u8, s: vaxis.Style, lo: u16, hi: u16) void {
+    // Emit one cell of unscrolled column `vc`, shifted left by `h`; skip it if
+    // it falls off the left (vc < h) or right edge.
+    const emit = struct {
+        fn f(w: vaxis.Window, vc: u16, h: u16, r: u16, g: []const u8, s: vaxis.Style, lo: u16, hi: u16) void {
+            if (vc < h) return;
+            const c = vc - h;
+            if (c >= w.width) return;
             var cell_style = s;
             if (c >= lo and c < hi) cell_style.bg = .{ .index = ui_theme.selected_bg };
             w.writeCell(c, r, .{ .char = .{ .grapheme = g, .width = 1 }, .style = cell_style });
         }
     }.f;
-    while (i < line.len and out_col < win.width) {
+    const last_col: usize = @as(usize, h_off) + win.width;
+    while (i < line.len and vis_col < last_col) {
         const byte = line[i];
         if (byte == 0x1b) {
             // CSI: ESC [ params... final(0x40-0x7e). Other escapes: drop ESC.
@@ -2120,15 +2196,15 @@ fn printAnsi(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, s
         }
         if (byte == '\t') {
             var spaces: u8 = 0;
-            while (spaces < 4 and out_col < win.width) : (spaces += 1) {
-                writeAt(win, out_col, row, " ", style, sel_lo, sel_hi);
-                out_col += 1;
+            while (spaces < 4 and vis_col < last_col) : (spaces += 1) {
+                emit(win, vis_col, h_off, row, " ", style, sel_lo, sel_hi);
+                vis_col += 1;
             }
             i += 1;
             continue;
         }
-        writeAt(win, out_col, row, glyph(byte), style, sel_lo, sel_hi);
-        out_col += 1;
+        emit(win, vis_col, h_off, row, glyph(byte), style, sel_lo, sel_hi);
+        vis_col += 1;
         i += 1;
     }
 }
@@ -2190,10 +2266,11 @@ fn wrapText(text: []const u8, width: u16, out: [][]const u8) usize {
 }
 
 /// Write a single static UTF-8 glyph (e.g. an arrow) as one cell. The grapheme
-/// must be a stable slice — vaxis stores it by reference until render.
+/// must be a stable slice — vaxis stores it by reference until render. Honors
+/// `row_h_off` so glyphs in list rows pan with the rest of the row.
 fn printGlyph(win: vaxis.Window, row: u16, col: u16, grapheme: []const u8, style: vaxis.Style) u16 {
-    if (row < win.height and col < win.width) {
-        win.writeCell(col, row, .{ .char = .{ .grapheme = grapheme, .width = 1 }, .style = style });
+    if (row < win.height) {
+        emitRowCell(win, col, row, grapheme, style);
         return col + 1;
     }
     return col;
@@ -2391,6 +2468,9 @@ test "footer hints have no key contradictions per stage" {
 
     // Patch line view advertises the patch menu to apply/reset the selection.
     try std.testing.expect(has(footerHints(.{ .staging_patch = true }), "^p patch"));
+
+    // The Diff panel advertises horizontal scrolling (H/L) for long lines.
+    try std.testing.expect(has(footerHints(.{ .focus = .main }), "H/L"));
 
     // Conflict state (Files panel): advertises the resolve/continue keys, and
     // must NOT promise "esc back" — the panel is top-level during a conflict,

@@ -11,6 +11,8 @@ pub const Action = enum {
     move_down,
     focus_left,
     focus_right,
+    scroll_left,
+    scroll_right,
     toggle_main,
     toggle_staging_split,
     select,
@@ -133,6 +135,8 @@ pub fn isMutating(self: Action) bool {
         .move_down,
         .focus_left,
         .focus_right,
+        .scroll_left,
+        .scroll_right,
         .toggle_main,
         .toggle_staging_split,
         .focus_status,
@@ -209,6 +213,10 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     if (key.matches(vaxis.Key.tab, .{})) return .toggle_main;
     if (keymap.left.matches(key) or key.matches(vaxis.Key.left, .{})) return .focus_left;
     if (keymap.right.matches(key) or key.matches(vaxis.Key.right, .{})) return .focus_right;
+
+    // Horizontal scrolling (H/L) of the focused panel for rows wider than it.
+    if (keymap.scroll_left.matches(key)) return .scroll_left;
+    if (keymap.scroll_right.matches(key)) return .scroll_right;
 
     // Toggle the staging view's single/split layout (only acts in that view).
     if (keymap.staging_split.matches(key)) return .toggle_staging_split;
@@ -303,6 +311,12 @@ test "normal key mapping handles global and focused actions" {
     try std.testing.expectEqual(Action.start_commit, fromNormalKey(testKey('c'), keymap, .files).?);
     try std.testing.expectEqual(Action.cherry_pick, fromNormalKey(testKey('c'), keymap, .commits).?);
     try std.testing.expectEqual(Action.checkout_by_name, fromNormalKey(testKey('c'), keymap, .branches).?);
+
+    // H/L scroll the focused panel horizontally; lowercase h/l move between panels.
+    try std.testing.expectEqual(Action.scroll_left, fromNormalKey(testKey('H'), keymap, .main).?);
+    try std.testing.expectEqual(Action.scroll_right, fromNormalKey(testKey('L'), keymap, .main).?);
+    try std.testing.expectEqual(Action.focus_left, fromNormalKey(testKey('h'), keymap, .files).?);
+    try std.testing.expectEqual(Action.focus_right, fromNormalKey(testKey('l'), keymap, .files).?);
 
     // <enter> descends into the main panel from any side panel, but does
     // nothing once the main panel already has focus.

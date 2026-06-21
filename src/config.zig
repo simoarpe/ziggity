@@ -31,6 +31,8 @@ pub const KeyMap = struct {
     down: Binding = .{ .codepoint = 'j' },
     left: Binding = .{ .codepoint = 'h' },
     right: Binding = .{ .codepoint = 'l' },
+    scroll_left: Binding = .{ .codepoint = 'H' },
+    scroll_right: Binding = .{ .codepoint = 'L' },
     select: Binding = .{ .codepoint = ' ' },
     enter: Binding = .{ .codepoint = 0x0d },
     escape: Binding = .{ .codepoint = 0x1b },

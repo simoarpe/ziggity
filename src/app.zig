@@ -227,7 +227,23 @@ pub fn helpSectionKeyword(focus: model.Focus, staging_active: bool) ?[]const u8 
 /// Per-list-panel view state: `scroll` is the top visible item index, `view_h`
 /// the last-rendered visible row count, and `last_sel` the selection index at
 /// the previous render (used to detect when to re-anchor the view).
-const ListView = struct { scroll: usize = 0, view_h: u16 = 0, last_sel: usize = 0 };
+const ListView = struct {
+    scroll: usize = 0,
+    view_h: u16 = 0,
+    last_sel: usize = 0,
+    /// Horizontal scroll offset (cells), for panning wide rows with H/L.
+    hscroll: u16 = 0,
+    /// Widest rendered row and inner width from the last draw, used to bound
+    /// `hscroll` so it can't run past the content.
+    content_width: u16 = 0,
+    view_w: u16 = 0,
+};
+
+/// Cells the diff/list pans per H/L press. A small fixed step (rather than a
+/// fraction of the panel width) keeps every press uniform — a width-based step
+/// makes the first press jump most of the scrollable range on a wide panel,
+/// leaving a jarring tiny remainder. Key-repeat covers fast traversal.
+pub const horizontal_scroll_step: u16 = 6;
 
 /// True when a push failed because the remote has diverged and the push needs to
 /// be forced. Matches git's English rejection messages.
@@ -1163,6 +1179,35 @@ pub fn diffLineCount(text: []const u8) usize {
     return n;
 }
 
+/// The visible width (in terminal cells) of the widest line in `text`: ANSI SGR
+/// escape sequences are not counted (they produce no cells) and tabs expand to
+/// 4, matching how `printAnsi` renders. Used to bound horizontal scrolling.
+pub fn diffMaxVisibleWidth(text: []const u8) u16 {
+    var max: u16 = 0;
+    var col: u16 = 0;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const byte = text[i];
+        if (byte == '\n') {
+            max = @max(max, col);
+            col = 0;
+            continue;
+        }
+        if (byte == '\r') continue;
+        if (byte == 0x1b) {
+            // Skip a CSI escape (ESC [ ... final byte 0x40-0x7e); it draws nothing.
+            if (i + 1 < text.len and text[i + 1] == '[') {
+                var j = i + 2;
+                while (j < text.len and !(text[j] >= 0x40 and text[j] <= 0x7e)) j += 1;
+                i = j; // loop's +1 steps past the final byte
+            }
+            continue;
+        }
+        col +|= if (byte == '\t') 4 else 1;
+    }
+    return @max(max, col);
+}
+
 /// Remove `len` bytes at `pos` from `buf`, shifting the tail down. Never grows,
 /// so no allocation is needed.
 fn deleteRange(buf: *std.ArrayList(u8), pos: usize, len: usize) void {
@@ -1366,6 +1411,13 @@ pub const App = struct {
     branches_tab: BranchesTab = .local,
     commits_tab: CommitsTab = .commits,
     main_scroll: usize = 0,
+    /// Horizontal scroll offset (cells) of the main diff / active staging pane,
+    /// so lines wider than the panel can be read with H/L. Reset to 0 whenever
+    /// the main view is reset to the top (see `resetMainView`).
+    main_hscroll: u16 = 0,
+    /// Last-rendered inner width of the main diff / active staging pane, used to
+    /// bound the horizontal offset.
+    main_view_width: u16 = 0,
     file_display_filter: model.FileDisplayFilter = .all,
     commit_body_buffer: std.ArrayList(u8) = .empty,
     // An unfinalized "create commit" message (subject + body), preserved when the
@@ -2104,6 +2156,10 @@ pub const App = struct {
             },
             .focus_left => if (self.staging_active) try self.closeStaging() else try self.focusPrevious(),
             .focus_right => if (!self.staging_active) try self.focusNext(),
+            // H/L pan the focused panel horizontally (main diff or a side list)
+            // so rows wider than the panel can be read. No-op when content fits.
+            .scroll_left => self.scrollFocusedHorizontal(-1),
+            .scroll_right => self.scrollFocusedHorizontal(1),
             // Tab toggles focus into the Diff (main) panel and back to the side
             // panel it came from. In the staging view it closes it (back to the
             // Files panel); `[`/`]` switch the staged/unstaged side there. In the
@@ -2264,7 +2320,7 @@ pub const App = struct {
                     if (self.selPaneAt(c, rw)) |pane| {
                         if (self.paneText(pane).len > 0) {
                             const r = self.paneRectFor(pane).?;
-                            const pt = diffPointAt(r, self.paneScroll(pane), c, rw);
+                            const pt = diffPointAt(r, self.paneScroll(pane), self.paneHScroll(pane), c, rw);
                             // Remember if a real selection was on screen, so a
                             // click that clears it doesn't also grab focus.
                             self.diff_sel_had_span = self.diff_sel_active and
@@ -2286,7 +2342,7 @@ pub const App = struct {
                 },
                 .drag => if (self.diff_sel_active) {
                     if (self.paneRectFor(self.diff_sel_pane)) |r| {
-                        const pt = diffPointAt(r, self.paneScroll(self.diff_sel_pane), c, rw);
+                        const pt = diffPointAt(r, self.paneScroll(self.diff_sel_pane), self.paneHScroll(self.diff_sel_pane), c, rw);
                         self.diff_sel_head_line = pt.line;
                         self.diff_sel_head_col = pt.col;
                         self.diff_sel_dragged = true;
@@ -2358,7 +2414,7 @@ pub const App = struct {
         };
     }
 
-    fn listView(self: *App, focus: model.Focus) ?*ListView {
+    pub fn listView(self: *App, focus: model.Focus) ?*ListView {
         const i = listViewIndex(focus) orelse return null;
         return &self.list_views[i];
     }
@@ -2484,6 +2540,16 @@ pub const App = struct {
         };
     }
 
+    /// Horizontal offset applied to a selectable pane when rendering and when
+    /// mapping a mouse cell to a text column. The read-only `.other` pane (split
+    /// staging) always renders from the left.
+    pub fn paneHScroll(self: *const App, pane: SelPane) u16 {
+        return switch (pane) {
+            .main => self.main_hscroll,
+            .other => 0,
+        };
+    }
+
     /// Which selectable pane (if any) is under a screen cell.
     fn selPaneAt(self: *const App, col: u16, row: u16) ?SelPane {
         inline for (.{ SelPane.main, SelPane.other }) |pane| {
@@ -2499,7 +2565,7 @@ pub const App = struct {
     /// Map an absolute screen cell to a position in a pane's content: the line
     /// index (accounting for `scroll`) and the visible column, both clamped to
     /// the pane's inner content area.
-    fn diffPointAt(r: PanelRect, scroll: usize, col: u16, row: u16) DiffPoint {
+    fn diffPointAt(r: PanelRect, scroll: usize, h_off: u16, col: u16, row: u16) DiffPoint {
         const content_top = r.y + 1;
         const content_left = r.x + 1;
         const content_h = r.h -| 2;
@@ -2508,8 +2574,10 @@ pub const App = struct {
             0
         else
             @min(row - content_top, content_h -| 1);
-        const dcol: usize = if (col <= content_left) 0 else @min(col - content_left, content_w);
-        return .{ .line = scroll + rel_row, .col = dcol };
+        // Add the horizontal offset so the selection tracks the underlying text
+        // column, not the on-screen column, when the pane is scrolled right.
+        const screen_col: usize = if (col <= content_left) 0 else @min(col - content_left, content_w);
+        return .{ .line = scroll + rel_row, .col = screen_col + h_off };
     }
 
     /// Normalized (start <= end) selection for `pane`, clamped to its content.
@@ -2879,7 +2947,7 @@ pub const App = struct {
             self.tree_rows = &.{};
             try self.setMessage("file list", .{});
         }
-        self.main_scroll = 0;
+        self.resetMainView();
         try self.updatePreview();
     }
 
@@ -3273,7 +3341,7 @@ pub const App = struct {
 
         self.staging_anchor = null;
         self.staging_cursor = self.stagingFirstLine();
-        self.main_scroll = 0;
+        self.resetMainView();
         self.scrollToStagingCursor();
         try self.setMessage("space: toggle line/hunk into patch, esc: back", .{});
     }
@@ -3362,7 +3430,7 @@ pub const App = struct {
 
         self.clearStaging();
         self.focus = self.main_origin;
-        self.main_scroll = 0;
+        self.resetMainView();
         try self.updatePreview();
         try self.setMessage("patch: {d} files", .{self.patchFileCount()});
     }
@@ -3634,7 +3702,7 @@ pub const App = struct {
         if (self.staging_patch_mode) return self.closePatchLineView();
         self.clearStaging();
         self.focus = .files;
-        self.main_scroll = 0;
+        self.resetMainView();
         try self.updatePreview();
     }
 
@@ -3666,14 +3734,16 @@ pub const App = struct {
         self.commit_files = files;
         self.commit_file_index = 0;
         self.commit_files_active = true;
-        self.main_scroll = 0;
+        self.resetMainView();
+        self.resetListHScroll(.commits);
         try self.updatePreview();
         try self.setMessage("{d} files in {s}", .{ files.len, commit.short_hash });
     }
 
     fn closeCommitFiles(self: *App) !void {
         self.deactivateCommitFiles();
-        self.main_scroll = 0;
+        self.resetMainView();
+        self.resetListHScroll(.commits);
         try self.updatePreview();
     }
 
@@ -3708,8 +3778,11 @@ pub const App = struct {
         self.allocator.free(self.branch_commits_ref);
         self.branch_commits_ref = try self.allocator.dupe(u8, ref);
         self.branch_commits_active = true;
-        if (self.listView(.branches)) |lv| lv.scroll = 0;
-        self.main_scroll = 0;
+        if (self.listView(.branches)) |lv| {
+            lv.scroll = 0;
+            lv.hscroll = 0;
+        }
+        self.resetMainView();
         try self.updatePreview();
         try self.setMessage("{d} commits in {s}", .{ commits.len, ref });
     }
@@ -3717,8 +3790,11 @@ pub const App = struct {
     /// Exit the sub-commits view, back to the branch list.
     fn closeBranchCommits(self: *App) !void {
         self.deactivateBranchCommits();
-        if (self.listView(.branches)) |lv| lv.scroll = 0;
-        self.main_scroll = 0;
+        if (self.listView(.branches)) |lv| {
+            lv.scroll = 0;
+            lv.hscroll = 0;
+        }
+        self.resetMainView();
         try self.updatePreview();
     }
 
@@ -3741,14 +3817,16 @@ pub const App = struct {
         self.branch_files = files;
         self.branch_file_index = 0;
         self.branch_files_active = true;
-        self.main_scroll = 0;
+        self.resetMainView();
+        self.resetListHScroll(.branches);
         try self.updatePreview();
         try self.setMessage("{d} files in {s}", .{ files.len, commit.short_hash });
     }
 
     fn closeBranchFiles(self: *App) !void {
         self.deactivateBranchFiles();
-        self.main_scroll = 0;
+        self.resetMainView();
+        self.resetListHScroll(.branches);
         try self.updatePreview();
     }
 
@@ -3809,7 +3887,8 @@ pub const App = struct {
                         .submodules => .worktrees,
                     },
                 };
-                self.main_scroll = 0;
+                self.resetMainView();
+                self.resetListHScroll(.branches);
                 try self.updatePreview();
                 try self.setMessage("{s}", .{self.branches_tab.label()});
             },
@@ -3822,7 +3901,8 @@ pub const App = struct {
                     .commits => .reflog,
                     .reflog => .commits,
                 };
-                self.main_scroll = 0;
+                self.resetMainView();
+                self.resetListHScroll(.commits);
                 try self.updatePreview();
                 try self.setMessage("{s}", .{self.commits_tab.label()});
             },
@@ -3898,7 +3978,7 @@ pub const App = struct {
         // is modal, so it is closed.
         if (self.staging_active) self.clearStaging();
         self.focus = focus;
-        self.main_scroll = 0;
+        self.resetMainView();
         try self.updatePreview();
     }
 
@@ -3907,13 +3987,13 @@ pub const App = struct {
     fn enterMain(self: *App) !void {
         if (self.focus.isSidePanel()) self.main_origin = self.focus;
         self.focus = .main;
-        self.main_scroll = 0;
+        self.resetMainView();
         try self.updatePreview();
     }
 
     fn leaveMain(self: *App) !void {
         self.focus = self.main_origin;
-        self.main_scroll = 0;
+        self.resetMainView();
         try self.updatePreview();
     }
 
@@ -3927,7 +4007,7 @@ pub const App = struct {
             .stash => .status,
             .main => unreachable,
         };
-        self.main_scroll = 0;
+        self.resetMainView();
         try self.updatePreview();
     }
 
@@ -3941,7 +4021,7 @@ pub const App = struct {
             .stash => .commits,
             .main => unreachable,
         };
-        self.main_scroll = 0;
+        self.resetMainView();
         try self.updatePreview();
     }
 
@@ -4016,6 +4096,59 @@ pub const App = struct {
             self.main_scroll += @intCast(amount);
         }
         self.main_scroll = @min(self.main_scroll, self.maxMainScroll());
+    }
+
+    /// Reset the main panel to the top-left. Called wherever the main view's
+    /// content changes (a new file/commit/diff, opening or closing a sub-view).
+    fn resetMainView(self: *App) void {
+        self.main_scroll = 0;
+        self.main_hscroll = 0;
+    }
+
+    /// The widest line of the main panel's current content, in visible cells.
+    fn mainContentWidth(self: *const App) u16 {
+        return diffMaxVisibleWidth(if (self.staging_active) self.staging_diff else self.diff);
+    }
+
+    /// Largest horizontal offset that still keeps the widest line's end at (or
+    /// before) the panel's right edge. Zero when the content already fits.
+    fn maxMainHScroll(self: *const App) u16 {
+        const view: u16 = if (self.main_view_width == 0) 80 else self.main_view_width;
+        return self.mainContentWidth() -| view;
+    }
+
+    /// Horizontal counterpart of `scrollMain`: shift the diff left/right by
+    /// `amount` cells, clamped so it never scrolls past the content.
+    fn scrollMainHorizontal(self: *App, amount: i32) void {
+        if (amount < 0) {
+            self.main_hscroll -|= @intCast(-amount);
+        } else {
+            self.main_hscroll +|= @intCast(amount);
+        }
+        self.main_hscroll = @min(self.main_hscroll, self.maxMainHScroll());
+    }
+
+    /// Pan the focused panel horizontally by one step in `dir` (-1 left, +1
+    /// right): the main diff, or a side list. Each bounds its offset by the
+    /// content/inner widths captured at the last render. A no-op for the Status
+    /// panel and whenever the content already fits.
+    fn scrollFocusedHorizontal(self: *App, dir: i32) void {
+        const delta: i32 = horizontal_scroll_step;
+        if (self.focus == .main) {
+            self.scrollMainHorizontal(if (dir < 0) -delta else delta);
+            return;
+        }
+        const lv = self.listView(self.focus) orelse return;
+        const view: u16 = if (lv.view_w == 0) 80 else lv.view_w;
+        const max: u16 = lv.content_width -| view;
+        if (dir < 0) lv.hscroll -|= horizontal_scroll_step else lv.hscroll +|= horizontal_scroll_step;
+        lv.hscroll = @min(lv.hscroll, max);
+    }
+
+    /// Reset a side list's horizontal pan to the left edge — called when its
+    /// content identity changes (tab switch, drill in/out).
+    fn resetListHScroll(self: *App, focus: model.Focus) void {
+        if (self.listView(focus)) |lv| lv.hscroll = 0;
     }
 
     /// Space in the Files panel: stage/unstage a whole directory in tree view
@@ -4929,7 +5062,7 @@ pub const App = struct {
 
     fn startFileFilterPrompt(self: *App) !void {
         self.focus = .files;
-        self.main_scroll = 0;
+        self.resetMainView();
         self.mode = .file_filter_prompt;
         self.file_filter_buffer.clearRetainingCapacity();
         self.file_filter_cursor = 0;
@@ -6894,7 +7027,7 @@ pub const App = struct {
         self.file_filter = next_filter;
         self.file_index = self.firstMatchingFileIndex() orelse 0;
         if (self.tree_view) try self.rebuildTree(null);
-        self.main_scroll = 0;
+        self.resetMainView();
         try self.updatePreview();
     }
 
@@ -6903,7 +7036,7 @@ pub const App = struct {
         self.file_display_filter = filter;
         self.file_index = self.firstMatchingFileIndex() orelse 0;
         if (self.tree_view) try self.rebuildTree(null);
-        self.main_scroll = 0;
+        self.resetMainView();
         try self.updatePreview();
         if (filter == .all) {
             try self.setMessage("file status filter cleared", .{});
@@ -7188,6 +7321,14 @@ test "diffLineCount ignores a single trailing newline" {
     try std.testing.expectEqual(@as(usize, 1), diffLineCount("only"));
 }
 
+test "diffMaxVisibleWidth skips ANSI escapes and expands tabs" {
+    try std.testing.expectEqual(@as(u16, 5), diffMaxVisibleWidth("ab\ncdcde\nx"));
+    try std.testing.expectEqual(@as(u16, 6), diffMaxVisibleWidth("a\nbbbbbb"));
+    try std.testing.expectEqual(@as(u16, 3), diffMaxVisibleWidth("\x1b[32m+++\x1b[0m"));
+    try std.testing.expectEqual(@as(u16, 5), diffMaxVisibleWidth("\tx"));
+    try std.testing.expectEqual(@as(u16, 0), diffMaxVisibleWidth(""));
+}
+
 test "scrollMain clamps to content so it can't scroll into empty space" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -7210,6 +7351,47 @@ test "scrollMain clamps to content so it can't scroll into empty space" {
     app.main_view_height = 10;
     try app.scrollMain(50);
     try std.testing.expectEqual(@as(usize, 0), app.main_scroll);
+}
+
+test "horizontal scroll steps uniformly and stays bounded by the content" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // Main diff: a 90-cell line in a 64-wide view -> max offset 26. Every press
+    // moves a uniform `horizontal_scroll_step` (no giant first jump), and the
+    // only short move is the final clamp to the bound.
+    allocator.free(app.diff);
+    app.diff = try allocator.dupe(u8, "short\n" ++ ("x" ** 90) ++ "\n");
+    app.main_view_width = 64;
+    app.focus = .main;
+
+    const step = horizontal_scroll_step;
+    app.scrollFocusedHorizontal(1);
+    try std.testing.expectEqual(step, app.main_hscroll);
+    app.scrollFocusedHorizontal(1);
+    try std.testing.expectEqual(@as(u16, step * 2), app.main_hscroll);
+    for (0..50) |_| app.scrollFocusedHorizontal(1); // run into the bound
+    try std.testing.expectEqual(@as(u16, 26), app.main_hscroll); // 90 - 64
+    for (0..50) |_| app.scrollFocusedHorizontal(-1);
+    try std.testing.expectEqual(@as(u16, 0), app.main_hscroll);
+
+    // A list panel pans its own offset, bounded by its recorded widths.
+    app.focus = .commits;
+    const lv = app.listView(.commits).?;
+    lv.content_width = 50;
+    lv.view_w = 20;
+    app.scrollFocusedHorizontal(1);
+    try std.testing.expectEqual(step, lv.hscroll);
+    for (0..50) |_| app.scrollFocusedHorizontal(1);
+    try std.testing.expectEqual(@as(u16, 30), lv.hscroll); // 50 - 20
+    app.resetListHScroll(.commits);
+    try std.testing.expectEqual(@as(u16, 0), lv.hscroll);
+
+    // Status has no list view -> H/L are a no-op (no crash).
+    app.focus = .status;
+    app.scrollFocusedHorizontal(1);
 }
 
 test "pushNeedsForce detects diverged-remote rejections only" {

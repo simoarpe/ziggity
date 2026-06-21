@@ -151,6 +151,8 @@ Useful keys:
 - `ctrl+b`: open files status filter menu
 - `j`/`k` or arrows: move selection
 - `h`/`l` or arrows: cycle focus between side panels
+- `H`/`L`: scroll the focused panel left/right (the diff, or a list with rows
+  wider than the panel)
 - `tab`: focus the Diff panel (press `tab` again to return to the side panel)
 - `1`/`2`/`3`/`4`/`5`: focus status, files, branches, commits, stash
 - `[`/`]`: switch panel tabs (branches: Local/Remotes/Tags; commits: Commits/Reflog) or the staging view's unstaged/staged side
