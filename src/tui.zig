@@ -741,6 +741,13 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         "Log"
     else
         "Diff";
+    // Clamp the main panel's scroll to the current content (using the previous
+    // frame's measured size) before drawing. Selecting a different item replaces
+    // the preview without touching the scroll, so a scroll left over from a
+    // longer/wider diff could otherwise skip past all of a shorter one and render
+    // the panel blank.
+    app.main_scroll = @min(app.main_scroll, app.maxMainScroll());
+    app.main_hscroll = @min(app.main_hscroll, app.maxMainHScroll());
     if (app.staging_active and app.staging_split and !app.staging_patch_mode) {
         // Split staging view: two panes (Unstaged | Staged) fill the main area.
         drawStagingSplit(root, app, side_w, 0, main_w, body_h);

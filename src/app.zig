@@ -523,6 +523,11 @@ pub const PreviewJob = struct {
             var argv: std.ArrayList([]const u8) = .empty;
             defer argv.deinit(gpa);
             try argv.append(gpa, "git");
+            // `git diff` refreshes the index (taking `.git/index.lock`) unless told
+            // not to; without this the preview can collide with a concurrent
+            // `git add` and come back empty (a spurious "No diff") until the next
+            // refresh. No-op for `log`/`show`/`stash show`.
+            try argv.append(gpa, "--no-optional-locks");
             try argv.appendSlice(gpa, sec.argv);
             const res = std.process.run(gpa, io, .{
                 .argv = argv.items,
@@ -2882,6 +2887,8 @@ pub const App = struct {
             },
             .status, .main => return,
         }
+        // A different item is now selected: show its diff from the top-left.
+        self.resetMainView();
         try self.updatePreview();
     }
 
@@ -4074,12 +4081,16 @@ pub const App = struct {
     fn moveUp(self: *App) !void {
         if (self.focus == .main) return self.scrollMain(-1);
         self.moveSelection(self.focus, false);
+        // A different item is now selected, so show its diff from the top-left
+        // (otherwise a scroll left from the previous, longer diff persists).
+        self.resetMainView();
         try self.updatePreview();
     }
 
     fn moveDown(self: *App) !void {
         if (self.focus == .main) return self.scrollMain(1);
         self.moveSelection(self.focus, true);
+        self.resetMainView();
         try self.updatePreview();
     }
 
@@ -4122,7 +4133,7 @@ pub const App = struct {
     /// The largest `main_scroll` that still shows content: stops at the point
     /// where the last line sits on the bottom row, so the panel can't scroll on
     /// into empty space. Zero when the content fits the view.
-    fn maxMainScroll(self: *const App) usize {
+    pub fn maxMainScroll(self: *const App) usize {
         const text = if (self.staging_active) self.staging_diff else self.diff;
         const lines = diffLineCount(text);
         const height: usize = if (self.main_view_height == 0) 20 else self.main_view_height;
@@ -4158,7 +4169,7 @@ pub const App = struct {
 
     /// Largest horizontal offset that still keeps the widest line's end at (or
     /// before) the panel's right edge. Zero when the content already fits.
-    fn maxMainHScroll(self: *const App) u16 {
+    pub fn maxMainHScroll(self: *const App) u16 {
         const view: u16 = if (self.main_view_width == 0) 80 else self.main_view_width;
         return self.mainContentWidth() -| view;
     }
@@ -6403,21 +6414,23 @@ pub const App = struct {
         switch (kind) {
             .file => |f| {
                 empty_msg = "No diff for selected file.\n";
-                if (f.has_unstaged) {
-                    if (!f.tracked and !f.has_staged) {
-                        try sections.append(page_alloc, .{
-                            .argv = try dupArgv(&.{ "diff", "--no-index", "--color=always", "--", "/dev/null", f.path }),
-                            .label = "Untracked\n\n",
-                            .keep_on_error = true,
-                        });
-                    } else {
-                        try sections.append(page_alloc, .{
-                            .argv = try fileDiffArgv(false, ctx_arg, f.path, f.previous_path),
-                            .label = "Unstaged\n\n",
-                        });
-                    }
-                }
-                if (f.has_staged) {
+                if (!f.tracked and !f.has_staged) {
+                    // Untracked and not staged: show the whole file via --no-index.
+                    try sections.append(page_alloc, .{
+                        .argv = try dupArgv(&.{ "diff", "--no-index", "--color=always", "--", "/dev/null", f.path }),
+                        .label = "Untracked\n\n",
+                        .keep_on_error = true,
+                    });
+                } else {
+                    // Query both sides regardless of the optimistic staged/unstaged
+                    // flags — after a stage toggle those flags can momentarily run
+                    // ahead of git, so gating on them would query the wrong side and
+                    // show a spurious "No diff". The worker drops whichever side is
+                    // empty, so the panel always reflects real git state.
+                    try sections.append(page_alloc, .{
+                        .argv = try fileDiffArgv(false, ctx_arg, f.path, f.previous_path),
+                        .label = "Unstaged\n\n",
+                    });
                     try sections.append(page_alloc, .{
                         .argv = try fileDiffArgv(true, ctx_arg, f.path, f.previous_path),
                         .label = "Staged\n\n",
@@ -7959,6 +7972,27 @@ test "optimistic staging flips file state in the model immediately" {
     app.applyOptimisticStage(false, null);
     try std.testing.expectEqual([2]u8{ ' ', 'M' }, app.data.files[0].short_status);
     try std.testing.expectEqual([2]u8{ '?', '?' }, app.data.files[1].short_status);
+}
+
+test "navigating to another item resets the diff scroll so it can't render blank" {
+    const allocator = std.testing.allocator;
+    var files = [_]model.FileStatus{
+        .{ .path = @constCast("a.zig"), .short_status = .{ ' ', 'M' }, .has_staged = false, .has_unstaged = true, .tracked = true, .added = false, .deleted = false, .conflict = false },
+        .{ .path = @constCast("b.zig"), .short_status = .{ ' ', 'M' }, .has_staged = false, .has_unstaged = true, .tracked = true, .added = false, .deleted = false, .conflict = false },
+    };
+    var app = try testApp(allocator, &files);
+    defer deinitTestApp(&app);
+    app.focus = .files;
+
+    // Simulate having scrolled a long previous diff far down/right.
+    app.main_scroll = 100;
+    app.main_hscroll = 50;
+
+    // Selecting a different file shows its diff from the top-left, so a stale
+    // scroll can't skip past a shorter diff and leave the panel blank.
+    try app.moveDown();
+    try std.testing.expectEqual(@as(usize, 0), app.main_scroll);
+    try std.testing.expectEqual(@as(u16, 0), app.main_hscroll);
 }
 
 test "rapid stage toggles coalesce and flush as one off-thread batch" {
