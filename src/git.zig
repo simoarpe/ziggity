@@ -270,6 +270,12 @@ pub const Git = struct {
         const result = try runWithLockRetry(self.allocator, self.io, .{
             .argv = argv.items,
             .cwd = .{ .path = self.root },
+            // Apply our git environment (notably GIT_OPTIONAL_LOCKS=0, so the
+            // frequent background `git status` never takes `.git/index.lock` and
+            // collides with a concurrent `git add`, and GIT_TERMINAL_PROMPT=0).
+            // Without this the subprocess inherits the bare parent env and large
+            // repos hit spurious "unable to create '.git/index.lock'" errors.
+            .environ_map = self.environ,
             .stdout_limit = .limited(16 * 1024 * 1024),
             .stderr_limit = .limited(4 * 1024 * 1024),
         });

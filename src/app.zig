@@ -1408,6 +1408,10 @@ pub const App = struct {
     dialog_origin_y: u16 = 0,
     dialog_rows: [256][]const u8 = [_][]const u8{""} ** 256,
     dialog_row_count: usize = 0,
+    /// App-owned backing for the confirmation prompt text, so the rendered rows
+    /// recorded for mouse selection stay valid after the draw call returns
+    /// (a stack buffer would dangle when the selection is copied between frames).
+    confirm_text_buf: [1024]u8 = undefined,
     branches_tab: BranchesTab = .local,
     commits_tab: CommitsTab = .commits,
     main_scroll: usize = 0,

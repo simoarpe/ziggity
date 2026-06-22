@@ -1204,10 +1204,11 @@ fn drawMenuPopup(root: vaxis.Window, app: *const app_mod.App) void {
     }
 }
 
-fn drawConfirmPopup(root: vaxis.Window, app: *const app_mod.App) void {
+fn drawConfirmPopup(root: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
-    var buf: [1024]u8 = undefined;
-    const text = app.confirmationText(&buf);
+    // Use the App-owned buffer (not a stack one) so the rows recorded for mouse
+    // selection below stay valid when the selection is copied between frames.
+    const text = app.confirmationText(&app.confirm_text_buf);
     const title = switch (app.pending_confirmation orelse .discard_all) {
         .discard_all => "Discard all changes",
         .merge_branch => "Merge branch",
@@ -1233,8 +1234,13 @@ fn drawConfirmPopup(root: vaxis.Window, app: *const app_mod.App) void {
     // border, so the popup is n + 4 tall (clamped to the screen).
     const h: u16 = @intCast(@min(@as(usize, root.height -| 2), n + 4));
     const win = popup(root, w, h, title, null);
+    const px0: u16 = (root.width - w) / 2;
+    const py0: u16 = (root.height - h) / 2;
+    app.beginDialogGrid(px0 + 1, py0 + 1, win.height);
     const shown = @min(n, @as(usize, win.height -| 1)); // keep the footer row clear
-    for (lines[0..shown], 0..) |ln, idx| print(win, @intCast(idx), 0, ln, st.normal);
+    // drawDialogRow records each row so the message can be selected and copied
+    // with the mouse (drag to select, release to copy), like the other popups.
+    for (lines[0..shown], 0..) |ln, idx| drawDialogRow(win, app, @intCast(idx), ln, st.normal);
     print(win, win.height -| 1, 0, "(y/enter) confirm   (n/esc) cancel", st.bottom_accent);
 }
 
