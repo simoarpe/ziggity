@@ -27,10 +27,15 @@ pub const ExecResult = struct {
     }
 };
 
-/// Up to this many attempts, waiting `lock_retry_wait` between them, when a git
-/// command fails with a transient lock error.
-const lock_retry_count = 5;
-const lock_retry_wait = std.Io.Duration.fromMilliseconds(50);
+/// On a transient lock error, retry up to `lock_retry_count` times with an
+/// exponential backoff: the wait starts at `lock_retry_base_ms` and doubles each
+/// attempt, capped at `lock_retry_cap_ms`. A big repo's index write can hold the
+/// lock for a few hundred ms, so the old flat 5×50ms (250ms) budget ran out and
+/// surfaced the error; this gives ~1.1s total, which absorbs realistic
+/// contention while still failing on a genuinely stuck lock.
+const lock_retry_count = 8;
+const lock_retry_base_ms: i64 = 25;
+const lock_retry_cap_ms: i64 = 250;
 
 /// True when git's output indicates a transient lock error worth retrying —
 /// another git process (a background refresh, or one the user ran elsewhere)
@@ -48,6 +53,7 @@ pub fn isRetryableLockError(text: []const u8) bool {
 /// so a momentary lock never reaches the user as a hard failure.
 pub fn runWithLockRetry(allocator: std.mem.Allocator, io: std.Io, options: std.process.RunOptions) std.process.RunError!std.process.RunResult {
     var attempt: usize = 1;
+    var wait_ms: i64 = lock_retry_base_ms;
     while (true) : (attempt += 1) {
         const result = try std.process.run(allocator, io, options);
         const failed = switch (result.term) {
@@ -59,10 +65,12 @@ pub fn runWithLockRetry(allocator: std.mem.Allocator, io: std.Io, options: std.p
         {
             return result;
         }
-        // Transient lock: discard this attempt's output, wait, and retry.
+        // Transient lock: discard this attempt's output, wait, and retry with an
+        // exponential backoff (capped) so a slower competing write is waited out.
         allocator.free(result.stdout);
         allocator.free(result.stderr);
-        std.Io.sleep(io, lock_retry_wait, .awake) catch {};
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(wait_ms), .awake) catch {};
+        wait_ms = @min(wait_ms * 2, lock_retry_cap_ms);
     }
 }
 
@@ -265,16 +273,22 @@ pub const Git = struct {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(self.allocator);
         try argv.append(self.allocator, "git");
+        // `--no-optional-locks` as an explicit global flag (belt-and-suspenders
+        // with GIT_OPTIONAL_LOCKS=0 in the env): the frequent read-only commands,
+        // above all the background `git status`, must never take `.git/index.lock`
+        // to refresh the on-disk index/untracked-cache/fsmonitor extension —
+        // otherwise they collide with a concurrent `git add` and surface a
+        // spurious "unable to create '.git/index.lock': File exists". The flag is
+        // honored even when the env var isn't (e.g. an fsmonitor daemon). It's a
+        // no-op for write commands, which take the required index lock regardless.
+        // Recorded command log keeps the logical args only (see `recordCommand`).
+        try argv.append(self.allocator, "--no-optional-locks");
         try argv.appendSlice(self.allocator, args);
 
         const result = try runWithLockRetry(self.allocator, self.io, .{
             .argv = argv.items,
             .cwd = .{ .path = self.root },
-            // Apply our git environment (notably GIT_OPTIONAL_LOCKS=0, so the
-            // frequent background `git status` never takes `.git/index.lock` and
-            // collides with a concurrent `git add`, and GIT_TERMINAL_PROMPT=0).
-            // Without this the subprocess inherits the bare parent env and large
-            // repos hit spurious "unable to create '.git/index.lock'" errors.
+            // Also keep the env (GIT_TERMINAL_PROMPT=0, GIT_OPTIONAL_LOCKS=0).
             .environ_map = self.environ,
             .stdout_limit = .limited(16 * 1024 * 1024),
             .stderr_limit = .limited(4 * 1024 * 1024),
@@ -1210,7 +1224,7 @@ pub const Git = struct {
         return null;
     }
 
-    fn successResult(self: *Git) !ExecResult {
+    pub fn successResult(self: *Git) !ExecResult {
         return .{
             .stdout = try self.allocator.alloc(u8, 0),
             .stderr = try self.allocator.alloc(u8, 0),

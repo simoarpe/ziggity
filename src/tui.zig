@@ -452,6 +452,11 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             }
         }
 
+        // Flush any pending stage/unstage toggles into a coalesced off-thread
+        // batch (queued as a mutation below) so rapid space-staging never blocks
+        // the UI thread on a synchronous `git add`.
+        app.tryFlushStaging();
+
         // Start the queued slow mutation off the loop. Single in-flight; the
         // input gate keeps another mutation from being requested meanwhile.
         if (mutation_future == null) {

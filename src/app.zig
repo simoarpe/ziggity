@@ -995,6 +995,12 @@ pub const Mutation = union(enum) {
     apply_custom_patch: struct { patch: []const u8, reverse: bool },
     remove_patch_from_commit: struct { base_ref: []const u8, todo: []const u8, patch: []const u8 },
     rebase_todo: struct { base_ref: []const u8, todo: []const u8, message: ?[]const u8 },
+    /// A coalesced batch of stage/unstage work, so rapid space-toggles and the
+    /// stage/unstage-all key run off the UI thread instead of blocking input on a
+    /// synchronous git command. `all` (when set) runs `git add -A` / `git reset`
+    /// first as the baseline, then the per-path `add` (`git add`) / `reset`
+    /// (`git reset`) overrides are applied on top.
+    stage_batch: struct { all: ?bool = null, add: []const []const u8, reset: []const []const u8 },
 
     /// Worker-thread entry point: run the mutation on a throwaway page-allocator
     /// `Git`. The wgit's command log (mutations are recorded) is page-allocated
@@ -1033,6 +1039,22 @@ pub const Mutation = union(enum) {
             .apply_custom_patch => |x| wgit.applyCustomPatch(x.patch, x.reverse),
             .remove_patch_from_commit => |x| wgit.removePatchFromCommit(x.base_ref, x.todo, x.patch),
             .rebase_todo => |x| wgit.rebaseTodo(x.base_ref, x.todo, x.message),
+            .stage_batch => |b| blk: {
+                // All-op baseline first, then per-path overrides; report the
+                // first failure.
+                if (b.all) |stage_all| {
+                    var r = if (stage_all) try wgit.stageAll() else try wgit.unstageAll();
+                    if (!r.ok()) break :blk r;
+                    r.deinit(gpa);
+                }
+                if (b.add.len > 0) {
+                    var r = try wgit.stagePaths(b.add);
+                    if (!r.ok()) break :blk r;
+                    r.deinit(gpa);
+                }
+                if (b.reset.len > 0) break :blk try wgit.unstagePaths(b.reset);
+                break :blk try wgit.successResult();
+            },
         };
     }
 
@@ -1067,6 +1089,7 @@ pub const Mutation = union(enum) {
             .apply_custom_patch => |x| .{ .apply_custom_patch = .{ .patch = try gpa.dupe(u8, x.patch), .reverse = x.reverse } },
             .remove_patch_from_commit => |x| .{ .remove_patch_from_commit = .{ .base_ref = try gpa.dupe(u8, x.base_ref), .todo = try gpa.dupe(u8, x.todo), .patch = try gpa.dupe(u8, x.patch) } },
             .rebase_todo => |x| .{ .rebase_todo = .{ .base_ref = try gpa.dupe(u8, x.base_ref), .todo = try gpa.dupe(u8, x.todo), .message = if (x.message) |m| try gpa.dupe(u8, m) else null } },
+            .stage_batch => |b| .{ .stage_batch = .{ .all = b.all, .add = try dupeStrList(gpa, b.add), .reset = try dupeStrList(gpa, b.reset) } },
         };
     }
 
@@ -1100,6 +1123,10 @@ pub const Mutation = union(enum) {
                 gpa.free(x.base_ref);
                 gpa.free(x.todo);
                 if (x.message) |m| gpa.free(m);
+            },
+            .stage_batch => |b| {
+                freeStrList(gpa, b.add);
+                freeStrList(gpa, b.reset);
             },
             .amend, .undo, .fast_forward_current, .bisect_skip, .bisect_reset, .amend_continue_rebase => {},
         }
@@ -1422,6 +1449,16 @@ pub const App = struct {
     /// Last-rendered inner width of the main diff / active staging pane, used to
     /// bound the horizontal offset.
     main_view_width: u16 = 0,
+    /// Coalesced pending stage/unstage toggles: path -> desired staged state
+    /// (true = `git add`, false = `git reset`). A space-toggle records here and
+    /// updates the model optimistically; the loop flushes them to git off the UI
+    /// thread (see `tryFlushStaging`), so rapid staging never blocks input. Keys
+    /// are owned by `allocator`.
+    stage_pending: std.StringArrayHashMapUnmanaged(bool) = .empty,
+    /// Pending stage/unstage-all (`a`): true = `git add -A`, false = `git reset`.
+    /// Flushed off the UI thread with `stage_pending` so `a` is non-blocking too.
+    /// An all-op supersedes per-path pending (it sets the baseline for everything).
+    stage_all_pending: ?bool = null,
     file_display_filter: model.FileDisplayFilter = .all,
     commit_body_buffer: std.ArrayList(u8) = .empty,
     // An unfinalized "create commit" message (subject + body), preserved when the
@@ -1648,6 +1685,8 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.clearStagePending();
+        self.stage_pending.deinit(self.allocator);
         self.data.deinit(self.allocator);
         model.deinitCommitFiles(self.allocator, self.commit_files);
         model.deinitCommitFiles(self.allocator, self.branch_files);
@@ -2086,8 +2125,13 @@ pub const App = struct {
             action = actions.fromNormalKey(key, self.config.keymap, .status) orelse return;
         }
         // While a slow op runs, navigation/inspection stay live but mutating
-        // keys are ignored so a second git command can't race the first.
-        if (self.foregroundBusy() and actions.isMutating(action)) {
+        // keys are ignored so a second git command can't race the first. The
+        // Files-panel staging keys are exempt: the per-file toggle (`space`) and
+        // stage/unstage-all (`a`) only update the model optimistically and queue a
+        // coalesced batch (flushed off-thread once the worker frees up), so rapid
+        // staging stays responsive even mid-op.
+        const staging_key = (action == .select or action == .stage_all) and self.focus == .files;
+        if (self.foregroundBusy() and actions.isMutating(action) and !staging_key) {
             return self.setMessage("operation in progress...", .{});
         }
         switch (action) {
@@ -2997,11 +3041,9 @@ pub const App = struct {
             const include = if (want_staged) file.has_unstaged else file.has_staged;
             if (include) try paths.append(self.allocator, file.path);
         }
-        self.applyOptimisticStage(want_staged, paths.items);
-        if (want_staged) {
-            return self.runMutationFiles(try self.git.stagePaths(paths.items), "staged {s}/", .{dir});
-        }
-        return self.runMutationFiles(try self.git.unstagePaths(paths.items), "unstaged {s}/", .{dir});
+        // Queue each path (optimistic + pending); the loop flushes them as one
+        // off-thread batch, so a big directory never blocks input either.
+        for (paths.items) |p| try self.queueStageOp(p, want_staged);
     }
 
     pub fn fileFilterActive(self: *const App) bool {
@@ -4202,39 +4244,89 @@ pub const App = struct {
             return;
         };
         if (file.conflict) return self.startConflictResolveMenu();
-        if (file.has_unstaged) {
-            self.applyOptimisticStage(true, &[_][]const u8{file.path});
-            return self.runMutationFiles(try self.git.stageFile(file.path), "staged {s}", .{file.path});
-        }
-        if (file.has_staged) {
-            self.applyOptimisticStage(false, &[_][]const u8{file.path});
-            return self.runMutationFiles(try self.git.unstageFile(file), "unstaged {s}", .{file.path});
-        }
+        if (file.has_unstaged) return self.queueStageOp(file.path, true);
+        if (file.has_staged) return self.queueStageOp(file.path, false);
         try self.setMessage("file has no staged or unstaged changes", .{});
     }
 
+    /// Record a stage (`true`) or unstage (`false`) of `path`: update the model
+    /// optimistically for instant feedback and remember the desired state. The
+    /// actual `git add`/`git reset` is flushed off the UI thread by the loop (see
+    /// `tryFlushStaging`), coalesced with any other rapid toggles, so input never
+    /// blocks on git. Re-toggling a path just overwrites its desired state.
+    fn queueStageOp(self: *App, path: []const u8, stage: bool) !void {
+        self.applyOptimisticStage(stage, &[_][]const u8{path});
+        const gop = try self.stage_pending.getOrPut(self.allocator, path);
+        if (!gop.found_existing) gop.key_ptr.* = try self.allocator.dupe(u8, path);
+        gop.value_ptr.* = stage;
+        // Drop any background worktree snapshot started before this change so it
+        // can't clobber the optimistic state with the pre-toggle index.
+        self.refresh_generation +%= 1;
+    }
+
+    /// TUI-loop hook: if any stage toggles are pending and the mutation worker is
+    /// free, drain them into one `git add`/`git reset` batch and queue it. Called
+    /// every loop iteration; a no-op when nothing is pending or a mutation is
+    /// already in flight (then it runs after that finishes).
+    pub fn tryFlushStaging(self: *App) void {
+        if (self.stage_pending.count() == 0 and self.stage_all_pending == null) return;
+        if (self.foregroundBusy()) return;
+        var add: std.ArrayList([]const u8) = .empty;
+        defer add.deinit(self.allocator);
+        var reset: std.ArrayList([]const u8) = .empty;
+        defer reset.deinit(self.allocator);
+        var it = self.stage_pending.iterator();
+        while (it.next()) |e| {
+            (if (e.value_ptr.*) &add else &reset).append(self.allocator, e.key_ptr.*) catch return;
+        }
+        // requestMutation deep-copies the lists, so the pending keys can be freed.
+        self.requestMutation(.{ .stage_batch = .{ .all = self.stage_all_pending, .add = add.items, .reset = reset.items } }, .{ .gerund = "staging", .refresh = Refresh.files }, "staged", .{}) catch return;
+        self.clearStagePending();
+        self.stage_all_pending = null;
+    }
+
+    fn clearStagePending(self: *App) void {
+        var it = self.stage_pending.iterator();
+        while (it.next()) |e| self.allocator.free(e.key_ptr.*);
+        self.stage_pending.clearRetainingCapacity();
+    }
+
+    /// Record a stage/unstage-all (`a`): update the model optimistically and set
+    /// the pending all-op, which the loop flushes off-thread. Supersedes any
+    /// per-path pending (the all-op is the new baseline for every file).
+    fn queueStageAll(self: *App, stage: bool) void {
+        self.applyOptimisticStage(stage, null);
+        self.clearStagePending();
+        self.stage_all_pending = stage;
+        self.refresh_generation +%= 1;
+    }
+
     fn toggleAllStaged(self: *App) !void {
+        // Like the per-file toggle, this only updates the model optimistically and
+        // queues the work; the loop flushes it off the UI thread so `a` is
+        // non-blocking too. A filter narrows it to the visible paths (a per-path
+        // batch); unfiltered, it uses the efficient `git add -A` / `git reset`.
         if (self.visibleUnstagedCount() > 0) {
             if (self.anyFileFilterActive()) {
                 var paths: std.ArrayList([]const u8) = .empty;
                 defer paths.deinit(self.allocator);
                 try self.collectVisiblePaths(&paths, .unstaged);
-                self.applyOptimisticStage(true, paths.items);
-                return self.runMutationFiles(try self.git.stagePaths(paths.items), "staged visible files", .{});
+                for (paths.items) |p| try self.queueStageOp(p, true);
+                return;
             }
-            self.applyOptimisticStage(true, null);
-            return self.runMutationFiles(try self.git.stageAll(), "staged all files", .{});
+            self.queueStageAll(true);
+            return;
         }
         if (self.visibleStagedCount() > 0) {
             if (self.anyFileFilterActive()) {
                 var paths: std.ArrayList([]const u8) = .empty;
                 defer paths.deinit(self.allocator);
                 try self.collectVisiblePaths(&paths, .staged);
-                self.applyOptimisticStage(false, paths.items);
-                return self.runMutationFiles(try self.git.unstagePaths(paths.items), "unstaged visible files", .{});
+                for (paths.items) |p| try self.queueStageOp(p, false);
+                return;
             }
-            self.applyOptimisticStage(false, null);
-            return self.runMutationFiles(try self.git.unstageAll(), "unstaged all files", .{});
+            self.queueStageAll(false);
+            return;
         }
         try self.setMessage("no visible files to stage", .{});
     }
@@ -7869,6 +7961,72 @@ test "optimistic staging flips file state in the model immediately" {
     try std.testing.expectEqual([2]u8{ '?', '?' }, app.data.files[1].short_status);
 }
 
+test "rapid stage toggles coalesce and flush as one off-thread batch" {
+    const allocator = std.testing.allocator;
+    var files = [_]model.FileStatus{
+        .{ .path = @constCast("a.zig"), .short_status = .{ ' ', 'M' }, .has_staged = false, .has_unstaged = true, .tracked = true, .added = false, .deleted = false, .conflict = false },
+        .{ .path = @constCast("b.zig"), .short_status = .{ ' ', 'M' }, .has_staged = false, .has_unstaged = true, .tracked = true, .added = false, .deleted = false, .conflict = false },
+    };
+    var app = try testApp(allocator, &files);
+    defer deinitTestApp(&app);
+    app.initial_load_pending = false; // not busy, so a flush can run
+
+    // Queue a stage of a.zig: optimistic update is immediate, one pending entry,
+    // and no synchronous git ran (nothing is requested until the loop flushes).
+    try app.queueStageOp("a.zig", true);
+    try std.testing.expect(app.data.files[0].has_staged);
+    try std.testing.expectEqual(@as(usize, 1), app.stage_pending.count());
+    try std.testing.expect(app.mutation_requested == null);
+
+    // Re-toggling the same path coalesces (still one entry) and overwrites intent.
+    try app.queueStageOp("a.zig", false);
+    try std.testing.expectEqual(@as(usize, 1), app.stage_pending.count());
+    try std.testing.expectEqual(false, app.stage_pending.get("a.zig").?);
+
+    // A second path adds a second entry.
+    try app.queueStageOp("b.zig", true);
+    try std.testing.expectEqual(@as(usize, 2), app.stage_pending.count());
+
+    // Flushing drains all pending into a single queued batch mutation.
+    app.tryFlushStaging();
+    try std.testing.expectEqual(@as(usize, 0), app.stage_pending.count());
+    try std.testing.expect(app.mutation_requested != null);
+    try std.testing.expect(app.mutation_requested.? == .stage_batch);
+
+    // While that batch is "in flight" (mutation queued => foregroundBusy), a
+    // further toggle still records without blocking and does not flush yet.
+    try app.queueStageOp("a.zig", true);
+    try std.testing.expectEqual(@as(usize, 1), app.stage_pending.count());
+    app.tryFlushStaging();
+    try std.testing.expectEqual(@as(usize, 1), app.stage_pending.count()); // held until the worker frees
+}
+
+test "stage-all queues off-thread, supersedes per-path pending, flushes one batch" {
+    const allocator = std.testing.allocator;
+    var files = [_]model.FileStatus{
+        .{ .path = @constCast("a.zig"), .short_status = .{ ' ', 'M' }, .has_staged = false, .has_unstaged = true, .tracked = true, .added = false, .deleted = false, .conflict = false },
+        .{ .path = @constCast("b.zig"), .short_status = .{ ' ', 'M' }, .has_staged = false, .has_unstaged = true, .tracked = true, .added = false, .deleted = false, .conflict = false },
+    };
+    var app = try testApp(allocator, &files);
+    defer deinitTestApp(&app);
+    app.initial_load_pending = false;
+
+    // A per-path toggle then stage-all: the all-op supersedes the per-path entry.
+    try app.queueStageOp("a.zig", true);
+    try std.testing.expectEqual(@as(usize, 1), app.stage_pending.count());
+    app.queueStageAll(true);
+    try std.testing.expectEqual(@as(usize, 0), app.stage_pending.count());
+    try std.testing.expectEqual(true, app.stage_all_pending.?);
+    try std.testing.expect(app.data.files[0].has_staged and app.data.files[1].has_staged);
+
+    // Flushing queues a single batch carrying the all-op; the flag then clears.
+    app.tryFlushStaging();
+    try std.testing.expect(app.mutation_requested != null);
+    try std.testing.expect(app.mutation_requested.? == .stage_batch);
+    try std.testing.expectEqual(true, app.mutation_requested.?.stage_batch.all.?);
+    try std.testing.expect(app.stage_all_pending == null);
+}
+
 test "refreshViews loads the working tree off-thread, not synchronously" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -8786,9 +8944,18 @@ test "input gate ignores mutating keys while a foreground op runs" {
     var app = try testApp(allocator, &no_files);
     defer deinitTestApp(&app);
 
+    app.focus = .files;
     app.mutation_active = true; // simulate an op in flight
-    try app.handleKey(.{ .codepoint = 'a' }); // stage_all — mutating, must be ignored
+
+    // A non-staging mutating key (commit) is ignored while an op runs.
+    try app.handleKey(.{ .codepoint = 'c' });
     try std.testing.expectEqualStrings("operation in progress...", app.message);
+
+    // Staging keys are exempt: they only queue optimistically (flushed off-thread
+    // once the worker frees), so they stay responsive even mid-op and are NOT
+    // gated. With no files, `a` reports "no visible files" rather than the gate.
+    try app.handleKey(.{ .codepoint = 'a' }); // stage/unstage-all — exempt
+    try std.testing.expect(!std.mem.eql(u8, "operation in progress...", app.message));
     app.mutation_active = false;
 }
 
@@ -8920,6 +9087,8 @@ fn deinitTestApp(app: *App) void {
     if (app.preview_wanted) |job| job.deinit(page_alloc);
     if (app.mutation_requested) |job| job.deinit(page_alloc);
     page_alloc.free(app.mutation_msg);
+    app.clearStagePending();
+    app.stage_pending.deinit(app.allocator);
     app.collapsed_dirs.deinit();
 }
 
