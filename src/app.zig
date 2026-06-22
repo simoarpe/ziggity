@@ -2131,6 +2131,16 @@ pub const App = struct {
             }
         }
 
+        // `e` opens the selected file in the editor. Beyond the Files panel
+        // (which routes it through the `edit_file` action), it also works while
+        // viewing a file: a commit's file list, the staging/patch view, and the
+        // Diff panel of a working-tree file. In those, the key is otherwise
+        // shadowed/unbound, so handle it explicitly here. (Not in the Branches/
+        // Commits *lists*, where `e` keeps its edit-remote/reword meaning.)
+        if (self.config.keymap.edit_file.matches(key) and self.editableFileContext()) {
+            return self.requestEditFile();
+        }
+
         var action = actions.fromNormalKey(key, self.config.keymap, self.focus) orelse return;
         // A panel drilled into a commit's files shows files, not its list, so
         // the list-level bindings don't apply: the Branches sub-commits drill
@@ -4228,9 +4238,40 @@ pub const App = struct {
     /// Builds the command (config override / preset / auto-detected editor) and
     /// hands it to the TUI loop, which suspends for a terminal editor or just
     /// launches a GUI one. The path is the on-disk file in tree or flat view.
+    /// True when a commit's file list is shown (the Commits drill, or the
+    /// Branches sub-commits drill at the files level) — where `e` edits the
+    /// selected file's current working-tree version.
+    fn inCommitFilesView(self: *const App) bool {
+        return (self.commitsFilesActive() and self.focus == .commits) or
+            (self.branchFilesActive() and self.focus == .branches);
+    }
+
+    /// Contexts (outside the Files panel) where `e` should open the file under
+    /// view: the staging/patch view, a commit's file list, and the Diff panel of
+    /// a working-tree file. The Files panel itself uses the `edit_file` action.
+    fn editableFileContext(self: *const App) bool {
+        if (self.staging_active) return true; // staging view + patch line view
+        if (self.inCommitFilesView()) return true;
+        // The Diff panel showing the selected working-tree file's diff.
+        if (self.focus == .main and self.contentFocus() == .files and self.selectedFile() != null) return true;
+        return false;
+    }
+
     fn requestEditFile(self: *App) !void {
         const path = blk: {
-            if (self.tree_view) {
+            // Staging / patch view: the file being staged or patched.
+            if (self.staging_active) {
+                if (self.staging_path.len > 0) break :blk self.staging_path;
+                try self.setMessage("no file to edit", .{});
+                return;
+            }
+            // A commit's file list: edit the file's current version on disk.
+            if (self.inCommitFilesView()) {
+                if (self.selectedCommitFile()) |cf| break :blk cf.path;
+                try self.setMessage("no file selected", .{});
+                return;
+            }
+            if (self.tree_view and self.focus == .files) {
                 if (self.treeSelectedRow()) |row| {
                     if (row.is_dir) {
                         try self.setMessage("select a file to edit (not a directory)", .{});

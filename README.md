@@ -165,8 +165,9 @@ Useful keys:
   unstaged and staged side by side, `c`/`A` commit/amend the staged changes,
   `esc` goes back)
 - `space`: stage/unstage file, checkout branch, or apply stash depending on focus
-- `e`: open the selected file in your editor (files panel; configurable — see
-  "Editor" below)
+- `e`: open the file under view in your editor — from the Files panel, a
+  commit's file list, the staging/patch view, or a working-tree file's Diff
+  panel (configurable — see "Editor" below)
 - `n`: create a new branch from HEAD (branches panel, Local tab)
 - `c`: checkout a branch/ref by typing its name (branches panel); resolves a
   local branch, DWIM-tracks a remote branch, detaches onto a tag/commit, or
@@ -331,8 +332,9 @@ How to read it:
 
 ### Editor (`e`)
 
-`e` in the Files panel opens the selected file in an editor. The command is
-chosen in this order:
+`e` opens the file under view in an editor — from the Files panel, a commit's
+file list (Commits/Branches drills), the staging/patch view, or a working-tree
+file's Diff panel. The command is chosen in this order:
 
 1. `editor_command` — an explicit template you set. Use `{{filename}}` for the
    path (it's quoted for you); if omitted, the path is appended.

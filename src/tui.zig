@@ -871,7 +871,8 @@ const help_lines = [_][]const u8{
     "  space          stage/unstage (whole dir in tree view)",
     "  a              stage/unstage all",
     "  c / A          commit (popup) / amend last commit",
-    "  e              open the file in your editor (configurable; see README)",
+    "  e              open the file in your editor (also from the staging,",
+    "                 patch, and diff views; configurable, see README)",
     "  d / D          discard menu / discard all",
     "  s              stash menu (all / +untracked / staged / file)",
     "  / / ctrl+b     filter by path / status filter",
@@ -886,6 +887,7 @@ const help_lines = [_][]const u8{
     "  [ / ]          switch unstaged / staged side",
     "  \\              toggle split view (unstaged | staged)",
     "  c / A          commit / amend the staged changes",
+    "  e              open the file in your editor",
     "",
     "Branches  (tabs: Local / Remotes / Tags / Worktrees / Submodules)",
     "  space          checkout / apply / init-update",
@@ -908,7 +910,8 @@ const help_lines = [_][]const u8{
     "  /              filter the log by message / author / path (esc clears)",
     "  b              bisect menu (start, then mark good/bad/skip/reset)",
     "  in a commit's files: space toggles a whole file into the patch,",
-    "                 enter opens that file to pick individual lines",
+    "                 enter opens that file to pick individual lines,",
+    "                 e opens the file in your editor",
     "  ctrl+p         custom patch menu (apply / remove from commit / reset)",
     "  ctrl+j/ctrl+k  move commit down / up",
     "",
@@ -1989,6 +1992,8 @@ const FooterCtx = struct {
     branch_files: bool = false,
     /// A merge/rebase/conflict is in progress (data.state != .clean).
     conflict: bool = false,
+    /// The Diff panel is showing a working-tree file (so `e` can edit it).
+    main_file: bool = false,
 };
 
 /// Keybinding hints for the current stage. A global suffix is appended since
@@ -1998,15 +2003,15 @@ fn footerHints(c: FooterCtx) []const u8 {
     const global = "  @ log  ? help  z undo  R refresh  q quit";
     const global_branches = "  @ log  ? help  z undo  q quit";
     if (c.staging_patch) {
-        return "j/k line  v range  space add/remove line (@@=hunk)  ^p patch  esc back" ++ global;
+        return "j/k line  v range  space add/remove line (@@=hunk)  ^p patch  e edit  esc back" ++ global;
     }
     if (c.staging) {
-        return "j/k line  v range  space stage/unstage (@@=hunk)  [/] staged/unstaged  \\ split  c/A commit/amend  esc back" ++ global;
+        return "j/k line  v range  space stage/unstage (@@=hunk)  [/] staged/unstaged  \\ split  c/A commit/amend  e edit  esc back" ++ global;
     }
     // A commit's file list, building a custom patch: `space` toggles the whole
-    // file, `enter` opens per-line selection, `^p` opens the patch menu. Shared
-    // by the Commits drill and the Branches sub-commits drill.
-    const commit_files_hint = "j/k file  space toggle file  enter pick lines  ^p patch  esc back";
+    // file, `enter` opens per-line selection, `^p` opens the patch menu, `e`
+    // edits the file. Shared by the Commits and Branches sub-commits drills.
+    const commit_files_hint = "j/k file  space toggle file  enter pick lines  ^p patch  e edit  esc back";
     if (c.commits_files and c.focus == .commits) {
         return commit_files_hint ++ global;
     }
@@ -2038,7 +2043,10 @@ fn footerHints(c: FooterCtx) []const u8 {
         .branches => unreachable,
         .commits => "enter files  g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  W diff  / filter  b bisect  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
-        .main => "j/k scroll  H/L pan  PgUp/PgDn page  drag select  ^o copy all  esc back" ++ global,
+        .main => if (c.main_file)
+            "j/k scroll  H/L pan  e edit  PgUp/PgDn page  drag select  ^o copy all  esc back" ++ global
+        else
+            "j/k scroll  H/L pan  PgUp/PgDn page  drag select  ^o copy all  esc back" ++ global,
     };
 }
 
@@ -2053,6 +2061,9 @@ fn contextHints(app: *const app_mod.App) []const u8 {
         .branch_commits = app.branch_commits_active,
         .branch_files = app.branchFilesActive(),
         .conflict = app.data.state != .clean,
+        // `e` edits the file when the Diff panel shows a working-tree file.
+        .main_file = app.focus == .main and !app.staging_active and
+            app.contentFocus() == .files and app.selectedFile() != null,
     });
 }
 
@@ -2561,6 +2572,16 @@ test "footer hints have no key contradictions per stage" {
 
     // The Diff panel advertises horizontal scrolling (H/L) for long lines.
     try std.testing.expect(has(footerHints(.{ .focus = .main }), "H/L"));
+
+    // `e edit` is advertised wherever editing the file works: Files, the
+    // staging and patch views, a commit's file list, and the Diff panel of a
+    // working-tree file — but NOT the plain Diff panel (a commit/branch diff).
+    try std.testing.expect(has(footerHints(.{ .focus = .files }), "e edit"));
+    try std.testing.expect(has(footerHints(.{ .staging = true, .focus = .main }), "e edit"));
+    try std.testing.expect(has(footerHints(.{ .staging_patch = true, .focus = .main }), "e edit"));
+    try std.testing.expect(has(footerHints(.{ .focus = .commits, .commits_files = true }), "e edit"));
+    try std.testing.expect(has(footerHints(.{ .focus = .main, .main_file = true }), "e edit"));
+    try std.testing.expect(!has(footerHints(.{ .focus = .main }), "e edit"));
 
     // Conflict state (Files panel): advertises the resolve/continue keys, and
     // must NOT promise "esc back" — the panel is top-level during a conflict,
