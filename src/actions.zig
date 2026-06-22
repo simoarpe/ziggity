@@ -17,6 +17,7 @@ pub const Action = enum {
     toggle_staging_split,
     select,
     stage_all,
+    edit_file,
     discard_selected,
     discard_all,
     stash_menu,
@@ -151,6 +152,7 @@ pub fn isMutating(self: Action) bool {
         .help,
         .copy_to_clipboard,
         .open_browser,
+        .edit_file,
         .diff_mark,
         .toggle_tree,
         .start_file_filter,
@@ -231,6 +233,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     switch (focus) {
         .files => {
             if (keymap.stage_all.matches(key)) return .stage_all;
+            if (keymap.edit_file.matches(key)) return .edit_file;
             if (keymap.toggle_tree.matches(key)) return .toggle_tree;
             if (keymap.open_status_filter.matches(key)) return .open_status_filter;
             if (keymap.discard.matches(key)) return .discard_selected;

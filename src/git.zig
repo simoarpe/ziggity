@@ -893,6 +893,17 @@ pub const Git = struct {
         return result.stdout;
     }
 
+    /// The configured `core.editor` (or null if unset), allocated by the Git's
+    /// allocator — caller frees. Used to auto-detect the file editor.
+    pub fn coreEditor(self: *Git) ?[]u8 {
+        var res = self.exec(&.{ "config", "--get", "core.editor" }) catch return null;
+        defer res.deinit(self.allocator);
+        if (!res.ok()) return null;
+        const trimmed = std.mem.trim(u8, res.stdout, " \t\r\n");
+        if (trimmed.len == 0) return null;
+        return self.allocator.dupe(u8, trimmed) catch null;
+    }
+
     pub fn stageFile(self: *Git, path: []const u8) !ExecResult {
         return self.stagePaths(&.{path});
     }

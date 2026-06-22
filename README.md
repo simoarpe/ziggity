@@ -165,6 +165,8 @@ Useful keys:
   unstaged and staged side by side, `c`/`A` commit/amend the staged changes,
   `esc` goes back)
 - `space`: stage/unstage file, checkout branch, or apply stash depending on focus
+- `e`: open the selected file in your editor (files panel; configurable — see
+  "Editor" below)
 - `n`: create a new branch from HEAD (branches panel, Local tab)
 - `c`: checkout a branch/ref by typing its name (branches panel); resolves a
   local branch, DWIM-tracks a remote branch, detaches onto a tag/commit, or
@@ -223,6 +225,13 @@ refresh_interval_secs = 10
 expand_focused_side_panel = false  # focused list panel expands, others shrink
 expanded_side_panel_weight = 2     # how much bigger the focused panel gets
 staging_split = auto               # staging layout: off | on | auto (default). See "Staging layout" below.
+
+# Editor for `e` in the Files panel. With nothing set, the editor is
+# auto-detected from git core.editor, then $GIT_EDITOR / $VISUAL / $EDITOR,
+# falling back to vim. See "Editor" below.
+editor_preset =                    # vim | nvim | nano | emacs | micro | helix | kakoune | vscode | sublime | zed | ...
+editor_command =                   # explicit override template, e.g. "code --reuse-window -- {{filename}}"
+editor_in_terminal =               # true = suspend the TUI and resume on exit (terminal editors); false = just launch (GUI)
 
 # Action feedback (lazygit-style). Default: actions succeed silently with a
 # one-line summary in the bottom bar, and only failures pop a dialog.
@@ -319,6 +328,27 @@ How to read it:
   staging changes the file from mixed to one-sided (or vice versa). Separately,
   the active side auto-switches to the staged side when the unstaged side is
   empty.
+
+### Editor (`e`)
+
+`e` in the Files panel opens the selected file in an editor. The command is
+chosen in this order:
+
+1. `editor_command` — an explicit template you set. Use `{{filename}}` for the
+   path (it's quoted for you); if omitted, the path is appended.
+2. `editor_preset` — a named built-in: `vi`, `vim`, `nvim`, `lvim`, `nano`,
+   `emacs`, `micro`, `helix`, `kakoune`, `vscode`, `sublime`, `zed`, `bbedit`,
+   `xcode`.
+3. Auto-detection — the first of git `core.editor`, `$GIT_EDITOR`, `$VISUAL`,
+   `$EDITOR` (matched to a preset by name, or run as a terminal editor).
+4. Fallback — `vim`.
+
+Terminal editors (vim, nano, emacs, micro, helix, kakoune, …) **suspend**
+Ziggity: it leaves the alt screen, runs the editor on the terminal, and resumes
+when you quit it. GUI editors (VS Code, Sublime, Zed, …) just **launch** and
+Ziggity keeps running. `editor_in_terminal = true|false` forces which behavior
+to use (handy for an unusual `editor_command`, or a GUI editor invoked with a
+`--wait` flag).
 
 ## libvaxis Usage
 

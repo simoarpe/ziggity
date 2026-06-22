@@ -389,6 +389,16 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             app.clipboard_request = null;
         }
 
+        // Open the selected file in the editor. A terminal editor needs the
+        // terminal, so suspend the TUI and resume on exit; a GUI editor just
+        // launches. This must happen on the UI thread (it drives the tty).
+        if (app.editor_request) |req| {
+            app.editor_request = null;
+            runEditor(&loop, &vx, &tty, writer, io, app, req);
+            app.allocator.free(req.command);
+            render_needed = true;
+        }
+
         // Start a queued network op once nothing else is in flight.
         if (async_future == null) {
             if (app.async_requested) |op| {
@@ -503,6 +513,67 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
 
         if (render_needed) try renderAndFlush(&vx, writer, app);
     }
+}
+
+/// Launch the requested editor on the file. A GUI editor (`suspend_tui` false)
+/// is spawned with its stdio sent to /dev/null so it can't scribble on the alt
+/// screen, and reaped. A terminal editor needs the terminal: stop the input
+/// loop, leave the alt screen and restore cooked mode, run it to completion,
+/// then re-enter raw + alt screen, restart the loop, and force a full repaint.
+fn runEditor(
+    loop: *vaxis.Loop(Event),
+    vx: *vaxis.Vaxis,
+    tty: *vaxis.Tty,
+    writer: *std.Io.Writer,
+    io: std.Io,
+    app: *app_mod.App,
+    req: app_mod.EditorRequest,
+) void {
+    const argv = [_][]const u8{ "sh", "-c", req.command };
+
+    if (!req.suspend_tui) {
+        var child = std.process.spawn(io, .{
+            .argv = &argv,
+            .cwd = .{ .path = app.git.root },
+            .environ_map = app.git.environ,
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        }) catch return;
+        _ = child.wait(io) catch {};
+        return;
+    }
+
+    // Hand the terminal to a terminal editor. `tty.fd`/`tty.termios` exist only
+    // on the real (posix) Tty, not the test stub — gate the raw/cooked switch.
+    const has_termios = @hasField(vaxis.Tty, "fd") and @hasField(vaxis.Tty, "termios");
+    loop.stop();
+    vx.exitAltScreen(writer) catch {};
+    vx.setMouseMode(writer, false) catch {};
+    writer.writeAll(focus_events_reset) catch {};
+    writer.flush() catch {};
+    if (has_termios) std.posix.tcsetattr(tty.fd.handle, .FLUSH, tty.termios) catch {}; // cooked mode
+
+    if (std.process.spawn(io, .{
+        .argv = &argv,
+        .cwd = .{ .path = app.git.root },
+        .environ_map = app.git.environ,
+    })) |child| {
+        var c = child;
+        _ = c.wait(io) catch {};
+    } else |_| {}
+
+    // Reclaim the terminal.
+    if (has_termios) {
+        _ = vaxis.Tty.makeRaw(tty.fd.handle) catch {};
+    }
+    vx.enterAltScreen(writer) catch {};
+    vx.setMouseMode(writer, true) catch {};
+    writer.writeAll(focus_events_set) catch {};
+    writer.flush() catch {};
+    vx.queryTerminal(writer, .fromSeconds(1)) catch {};
+    loop.start() catch {};
+    vx.queueRefresh(); // editor scribbled over the screen: repaint everything
 }
 
 /// ASCII spinner frame for `frame` (the renderer maps non-ASCII bytes to '?',
@@ -800,6 +871,7 @@ const help_lines = [_][]const u8{
     "  space          stage/unstage (whole dir in tree view)",
     "  a              stage/unstage all",
     "  c / A          commit (popup) / amend last commit",
+    "  e              open the file in your editor (configurable; see README)",
     "  d / D          discard menu / discard all",
     "  s              stash menu (all / +untracked / staged / file)",
     "  / / ctrl+b     filter by path / status filter",
@@ -1962,7 +2034,7 @@ fn footerHints(c: FooterCtx) []const u8 {
     }
     return switch (c.focus) {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push" ++ global,
-        .files => "space stage  a all  c commit  A amend  d discard  s stash  / filter  ` tree  enter hunks" ++ global,
+        .files => "space stage  a all  c commit  A amend  e edit  d discard  s stash  / filter  ` tree  enter hunks" ++ global,
         .branches => unreachable,
         .commits => "enter files  g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  W diff  / filter  b bisect  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,

@@ -38,6 +38,7 @@ pub const KeyMap = struct {
     escape: Binding = .{ .codepoint = 0x1b },
     backspace: Binding = .{ .codepoint = 0x7f },
     stage_all: Binding = .{ .codepoint = 'a' },
+    edit_file: Binding = .{ .codepoint = 'e' },
     file_filter: Binding = .{ .codepoint = '/' },
     toggle_tree: Binding = .{ .codepoint = '`' },
     staging_split: Binding = .{ .codepoint = '\\' },
@@ -126,6 +127,35 @@ pub const CustomCommand = struct {
 
 pub const max_custom_commands = 16;
 
+/// A fixed-capacity string, so config needs no allocation or teardown.
+fn FixedStr(comptime cap: usize) type {
+    return struct {
+        buf: [cap]u8 = undefined,
+        len: usize = 0,
+        const Self = @This();
+        pub fn get(self: *const Self) []const u8 {
+            return self.buf[0..self.len];
+        }
+        pub fn set(self: *Self, v: []const u8) void {
+            const n = @min(v.len, cap);
+            @memcpy(self.buf[0..n], v[0..n]);
+            self.len = n;
+        }
+    };
+}
+
+/// How a file is opened in an editor (`e` in the Files panel). All empty/null by
+/// default, which makes Ziggity auto-detect the editor (see `editor.zig`).
+pub const EditorConfig = struct {
+    /// `editor_preset`: a named built-in preset (vim, nvim, vscode, …).
+    preset: FixedStr(32) = .{},
+    /// `editor_command`: an explicit command template, with `{{filename}}`.
+    command: FixedStr(256) = .{},
+    /// `editor_in_terminal`: force suspend-and-resume (true) or just-launch
+    /// (false), overriding the preset/auto default. Null = use the default.
+    in_terminal: ?bool = null,
+};
+
 /// When the operation result dialog appears after a git action.
 /// `on_error` (default): silent on success, dialog on failure.
 pub const ResultDialog = enum { on_error, always, never };
@@ -186,6 +216,7 @@ pub const Config = struct {
     skip_confirm: ConfirmSkips = .{},
     keymap: KeyMap = .{},
     theme: Theme = .{},
+    editor: EditorConfig = .{},
     custom_commands: [max_custom_commands]CustomCommand = undefined,
     custom_count: usize = 0,
 
@@ -272,6 +303,18 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "branch_sort_order")) {
             if (std.meta.stringToEnum(model.BranchSortOrder, value)) |v| self.branch_sort_order = v;
+            return;
+        }
+        if (std.mem.eql(u8, key, "editor_preset")) {
+            self.editor.preset.set(value);
+            return;
+        }
+        if (std.mem.eql(u8, key, "editor_command")) {
+            self.editor.command.set(value);
+            return;
+        }
+        if (std.mem.eql(u8, key, "editor_in_terminal")) {
+            if (parseBool(value)) |on| self.editor.in_terminal = on;
             return;
         }
         if (std.mem.startsWith(u8, key, "skip_confirm.")) {

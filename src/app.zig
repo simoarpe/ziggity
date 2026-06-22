@@ -4,6 +4,7 @@ const vaxis = @import("vaxis");
 const actions = @import("actions.zig");
 const config_mod = @import("config.zig");
 const diff_mod = @import("diff.zig");
+const editor_mod = @import("editor.zig");
 const filetree = @import("filetree.zig");
 const git_mod = @import("git.zig");
 const model = @import("model.zig");
@@ -77,6 +78,14 @@ pub const CommitField = enum { subject, body };
 pub const CommitAction = enum { create, reword };
 
 /// A reusable single-line text-input popup. Each kind knows its title and what
+/// An editor launch requested by the edit action, performed by the TUI loop.
+/// `command` is a `sh -c` line (owned); `suspend_tui` means the TUI must give
+/// up the terminal (a terminal editor) and resume when it exits.
+pub const EditorRequest = struct {
+    command: []u8,
+    suspend_tui: bool,
+};
+
 /// to do with the submitted text.
 pub const TextPromptKind = enum {
     new_branch,
@@ -1515,6 +1524,11 @@ pub const App = struct {
     // Text the TUI loop should copy to the system clipboard (OSC 52), owned;
     // set by a copy action, consumed and freed by the loop.
     clipboard_request: ?[]u8 = null,
+    // An editor launch the TUI loop should perform (open the selected file):
+    // `command` is a `sh -c` line, owned; `suspend_tui` means hand the terminal
+    // to a terminal editor and resume on exit (vs just spawning a GUI editor).
+    // Set by the edit action, consumed and freed by the loop.
+    editor_request: ?EditorRequest = null,
     // Diffing mode: the ref (commit hash or branch) marked as the diff base.
     // When set, the main panel shows `git diff <base> <selected ref>`.
     diff_base: ?[]u8 = null,
@@ -1721,6 +1735,7 @@ pub const App = struct {
         self.copied_commits.deinit(self.allocator);
         if (self.marked_base) |b| self.allocator.free(b);
         if (self.clipboard_request) |c| self.allocator.free(c);
+        if (self.editor_request) |r| self.allocator.free(r.command);
         if (self.diff_base) |b| self.allocator.free(b);
         if (self.patch_source) |s| self.allocator.free(s);
         for (self.patch_paths.items) |p| self.allocator.free(p);
@@ -2273,6 +2288,7 @@ pub const App = struct {
             .patch_menu => try self.startPatchMenu(),
             .conflict_menu => try self.startConflictActionsMenu(),
             .stage_all => try self.toggleAllStaged(),
+            .edit_file => try self.requestEditFile(),
             .discard_selected => try self.startDiscardMenu(),
             .discard_all => try self.startDiscardAllConfirmation(),
             .stash_menu => try self.startStashMenu(),
@@ -4206,6 +4222,67 @@ pub const App = struct {
     /// content identity changes (tab switch, drill in/out).
     fn resetListHScroll(self: *App, focus: model.Focus) void {
         if (self.listView(focus)) |lv| lv.hscroll = 0;
+    }
+
+    /// `e` in the Files panel: open the selected file in the configured editor.
+    /// Builds the command (config override / preset / auto-detected editor) and
+    /// hands it to the TUI loop, which suspends for a terminal editor or just
+    /// launches a GUI one. The path is the on-disk file in tree or flat view.
+    fn requestEditFile(self: *App) !void {
+        const path = blk: {
+            if (self.tree_view) {
+                if (self.treeSelectedRow()) |row| {
+                    if (row.is_dir) {
+                        try self.setMessage("select a file to edit (not a directory)", .{});
+                        return;
+                    }
+                    break :blk row.path;
+                }
+            }
+            if (self.selectedFile()) |f| break :blk f.path;
+            try self.setMessage("no file selected", .{});
+            return;
+        };
+
+        var det_buf: [128]u8 = undefined;
+        const detected = self.detectEditor(&det_buf);
+        const r = editor_mod.resolve(
+            self.allocator,
+            self.config.editor.command.get(),
+            self.config.editor.preset.get(),
+            detected,
+            self.config.editor.in_terminal,
+            path,
+        ) catch {
+            try self.setMessage("could not build the editor command", .{});
+            return;
+        };
+        if (self.editor_request) |old| self.allocator.free(old.command);
+        self.editor_request = .{ .command = r.command, .suspend_tui = r.suspend_tui };
+    }
+
+    /// The editor to open files with, as the first word of (in order) git's
+    /// `core.editor`, `$GIT_EDITOR`, `$VISUAL`, `$EDITOR`. Empty if none is set
+    /// (the resolver then falls back to a `vim` preset). Copied into `buf`.
+    fn detectEditor(self: *App, buf: []u8) []const u8 {
+        if (self.git.coreEditor()) |ce| {
+            defer self.allocator.free(ce);
+            const w = editor_mod.firstWord(ce);
+            if (w.len > 0 and w.len <= buf.len) {
+                @memcpy(buf[0..w.len], w);
+                return buf[0..w.len];
+            }
+        }
+        for ([_][]const u8{ "GIT_EDITOR", "VISUAL", "EDITOR" }) |name| {
+            if (self.git.environ.get(name)) |v| {
+                const w = editor_mod.firstWord(v);
+                if (w.len > 0 and w.len <= buf.len) {
+                    @memcpy(buf[0..w.len], w);
+                    return buf[0..w.len];
+                }
+            }
+        }
+        return "";
     }
 
     /// Space in the Files panel: stage/unstage a whole directory in tree view
@@ -9085,6 +9162,7 @@ fn deinitTestApp(app: *App) void {
     app.allocator.free(app.op_summary);
     app.allocator.free(app.op_output);
     if (app.clipboard_request) |c| app.allocator.free(c);
+    if (app.editor_request) |r| app.allocator.free(r.command);
     if (app.diff_base) |b| app.allocator.free(b);
     if (app.patch_source) |s| app.allocator.free(s);
     for (app.patch_paths.items) |p| app.allocator.free(p);
