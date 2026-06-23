@@ -7,6 +7,7 @@ const std = @import("std");
 const app_mod = @import("app.zig");
 const config_mod = @import("config.zig");
 const diff_mod = @import("diff.zig");
+const model = @import("model.zig");
 const patch_mod = @import("patch.zig");
 
 const App = app_mod.App;
@@ -239,4 +240,140 @@ pub fn clearStaging(app: *App) void {
     app.staging_staged_view = false;
     app.staging_cursor = 0;
     app.staging_anchor = null;
+}
+
+// --- File-list staging: optimistic toggles flushed to git off the UI thread ---
+
+/// Space in the Files panel: stage/unstage a whole directory in tree view when
+/// the cursor is on one, otherwise the selected file.
+pub fn toggleSelectedFileStaged(app: *App) !void {
+    if (app.tree_view) {
+        if (app.treeSelectedRow()) |row| {
+            if (row.is_dir) return app.toggleDirStaged(row.path);
+        }
+    }
+    return toggleFileStaged(app);
+}
+
+/// Optimistically flip the staged/unstaged state of the matching files in the
+/// in-memory model so the list reflects the change the instant the key is
+/// pressed; the async `git status` refresh that follows reconciles it with
+/// reality (a full replace — no merge). `paths == null` means every file
+/// (stage/unstage all with no filter active). Statuses with no well-defined
+/// instant transition are left untouched. Files are mutated in place — never
+/// reordered or removed — so selection holds.
+pub fn applyOptimisticStage(app: *App, stage: bool, paths: ?[]const []const u8) void {
+    for (app.data.files) |*file| {
+        if (paths) |ps| {
+            var match = false;
+            for (ps) |p| {
+                if (std.mem.eql(u8, file.path, p)) {
+                    match = true;
+                    break;
+                }
+            }
+            if (!match) continue;
+        }
+        const new_status = if (stage)
+            model.optimisticStage(file.short_status)
+        else
+            model.optimisticUnstage(file.short_status);
+        if (new_status) |ns| model.setStatusFields(file, ns);
+    }
+    // A display filter (e.g. "unstaged only") may now hide a just-staged file;
+    // keep the selection index in range until the refresh re-anchors by path.
+    app.clampSelections();
+}
+
+pub fn toggleFileStaged(app: *App) !void {
+    const file = app.selectedFile() orelse {
+        try app.setMessage("no file selected", .{});
+        return;
+    };
+    if (file.conflict) return app.startConflictResolveMenu();
+    if (file.has_unstaged) return queueStageOp(app, file.path, true);
+    if (file.has_staged) return queueStageOp(app, file.path, false);
+    try app.setMessage("file has no staged or unstaged changes", .{});
+}
+
+/// Record a stage (`true`) or unstage (`false`) of `path`: update the model
+/// optimistically for instant feedback and remember the desired state. The
+/// actual `git add`/`git reset` is flushed off the UI thread by the loop (see
+/// `tryFlushStaging`), coalesced with any other rapid toggles, so input never
+/// blocks on git. Re-toggling a path just overwrites its desired state.
+pub fn queueStageOp(app: *App, path: []const u8, stage: bool) !void {
+    applyOptimisticStage(app, stage, &[_][]const u8{path});
+    const gop = try app.stage_pending.getOrPut(app.allocator, path);
+    if (!gop.found_existing) gop.key_ptr.* = try app.allocator.dupe(u8, path);
+    gop.value_ptr.* = stage;
+    // Drop any background worktree snapshot started before this change so it
+    // can't clobber the optimistic state with the pre-toggle index.
+    app.refresh_generation +%= 1;
+}
+
+/// TUI-loop hook: if any stage toggles are pending and the mutation worker is
+/// free, drain them into one `git add`/`git reset` batch and queue it. Called
+/// every loop iteration; a no-op when nothing is pending or a mutation is
+/// already in flight (then it runs after that finishes).
+pub fn tryFlushStaging(app: *App) void {
+    if (app.stage_pending.count() == 0 and app.stage_all_pending == null) return;
+    if (app.foregroundBusy()) return;
+    var add: std.ArrayList([]const u8) = .empty;
+    defer add.deinit(app.allocator);
+    var reset: std.ArrayList([]const u8) = .empty;
+    defer reset.deinit(app.allocator);
+    var it = app.stage_pending.iterator();
+    while (it.next()) |e| {
+        (if (e.value_ptr.*) &add else &reset).append(app.allocator, e.key_ptr.*) catch return;
+    }
+    // requestMutation deep-copies the lists, so the pending keys can be freed.
+    app.requestMutation(.{ .stage_batch = .{ .all = app.stage_all_pending, .add = add.items, .reset = reset.items } }, .{ .gerund = "staging", .refresh = App.Refresh.files }, "staged", .{}) catch return;
+    clearStagePending(app);
+    app.stage_all_pending = null;
+}
+
+pub fn clearStagePending(app: *App) void {
+    var it = app.stage_pending.iterator();
+    while (it.next()) |e| app.allocator.free(e.key_ptr.*);
+    app.stage_pending.clearRetainingCapacity();
+}
+
+/// Record a stage/unstage-all (`a`): update the model optimistically and set the
+/// pending all-op, which the loop flushes off-thread. Supersedes any per-path
+/// pending (the all-op is the new baseline for every file).
+pub fn queueStageAll(app: *App, stage: bool) void {
+    applyOptimisticStage(app, stage, null);
+    clearStagePending(app);
+    app.stage_all_pending = stage;
+    app.refresh_generation +%= 1;
+}
+
+pub fn toggleAllStaged(app: *App) !void {
+    // Like the per-file toggle, this only updates the model optimistically and
+    // queues the work; the loop flushes it off the UI thread so `a` is
+    // non-blocking too. A filter narrows it to the visible paths (a per-path
+    // batch); unfiltered, it uses the efficient `git add -A` / `git reset`.
+    if (app.visibleUnstagedCount() > 0) {
+        if (app.anyFileFilterActive()) {
+            var paths: std.ArrayList([]const u8) = .empty;
+            defer paths.deinit(app.allocator);
+            try app.collectVisiblePaths(&paths, .unstaged);
+            for (paths.items) |p| try queueStageOp(app, p, true);
+            return;
+        }
+        queueStageAll(app, true);
+        return;
+    }
+    if (app.visibleStagedCount() > 0) {
+        if (app.anyFileFilterActive()) {
+            var paths: std.ArrayList([]const u8) = .empty;
+            defer paths.deinit(app.allocator);
+            try app.collectVisiblePaths(&paths, .staged);
+            for (paths.items) |p| try queueStageOp(app, p, false);
+            return;
+        }
+        queueStageAll(app, false);
+        return;
+    }
+    try app.setMessage("no visible files to stage", .{});
 }
