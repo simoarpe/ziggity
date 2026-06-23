@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 
 const actions = @import("actions.zig");
+const commits_mod = @import("commits.zig");
 const config_mod = @import("config.zig");
 const credentials_mod = @import("credentials.zig");
 const diff_mod = @import("diff.zig");
@@ -2032,7 +2033,7 @@ pub const App = struct {
 
     pub fn handleKey(self: *App, key: vaxis.Key) !void {
         if (self.mode == .commit_prompt) {
-            try self.handleCommitPromptKey(key);
+            try commits_mod.handleCommitPromptKey(self, key);
             return;
         }
         if (self.mode == .file_filter_prompt) {
@@ -2119,11 +2120,11 @@ pub const App = struct {
         if (self.staging_active and !self.staging_patch_mode) {
             if (self.config.keymap.commit.matches(key)) {
                 if (self.foregroundBusy()) return self.setMessage("operation in progress...", .{});
-                return self.startCommitPrompt();
+                return commits_mod.startCommitPrompt(self);
             }
             if (self.config.keymap.amend.matches(key)) {
                 if (self.foregroundBusy()) return self.setMessage("operation in progress...", .{});
-                return self.amendLastCommit();
+                return commits_mod.amendLastCommit(self);
             }
         }
 
@@ -2309,8 +2310,8 @@ pub const App = struct {
             .start_file_filter => try self.startFileFilterPrompt(),
             .start_commit_filter => try self.startCommitFilterMenu(),
             .open_status_filter => try self.startStatusFilterMenu(),
-            .start_commit => try self.startCommitPrompt(),
-            .amend_commit => try self.amendLastCommit(),
+            .start_commit => try commits_mod.startCommitPrompt(self),
+            .amend_commit => try commits_mod.amendLastCommit(self),
             .cherry_pick => try self.toggleCommitCopy(),
             .new_branch => try self.startNewForBranchTab(),
             .checkout_by_name => try self.startTextPrompt(.checkout_by_name),
@@ -2328,7 +2329,7 @@ pub const App = struct {
             .rebase_squash => try self.rebaseSelectedCommit(.squash),
             .rebase_fixup => try self.rebaseSelectedCommit(.fixup),
             .rebase_edit => try self.rebaseSelectedCommit(.edit),
-            .rebase_reword => try self.startReword(),
+            .rebase_reword => try commits_mod.startReword(self),
             .rebase_move_down => try self.rebaseSelectedCommit(.move_down),
             .rebase_move_up => try self.rebaseSelectedCommit(.move_up),
             .rebase_create_fixup => try self.createFixupCommit(),
@@ -3649,142 +3650,6 @@ pub const App = struct {
 
     /// Space in the Files panel: stage/unstage a whole directory in tree view
     /// when the cursor is on one, otherwise the selected file.
-    fn startCommitPrompt(self: *App) !void {
-        if (self.data.stagedCount() == 0) {
-            try self.setMessage("stage files before committing", .{});
-            return;
-        }
-        self.mode = .commit_prompt;
-        self.commit_action = .create;
-        self.commit_field = .subject;
-        self.commit_buffer.clearRetainingCapacity();
-        self.commit_body_buffer.clearRetainingCapacity();
-        // The first time the dialog opens this session, pick up a draft left on
-        // disk by a previous run (if nothing is preserved in memory already).
-        if (!self.commit_draft_loaded) {
-            self.commit_draft_loaded = true;
-            if (self.commit_preserved_subject.len == 0 and self.commit_preserved_body.len == 0) self.loadCommitDraftFile();
-        }
-        // Restore an unfinalized message from a previous (cancelled) attempt.
-        const restored = self.commit_preserved_subject.len > 0 or self.commit_preserved_body.len > 0;
-        if (restored) {
-            try self.commit_buffer.appendSlice(self.allocator, self.commit_preserved_subject);
-            try self.commit_body_buffer.appendSlice(self.allocator, self.commit_preserved_body);
-        }
-        self.commit_cursor = self.commit_buffer.items.len;
-        self.commit_body_cursor = self.commit_body_buffer.items.len;
-        self.commit_scroll = 0;
-        self.commit_body_scroll_x = 0;
-        self.commit_body_scroll_y = 0;
-        if (restored) {
-            try self.setMessage("enter commit message (restored draft)", .{});
-        } else {
-            try self.setMessage("enter commit message", .{});
-        }
-    }
-
-    /// Preserve the live editor's content as the unfinalized create-commit
-    /// message, or drop any prior draft if the editor is now empty.
-    fn savePreservedCommitMessage(self: *App) !void {
-        const subj_empty = std.mem.trim(u8, self.commit_buffer.items, " \t\r\n").len == 0;
-        const body_empty = std.mem.trim(u8, self.commit_body_buffer.items, " \t\r\n").len == 0;
-        if (subj_empty and body_empty) return self.clearPreservedCommitMessage();
-        const subj = try self.allocator.dupe(u8, self.commit_buffer.items);
-        errdefer self.allocator.free(subj);
-        const body = try self.allocator.dupe(u8, self.commit_body_buffer.items);
-        self.allocator.free(self.commit_preserved_subject);
-        self.allocator.free(self.commit_preserved_body);
-        self.commit_preserved_subject = subj;
-        self.commit_preserved_body = body;
-        self.writeCommitDraftFile();
-    }
-
-    fn clearPreservedCommitMessage(self: *App) void {
-        self.allocator.free(self.commit_preserved_subject);
-        self.allocator.free(self.commit_preserved_body);
-        self.commit_preserved_subject = &.{};
-        self.commit_preserved_body = &.{};
-        if (self.commit_draft_path) |path| std.Io.Dir.deleteFile(.cwd(), self.git.io, path) catch {};
-    }
-
-    /// Persist the in-memory draft to `.git/ZIGGITY_PENDING_COMMIT` so it
-    /// survives quitting (best-effort; stored as "subject\n<body>").
-    fn writeCommitDraftFile(self: *App) void {
-        const path = self.commit_draft_path orelse return;
-        const bytes = std.fmt.allocPrint(self.allocator, "{s}\n{s}", .{ self.commit_preserved_subject, self.commit_preserved_body }) catch return;
-        defer self.allocator.free(bytes);
-        std.Io.Dir.writeFile(.cwd(), self.git.io, .{ .sub_path = path, .data = bytes }) catch {};
-    }
-
-    /// Load a draft persisted by a previous run into the in-memory fields. The
-    /// stored format splits subject from body at the first newline.
-    fn loadCommitDraftFile(self: *App) void {
-        const path = self.commit_draft_path orelse return;
-        const bytes = std.Io.Dir.readFileAlloc(.cwd(), self.git.io, path, self.allocator, .limited(1 << 20)) catch return;
-        defer self.allocator.free(bytes);
-        const nl = std.mem.indexOfScalar(u8, bytes, '\n');
-        const subject = if (nl) |i| bytes[0..i] else bytes;
-        const body = if (nl) |i| bytes[i + 1 ..] else "";
-        if (subject.len == 0 and body.len == 0) return;
-        const subj = self.allocator.dupe(u8, subject) catch return;
-        const bod = self.allocator.dupe(u8, body) catch {
-            self.allocator.free(subj);
-            return;
-        };
-        self.allocator.free(self.commit_preserved_subject);
-        self.allocator.free(self.commit_preserved_body);
-        self.commit_preserved_subject = subj;
-        self.commit_preserved_body = bod;
-    }
-
-    /// Open the commit editor pre-filled with a commit's subject/body to reword
-    /// it (runs an interactive rebase on submit).
-    fn startReword(self: *App) !void {
-        if (self.commits_tab != .commits) {
-            try self.setMessage("reword applies to the Commits tab", .{});
-            return;
-        }
-        if (self.data.state != .clean) {
-            try self.setMessage("finish the in-progress operation first (m)", .{});
-            return;
-        }
-        if (self.data.commits.len == 0) {
-            try self.setMessage("no commit selected", .{});
-            return;
-        }
-        const i = @min(self.commit_index, self.data.commits.len - 1);
-        const commit = self.data.commits[i];
-        const body = self.git.commitBody(commit.hash) catch try self.allocator.alloc(u8, 0);
-        defer self.allocator.free(body);
-
-        self.mode = .commit_prompt;
-        self.commit_action = .reword;
-        self.commit_reword_index = i;
-        self.commit_field = .subject;
-        self.commit_buffer.clearRetainingCapacity();
-        try self.commit_buffer.appendSlice(self.allocator, commit.subject);
-        self.commit_body_buffer.clearRetainingCapacity();
-        try self.commit_body_buffer.appendSlice(self.allocator, body);
-        self.commit_cursor = self.commit_buffer.items.len;
-        self.commit_body_cursor = self.commit_body_buffer.items.len;
-        self.commit_scroll = 0;
-        self.commit_body_scroll_x = 0;
-        self.commit_body_scroll_y = 0;
-        try self.setMessage("reword commit", .{});
-    }
-
-    fn amendLastCommit(self: *App) !void {
-        if (self.data.state != .clean) {
-            try self.setMessage("finish the in-progress operation first (m)", .{});
-            return;
-        }
-        if (self.data.stagedCount() == 0) {
-            try self.setMessage("stage changes to amend into the last commit", .{});
-            return;
-        }
-        return self.requestMutation(.amend, .{ .gerund = "amending", .command = "git commit --amend", .refresh = Refresh.commit }, "amended last commit", .{});
-    }
-
     pub fn isCommitCopied(self: *const App, hash: []const u8) bool {
         for (self.copied_commits.items) |h| {
             if (std.mem.eql(u8, h, hash)) return true;
@@ -4967,7 +4832,7 @@ pub const App = struct {
 
     /// Build the rebase todo + base ref for `action` on commit index `i`
     /// (in the newest-first commit list), run it, and report.
-    fn runRebase(self: *App, action: RebaseAction, i: usize, message: ?[]const u8) !void {
+    pub fn runRebase(self: *App, action: RebaseAction, i: usize, message: ?[]const u8) !void {
         const commits = self.data.commits;
         const base_index: usize = switch (action) {
             .drop, .edit, .reword, .move_up => i,
@@ -5162,67 +5027,6 @@ pub const App = struct {
             return;
         };
         return self.runMutationScoped(try self.git.stashDrop(entry.index), Refresh.stash, "dropped {s}", .{entry.selector});
-    }
-
-    fn handleCommitPromptKey(self: *App, key: vaxis.Key) !void {
-        if (self.isEscapeKey(key)) {
-            self.mode = .normal;
-            // Keep an unfinalized "create" message so reopening restores it; a
-            // reword's text is tied to its commit, so it is not preserved.
-            if (self.commit_action == .create) try self.savePreservedCommitMessage();
-            self.commit_buffer.clearRetainingCapacity();
-            self.commit_body_buffer.clearRetainingCapacity();
-            try self.setMessage("commit cancelled", .{});
-            return;
-        }
-        // Tab switches between the subject and body fields.
-        if (key.matches(vaxis.Key.tab, .{})) {
-            self.commit_field = if (self.commit_field == .subject) .body else .subject;
-            return;
-        }
-        // Enter submits from the subject; in the body it inserts a newline.
-        if (self.isEnterKey(key)) {
-            if (self.commit_field == .body) {
-                try self.commit_body_buffer.insertSlice(self.allocator, self.commit_body_cursor, "\n");
-                self.commit_body_cursor += 1;
-                return;
-            }
-            return self.submitCommit();
-        }
-        const buffer = if (self.commit_field == .subject) &self.commit_buffer else &self.commit_body_buffer;
-        const cursor = if (self.commit_field == .subject) &self.commit_cursor else &self.commit_body_cursor;
-        _ = try self.editLine(buffer, cursor, key);
-    }
-
-    fn submitCommit(self: *App) !void {
-        const subject = std.mem.trim(u8, self.commit_buffer.items, " \t\r\n");
-        if (subject.len == 0) {
-            try self.setMessage("commit message cannot be empty", .{});
-            return;
-        }
-        const body = std.mem.trim(u8, self.commit_body_buffer.items, " \t\r\n");
-        const message = if (body.len > 0)
-            try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ subject, body })
-        else
-            try self.allocator.dupe(u8, subject);
-        defer self.allocator.free(message);
-
-        const action = self.commit_action;
-        const reword_index = self.commit_reword_index;
-        self.mode = .normal;
-        self.commit_buffer.clearRetainingCapacity();
-        self.commit_body_buffer.clearRetainingCapacity();
-        // The message is being committed: drop any preserved draft.
-        self.clearPreservedCommitMessage();
-
-        switch (action) {
-            // Run the commit off-thread (close the panel first, then
-            // commit via a waiting status): the dialog disappears at once and
-            // pre-commit hooks / signing / a slow `git status` no longer block
-            // it. The refresh is scoped to the views a commit changes.
-            .create => return self.requestMutation(.{ .commit = message }, .{ .gerund = "committing", .command = "git commit", .refresh = Refresh.commit }, "commit created", .{}),
-            .reword => return self.runRebase(.reword, reword_index, message),
-        }
     }
 
     fn handleFileFilterPromptKey(self: *App, key: vaxis.Key) !void {
@@ -7463,7 +7267,7 @@ test "an unfinalized commit message is preserved on cancel and restored on reope
     const esc = vaxis.Key{ .codepoint = vaxis.Key.escape };
 
     // Type a subject + multi-line body, then cancel with <esc>.
-    try app.startCommitPrompt();
+    try commits_mod.startCommitPrompt(&app);
     try app.commit_buffer.appendSlice(allocator, "wip subject");
     try app.commit_body_buffer.appendSlice(allocator, "line one\nline two");
     try app.handleKey(esc);
@@ -7473,28 +7277,28 @@ test "an unfinalized commit message is preserved on cancel and restored on reope
     try std.testing.expectEqualStrings("line one\nline two", app.commit_preserved_body);
 
     // Reopening restores the draft into the editor, caret at the end.
-    try app.startCommitPrompt();
+    try commits_mod.startCommitPrompt(&app);
     try std.testing.expectEqualStrings("wip subject", app.commit_buffer.items);
     try std.testing.expectEqualStrings("line one\nline two", app.commit_body_buffer.items);
     try std.testing.expectEqual(app.commit_buffer.items.len, app.commit_cursor);
 
     // A successful commit drops the draft (submitCommit calls this on submit).
-    app.clearPreservedCommitMessage();
+    commits_mod.clearPreservedCommitMessage(&app);
     try std.testing.expectEqual(@as(usize, 0), app.commit_preserved_subject.len);
 
     // Emptying the editor and cancelling drops the preserved draft too.
-    try app.startCommitPrompt();
+    try commits_mod.startCommitPrompt(&app);
     try app.commit_buffer.appendSlice(allocator, "draft");
     try app.handleKey(esc);
     try std.testing.expect(app.commit_preserved_subject.len > 0);
-    try app.startCommitPrompt(); // restores "draft"
+    try commits_mod.startCommitPrompt(&app); // restores "draft"
     app.commit_buffer.clearRetainingCapacity();
     app.commit_body_buffer.clearRetainingCapacity();
     try app.handleKey(esc);
     try std.testing.expectEqual(@as(usize, 0), app.commit_preserved_subject.len);
 
     // A reword's text is NOT preserved (it belongs to its commit).
-    try app.startCommitPrompt();
+    try commits_mod.startCommitPrompt(&app);
     app.commit_action = .reword;
     try app.commit_buffer.appendSlice(allocator, "reworded");
     try app.handleKey(esc);
