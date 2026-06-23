@@ -107,6 +107,8 @@ pub const Theme = struct {
     removed: u8 = 9,
     hunk: u8 = 14,
     header: u8 = 13,
+    /// Commit short hashes in the log (the classic `git log --oneline` yellow).
+    hash: u8 = 3,
     /// Footer (bottom bar) keybinding hints: the key is highlighted in
     /// `footer_key`, its description shown in `footer`.
     footer: u8 = 12,

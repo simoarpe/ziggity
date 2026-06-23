@@ -1636,12 +1636,17 @@ fn drawTags(win: vaxis.Window, app: *const app_mod.App) void {
         row += 1;
     }) {
         const tag = app.data.tags[idx];
-        var buf: [512]u8 = undefined;
-        const line = if (tag.subject.len > 0)
-            std.fmt.bufPrint(&buf, "{s}  {s}", .{ tag.name, tag.subject }) catch tag.name
-        else
-            tag.name;
-        drawSelectable(win, row, line, styles().normal, selOf(idx == app.tag_index, app.focus == .branches));
+        // Tag name in the default colour, its annotation/subject dimmed so the
+        // name stands out (the row's selection background still spans both).
+        var base = styles().normal;
+        const sel = selOf(idx == app.tag_index, app.focus == .branches);
+        applySel(&base, sel);
+        if (sel != .none) fillRow(win, row, base);
+        const col = printSpan(win, row, 0, tag.name, base);
+        if (tag.subject.len > 0) {
+            const c2 = printSpan(win, row, col, "  ", base);
+            _ = printSpan(win, row, c2, tag.subject, withFg(base, ui_theme.muted));
+        }
     }
 }
 
@@ -1715,6 +1720,7 @@ fn drawCommitFiles(win: vaxis.Window, app: *const app_mod.App, files: []const mo
         const line = std.fmt.bufPrint(&buf, "{c}{c} {s}", .{ marker, file.status, file.path }) catch file.path;
         const style = if (in_patch) styles().staged else switch (file.status) {
             'A' => styles().added,
+            'M', 'R' => styles().hash,
             'D' => styles().removed,
             else => styles().normal,
         };
@@ -1734,15 +1740,25 @@ fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const m
         row += 1;
     }) {
         const commit = commits[idx];
-        var buf: [512]u8 = undefined;
         // A leading marker flags commits copied to the cherry-pick clipboard;
         // a 'B' flags the commit marked as the base for a rebase --onto.
         const copied = app.isCommitCopied(commit.hash);
         const marked = app.isMarkedBase(commit.hash);
         const marker: u8 = if (marked) 'B' else if (copied) '*' else ' ';
-        const line = std.fmt.bufPrint(&buf, "{c}{s} {s}", .{ marker, commit.short_hash, commit.subject }) catch commit.subject;
-        const style = if (marked) styles().warning else if (copied) styles().staged else styles().normal;
-        drawSelectable(win, row, line, style, selOf(idx == selected, focused));
+
+        // The selection background/bold spans the whole row; the short hash is
+        // coloured on its own (yellow, or the marker's colour) while the subject
+        // keeps the default text colour — the familiar `git log --oneline` look.
+        var base = styles().normal;
+        const sel = selOf(idx == selected, focused);
+        applySel(&base, sel);
+        if (sel != .none) fillRow(win, row, base);
+
+        const hash_fg = if (marked) ui_theme.warning else if (copied) ui_theme.staged else ui_theme.hash;
+        var buf: [80]u8 = undefined;
+        const head = std.fmt.bufPrint(&buf, "{c}{s} ", .{ marker, commit.short_hash }) catch "";
+        const col = printSpan(win, row, 0, head, withFg(base, hash_fg));
+        _ = printSpan(win, row, col, commit.subject, base);
     }
 }
 
@@ -2414,6 +2430,7 @@ const StyleSet = struct {
     removed: vaxis.Style,
     hunk: vaxis.Style,
     header: vaxis.Style,
+    hash: vaxis.Style,
     bottom: vaxis.Style,
     bottom_accent: vaxis.Style,
     hint_key: vaxis.Style,
@@ -2436,6 +2453,7 @@ fn styles() StyleSet {
         .removed = .{ .fg = .{ .index = t.removed } },
         .hunk = .{ .fg = .{ .index = t.hunk } },
         .header = .{ .fg = .{ .index = t.header }, .bold = true },
+        .hash = .{ .fg = .{ .index = t.hash } },
         .bottom = .{ .fg = .{ .index = 15 }, .bg = .{ .index = 0 } },
         .bottom_accent = .{ .fg = .{ .index = t.accent }, .bg = .{ .index = 0 }, .bold = true },
         .hint_key = .{ .fg = .{ .index = t.footer_key }, .bg = .{ .index = 0 }, .bold = true },
