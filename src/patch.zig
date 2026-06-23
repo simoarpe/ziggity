@@ -7,6 +7,7 @@ const std = @import("std");
 
 const app_mod = @import("app.zig");
 const diff_mod = @import("diff.zig");
+const staging_mod = @import("staging.zig");
 
 const App = app_mod.App;
 
@@ -183,7 +184,7 @@ pub fn doOpenPatchLineView(app: *App) !void {
         try app.setMessage("could not load the file's diff", .{});
         return;
     };
-    app.clearStaging();
+    staging_mod.clearStaging(app);
     app.staging_path = try app.allocator.dupe(u8, file.path);
     app.staging_diff = diff;
     app.staging = try diff_mod.parse(app.allocator, app.staging_diff);
@@ -203,9 +204,9 @@ pub fn doOpenPatchLineView(app: *App) !void {
     }
 
     app.staging_anchor = null;
-    app.staging_cursor = app.stagingFirstLine();
+    app.staging_cursor = staging_mod.stagingFirstLine(app);
     app.resetMainView();
-    app.scrollToStagingCursor();
+    staging_mod.scrollToStagingCursor(app);
     try app.setMessage("space: toggle line/hunk into patch, esc: back", .{});
 }
 
@@ -217,7 +218,7 @@ pub fn togglePatchInclusion(app: *App) !void {
         try app.setMessage("no changes in this file", .{});
         return;
     }
-    const hunk_index = app.stagingHunkAt(app.staging_cursor) orelse {
+    const hunk_index = staging_mod.stagingHunkAt(app, app.staging_cursor) orelse {
         try app.setMessage("move the cursor onto a change", .{});
         return;
     };
@@ -291,7 +292,7 @@ pub fn closePatchLineView(app: *App) !void {
         removePatchFile(app, path);
     }
 
-    app.clearStaging();
+    staging_mod.clearStaging(app);
     app.focus = app.main_origin;
     app.resetMainView();
     try app.updatePreview();

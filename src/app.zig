@@ -10,6 +10,7 @@ const filetree = @import("filetree.zig");
 const git_mod = @import("git.zig");
 const model = @import("model.zig");
 const patch_mod = @import("patch.zig");
+const staging_mod = @import("staging.zig");
 const textmatch = @import("textmatch.zig");
 
 pub const Mode = enum {
@@ -2190,7 +2191,7 @@ pub const App = struct {
                     return;
                 }
                 if (self.staging_active) {
-                    try self.closeStaging();
+                    try staging_mod.closeStaging(self);
                 } else if (self.focus == .main) {
                     try self.leaveMain();
                 } else if (self.focus == .commits and self.commit_files_active) {
@@ -2216,8 +2217,8 @@ pub const App = struct {
             // `[` / `]` cycle a multi-dimensional panel: the Branches/Commits
             // tabs, or the staged/unstaged side of the staging view.
             // The patch line view has no staged/unstaged sides, so `[`/`]` are inert there.
-            .prev_tab => if (self.staging_patch_mode) {} else if (self.staging_active) try self.toggleStagingSide() else try self.cycleTab(.prev),
-            .next_tab => if (self.staging_patch_mode) {} else if (self.staging_active) try self.toggleStagingSide() else try self.cycleTab(.next),
+            .prev_tab => if (self.staging_patch_mode) {} else if (self.staging_active) try staging_mod.toggleStagingSide(self) else try self.cycleTab(.prev),
+            .next_tab => if (self.staging_patch_mode) {} else if (self.staging_active) try staging_mod.toggleStagingSide(self) else try self.cycleTab(.next),
             .refresh => {
                 self.refreshViews(Refresh.all);
                 try self.setMessage("refreshed", .{});
@@ -2225,16 +2226,16 @@ pub const App = struct {
             .fetch => try self.requestAsync(.fetch),
             .pull => try self.requestAsync(.pull),
             .push => try self.startPush(),
-            .move_up => if (self.staging_active) self.moveStagingCursor(-1) else try self.moveUp(),
-            .move_down => if (self.staging_active) self.moveStagingCursor(1) else try self.moveDown(),
+            .move_up => if (self.staging_active) staging_mod.moveStagingCursor(self, -1) else try self.moveUp(),
+            .move_down => if (self.staging_active) staging_mod.moveStagingCursor(self, 1) else try self.moveDown(),
             .range_select => {
                 if (self.staging_active) {
-                    self.toggleStagingRange();
+                    staging_mod.toggleStagingRange(self);
                 } else if (self.focus == .commits) {
                     try self.pasteCopiedCommits();
                 }
             },
-            .focus_left => if (self.staging_active) try self.closeStaging() else try self.focusPrevious(),
+            .focus_left => if (self.staging_active) try staging_mod.closeStaging(self) else try self.focusPrevious(),
             .focus_right => if (!self.staging_active) try self.focusNext(),
             // H/L pan the focused panel horizontally (main diff or a side list)
             // so rows wider than the panel can be read. No-op when content fits.
@@ -2246,7 +2247,7 @@ pub const App = struct {
             // Files panel it mirrors <enter>, opening the staging view.
             .toggle_main => {
                 if (self.staging_active) {
-                    try self.closeStaging();
+                    try staging_mod.closeStaging(self);
                 } else if (self.focus == .main) {
                     try self.leaveMain();
                 } else if (self.focus == .files) {
@@ -2256,12 +2257,12 @@ pub const App = struct {
                 }
             },
             // Toggle the staging view between single and split layouts.
-            .toggle_staging_split => if (self.staging_active and !self.staging_patch_mode) try self.toggleStagingSplit(),
+            .toggle_staging_split => if (self.staging_active and !self.staging_patch_mode) try staging_mod.toggleStagingSplit(self),
             .select => {
                 if (self.staging_patch_mode) {
                     try patch_mod.togglePatchInclusion(self);
                 } else if (self.staging_active) {
-                    try self.applyStagingSelection();
+                    try staging_mod.applyStagingSelection(self);
                 } else switch (self.focus) {
                     .files => try self.toggleSelectedFileStaged(),
                     // In the sub-commits drill, space on a file adds it to the
@@ -2444,7 +2445,7 @@ pub const App = struct {
                         self.diff_sel_active = false;
                         if (!self.staging_active) {
                             if (self.contentFocus() == .files) {
-                                try self.openStaging();
+                                try staging_mod.openStaging(self);
                             } else {
                                 try self.focusPanel(.main);
                             }
@@ -3256,242 +3257,10 @@ pub const App = struct {
                     if (row.is_dir) return self.toggleTreeCollapse();
                 }
             }
-            return self.openStaging();
+            return staging_mod.openStaging(self);
         }
         return self.enterMain();
     }
-
-    fn openStaging(self: *App) !void {
-        const file = self.selectedFile() orelse {
-            try self.setMessage("no file selected", .{});
-            return;
-        };
-        if (!file.tracked and !file.has_staged) {
-            try self.setMessage("stage untracked files with space in the Files panel", .{});
-            return;
-        }
-        const path = try self.allocator.dupe(u8, file.path);
-        self.clearStaging();
-        self.staging_path = path;
-        self.staging_staged_view = false;
-        self.main_origin = .files;
-        self.focus = .main;
-        self.staging_active = true;
-        // Decide the layout for this file (recomputed only on (re)open):
-        //   off/on -> the remembered preference; auto -> split for a file with
-        //   both staged and unstaged changes, else the remembered preference.
-        self.staging_opened_mixed = file.has_staged and file.has_unstaged;
-        self.staging_split = stagingLayoutForOpen(self.config.staging_split, self.staging_split_pref, self.staging_opened_mixed);
-        try self.loadStaging(false);
-        try self.setMessage("staging {s}", .{file.path});
-    }
-
-    /// Reload the staging diff for the current side. `keep_cursor` preserves the
-    /// cursor position (clamped) instead of resetting to the first change — used
-    /// after staging/unstaging a line so the cursor stays put and repeated space
-    /// keeps applying the lines that shift up into it.
-    fn loadStaging(self: *App, keep_cursor: bool) !void {
-        if (self.staging) |*parsed| parsed.deinit(self.allocator);
-        self.staging = null;
-        self.allocator.free(self.staging_diff);
-        self.staging_diff = &.{};
-
-        self.staging_diff = self.git.rawFileDiff(self.staging_path, self.staging_staged_view, self.config.diff_context) catch
-            try self.allocator.dupe(u8, "");
-
-        // If the active side has no diff but the other side does, switch to it —
-        // e.g. opening a fully-staged file shows the staged changes rather than a
-        // blank unstaged pane (and after staging the last change, flip to staged).
-        if (self.staging_diff.len == 0) {
-            const other = self.git.rawFileDiff(self.staging_path, !self.staging_staged_view, self.config.diff_context) catch
-                try self.allocator.dupe(u8, "");
-            if (other.len > 0) {
-                self.allocator.free(self.staging_diff);
-                self.staging_diff = other;
-                self.staging_staged_view = !self.staging_staged_view;
-            } else {
-                self.allocator.free(other);
-            }
-        }
-
-        self.staging = try diff_mod.parse(self.allocator, self.staging_diff);
-
-        // In split view, also load the other side's diff for the read-only pane.
-        self.allocator.free(self.staging_other_diff);
-        self.staging_other_diff = &.{};
-        if (self.staging_split) {
-            self.staging_other_diff = self.git.rawFileDiff(self.staging_path, !self.staging_staged_view, self.config.diff_context) catch
-                try self.allocator.dupe(u8, "");
-        }
-
-        self.staging_anchor = null;
-        if (keep_cursor) {
-            self.staging_cursor = @min(@max(self.staging_cursor, self.stagingFirstLine()), self.stagingLastLine());
-        } else {
-            self.staging_cursor = self.stagingFirstLine();
-        }
-        self.scrollToStagingCursor();
-    }
-
-    fn toggleStagingSide(self: *App) !void {
-        self.staging_staged_view = !self.staging_staged_view;
-        try self.loadStaging(false);
-        try self.setMessage("{s} changes", .{if (self.staging_staged_view) "staged" else "unstaged"});
-    }
-
-    /// The staging layout to use when a file opens, per the config mode, the
-    /// remembered `\` preference, and whether the file has both staged and
-    /// unstaged changes ("mixed").
-    fn stagingLayoutForOpen(mode: config_mod.StagingSplitMode, pref: bool, mixed: bool) bool {
-        return switch (mode) {
-            .off, .on => pref,
-            .auto => if (mixed) true else pref,
-        };
-    }
-
-    /// Whether toggling `\` should be remembered for the next file. In `auto`, a
-    /// mixed file always reopens split, so its toggle is transient.
-    fn stagingTogglePersists(mode: config_mod.StagingSplitMode, mixed: bool) bool {
-        return !(mode == .auto and mixed);
-    }
-
-    fn toggleStagingSplit(self: *App) !void {
-        self.staging_split = !self.staging_split;
-        if (stagingTogglePersists(self.config.staging_split, self.staging_opened_mixed)) {
-            self.staging_split_pref = self.staging_split;
-        }
-        try self.loadStaging(true); // (re)load or drop the other side's diff
-        try self.setMessage("{s} staging view", .{if (self.staging_split) "split" else "single"});
-    }
-
-    fn toggleStagingRange(self: *App) void {
-        self.staging_anchor = if (self.staging_anchor == null) self.staging_cursor else null;
-    }
-
-    /// Line index of the first selectable line (the first hunk's `@@` line).
-    pub fn stagingFirstLine(self: *const App) usize {
-        const parsed = self.staging orelse return 0;
-        if (parsed.hunks.len == 0) return 0;
-        return parsed.hunks[0].start_line;
-    }
-
-    fn stagingLastLine(self: *const App) usize {
-        const lines = std.mem.count(u8, self.staging_diff, "\n");
-        if (lines == 0) return self.stagingFirstLine();
-        return lines - 1;
-    }
-
-    fn moveStagingCursor(self: *App, delta: i8) void {
-        const first = self.stagingFirstLine();
-        const last = self.stagingLastLine();
-        if (delta < 0) {
-            if (self.staging_cursor > first) self.staging_cursor -= 1;
-        } else if (self.staging_cursor < last) {
-            self.staging_cursor += 1;
-        }
-        self.scrollToStagingCursor();
-    }
-
-    pub fn scrollToStagingCursor(self: *App) void {
-        const height: usize = if (self.main_view_height == 0) 20 else self.main_view_height;
-        if (self.staging_cursor < self.main_scroll) {
-            self.main_scroll = self.staging_cursor;
-        } else if (self.staging_cursor >= self.main_scroll + height) {
-            self.main_scroll = self.staging_cursor + 1 - height;
-        }
-    }
-
-    /// The hunk index whose body or header line contains `abs`, or null.
-    pub fn stagingHunkAt(self: *const App, abs: usize) ?usize {
-        const parsed = self.staging orelse return null;
-        for (parsed.hunks, 0..) |hunk, idx| {
-            if (abs >= hunk.start_line and abs < hunk.end_line) return idx;
-        }
-        return null;
-    }
-
-    fn applyStagingSelection(self: *App) !void {
-        const parsed = self.staging orelse return;
-        if (parsed.hunks.len == 0) {
-            try self.setMessage("no changes to stage", .{});
-            return;
-        }
-        const hunk_index = self.stagingHunkAt(self.staging_cursor) orelse {
-            try self.setMessage("move the cursor onto a change", .{});
-            return;
-        };
-        const hunk = parsed.hunks[hunk_index];
-
-        // On the `@@` header line, stage the whole hunk; otherwise the lines.
-        const patch = if (self.staging_cursor == hunk.start_line)
-            try diff_mod.buildHunkPatch(self.allocator, self.staging_diff, parsed, hunk_index)
-        else blk: {
-            const lo_abs = @min(self.staging_anchor orelse self.staging_cursor, self.staging_cursor);
-            const hi_abs = @max(self.staging_anchor orelse self.staging_cursor, self.staging_cursor);
-            const body_first = hunk.start_line + 1;
-            const lo = (@max(lo_abs, body_first)) - body_first;
-            const hi = (@min(hi_abs, hunk.end_line - 1)) - body_first;
-            break :blk diff_mod.buildLinePatch(self.allocator, self.staging_diff, parsed, hunk_index, lo, hi, self.staging_staged_view) catch |err| switch (err) {
-                error.EmptySelection => {
-                    try self.setMessage("selection contains no change", .{});
-                    return;
-                },
-                error.NoNewlineHunk => {
-                    try self.setMessage("stage the whole hunk for no-newline changes (enter on @@)", .{});
-                    return;
-                },
-                error.InvalidHunk => {
-                    try self.setMessage("could not build patch for this hunk", .{});
-                    return;
-                },
-                else => return err,
-            };
-        };
-        defer self.allocator.free(patch);
-
-        var result = try self.git.applyPatch(patch, self.staging_staged_view);
-        defer result.deinit(self.allocator);
-        if (!result.ok()) {
-            const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
-            try self.setMessage("apply failed: {s}", .{if (stderr.len > 0) stderr else "git apply error"});
-            return;
-        }
-        const verb = if (self.staging_staged_view) "unstaged" else "staged";
-        const scope = if (self.staging_cursor == hunk.start_line) "hunk" else "selection";
-        try self.setMessage("{s} {s}", .{ verb, scope });
-        self.staging_anchor = null;
-        // Staging a line only touches the index — scoped (fast) reload. Keep
-        // the cursor where it is so repeated space keeps staging the lines that
-        // shift up into its position.
-        self.refreshFiles() catch {};
-        try self.loadStaging(true);
-    }
-
-    fn closeStaging(self: *App) !void {
-        if (self.staging_patch_mode) return patch_mod.closePatchLineView(self);
-        self.clearStaging();
-        self.focus = .files;
-        self.resetMainView();
-        try self.updatePreview();
-    }
-
-    pub fn clearStaging(self: *App) void {
-        self.staging_patch_mode = false;
-        if (self.staging) |*parsed| parsed.deinit(self.allocator);
-        self.staging = null;
-        self.allocator.free(self.staging_diff);
-        self.staging_diff = &.{};
-        self.allocator.free(self.staging_other_diff);
-        self.staging_other_diff = &.{};
-        self.allocator.free(self.staging_path);
-        self.staging_path = &.{};
-        self.staging_active = false;
-        self.staging_staged_view = false;
-        self.staging_cursor = 0;
-        self.staging_anchor = null;
-    }
-
-    // --- Commits panel: its own commit-files drill (log -> a commit's files) ---
 
     const TabDirection = enum { prev, next };
 
@@ -3606,7 +3375,7 @@ pub const App = struct {
         // Sub-commits / commit-files drills persist across focus changes (each
         // panel keeps its own context); only <esc> backs out of them. Staging
         // is modal, so it is closed.
-        if (self.staging_active) self.clearStaging();
+        if (self.staging_active) staging_mod.clearStaging(self);
         self.focus = focus;
         self.resetMainView();
         try self.updatePreview();
@@ -6619,7 +6388,7 @@ pub const App = struct {
         self.refreshViews(self.mutation_refresh);
         // If the staging view is open (e.g. a commit/amend was started from it),
         // reload its diff so it reflects what's left after the mutation.
-        if (self.staging_active) self.loadStaging(true) catch {};
+        if (self.staging_active) staging_mod.loadStaging(self, true) catch {};
     }
 
     fn runCustomCommand(self: *App, command: []const u8) !void {
@@ -8013,23 +7782,23 @@ test "tab closes the staging view back to the files panel" {
 
 test "staging split layout + remember rules per off/on/auto" {
     // off: layout follows the remembered preference; mixed isn't special.
-    try std.testing.expect(!App.stagingLayoutForOpen(.off, false, false));
-    try std.testing.expect(!App.stagingLayoutForOpen(.off, false, true));
-    try std.testing.expect(App.stagingLayoutForOpen(.off, true, false));
+    try std.testing.expect(!staging_mod.stagingLayoutForOpen(.off, false, false));
+    try std.testing.expect(!staging_mod.stagingLayoutForOpen(.off, false, true));
+    try std.testing.expect(staging_mod.stagingLayoutForOpen(.off, true, false));
     // on: same, just with a split-by-default preference.
-    try std.testing.expect(App.stagingLayoutForOpen(.on, true, true));
-    try std.testing.expect(!App.stagingLayoutForOpen(.on, false, false));
+    try std.testing.expect(staging_mod.stagingLayoutForOpen(.on, true, true));
+    try std.testing.expect(!staging_mod.stagingLayoutForOpen(.on, false, false));
     // auto: one-sided follows the preference; mixed is always split.
-    try std.testing.expect(!App.stagingLayoutForOpen(.auto, false, false)); // one-sided default single
-    try std.testing.expect(App.stagingLayoutForOpen(.auto, true, false)); // one-sided remembered split
-    try std.testing.expect(App.stagingLayoutForOpen(.auto, false, true)); // mixed -> split regardless
-    try std.testing.expect(App.stagingLayoutForOpen(.auto, true, true));
+    try std.testing.expect(!staging_mod.stagingLayoutForOpen(.auto, false, false)); // one-sided default single
+    try std.testing.expect(staging_mod.stagingLayoutForOpen(.auto, true, false)); // one-sided remembered split
+    try std.testing.expect(staging_mod.stagingLayoutForOpen(.auto, false, true)); // mixed -> split regardless
+    try std.testing.expect(staging_mod.stagingLayoutForOpen(.auto, true, true));
 
     // The `\` toggle persists everywhere except a mixed file in auto.
-    try std.testing.expect(App.stagingTogglePersists(.off, true));
-    try std.testing.expect(App.stagingTogglePersists(.on, false));
-    try std.testing.expect(App.stagingTogglePersists(.auto, false)); // one-sided remembers
-    try std.testing.expect(!App.stagingTogglePersists(.auto, true)); // mixed is transient
+    try std.testing.expect(staging_mod.stagingTogglePersists(.off, true));
+    try std.testing.expect(staging_mod.stagingTogglePersists(.on, false));
+    try std.testing.expect(staging_mod.stagingTogglePersists(.auto, false)); // one-sided remembers
+    try std.testing.expect(!staging_mod.stagingTogglePersists(.auto, true)); // mixed is transient
 }
 
 test "tab mirrors enter in the files panel (opens staging, not the diff)" {
@@ -8996,25 +8765,25 @@ test "staging cursor navigation clamps, ranges, and tears down cleanly" {
     app.staging = try diff_mod.parse(allocator, app.staging_diff);
     app.staging_path = try allocator.dupe(u8, "f");
     app.staging_active = true;
-    app.staging_cursor = app.stagingFirstLine();
+    app.staging_cursor = staging_mod.stagingFirstLine(&app);
 
     // Cursor starts on the @@ line (line 3) and cannot move above it.
     try std.testing.expectEqual(@as(usize, 3), app.staging_cursor);
-    app.moveStagingCursor(-1);
+    staging_mod.moveStagingCursor(&app, -1);
     try std.testing.expectEqual(@as(usize, 3), app.staging_cursor);
 
     // The cursor's hunk is found for body lines.
-    app.moveStagingCursor(1);
+    staging_mod.moveStagingCursor(&app, 1);
     try std.testing.expectEqual(@as(usize, 4), app.staging_cursor);
-    try std.testing.expectEqual(@as(?usize, 0), app.stagingHunkAt(app.staging_cursor));
+    try std.testing.expectEqual(@as(?usize, 0), staging_mod.stagingHunkAt(&app, app.staging_cursor));
 
     // Range toggle anchors and clears.
-    app.toggleStagingRange();
+    staging_mod.toggleStagingRange(&app);
     try std.testing.expectEqual(@as(?usize, 4), app.staging_anchor);
-    app.toggleStagingRange();
+    staging_mod.toggleStagingRange(&app);
     try std.testing.expect(app.staging_anchor == null);
 
-    app.clearStaging();
+    staging_mod.clearStaging(&app);
     try std.testing.expect(!app.staging_active);
     try std.testing.expect(app.staging == null);
     try std.testing.expectEqual(@as(usize, 0), app.staging_diff.len);
