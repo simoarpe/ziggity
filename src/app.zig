@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 
 const actions = @import("actions.zig");
 const branches_mod = @import("branches.zig");
+const stash_mod = @import("stash.zig");
 const commits_mod = @import("commits.zig");
 const commitops_mod = @import("commitops.zig");
 const config_mod = @import("config.zig");
@@ -459,7 +460,7 @@ const rebase_actions_menu = [_]MenuItem{
     .{ .label = "Abort", .action = .conflict_abort },
 };
 
-const stash_menu = [_]MenuItem{
+pub const stash_menu = [_]MenuItem{
     .{ .label = "Stash all changes", .action = .stash_all },
     .{ .label = "Stash including untracked files", .action = .stash_untracked },
     .{ .label = "Stash staged changes only", .action = .stash_staged },
@@ -2276,7 +2277,7 @@ pub const App = struct {
                     .branches => if (self.branch_commits_active) {
                         if (self.branchFilesActive()) try patch_mod.toggleFileInPatch(self);
                     } else try branches_mod.checkoutSelectedBranch(self),
-                    .stash => try self.applySelectedStash(),
+                    .stash => try stash_mod.applySelectedStash(self),
                     // In a commit's file list, space toggles the file into the
                     // custom patch.
                     .commits => if (self.commitsFilesActive()) try patch_mod.toggleFileInPatch(self),
@@ -2309,7 +2310,7 @@ pub const App = struct {
             .edit_file => try self.requestEditFile(),
             .discard_selected => try self.startDiscardMenu(),
             .discard_all => try self.startDiscardAllConfirmation(),
-            .stash_menu => try self.startStashMenu(),
+            .stash_menu => try stash_mod.startStashMenu(self),
             .start_file_filter => try self.startFileFilterPrompt(),
             .start_commit_filter => try self.startCommitFilterMenu(),
             .open_status_filter => try self.startStatusFilterMenu(),
@@ -2339,8 +2340,8 @@ pub const App = struct {
             .rebase_autosquash => try commitops_mod.autosquashFixups(self),
             .mark_base => try self.toggleMarkBase(),
             .bisect_menu => try self.startBisectMenu(),
-            .stash_pop => try self.popSelectedStash(),
-            .stash_drop => try self.dropSelectedStash(),
+            .stash_pop => try stash_mod.popSelectedStash(self),
+            .stash_drop => try stash_mod.dropSelectedStash(self),
             .confirm, .backspace => {},
         }
     }
@@ -4183,17 +4184,6 @@ pub const App = struct {
         try self.setMessage("discard changes", .{});
     }
 
-    fn startStashMenu(self: *App) !void {
-        if (self.data.files.len == 0) {
-            try self.setMessage("nothing to stash", .{});
-            return;
-        }
-        self.focus = .files;
-        self.mode = .menu;
-        self.active_menu = .{ .title = "Stash", .items = &stash_menu, .index = 0 };
-        try self.setMessage("stash changes", .{});
-    }
-
     fn startPatchMenu(self: *App) !void {
         if (patch_mod.patchFileCount(self) == 0) {
             try self.setMessage("no patch - open a commit (enter), then space to add files", .{});
@@ -4545,30 +4535,6 @@ pub const App = struct {
     }
 
     /// `n` in the Branches panel creates a branch, or a tag on the Tags tab.
-    fn applySelectedStash(self: *App) !void {
-        const entry = self.selectedStash() orelse {
-            try self.setMessage("no stash entry selected", .{});
-            return;
-        };
-        return self.runMutationScoped(try self.git.stashApply(entry.index), Refresh.stash_apply, "applied {s}", .{entry.selector});
-    }
-
-    fn popSelectedStash(self: *App) !void {
-        const entry = self.selectedStash() orelse {
-            try self.setMessage("no stash entry selected", .{});
-            return;
-        };
-        return self.runMutationScoped(try self.git.stashPop(entry.index), Refresh.stash, "popped {s}", .{entry.selector});
-    }
-
-    fn dropSelectedStash(self: *App) !void {
-        const entry = self.selectedStash() orelse {
-            try self.setMessage("no stash entry selected", .{});
-            return;
-        };
-        return self.runMutationScoped(try self.git.stashDrop(entry.index), Refresh.stash, "dropped {s}", .{entry.selector});
-    }
-
     fn handleFileFilterPromptKey(self: *App, key: vaxis.Key) !void {
         if (self.isEscapeKey(key)) {
             try self.clearFileFilter();
