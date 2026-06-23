@@ -4,6 +4,7 @@ pub const commits = @import("commits.zig");
 pub const config = @import("config.zig");
 pub const credentials = @import("credentials.zig");
 pub const diff = @import("diff.zig");
+pub const diffmode = @import("diffmode.zig");
 pub const drills = @import("drills.zig");
 pub const editor = @import("editor.zig");
 pub const filetree = @import("filetree.zig");

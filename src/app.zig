@@ -4,6 +4,7 @@ const vaxis = @import("vaxis");
 const actions = @import("actions.zig");
 const commits_mod = @import("commits.zig");
 const config_mod = @import("config.zig");
+const diffmode_mod = @import("diffmode.zig");
 const credentials_mod = @import("credentials.zig");
 const diff_mod = @import("diff.zig");
 const drills_mod = @import("drills.zig");
@@ -437,11 +438,11 @@ const conflict_actions_menu = [_]MenuItem{
 
 /// The Diffing menu (W). The first two entries are always shown; the reverse /
 /// exit entries appear only while diffing is active.
-const diffing_menu_inactive = [_]MenuItem{
+pub const diffing_menu_inactive = [_]MenuItem{
     .{ .label = "Diff the selected ref", .action = .diff_against_selected },
     .{ .label = "Enter a ref to diff against...", .action = .diff_enter_ref },
 };
-const diffing_menu_active = [_]MenuItem{
+pub const diffing_menu_active = [_]MenuItem{
     .{ .label = "Diff the selected ref", .action = .diff_against_selected },
     .{ .label = "Enter a ref to diff against...", .action = .diff_enter_ref },
     .{ .label = "Reverse diff direction", .action = .diff_reverse_direction },
@@ -2179,7 +2180,7 @@ pub const App = struct {
                     return;
                 }
                 if (self.diff_base != null) {
-                    self.clearDiffBase();
+                    diffmode_mod.clearDiffBase(self);
                     try self.setMessage("exited diffing mode", .{});
                     try self.updatePreview();
                     return;
@@ -2298,8 +2299,8 @@ pub const App = struct {
             },
             .undo => try self.startUndoConfirm(),
             .copy_to_clipboard => try self.requestClipboardCopy(),
-            .open_browser => try self.openSelectionInBrowser(),
-            .diff_mark => try self.startDiffingMenu(),
+            .open_browser => try diffmode_mod.openSelectionInBrowser(self),
+            .diff_mark => try diffmode_mod.startDiffingMenu(self),
             .patch_menu => try self.startPatchMenu(),
             .conflict_menu => try self.startConflictActionsMenu(),
             .stage_all => try staging_mod.toggleAllStaged(self),
@@ -3705,112 +3706,6 @@ pub const App = struct {
 
     /// The ref the focused panel contributes to a diff: a commit hash in the
     /// Commits panel or a branch/tag ref in the Branches panel; null otherwise.
-    fn selectedRefForDiff(self: *const App) ?[]const u8 {
-        return switch (self.contentFocus()) {
-            .commits => if (self.selectedCommit()) |commit| commit.hash else null,
-            .branches => self.selectedBranchRefName(),
-            .status, .files, .stash, .main => null,
-        };
-    }
-
-    fn clearDiffBase(self: *App) void {
-        if (self.diff_base) |b| self.allocator.free(b);
-        self.diff_base = null;
-        self.diff_reverse = false;
-    }
-
-    /// The Diffing menu (W): diff against the selected ref, enter an arbitrary
-    /// ref, and (while active) reverse the direction or exit.
-    fn startDiffingMenu(self: *App) !void {
-        const items: []const MenuItem = if (self.diff_base != null) &diffing_menu_active else &diffing_menu_inactive;
-        self.mode = .menu;
-        self.active_menu = .{ .title = "Diffing", .items = items, .index = 0 };
-        try self.setMessage("diffing", .{});
-    }
-
-    /// Mark the selected commit/branch/tag as the diff base. While active, the
-    /// main panel shows the diff from the base to whatever ref is selected.
-    fn diffAgainstSelected(self: *App) !void {
-        const ref = self.selectedRefForDiff() orelse {
-            try self.setMessage("select a commit or branch to diff", .{});
-            return;
-        };
-        self.clearDiffBase();
-        self.diff_base = try self.allocator.dupe(u8, ref);
-        try self.setMessage("diffing from {s} - select another ref (esc to exit)", .{ref});
-        try self.updatePreview();
-    }
-
-    /// Set the diff base to an arbitrary, typed ref name.
-    fn diffAgainstRef(self: *App, ref: []const u8) !void {
-        const owned = try self.allocator.dupe(u8, ref);
-        self.clearDiffBase();
-        self.diff_base = owned;
-        try self.setMessage("diffing from {s} - select another ref (esc to exit)", .{owned});
-        try self.updatePreview();
-    }
-
-    /// Open the focused commit or branch on its remote's web host. Derives an
-    /// https URL from the remote's fetch URL and launches the OS browser.
-    fn openSelectionInBrowser(self: *App) !void {
-        const remote = self.currentRemoteName();
-        const raw = self.git.remoteUrl(remote) catch {
-            try self.setMessage("no '{s}' remote to open", .{remote});
-            return;
-        };
-        defer self.allocator.free(raw);
-        const base = (try webUrlFromRemote(self.allocator, std.mem.trim(u8, raw, " \t\r\n"))) orelse {
-            try self.setMessage("cannot derive a web URL from {s}", .{std.mem.trim(u8, raw, " \t\r\n")});
-            return;
-        };
-        defer self.allocator.free(base);
-
-        const url = try self.selectionWebUrl(base);
-        defer self.allocator.free(url);
-        self.git.openUrl(url) catch {
-            try self.setMessage("failed to launch the browser", .{});
-            return;
-        };
-        try self.setMessage("opening {s}", .{url});
-    }
-
-    /// The remote whose web host we open: the current branch's upstream remote,
-    /// falling back to "origin".
-    fn currentRemoteName(self: *const App) []const u8 {
-        if (self.data.upstream) |upstream| {
-            if (std.mem.indexOfScalar(u8, upstream, '/')) |slash| return upstream[0..slash];
-        }
-        return "origin";
-    }
-
-    /// Append the path for the focused item to a repo web `base` URL.
-    fn selectionWebUrl(self: *const App, base: []const u8) ![]u8 {
-        switch (self.focus) {
-            .commits => if (self.selectedCommit()) |commit| {
-                return std.fmt.allocPrint(self.allocator, "{s}/commit/{s}", .{ base, commit.hash });
-            },
-            .branches => switch (self.branches_tab) {
-                .local => if (self.selectedBranch()) |branch| {
-                    return std.fmt.allocPrint(self.allocator, "{s}/tree/{s}", .{ base, branch.name });
-                },
-                .remotes => if (self.selectedRemoteBranch()) |branch| {
-                    // Strip the "<remote>/" prefix so the tree path is the branch.
-                    const name = if (std.mem.indexOfScalar(u8, branch.name, '/')) |slash|
-                        branch.name[slash + 1 ..]
-                    else
-                        branch.name;
-                    return std.fmt.allocPrint(self.allocator, "{s}/tree/{s}", .{ base, name });
-                },
-                .tags => if (self.selectedTag()) |tag| {
-                    return std.fmt.allocPrint(self.allocator, "{s}/tree/{s}", .{ base, tag.name });
-                },
-                .worktrees, .submodules => {},
-            },
-            .status, .files, .stash, .main => {},
-        }
-        return self.allocator.dupe(u8, base);
-    }
-
     /// Toggle the selected commit in the cherry-pick clipboard.
     fn toggleCommitCopy(self: *App) !void {
         const commit = self.selectedCommit() orelse {
@@ -4194,7 +4089,7 @@ pub const App = struct {
             },
             .diff_ref => {
                 // `value` aliases the input buffer; diffAgainstRef dupes it first.
-                try self.diffAgainstRef(value);
+                try diffmode_mod.diffAgainstRef(self, value);
                 self.mode = .normal;
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
@@ -4533,7 +4428,7 @@ pub const App = struct {
                 patch_mod.clearPatch(self);
                 try self.setMessage("patch reset", .{});
             },
-            .diff_against_selected => try self.diffAgainstSelected(),
+            .diff_against_selected => try diffmode_mod.diffAgainstSelected(self),
             .diff_enter_ref => try self.startTextPrompt(.diff_ref),
             .diff_reverse_direction => {
                 self.diff_reverse = !self.diff_reverse;
@@ -4541,7 +4436,7 @@ pub const App = struct {
                 try self.updatePreview();
             },
             .diff_exit => {
-                self.clearDiffBase();
+                diffmode_mod.clearDiffBase(self);
                 try self.setMessage("exited diffing mode", .{});
                 try self.updatePreview();
             },
@@ -5218,7 +5113,7 @@ pub const App = struct {
 
         // Diffing mode overrides the normal preview with a ref-to-ref diff.
         if (self.diff_base) |base| {
-            const target = self.selectedRefForDiff();
+            const target = diffmode_mod.selectedRefForDiff(self);
             if (target == null)
                 return self.setCheapPreview(try std.fmt.allocPrint(self.allocator, "Diffing from {s}.\n\nSelect a commit or branch to compare against.\n", .{base}));
             if (std.mem.eql(u8, base, target.?))
@@ -6813,14 +6708,14 @@ test "diffing mode marks a ref base and clears cleanly" {
 
     // W opens the Diffing menu; with no base yet it offers the two base options.
     app.focus = .status;
-    try app.startDiffingMenu();
+    try diffmode_mod.startDiffingMenu(&app);
     try std.testing.expectEqual(Mode.menu, app.mode);
     try std.testing.expectEqual(@as(usize, diffing_menu_inactive.len), app.active_menu.?.items.len);
     app.closeMenu();
 
     // "Diff the selected ref" from a panel without a ref refuses.
     app.focus = .status;
-    try app.diffAgainstSelected();
+    try diffmode_mod.diffAgainstSelected(&app);
     try std.testing.expect(app.diff_base == null);
     try std.testing.expectEqualStrings("select a commit or branch to diff", app.message);
 
@@ -6831,11 +6726,11 @@ test "diffing mode marks a ref base and clears cleanly" {
     app.data.commits = &commits;
     app.focus = .commits;
     app.commit_index = 0;
-    try app.diffAgainstSelected();
+    try diffmode_mod.diffAgainstSelected(&app);
     try std.testing.expectEqualStrings("aaaaaaa", app.diff_base.?);
 
     // While active, the menu adds reverse/exit; reversing flips the flag.
-    try app.startDiffingMenu();
+    try diffmode_mod.startDiffingMenu(&app);
     try std.testing.expectEqual(@as(usize, diffing_menu_active.len), app.active_menu.?.items.len);
     app.closeMenu();
     try std.testing.expect(!app.diff_reverse);
@@ -6843,7 +6738,7 @@ test "diffing mode marks a ref base and clears cleanly" {
     try std.testing.expect(app.diff_reverse);
 
     // An arbitrary ref can be set directly; exit clears base and reverse.
-    try app.diffAgainstRef("v1.0");
+    try diffmode_mod.diffAgainstRef(&app, "v1.0");
     try std.testing.expectEqualStrings("v1.0", app.diff_base.?);
     try std.testing.expect(!app.diff_reverse); // reset when the base was replaced
     try app.runMenuAction(.diff_exit);
@@ -8010,7 +7905,7 @@ test "operation dialog shows a running frame then its result" {
 /// Derive an https web URL (no scheme variants, no trailing `.git`) from a git
 /// remote URL. Handles scp-like (`git@host:owner/repo`), `https://…`, and
 /// `ssh://[user@]host[:port]/path` forms. Returns null if it cannot parse.
-fn webUrlFromRemote(allocator: std.mem.Allocator, remote: []const u8) !?[]u8 {
+pub fn webUrlFromRemote(allocator: std.mem.Allocator, remote: []const u8) !?[]u8 {
     var url = std.mem.trim(u8, remote, " \t\r\n");
     if (std.mem.endsWith(u8, url, ".git")) url = url[0 .. url.len - 4];
     url = std.mem.trimEnd(u8, url, "/");
