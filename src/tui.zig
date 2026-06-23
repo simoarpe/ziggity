@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 
 const app_mod = @import("app.zig");
 const config_mod = @import("config.zig");
+const credentials_mod = @import("credentials.zig");
 const git_mod = @import("git.zig");
 const model = @import("model.zig");
 const patch_mod = @import("patch.zig");
@@ -414,8 +415,8 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 }
                 // Attach entered credentials (a cloned, askpass-wired env) when
                 // available; on clone failure fall back to the bare env.
-                if (app.gitCredentialsSet()) {
-                    async_job.cred_environ = app.buildCredentialEnv(async_allocator) catch null;
+                if (credentials_mod.gitCredentialsSet(app)) {
+                    async_job.cred_environ = credentials_mod.buildCredentialEnv(app, async_allocator) catch null;
                 }
                 async_future = io.concurrent(asyncWorker, .{&async_job}) catch blk: {
                     if (async_job.cred_environ) |*e| {
@@ -1139,13 +1140,13 @@ fn drawTextPromptPopup(root: vaxis.Window, app: *app_mod.App) void {
 fn drawCredentialPopup(root: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
     const w: u16 = @min(@as(u16, 56), root.width -| 4);
-    const win = popup(root, w, 5, app.credentialTitle(), null);
+    const win = popup(root, w, 5, credentials_mod.credentialTitle(app), null);
     // Scroll horizontally so the caret stays inside the box.
     const caret = @min(app.prompt_cursor, app.input_buffer.items.len);
     const sc = app_mod.viewScroll(app.prompt_scroll, win.width, caret);
     app.prompt_scroll = sc.origin;
     const visible = app.input_buffer.items[sc.origin..];
-    if (app.credentialMask()) {
+    if (credentials_mod.credentialMask(app)) {
         // Mask the secret with bullets, one per byte (credentials are ASCII, so
         // a byte maps to a column). A bullet is used instead of `*` because a
         // run of identical asterisks can be reshaped by the terminal font's

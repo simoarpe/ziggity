@@ -1,6 +1,7 @@
 pub const actions = @import("actions.zig");
 pub const app = @import("app.zig");
 pub const config = @import("config.zig");
+pub const credentials = @import("credentials.zig");
 pub const diff = @import("diff.zig");
 pub const drills = @import("drills.zig");
 pub const editor = @import("editor.zig");

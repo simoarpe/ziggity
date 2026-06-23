@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 
 const actions = @import("actions.zig");
 const config_mod = @import("config.zig");
+const credentials_mod = @import("credentials.zig");
 const diff_mod = @import("diff.zig");
 const drills_mod = @import("drills.zig");
 const editor_mod = @import("editor.zig");
@@ -1753,7 +1754,7 @@ pub const App = struct {
         if (self.preview_wanted) |job| job.deinit(page_alloc);
         if (self.mutation_requested) |job| job.deinit(page_alloc);
         page_alloc.free(self.mutation_msg);
-        self.clearGitCredentials();
+        credentials_mod.clearGitCredentials(self);
         self.credential_user.deinit(self.allocator);
         if (self.exe_path) |p| self.allocator.free(p);
         if (self.push_upstream_remote) |r| self.allocator.free(r);
@@ -2051,7 +2052,7 @@ pub const App = struct {
             return;
         }
         if (self.mode == .credential_prompt) {
-            try self.handleCredentialPromptKey(key);
+            try credentials_mod.handleCredentialPromptKey(self, key);
             return;
         }
         if (self.mode == .confirmation) {
@@ -4092,7 +4093,7 @@ pub const App = struct {
     /// (left/right, Home/End, Ctrl-A/Ctrl-E), delete-before (backspace) and
     /// delete-at (Delete) the caret, and inserting printable text at the caret.
     /// `cursor` is a byte offset into `buf` and is kept on a UTF-8 boundary.
-    fn editLine(self: *App, buf: *std.ArrayList(u8), cursor: *usize, key: vaxis.Key) !EditResult {
+    pub fn editLine(self: *App, buf: *std.ArrayList(u8), cursor: *usize, key: vaxis.Key) !EditResult {
         if (cursor.* > buf.items.len) cursor.* = buf.items.len;
 
         // ---- cursor movement ----
@@ -4220,140 +4221,6 @@ pub const App = struct {
 
     /// True once a username and password/token have been entered this session.
     /// While set, network ops run with a credential-bearing cloned environment.
-    pub fn gitCredentialsSet(self: *const App) bool {
-        return self.git_username != null and self.git_password != null and self.exe_path != null;
-    }
-
-    /// Forget (and wipe) any stored credentials. Called on logout-style resets
-    /// and at shutdown so secrets do not linger in freed memory.
-    pub fn clearGitCredentials(self: *App) void {
-        if (self.git_username) |u| {
-            @memset(u, 0);
-            self.allocator.free(u);
-            self.git_username = null;
-        }
-        if (self.git_password) |p| {
-            @memset(p, 0);
-            self.allocator.free(p);
-            self.git_password = null;
-        }
-    }
-
-    /// Whether a failed network op's output indicates an authentication problem
-    /// (rather than e.g. a diverged remote or a network error), so the
-    /// credential prompt should open. Matches git's English messages.
-    fn isAuthFailure(output: []const u8) bool {
-        const needles = [_][]const u8{
-            "could not read Username",
-            "could not read Password",
-            "Authentication failed",
-            "terminal prompts disabled",
-            "Invalid username or password",
-            "Permission denied (publickey",
-            "fatal: Authentication",
-        };
-        for (needles) |n| {
-            if (std.ascii.indexOfIgnoreCase(output, n) != null) return true;
-        }
-        return false;
-    }
-
-    /// Open the two-step credential prompt (username, then masked password) and
-    /// remember `op` so it can be re-run once both fields are entered.
-    fn startCredentialPrompt(self: *App, op: AsyncOp) !void {
-        self.credential_retry_op = op;
-        self.credential_step = .username;
-        self.credential_user.clearRetainingCapacity();
-        self.input_buffer.clearRetainingCapacity();
-        self.prompt_cursor = 0;
-        self.prompt_scroll = 0;
-        self.mode = .credential_prompt;
-        try self.setMessage("authentication required", .{});
-    }
-
-    fn handleCredentialPromptKey(self: *App, key: vaxis.Key) !void {
-        if (self.isEscapeKey(key)) {
-            self.cancelCredentialPrompt();
-            return;
-        }
-        if (self.isEnterKey(key)) {
-            try self.advanceCredentialPrompt();
-            return;
-        }
-        _ = try self.editLine(&self.input_buffer, &self.prompt_cursor, key);
-    }
-
-    /// Title shown on the credential popup, by step.
-    pub fn credentialTitle(self: *const App) []const u8 {
-        return switch (self.credential_step) {
-            .username => "Username",
-            .password => "Password / token",
-        };
-    }
-
-    /// Whether the current credential field should be rendered masked.
-    pub fn credentialMask(self: *const App) bool {
-        return self.credential_step == .password;
-    }
-
-    fn cancelCredentialPrompt(self: *App) void {
-        self.mode = .normal;
-        self.credential_retry_op = null;
-        // Wipe both the in-progress username and the active field.
-        @memset(self.credential_user.items, 0);
-        self.credential_user.clearRetainingCapacity();
-        @memset(self.input_buffer.items, 0);
-        self.input_buffer.clearRetainingCapacity();
-        self.setMessage("authentication cancelled", .{}) catch {};
-    }
-
-    /// Advance the credential prompt: stash the username and move to the
-    /// password field, or store both and re-run the pending op.
-    fn advanceCredentialPrompt(self: *App) !void {
-        switch (self.credential_step) {
-            .username => {
-                self.credential_user.clearRetainingCapacity();
-                try self.credential_user.appendSlice(self.allocator, std.mem.trim(u8, self.input_buffer.items, " \t\r\n"));
-                @memset(self.input_buffer.items, 0);
-                self.input_buffer.clearRetainingCapacity();
-                self.prompt_cursor = 0;
-                self.prompt_scroll = 0;
-                self.credential_step = .password;
-            },
-            .password => {
-                self.clearGitCredentials();
-                self.git_username = try self.allocator.dupe(u8, self.credential_user.items);
-                self.git_password = try self.allocator.dupe(u8, self.input_buffer.items);
-                // Wipe the working buffers now the values are stored.
-                @memset(self.credential_user.items, 0);
-                self.credential_user.clearRetainingCapacity();
-                @memset(self.input_buffer.items, 0);
-                self.input_buffer.clearRetainingCapacity();
-                self.mode = .normal;
-                if (self.credential_retry_op) |op| {
-                    self.credential_retry_op = null;
-                    try self.requestAsync(op);
-                }
-            },
-        }
-    }
-
-    /// Clone the shared environment and add the askpass wiring + secrets for a
-    /// credential-bearing network op. The clone is owned by `gpa` (the async
-    /// page allocator) and freed by the worker; the shared environment is left
-    /// untouched, so concurrent git threads never see a mutated map.
-    pub fn buildCredentialEnv(self: *const App, gpa: std.mem.Allocator) !std.process.Environ.Map {
-        var env = try self.git.environ.clone(gpa);
-        errdefer env.deinit();
-        try env.put(askpass_env_marker, "1");
-        try env.put("GIT_ASKPASS", self.exe_path.?);
-        try env.put("SSH_ASKPASS", self.exe_path.?);
-        try env.put("SSH_ASKPASS_REQUIRE", "force");
-        try env.put(askpass_env_user, self.git_username.?);
-        try env.put(askpass_env_pass, self.git_password.?);
-        return env;
-    }
-
     fn submitTextPrompt(self: *App) !void {
         const kind = self.text_prompt_kind orelse {
             self.mode = .normal;
@@ -5855,7 +5722,7 @@ pub const App = struct {
     }
 
     /// Queue a network op for the TUI loop to run off-thread. Single in-flight.
-    fn requestAsync(self: *App, op: AsyncOp) !void {
+    pub fn requestAsync(self: *App, op: AsyncOp) !void {
         if (self.async_active or self.async_requested != null) {
             try self.setMessage("a network operation is already running", .{});
             return;
@@ -5934,12 +5801,12 @@ pub const App = struct {
                     try self.requestConfirmation(.force_push, "push rejected — force push with lease? (y/n)", .{});
                 } else if (pushNeedsForce(raw) and op == .push_force) {
                     try self.requestConfirmation(.force_push_plain, "force push with lease rejected — force push? (y/n)", .{});
-                } else if (isAuthFailure(raw) and self.exe_path != null) {
+                } else if (credentials_mod.isAuthFailure(raw) and self.exe_path != null) {
                     // git could not authenticate. If we already supplied
                     // credentials, they were wrong — forget them. Either way,
                     // (re-)prompt and retry once the user enters them.
-                    if (self.gitCredentialsSet()) self.clearGitCredentials();
-                    try self.startCredentialPrompt(op);
+                    if (credentials_mod.gitCredentialsSet(self)) credentials_mod.clearGitCredentials(self);
+                    try credentials_mod.startCredentialPrompt(self, op);
                 } else {
                     var label_buf: [64]u8 = undefined;
                     const summary = std.fmt.bufPrint(&label_buf, "{s} failed", .{op.label()}) catch "command failed";
@@ -6546,11 +6413,11 @@ pub const App = struct {
         }
     }
 
-    fn isEscapeKey(self: *const App, key: vaxis.Key) bool {
+    pub fn isEscapeKey(self: *const App, key: vaxis.Key) bool {
         return self.config.keymap.escape.matches(key) or key.matches(vaxis.Key.escape, .{});
     }
 
-    fn isEnterKey(self: *const App, key: vaxis.Key) bool {
+    pub fn isEnterKey(self: *const App, key: vaxis.Key) bool {
         return self.config.keymap.enter.matches(key) or key.matches(vaxis.Key.enter, .{});
     }
 
@@ -6825,12 +6692,12 @@ test "pushNeedsForce detects diverged-remote rejections only" {
 }
 
 test "isAuthFailure matches credential errors but not other failures" {
-    try std.testing.expect(App.isAuthFailure("fatal: could not read Username for 'https://github.com': terminal prompts disabled"));
-    try std.testing.expect(App.isAuthFailure("remote: Invalid username or password.\nfatal: Authentication failed for 'https://github.com/o/r'"));
-    try std.testing.expect(App.isAuthFailure("git@github.com: Permission denied (publickey)."));
-    try std.testing.expect(!App.isAuthFailure(" ! [rejected]        main -> main (non-fast-forward)"));
-    try std.testing.expect(!App.isAuthFailure("Everything up-to-date"));
-    try std.testing.expect(!App.isAuthFailure("fatal: unable to access: Could not resolve host: github.com"));
+    try std.testing.expect(credentials_mod.isAuthFailure("fatal: could not read Username for 'https://github.com': terminal prompts disabled"));
+    try std.testing.expect(credentials_mod.isAuthFailure("remote: Invalid username or password.\nfatal: Authentication failed for 'https://github.com/o/r'"));
+    try std.testing.expect(credentials_mod.isAuthFailure("git@github.com: Permission denied (publickey)."));
+    try std.testing.expect(!credentials_mod.isAuthFailure(" ! [rejected]        main -> main (non-fast-forward)"));
+    try std.testing.expect(!credentials_mod.isAuthFailure("Everything up-to-date"));
+    try std.testing.expect(!credentials_mod.isAuthFailure("fatal: unable to access: Could not resolve host: github.com"));
 }
 
 test "credential prompt collects username then password and queues a retry" {
@@ -6846,21 +6713,21 @@ test "credential prompt collects username then password and queues a retry" {
     defer app.git.command_log.deinit(allocator);
     defer for (app.git.command_log.items) |e| allocator.free(e);
 
-    try app.startCredentialPrompt(.push);
+    try credentials_mod.startCredentialPrompt(&app, .push);
     try std.testing.expectEqual(Mode.credential_prompt, app.mode);
     try std.testing.expectEqual(CredentialStep.username, app.credential_step);
-    try std.testing.expect(!app.credentialMask());
+    try std.testing.expect(!credentials_mod.credentialMask(&app));
 
     try app.input_buffer.appendSlice(allocator, "octocat");
-    try app.advanceCredentialPrompt();
+    try credentials_mod.advanceCredentialPrompt(&app);
     try std.testing.expectEqual(CredentialStep.password, app.credential_step);
-    try std.testing.expect(app.credentialMask());
-    try std.testing.expect(!app.gitCredentialsSet());
+    try std.testing.expect(credentials_mod.credentialMask(&app));
+    try std.testing.expect(!credentials_mod.gitCredentialsSet(&app));
 
     try app.input_buffer.appendSlice(allocator, "ghp_secret");
-    try app.advanceCredentialPrompt();
+    try credentials_mod.advanceCredentialPrompt(&app);
     try std.testing.expectEqual(Mode.normal, app.mode);
-    try std.testing.expect(app.gitCredentialsSet());
+    try std.testing.expect(credentials_mod.gitCredentialsSet(&app));
     try std.testing.expectEqualStrings("octocat", app.git_username.?);
     try std.testing.expectEqualStrings("ghp_secret", app.git_password.?);
     // The op is re-queued for the loop to run with credentials attached.
@@ -6874,11 +6741,11 @@ test "cancelling the credential prompt stores nothing and queues nothing" {
     defer deinitTestApp(&app);
     app.exe_path = try allocator.dupe(u8, "/path/to/ziggity");
 
-    try app.startCredentialPrompt(.pull);
+    try credentials_mod.startCredentialPrompt(&app, .pull);
     try app.input_buffer.appendSlice(allocator, "octocat");
-    app.cancelCredentialPrompt();
+    credentials_mod.cancelCredentialPrompt(&app);
     try std.testing.expectEqual(Mode.normal, app.mode);
-    try std.testing.expect(!app.gitCredentialsSet());
+    try std.testing.expect(!credentials_mod.gitCredentialsSet(&app));
     try std.testing.expect(app.async_requested == null);
     try std.testing.expect(app.credential_retry_op == null);
 }
@@ -8410,7 +8277,7 @@ fn deinitTestApp(app: *App) void {
     for (app.copied_commits.items) |entry| app.allocator.free(entry);
     app.copied_commits.deinit(app.allocator);
     if (app.marked_base) |b| app.allocator.free(b);
-    app.clearGitCredentials();
+    credentials_mod.clearGitCredentials(app);
     app.credential_user.deinit(app.allocator);
     if (app.exe_path) |p| app.allocator.free(p);
     if (app.push_upstream_remote) |r| app.allocator.free(r);
