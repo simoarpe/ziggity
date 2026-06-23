@@ -7,6 +7,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 
 const app_mod = @import("app.zig");
+const commitops_mod = @import("commitops.zig");
 
 const App = app_mod.App;
 
@@ -203,6 +204,6 @@ pub fn submitCommit(app: *App) !void {
         // signing / a slow `git status` no longer block it. The refresh is
         // scoped to the views a commit changes.
         .create => return app.requestMutation(.{ .commit = message }, .{ .gerund = "committing", .command = "git commit", .refresh = App.Refresh.commit }, "commit created", .{}),
-        .reword => return app.runRebase(.reword, reword_index, message),
+        .reword => return commitops_mod.runRebase(app, .reword, reword_index, message),
     }
 }

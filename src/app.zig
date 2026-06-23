@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 
 const actions = @import("actions.zig");
 const commits_mod = @import("commits.zig");
+const commitops_mod = @import("commitops.zig");
 const config_mod = @import("config.zig");
 const diffmode_mod = @import("diffmode.zig");
 const credentials_mod = @import("credentials.zig");
@@ -420,7 +421,7 @@ const branch_delete_menu = [_]MenuItem{
     .{ .label = "Force delete branch", .action = .force_delete_branch },
 };
 
-const commit_reset_menu = [_]MenuItem{
+pub const commit_reset_menu = [_]MenuItem{
     .{ .label = "Soft reset (keep staged changes)", .action = .reset_soft },
     .{ .label = "Mixed reset (keep working tree)", .action = .reset_mixed },
     .{ .label = "Hard reset (discard changes)", .action = .reset_hard },
@@ -2324,17 +2325,17 @@ pub const App = struct {
             .edit_remote => try self.startEditRemote(),
             .remove_remote => try self.startRemoveRemote(),
             .set_upstream => try self.setUpstreamToSelected(),
-            .reset_commit => try self.startCommitResetMenu(),
-            .revert_commit => try self.revertSelectedCommit(),
-            .rebase_drop => try self.rebaseSelectedCommit(.drop),
-            .rebase_squash => try self.rebaseSelectedCommit(.squash),
-            .rebase_fixup => try self.rebaseSelectedCommit(.fixup),
-            .rebase_edit => try self.rebaseSelectedCommit(.edit),
+            .reset_commit => try commitops_mod.startCommitResetMenu(self),
+            .revert_commit => try commitops_mod.revertSelectedCommit(self),
+            .rebase_drop => try commitops_mod.rebaseSelectedCommit(self, .drop),
+            .rebase_squash => try commitops_mod.rebaseSelectedCommit(self, .squash),
+            .rebase_fixup => try commitops_mod.rebaseSelectedCommit(self, .fixup),
+            .rebase_edit => try commitops_mod.rebaseSelectedCommit(self, .edit),
             .rebase_reword => try commits_mod.startReword(self),
-            .rebase_move_down => try self.rebaseSelectedCommit(.move_down),
-            .rebase_move_up => try self.rebaseSelectedCommit(.move_up),
-            .rebase_create_fixup => try self.createFixupCommit(),
-            .rebase_autosquash => try self.autosquashFixups(),
+            .rebase_move_down => try commitops_mod.rebaseSelectedCommit(self, .move_down),
+            .rebase_move_up => try commitops_mod.rebaseSelectedCommit(self, .move_up),
+            .rebase_create_fixup => try commitops_mod.createFixupCommit(self),
+            .rebase_autosquash => try commitops_mod.autosquashFixups(self),
             .mark_base => try self.toggleMarkBase(),
             .bisect_menu => try self.startBisectMenu(),
             .stash_pop => try self.popSelectedStash(),
@@ -4479,7 +4480,7 @@ pub const App = struct {
 
         var aw: std.Io.Writer.Allocating = .init(self.allocator);
         defer aw.deinit();
-        try writeRebaseTodo(&aw.writer, commits, i, .edit);
+        try commitops_mod.writeRebaseTodo(&aw.writer, commits, i, .edit);
         const todo = try aw.toOwnedSlice();
         defer self.allocator.free(todo);
 
@@ -4694,161 +4695,6 @@ pub const App = struct {
             try self.setMessage("no branch selected", .{});
             return null;
         };
-    }
-
-    fn startCommitResetMenu(self: *App) !void {
-        const commit = try self.commitForAction() orelse return;
-        self.mode = .menu;
-        self.active_menu = .{ .title = "Reset to commit", .items = &commit_reset_menu, .index = 0 };
-        try self.setMessage("reset to {s}", .{commit.short_hash});
-    }
-
-    fn revertSelectedCommit(self: *App) !void {
-        const commit = try self.commitForAction() orelse return;
-        return self.requestMutation(.{ .revert = commit.hash }, .{ .gerund = "reverting", .command = "git revert", .refresh = Refresh.commits_files }, "reverted {s}", .{commit.short_hash});
-    }
-
-    fn rebaseSelectedCommit(self: *App, action: RebaseAction) !void {
-        if (self.commits_tab != .commits) {
-            try self.setMessage("rebase actions apply to the Commits tab", .{});
-            return;
-        }
-        if (self.data.state != .clean) {
-            try self.setMessage("finish the in-progress rebase/merge first (m)", .{});
-            return;
-        }
-        if (self.data.commits.len == 0) {
-            try self.setMessage("no commit selected", .{});
-            return;
-        }
-        const i = @min(self.commit_index, self.data.commits.len - 1);
-        return self.runRebase(action, i, null);
-    }
-
-    /// Build the rebase todo + base ref for `action` on commit index `i`
-    /// (in the newest-first commit list), run it, and report.
-    pub fn runRebase(self: *App, action: RebaseAction, i: usize, message: ?[]const u8) !void {
-        const commits = self.data.commits;
-        const base_index: usize = switch (action) {
-            .drop, .edit, .reword, .move_up => i,
-            .squash, .fixup, .move_down => i + 1,
-        };
-        switch (action) {
-            .squash, .fixup, .move_down => if (i + 1 >= commits.len) {
-                try self.setMessage("no commit below to combine with", .{});
-                return;
-            },
-            .move_up => if (i == 0) {
-                try self.setMessage("commit is already at the top", .{});
-                return;
-            },
-            else => {},
-        }
-
-        const base_ref = try std.fmt.allocPrint(self.allocator, "{s}^", .{commits[base_index].hash});
-        defer self.allocator.free(base_ref);
-
-        var aw: std.Io.Writer.Allocating = .init(self.allocator);
-        defer aw.deinit();
-        try writeRebaseTodo(&aw.writer, commits, i, action);
-        const todo = try aw.toOwnedSlice();
-        defer self.allocator.free(todo);
-
-        var run_buf: [96]u8 = undefined;
-        const shown = std.fmt.bufPrint(&run_buf, "git rebase -i {s}", .{base_ref}) catch "git rebase -i";
-        return self.requestMutation(
-            .{ .rebase_todo = .{ .base_ref = base_ref, .todo = todo, .message = message } },
-            .{ .gerund = "rebasing", .command = shown },
-            "{s}",
-            .{action.label()},
-        );
-    }
-
-    /// Emit a git-rebase-todo (oldest-first) for `action` on commit index `i`.
-    fn writeRebaseTodo(w: *std.Io.Writer, commits: []const model.Commit, i: usize, action: RebaseAction) !void {
-        switch (action) {
-            .drop, .edit, .reword => {
-                var k = i;
-                while (true) : (k -= 1) {
-                    const word = if (k == i) action.word() else "pick";
-                    try w.print("{s} {s}\n", .{ word, commits[k].hash });
-                    if (k == 0) break;
-                }
-            },
-            .squash, .fixup => {
-                var k = i + 1;
-                while (true) : (k -= 1) {
-                    const word = if (k == i) action.word() else "pick";
-                    try w.print("{s} {s}\n", .{ word, commits[k].hash });
-                    if (k == 0) break;
-                }
-            },
-            .move_down => {
-                // Swap i with i+1 (move the commit one step older).
-                try w.print("pick {s}\n", .{commits[i].hash});
-                try w.print("pick {s}\n", .{commits[i + 1].hash});
-                if (i > 0) {
-                    var k = i - 1;
-                    while (true) : (k -= 1) {
-                        try w.print("pick {s}\n", .{commits[k].hash});
-                        if (k == 0) break;
-                    }
-                }
-            },
-            .move_up => {
-                // Swap i with i-1 (move the commit one step newer).
-                try w.print("pick {s}\n", .{commits[i - 1].hash});
-                try w.print("pick {s}\n", .{commits[i].hash});
-                if (i >= 2) {
-                    var k = i - 2;
-                    while (true) : (k -= 1) {
-                        try w.print("pick {s}\n", .{commits[k].hash});
-                        if (k == 0) break;
-                    }
-                }
-            },
-        }
-    }
-
-    /// Validate that a commit action can run: the Commits panel must be on the
-    /// Commits tab (not Reflog) with a commit selected.
-    fn commitForAction(self: *App) !?model.Commit {
-        if (self.commits_tab != .commits) {
-            try self.setMessage("commit actions apply to the Commits tab", .{});
-            return null;
-        }
-        return self.selectedCommit() orelse {
-            try self.setMessage("no commit selected", .{});
-            return null;
-        };
-    }
-
-    /// Commit the staged changes as a `fixup!` of the selected commit.
-    fn createFixupCommit(self: *App) !void {
-        if (self.data.state != .clean) {
-            try self.setMessage("finish the in-progress operation first (m)", .{});
-            return;
-        }
-        const commit = try self.commitForAction() orelse return;
-        if (self.data.stagedCount() == 0) {
-            try self.setMessage("stage changes to create a fixup commit", .{});
-            return;
-        }
-        return self.requestMutation(.{ .create_fixup = commit.hash }, .{ .gerund = "creating fixup", .command = "git commit --fixup", .refresh = Refresh.commits_files }, "created fixup! for {s}", .{commit.short_hash});
-    }
-
-    /// Autosquash fixup!/squash! commits above (and including) the selected one.
-    fn autosquashFixups(self: *App) !void {
-        if (self.data.state != .clean) {
-            try self.setMessage("finish the in-progress operation first (m)", .{});
-            return;
-        }
-        const commit = try self.commitForAction() orelse return;
-        const base = try std.fmt.allocPrint(self.allocator, "{s}^", .{commit.hash});
-        defer self.allocator.free(base);
-        var cmd_buf: [128]u8 = undefined;
-        const cmd = std.fmt.bufPrint(&cmd_buf, "git rebase -i --autosquash {s}", .{base}) catch "git rebase -i --autosquash";
-        return self.requestMutation(.{ .autosquash = base }, .{ .gerund = "autosquashing", .command = cmd }, "autosquashed fixups", .{});
     }
 
     fn checkoutSelectedBranch(self: *App) !void {
@@ -8110,14 +7956,14 @@ test "commit reset menu opens on the commits tab and refuses reflog" {
     }};
     app.data.commits = &commits;
 
-    try app.startCommitResetMenu();
+    try commitops_mod.startCommitResetMenu(&app);
     try std.testing.expectEqual(Mode.menu, app.mode);
     try std.testing.expectEqual(@as(usize, 3), app.active_menu.?.items.len);
     try std.testing.expectEqual(MenuAction.reset_hard, app.active_menu.?.items[2].action);
 
     app.closeMenu();
     app.commits_tab = .reflog;
-    try app.startCommitResetMenu();
+    try commitops_mod.startCommitResetMenu(&app);
     try std.testing.expectEqual(Mode.normal, app.mode);
 }
 
@@ -8149,7 +7995,7 @@ test "rebase todo ordering for drop, squash, and move" {
     };
     for (cases) |case| {
         var aw: std.Io.Writer.Allocating = .init(allocator);
-        try App.writeRebaseTodo(&aw.writer, &commits, case.i, case.action);
+        try commitops_mod.writeRebaseTodo(&aw.writer, &commits, case.i, case.action);
         const got = try aw.toOwnedSlice();
         defer allocator.free(got);
         try std.testing.expectEqualStrings(case.want, got);
