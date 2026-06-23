@@ -1,6 +1,7 @@
 pub const actions = @import("actions.zig");
 pub const app = @import("app.zig");
 pub const commitops = @import("commitops.zig");
+pub const branches = @import("branches.zig");
 pub const commits = @import("commits.zig");
 pub const config = @import("config.zig");
 pub const credentials = @import("credentials.zig");
