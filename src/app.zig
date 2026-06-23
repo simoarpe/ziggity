@@ -4,6 +4,7 @@ const vaxis = @import("vaxis");
 const actions = @import("actions.zig");
 const config_mod = @import("config.zig");
 const diff_mod = @import("diff.zig");
+const drills_mod = @import("drills.zig");
 const editor_mod = @import("editor.zig");
 const filetree = @import("filetree.zig");
 const git_mod = @import("git.zig");
@@ -1941,9 +1942,9 @@ pub const App = struct {
         // Keep each panel's open drill current with the refreshed repo. Reload
         // the Branches sub-commits list first (it may collapse the drill if its
         // ref is gone), then each panel's file list — independently.
-        if (self.branch_commits_active and s.contains(.branches)) self.reloadBranchCommitsAfterRefresh();
-        if (self.branch_files_active and s.contains(.branches)) self.reloadBranchFilesAfterRefresh();
-        if (self.commit_files_active and s.contains(.commits)) self.reloadCommitFilesAfterRefresh();
+        if (self.branch_commits_active and s.contains(.branches)) drills_mod.reloadBranchCommitsAfterRefresh(self);
+        if (self.branch_files_active and s.contains(.branches)) drills_mod.reloadBranchFilesAfterRefresh(self);
+        if (self.commit_files_active and s.contains(.commits)) drills_mod.reloadCommitFilesAfterRefresh(self);
         self.updatePreview() catch {};
     }
 
@@ -2194,13 +2195,13 @@ pub const App = struct {
                     try self.leaveMain();
                 } else if (self.focus == .commits and self.commit_files_active) {
                     // Commits panel: files -> log.
-                    try self.closeCommitFiles();
+                    try drills_mod.closeCommitFiles(self);
                 } else if (self.focus == .branches and self.branch_files_active) {
                     // Branches panel: files -> sub-commits.
-                    try self.closeBranchFiles();
+                    try drills_mod.closeBranchFiles(self);
                 } else if (self.focus == .branches and self.branch_commits_active) {
                     // Branches panel: sub-commits -> branch list.
-                    try self.closeBranchCommits();
+                    try drills_mod.closeBranchCommits(self);
                 } else {
                     // Top level: nothing to back out of. Esc does not quit.
                     try self.setMessage("press q to quit", .{});
@@ -3232,17 +3233,17 @@ pub const App = struct {
     /// elsewhere it descends into the main panel to scroll.
     fn descendOrOpenCommitFiles(self: *App) !void {
         if (self.focus == .commits and self.commits_tab == .commits and !self.commit_files_active) {
-            return self.openCommitFiles();
+            return drills_mod.openCommitFiles(self);
         }
         // Branches-panel drill: branch -> its commits -> the commit's files ->
         // the patch in main. <enter> descends one level at a time.
         if (self.focus == .branches) {
             if (self.branch_commits_active) {
-                if (!self.branch_files_active) return self.openBranchFiles(); // commit -> files
+                if (!self.branch_files_active) return drills_mod.openBranchFiles(self); // commit -> files
                 return patch_mod.openPatchLineView(self); // file -> line-select patch view
             }
             // Enter on a local/remote branch or tag opens its commits.
-            if (self.selectedBranchRefName()) |ref| return self.openBranchCommits(ref);
+            if (self.selectedBranchRefName()) |ref| return drills_mod.openBranchCommits(self, ref);
         }
         // Commits panel: a file in the commit-files view opens the patch line view.
         if (self.focus == .commits and self.commitsFilesActive()) {
@@ -3491,145 +3492,6 @@ pub const App = struct {
     }
 
     // --- Commits panel: its own commit-files drill (log -> a commit's files) ---
-
-    fn openCommitFiles(self: *App) !void {
-        const commit = self.selectedCommit() orelse {
-            try self.setMessage("no commit selected", .{});
-            return;
-        };
-        const files = try self.git.loadCommitFiles(commit.hash);
-        model.deinitCommitFiles(self.allocator, self.commit_files);
-        self.commit_files = files;
-        self.commit_file_index = 0;
-        self.commit_files_active = true;
-        self.resetMainView();
-        self.resetListHScroll(.commits);
-        try self.updatePreview();
-        try self.setMessage("{d} files in {s}", .{ files.len, commit.short_hash });
-    }
-
-    fn closeCommitFiles(self: *App) !void {
-        self.deactivateCommitFiles();
-        self.resetMainView();
-        self.resetListHScroll(.commits);
-        try self.updatePreview();
-    }
-
-    fn deactivateCommitFiles(self: *App) void {
-        model.deinitCommitFiles(self.allocator, self.commit_files);
-        self.commit_files = &.{};
-        self.commit_file_index = 0;
-        self.commit_files_active = false;
-    }
-
-    /// Reload the Commits panel's file list after a refresh; drop it if its
-    /// commit is gone. Independent of the Branches drill.
-    fn reloadCommitFilesAfterRefresh(self: *App) void {
-        const list = self.activeCommits();
-        if (list.len == 0) return self.deactivateCommitFiles();
-        const commit = list[@min(self.activeCommitIndex(), list.len - 1)];
-        const files = self.git.loadCommitFiles(commit.hash) catch return self.deactivateCommitFiles();
-        model.deinitCommitFiles(self.allocator, self.commit_files);
-        self.commit_files = files;
-        self.commit_file_index = if (self.commit_files.len == 0) 0 else @min(self.commit_file_index, self.commit_files.len - 1);
-    }
-
-    // --- Branches panel: its own drill (branch -> sub-commits -> files) ---
-
-    /// Drill from a branch/tag in the Branches panel into its commits (the
-    /// "sub-commits" view): the Branches panel then lists `ref`'s commits.
-    fn openBranchCommits(self: *App, ref: []const u8) !void {
-        const commits = try self.git.loadCommits(ref, 100);
-        model.deinitCommits(self.allocator, self.branch_commits);
-        self.branch_commits = commits;
-        self.branch_commit_index = 0;
-        self.allocator.free(self.branch_commits_ref);
-        self.branch_commits_ref = try self.allocator.dupe(u8, ref);
-        self.branch_commits_active = true;
-        if (self.listView(.branches)) |lv| {
-            lv.scroll = 0;
-            lv.hscroll = 0;
-        }
-        self.resetMainView();
-        try self.updatePreview();
-        try self.setMessage("{d} commits in {s}", .{ commits.len, ref });
-    }
-
-    /// Exit the sub-commits view, back to the branch list.
-    fn closeBranchCommits(self: *App) !void {
-        self.deactivateBranchCommits();
-        if (self.listView(.branches)) |lv| {
-            lv.scroll = 0;
-            lv.hscroll = 0;
-        }
-        self.resetMainView();
-        try self.updatePreview();
-    }
-
-    fn deactivateBranchCommits(self: *App) void {
-        // Closing the sub-commits list also drops the files level beneath it.
-        self.deactivateBranchFiles();
-        model.deinitCommits(self.allocator, self.branch_commits);
-        self.branch_commits = &.{};
-        self.branch_commit_index = 0;
-        self.branch_commits_active = false;
-    }
-
-    fn openBranchFiles(self: *App) !void {
-        const commit = self.selectedCommit() orelse {
-            try self.setMessage("no commit selected", .{});
-            return;
-        };
-        const files = try self.git.loadCommitFiles(commit.hash);
-        model.deinitCommitFiles(self.allocator, self.branch_files);
-        self.branch_files = files;
-        self.branch_file_index = 0;
-        self.branch_files_active = true;
-        self.resetMainView();
-        self.resetListHScroll(.branches);
-        try self.updatePreview();
-        try self.setMessage("{d} files in {s}", .{ files.len, commit.short_hash });
-    }
-
-    fn closeBranchFiles(self: *App) !void {
-        self.deactivateBranchFiles();
-        self.resetMainView();
-        self.resetListHScroll(.branches);
-        try self.updatePreview();
-    }
-
-    fn deactivateBranchFiles(self: *App) void {
-        model.deinitCommitFiles(self.allocator, self.branch_files);
-        self.branch_files = &.{};
-        self.branch_file_index = 0;
-        self.branch_files_active = false;
-    }
-
-    /// Reload the sub-commits list from its ref after a refresh, keeping the
-    /// selection position. If the ref is gone (no commits come back), exit the
-    /// whole Branches drill back to the branch list.
-    fn reloadBranchCommitsAfterRefresh(self: *App) void {
-        const commits = self.git.loadCommits(self.branch_commits_ref, 100) catch null;
-        if (commits == null or commits.?.len == 0) {
-            if (commits) |c| model.deinitCommits(self.allocator, c);
-            self.deactivateBranchCommits(); // also drops the files level
-            return;
-        }
-        model.deinitCommits(self.allocator, self.branch_commits);
-        self.branch_commits = commits.?;
-        self.branch_commit_index = @min(self.branch_commit_index, self.branch_commits.len - 1);
-    }
-
-    /// Reload the Branches drill's file list after a refresh; drop it if its
-    /// sub-commit is gone. Independent of the Commits panel.
-    fn reloadBranchFilesAfterRefresh(self: *App) void {
-        if (self.branch_commits.len == 0) return self.deactivateBranchFiles();
-        const commit = self.branch_commits[@min(self.branch_commit_index, self.branch_commits.len - 1)];
-        const files = self.git.loadCommitFiles(commit.hash) catch return self.deactivateBranchFiles();
-        model.deinitCommitFiles(self.allocator, self.branch_files);
-        self.branch_files = files;
-        self.branch_file_index = if (self.branch_files.len == 0) 0 else @min(self.branch_file_index, self.branch_files.len - 1);
-    }
 
     const TabDirection = enum { prev, next };
 
@@ -3919,7 +3781,7 @@ pub const App = struct {
 
     /// Reset a side list's horizontal pan to the left edge — called when its
     /// content identity changes (tab switch, drill in/out).
-    fn resetListHScroll(self: *App, focus: model.Focus) void {
+    pub fn resetListHScroll(self: *App, focus: model.Focus) void {
         if (self.listView(focus)) |lv| lv.hscroll = 0;
     }
 
@@ -7552,10 +7414,10 @@ test "branches sub-commits drill: selection, navigation, and teardown" {
     // <esc> pops one level at a time: files first, then the sub-commits list.
     app.branch_files = &.{};
     app.branch_commits = &.{};
-    app.deactivateBranchFiles();
+    drills_mod.deactivateBranchFiles(&app);
     try std.testing.expect(!app.branch_files_active);
     try std.testing.expect(app.branch_commits_active); // still drilled into commits
-    app.deactivateBranchCommits();
+    drills_mod.deactivateBranchCommits(&app);
     try std.testing.expect(!app.branch_commits_active);
 }
 
@@ -7610,7 +7472,7 @@ test "drill state survives switching focus and stays isolated per panel" {
     try std.testing.expectEqual(@as(usize, 2), app.activeListLen(.commits)); // commit_files
     // Closing one panel's files leaves the other's intact.
     app.branch_files = &.{};
-    app.deactivateBranchFiles();
+    drills_mod.deactivateBranchFiles(&app);
     try std.testing.expect(!app.branch_files_active);
     try std.testing.expect(app.commit_files_active); // untouched
 
@@ -9023,7 +8885,7 @@ test "commit file drill-down tracks selection and deactivates cleanly" {
 
     try std.testing.expectEqualStrings("src/b.zig", app.selectedCommitFile().?.path);
 
-    app.deactivateCommitFiles();
+    drills_mod.deactivateCommitFiles(&app);
     try std.testing.expect(!app.commit_files_active);
     try std.testing.expectEqual(@as(usize, 0), app.commit_files.len);
     try std.testing.expect(app.selectedCommitFile() == null);

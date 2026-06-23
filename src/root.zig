@@ -2,6 +2,7 @@ pub const actions = @import("actions.zig");
 pub const app = @import("app.zig");
 pub const config = @import("config.zig");
 pub const diff = @import("diff.zig");
+pub const drills = @import("drills.zig");
 pub const editor = @import("editor.zig");
 pub const filetree = @import("filetree.zig");
 pub const git = @import("git.zig");
