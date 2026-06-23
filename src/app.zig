@@ -8,6 +8,7 @@ const editor_mod = @import("editor.zig");
 const filetree = @import("filetree.zig");
 const git_mod = @import("git.zig");
 const model = @import("model.zig");
+const patch_mod = @import("patch.zig");
 const textmatch = @import("textmatch.zig");
 
 pub const Mode = enum {
@@ -2257,7 +2258,7 @@ pub const App = struct {
             .toggle_staging_split => if (self.staging_active and !self.staging_patch_mode) try self.toggleStagingSplit(),
             .select => {
                 if (self.staging_patch_mode) {
-                    try self.togglePatchInclusion();
+                    try patch_mod.togglePatchInclusion(self);
                 } else if (self.staging_active) {
                     try self.applyStagingSelection();
                 } else switch (self.focus) {
@@ -2266,12 +2267,12 @@ pub const App = struct {
                     // custom patch (as in the Commits panel); on the commit list
                     // it does nothing; otherwise it checks out the branch.
                     .branches => if (self.branch_commits_active) {
-                        if (self.branchFilesActive()) try self.toggleFileInPatch();
+                        if (self.branchFilesActive()) try patch_mod.toggleFileInPatch(self);
                     } else try self.checkoutSelectedBranch(),
                     .stash => try self.applySelectedStash(),
                     // In a commit's file list, space toggles the file into the
                     // custom patch.
-                    .commits => if (self.commitsFilesActive()) try self.toggleFileInPatch(),
+                    .commits => if (self.commitsFilesActive()) try patch_mod.toggleFileInPatch(self),
                     .status, .main => {},
                 }
             },
@@ -3226,318 +3227,6 @@ pub const App = struct {
         return self.commit_files_active;
     }
 
-    pub fn patchHasFile(self: *const App, path: []const u8) bool {
-        for (self.patch_paths.items) |p| {
-            if (std.mem.eql(u8, p, path)) return true;
-        }
-        return false;
-    }
-
-    pub fn patchFileCount(self: *const App) usize {
-        return self.patch_paths.items.len;
-    }
-
-    /// Files in the in-progress patch if it belongs to `hash`, else 0. A patch
-    /// is tied to one commit, so a commit-files view only advertises its own.
-    fn patchCountForCommit(self: *const App, hash: []const u8) usize {
-        const src = self.patch_source orelse return 0;
-        return if (std.mem.eql(u8, src, hash)) self.patch_paths.items.len else 0;
-    }
-
-    /// Patch file count for the commit the Commits panel is showing files for.
-    pub fn commitFilesPatchCount(self: *const App) usize {
-        if (!self.commit_files_active) return 0;
-        const list = self.activeCommits();
-        if (list.len == 0) return 0;
-        return self.patchCountForCommit(list[@min(self.activeCommitIndex(), list.len - 1)].hash);
-    }
-
-    /// Patch file count for the sub-commit the Branches panel is showing files for.
-    pub fn branchFilesPatchCount(self: *const App) usize {
-        if (!self.branch_files_active or self.branch_commits.len == 0) return 0;
-        return self.patchCountForCommit(self.branch_commits[@min(self.branch_commit_index, self.branch_commits.len - 1)].hash);
-    }
-
-    fn clearPatch(self: *App) void {
-        if (self.patch_source) |s| self.allocator.free(s);
-        self.patch_source = null;
-        for (self.patch_paths.items) |p| self.allocator.free(p);
-        self.patch_paths.clearRetainingCapacity();
-        for (self.patch_line_sel.items) |sel| if (sel) |s| self.allocator.free(s);
-        self.patch_line_sel.clearRetainingCapacity();
-    }
-
-    /// The line inclusion for a path in the patch: null if the file isn't in the
-    /// patch or is included whole; otherwise its per-line bool array.
-    fn patchLineSelFor(self: *const App, path: []const u8) ?[]bool {
-        for (self.patch_paths.items, 0..) |p, idx| {
-            if (std.mem.eql(u8, p, path)) return self.patch_line_sel.items[idx];
-        }
-        return null;
-    }
-
-    /// Toggle the selected commit file into the custom patch. A patch is tied
-    /// to one source commit; selecting a file from a different commit prompts to
-    /// discard the current patch first (confirming re-runs via `applyPatchToggle`).
-    fn toggleFileInPatch(self: *App) !void {
-        const commit = self.selectedCommit() orelse {
-            try self.setMessage("open a commit's files (enter) to build a patch", .{});
-            return;
-        };
-        if (self.selectedCommitFile() == null) {
-            try self.setMessage("open a commit's files (enter) to build a patch", .{});
-            return;
-        }
-        if (self.patch_source) |source| {
-            if (!std.mem.eql(u8, source, commit.hash)) {
-                self.patch_reset_resume = .toggle_file;
-                return self.requestConfirmation(.reset_patch, "confirm discard patch", .{});
-            }
-        }
-        return self.applyPatchToggle();
-    }
-
-    /// Add/remove the selected file in the custom patch, starting a fresh patch
-    /// (tied to the selected commit) if none is in progress. The caller has
-    /// already ensured the selection belongs to the patch's commit.
-    fn applyPatchToggle(self: *App) !void {
-        const commit = self.selectedCommit() orelse return;
-        const file = self.selectedCommitFile() orelse {
-            try self.setMessage("no file selected", .{});
-            return;
-        };
-        if (self.patch_source == null) self.patch_source = try self.allocator.dupe(u8, commit.hash);
-        for (self.patch_paths.items, 0..) |p, idx| {
-            if (std.mem.eql(u8, p, file.path)) {
-                self.allocator.free(self.patch_paths.orderedRemove(idx));
-                if (self.patch_line_sel.orderedRemove(idx)) |sel| self.allocator.free(sel);
-                if (self.patch_paths.items.len == 0) self.clearPatch();
-                try self.setMessage("removed {s} from patch ({d} files)", .{ file.path, self.patch_paths.items.len });
-                return;
-            }
-        }
-        try self.patch_paths.append(self.allocator, try self.allocator.dupe(u8, file.path));
-        try self.patch_line_sel.append(self.allocator, null); // whole file
-        try self.setMessage("added {s} to patch ({d} files)", .{ file.path, self.patch_paths.items.len });
-    }
-
-    /// Concatenate the source commit's per-file diffs into one applyable patch.
-    /// A file with a line selection contributes only its included lines.
-    fn buildPatchBytes(self: *App) ![]u8 {
-        const source = self.patch_source orelse return error.NoPatch;
-        var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(self.allocator);
-        for (self.patch_paths.items, 0..) |path, idx| {
-            const diff = try self.git.diffForCommitFile(source, path, self.config.diff_context);
-            defer self.allocator.free(diff);
-            if (self.patch_line_sel.items[idx]) |sel| {
-                var parsed = diff_mod.parse(self.allocator, diff) catch {
-                    try out.appendSlice(self.allocator, diff);
-                    continue;
-                };
-                defer parsed.deinit(self.allocator);
-                const part = diff_mod.buildPartialFilePatch(self.allocator, diff, parsed, sel) catch |err| switch (err) {
-                    error.EmptySelection => continue, // nothing selected from this file
-                    else => {
-                        try out.appendSlice(self.allocator, diff); // e.g. no-newline hunk
-                        continue;
-                    },
-                };
-                defer self.allocator.free(part);
-                try out.appendSlice(self.allocator, part);
-            } else {
-                try out.appendSlice(self.allocator, diff);
-            }
-        }
-        return out.toOwnedSlice(self.allocator);
-    }
-
-    /// Number of `\n`-separated lines in `text` (for sizing inclusion arrays).
-    fn diffLineCount2(text: []const u8) usize {
-        if (text.len == 0) return 0;
-        return std.mem.count(u8, text, "\n") + 1;
-    }
-
-    /// First byte of the `abs`-th line of `text`, or 0 if out of range / empty.
-    fn diffLineFirstByte(text: []const u8, abs: usize) u8 {
-        var lines = std.mem.splitScalar(u8, text, '\n');
-        var i: usize = 0;
-        while (lines.next()) |line| : (i += 1) {
-            if (i == abs) return if (line.len > 0) line[0] else 0;
-        }
-        return 0;
-    }
-
-    /// True if the `abs`-th line of the patch-view diff is an add/remove line.
-    fn patchLineIsChange(self: *const App, abs: usize) bool {
-        const c = diffLineFirstByte(self.staging_diff, abs);
-        return c == '+' or c == '-';
-    }
-
-    /// Open the line-selection view for the selected commit file. If a patch from
-    /// a different commit is in progress, confirm discarding it first; on confirm
-    /// the view re-opens here (the original action resumes, not a whole-file add).
-    fn openPatchLineView(self: *App) !void {
-        const commit = self.selectedCommit() orelse return self.enterMain();
-        if (self.selectedCommitFile() == null) return self.enterMain();
-        if (self.patch_source) |src| {
-            if (!std.mem.eql(u8, src, commit.hash)) {
-                self.patch_reset_resume = .line_view;
-                return self.requestConfirmation(.reset_patch, "confirm discard patch", .{});
-            }
-        }
-        return self.doOpenPatchLineView();
-    }
-
-    /// Actually open the patch line view (no patch-conflict check — the caller
-    /// has cleared any conflicting patch). Kept separate so the confirm handler
-    /// can resume here without an inferred-error-set cycle.
-    fn doOpenPatchLineView(self: *App) !void {
-        const commit = self.selectedCommit() orelse return self.enterMain();
-        const file = self.selectedCommitFile() orelse return self.enterMain();
-        const diff = self.git.diffForCommitFile(commit.hash, file.path, self.config.diff_context) catch {
-            try self.setMessage("could not load the file's diff", .{});
-            return;
-        };
-        self.clearStaging();
-        self.staging_path = try self.allocator.dupe(u8, file.path);
-        self.staging_diff = diff;
-        self.staging = try diff_mod.parse(self.allocator, self.staging_diff);
-        self.staging_active = true;
-        self.staging_patch_mode = true;
-        self.main_origin = self.contentFocus();
-        self.focus = .main;
-
-        // Seed the working inclusion from the file's current patch state.
-        const n = diffLineCount2(self.staging_diff);
-        self.allocator.free(self.patch_work_included);
-        self.patch_work_included = try self.allocator.alloc(bool, n);
-        const existing = self.patchLineSelFor(file.path);
-        const in_patch = self.patchHasFile(file.path);
-        for (self.patch_work_included, 0..) |*b, i| {
-            b.* = if (existing) |sel| (i < sel.len and sel[i]) else in_patch; // whole-file => all on
-        }
-
-        self.staging_anchor = null;
-        self.staging_cursor = self.stagingFirstLine();
-        self.resetMainView();
-        self.scrollToStagingCursor();
-        try self.setMessage("space: toggle line/hunk into patch, esc: back", .{});
-    }
-
-    /// Toggle the line(s)/hunk under the cursor in/out of the working patch
-    /// selection. On the `@@` header line the whole hunk's changes toggle.
-    fn togglePatchInclusion(self: *App) !void {
-        const parsed = self.staging orelse return;
-        if (parsed.hunks.len == 0) {
-            try self.setMessage("no changes in this file", .{});
-            return;
-        }
-        const hunk_index = self.stagingHunkAt(self.staging_cursor) orelse {
-            try self.setMessage("move the cursor onto a change", .{});
-            return;
-        };
-        const hunk = parsed.hunks[hunk_index];
-        var lo: usize = undefined;
-        var hi: usize = undefined;
-        if (self.staging_cursor == hunk.start_line) {
-            lo = hunk.start_line + 1;
-            hi = hunk.end_line -| 1;
-        } else {
-            lo = @max(@min(self.staging_anchor orelse self.staging_cursor, self.staging_cursor), hunk.start_line + 1);
-            hi = @min(@max(self.staging_anchor orelse self.staging_cursor, self.staging_cursor), hunk.end_line -| 1);
-        }
-        // Toggle: if every change line in the range is already included, remove;
-        // otherwise add. Context lines are ignored.
-        var all_on = true;
-        var any = false;
-        var i = lo;
-        while (i <= hi and i < self.patch_work_included.len) : (i += 1) {
-            if (self.patchLineIsChange(i)) {
-                any = true;
-                if (!self.patch_work_included[i]) all_on = false;
-            }
-        }
-        if (!any) {
-            try self.setMessage("no +/- change in the selection", .{});
-            return;
-        }
-        const target = !all_on;
-        i = lo;
-        while (i <= hi and i < self.patch_work_included.len) : (i += 1) {
-            if (self.patchLineIsChange(i)) self.patch_work_included[i] = target;
-        }
-        self.staging_anchor = null;
-        if (target) {
-            try self.setMessage("added to patch", .{});
-        } else {
-            try self.setMessage("removed from patch", .{});
-        }
-    }
-
-    /// Persist the line view's working inclusion into the patch (adding/updating
-    /// or removing the file), then close the view back to the commit-files list.
-    fn closePatchLineView(self: *App) !void {
-        const path = self.staging_path;
-        var any = false;
-        for (self.patch_work_included, 0..) |inc, i| {
-            if (inc and self.patchLineIsChange(i)) {
-                any = true;
-                break;
-            }
-        }
-        const commit_hash = if (self.selectedCommit()) |c| c.hash else null;
-
-        if (any) {
-            if (self.patch_source == null) {
-                if (commit_hash) |h| self.patch_source = try self.allocator.dupe(u8, h);
-            }
-            // Whole-file if every change line is included, else a line selection.
-            var whole = true;
-            for (self.patch_work_included, 0..) |inc, i| {
-                if (self.patchLineIsChange(i) and !inc) {
-                    whole = false;
-                    break;
-                }
-            }
-            const sel: ?[]bool = if (whole) null else try self.allocator.dupe(bool, self.patch_work_included);
-            errdefer if (sel) |s| self.allocator.free(s);
-            try self.setPatchFileSelection(path, sel);
-        } else {
-            self.removePatchFile(path);
-        }
-
-        self.clearStaging();
-        self.focus = self.main_origin;
-        self.resetMainView();
-        try self.updatePreview();
-        try self.setMessage("patch: {d} files", .{self.patchFileCount()});
-    }
-
-    /// Set (or add) a file's line selection in the patch. `sel` ownership moves in.
-    fn setPatchFileSelection(self: *App, path: []const u8, sel: ?[]bool) !void {
-        for (self.patch_paths.items, 0..) |p, idx| {
-            if (std.mem.eql(u8, p, path)) {
-                if (self.patch_line_sel.items[idx]) |old| self.allocator.free(old);
-                self.patch_line_sel.items[idx] = sel;
-                return;
-            }
-        }
-        try self.patch_paths.append(self.allocator, try self.allocator.dupe(u8, path));
-        try self.patch_line_sel.append(self.allocator, sel);
-    }
-
-    fn removePatchFile(self: *App, path: []const u8) void {
-        for (self.patch_paths.items, 0..) |p, idx| {
-            if (std.mem.eql(u8, p, path)) {
-                self.allocator.free(self.patch_paths.orderedRemove(idx));
-                if (self.patch_line_sel.orderedRemove(idx)) |s| self.allocator.free(s);
-                if (self.patch_paths.items.len == 0) self.clearPatch();
-                return;
-            }
-        }
-    }
-
     /// <enter> behaviour per panel: on the Commits tab it drills into the
     /// commit's file list; on the Files panel it opens the hunk-staging view;
     /// elsewhere it descends into the main panel to scroll.
@@ -3550,14 +3239,14 @@ pub const App = struct {
         if (self.focus == .branches) {
             if (self.branch_commits_active) {
                 if (!self.branch_files_active) return self.openBranchFiles(); // commit -> files
-                return self.openPatchLineView(); // file -> line-select patch view
+                return patch_mod.openPatchLineView(self); // file -> line-select patch view
             }
             // Enter on a local/remote branch or tag opens its commits.
             if (self.selectedBranchRefName()) |ref| return self.openBranchCommits(ref);
         }
         // Commits panel: a file in the commit-files view opens the patch line view.
         if (self.focus == .commits and self.commitsFilesActive()) {
-            return self.openPatchLineView();
+            return patch_mod.openPatchLineView(self);
         }
         if (self.focus == .files) {
             // In tree view, <enter> on a directory collapses/expands it.
@@ -3679,7 +3368,7 @@ pub const App = struct {
     }
 
     /// Line index of the first selectable line (the first hunk's `@@` line).
-    fn stagingFirstLine(self: *const App) usize {
+    pub fn stagingFirstLine(self: *const App) usize {
         const parsed = self.staging orelse return 0;
         if (parsed.hunks.len == 0) return 0;
         return parsed.hunks[0].start_line;
@@ -3702,7 +3391,7 @@ pub const App = struct {
         self.scrollToStagingCursor();
     }
 
-    fn scrollToStagingCursor(self: *App) void {
+    pub fn scrollToStagingCursor(self: *App) void {
         const height: usize = if (self.main_view_height == 0) 20 else self.main_view_height;
         if (self.staging_cursor < self.main_scroll) {
             self.main_scroll = self.staging_cursor;
@@ -3712,7 +3401,7 @@ pub const App = struct {
     }
 
     /// The hunk index whose body or header line contains `abs`, or null.
-    fn stagingHunkAt(self: *const App, abs: usize) ?usize {
+    pub fn stagingHunkAt(self: *const App, abs: usize) ?usize {
         const parsed = self.staging orelse return null;
         for (parsed.hunks, 0..) |hunk, idx| {
             if (abs >= hunk.start_line and abs < hunk.end_line) return idx;
@@ -3778,14 +3467,14 @@ pub const App = struct {
     }
 
     fn closeStaging(self: *App) !void {
-        if (self.staging_patch_mode) return self.closePatchLineView();
+        if (self.staging_patch_mode) return patch_mod.closePatchLineView(self);
         self.clearStaging();
         self.focus = .files;
         self.resetMainView();
         try self.updatePreview();
     }
 
-    fn clearStaging(self: *App) void {
+    pub fn clearStaging(self: *App) void {
         self.staging_patch_mode = false;
         if (self.staging) |*parsed| parsed.deinit(self.allocator);
         self.staging = null;
@@ -4063,7 +3752,7 @@ pub const App = struct {
 
     /// Descend into the main panel to inspect the selected item, remembering
     /// the side panel we came from so <esc>/<h> can return there.
-    fn enterMain(self: *App) !void {
+    pub fn enterMain(self: *App) !void {
         if (self.focus.isSidePanel()) self.main_origin = self.focus;
         self.focus = .main;
         self.resetMainView();
@@ -4183,7 +3872,7 @@ pub const App = struct {
 
     /// Reset the main panel to the top-left. Called wherever the main view's
     /// content changes (a new file/commit/diff, opening or closing a sub-view).
-    fn resetMainView(self: *App) void {
+    pub fn resetMainView(self: *App) void {
         self.main_scroll = 0;
         self.main_hscroll = 0;
     }
@@ -5378,13 +5067,13 @@ pub const App = struct {
     }
 
     fn startPatchMenu(self: *App) !void {
-        if (self.patchFileCount() == 0) {
+        if (patch_mod.patchFileCount(self) == 0) {
             try self.setMessage("no patch - open a commit (enter), then space to add files", .{});
             return;
         }
         self.mode = .menu;
         self.active_menu = .{ .title = "Custom patch", .items = &patch_menu_items, .index = 0 };
-        try self.setMessage("custom patch ({d} files)", .{self.patchFileCount()});
+        try self.setMessage("custom patch ({d} files)", .{patch_mod.patchFileCount(self)});
     }
 
     fn startBisectMenu(self: *App) !void {
@@ -5599,7 +5288,7 @@ pub const App = struct {
             },
             .patch_apply, .patch_apply_reverse => {
                 const reverse = action == .patch_apply_reverse;
-                const patch = self.buildPatchBytes() catch {
+                const patch = patch_mod.buildPatchBytes(self) catch {
                     try self.setMessage("no patch to apply", .{});
                     return;
                 };
@@ -5610,7 +5299,7 @@ pub const App = struct {
             },
             .patch_remove_from_commit => return self.removePatchFromSourceCommit(),
             .patch_reset => {
-                self.clearPatch();
+                patch_mod.clearPatch(self);
                 try self.setMessage("patch reset", .{});
             },
             .diff_against_selected => try self.diffAgainstSelected(),
@@ -5653,7 +5342,7 @@ pub const App = struct {
             return;
         }
 
-        const patch = self.buildPatchBytes() catch {
+        const patch = patch_mod.buildPatchBytes(self) catch {
             try self.setMessage("could not build the patch", .{});
             return;
         };
@@ -6312,10 +6001,10 @@ pub const App = struct {
             // Discard the old patch, then resume the action that triggered the
             // switch on the new commit (toggle the file, or re-open the line view).
             .reset_patch => {
-                self.clearPatch();
+                patch_mod.clearPatch(self);
                 return switch (self.patch_reset_resume) {
-                    .toggle_file => self.applyPatchToggle(),
-                    .line_view => self.doOpenPatchLineView(),
+                    .toggle_file => patch_mod.applyPatchToggle(self),
+                    .line_view => patch_mod.doOpenPatchLineView(self),
                 };
             },
         }
@@ -6334,7 +6023,7 @@ pub const App = struct {
     /// action runs immediately (no prompt); otherwise the confirmation prompt is
     /// shown with `prompt_fmt`/`prompt_args` in the bottom bar. The prompt text
     /// is irrelevant when skipping, since the action sets its own message.
-    fn requestConfirmation(self: *App, kind: Confirmation, comptime prompt_fmt: []const u8, prompt_args: anytype) !void {
+    pub fn requestConfirmation(self: *App, kind: Confirmation, comptime prompt_fmt: []const u8, prompt_args: anytype) !void {
         self.pending_confirmation = kind;
         if (self.shouldSkipConfirm(kind)) return self.confirmPendingAction();
         self.mode = .confirmation;
@@ -6352,7 +6041,7 @@ pub const App = struct {
     /// command render from `preview_cache` when warm, otherwise the command is
     /// queued for the TUI loop to run off-thread (see `requestGitPreview`). This
     /// never spawns git on the UI thread, so panel/selection moves stay instant.
-    fn updatePreview(self: *App) !void {
+    pub fn updatePreview(self: *App) !void {
         // While staging, the main panel renders the raw staging diff instead of
         // self.diff, so there is nothing to recompute here.
         if (self.staging_active) return;
@@ -7043,7 +6732,7 @@ pub const App = struct {
             if (mutable.ok()) {
                 switch (self.mutation_post) {
                     .none => {},
-                    .clear_patch => self.clearPatch(),
+                    .clear_patch => patch_mod.clearPatch(self),
                     .clear_copied => self.clearCopiedCommits(),
                 }
                 const line = if (self.mutation_echo) firstLine(mutable.stdout) else "";
@@ -7098,7 +6787,7 @@ pub const App = struct {
         self.refreshViews(Refresh.all);
     }
 
-    fn setMessage(self: *App, comptime fmt: []const u8, args: anytype) !void {
+    pub fn setMessage(self: *App, comptime fmt: []const u8, args: anytype) !void {
         self.allocator.free(self.message);
         self.message = try std.fmt.allocPrint(self.allocator, fmt, args);
     }
@@ -7793,32 +7482,32 @@ test "custom patch toggles commit files and is tied to one commit" {
     app.commit_index = 0;
 
     app.commit_file_index = 0;
-    try app.toggleFileInPatch();
-    try std.testing.expect(app.patchHasFile("f.txt"));
+    try patch_mod.toggleFileInPatch(&app);
+    try std.testing.expect(patch_mod.patchHasFile(&app, "f.txt"));
     app.commit_file_index = 1;
-    try app.toggleFileInPatch();
-    try std.testing.expectEqual(@as(usize, 2), app.patchFileCount());
+    try patch_mod.toggleFileInPatch(&app);
+    try std.testing.expectEqual(@as(usize, 2), patch_mod.patchFileCount(&app));
 
     // Toggling a file off removes it.
     app.commit_file_index = 0;
-    try app.toggleFileInPatch();
-    try std.testing.expect(!app.patchHasFile("f.txt"));
-    try std.testing.expectEqual(@as(usize, 1), app.patchFileCount());
+    try patch_mod.toggleFileInPatch(&app);
+    try std.testing.expect(!patch_mod.patchHasFile(&app, "f.txt"));
+    try std.testing.expectEqual(@as(usize, 1), patch_mod.patchFileCount(&app));
 
     // A file from a different commit prompts to discard the current patch
     // rather than acting; until confirmed, the existing patch is untouched.
     app.commit_index = 1;
     app.commit_file_index = 0;
-    try app.toggleFileInPatch();
+    try patch_mod.toggleFileInPatch(&app);
     try std.testing.expectEqual(Confirmation.reset_patch, app.pending_confirmation.?);
     try std.testing.expectEqual(Mode.confirmation, app.mode);
-    try std.testing.expectEqual(@as(usize, 1), app.patchFileCount()); // still g.txt from the first commit
+    try std.testing.expectEqual(@as(usize, 1), patch_mod.patchFileCount(&app)); // still g.txt from the first commit
 
     // Confirming discards the old patch and adds the file from the new commit.
     try app.confirmPendingAction();
     try std.testing.expect(app.pending_confirmation == null);
-    try std.testing.expectEqual(@as(usize, 1), app.patchFileCount());
-    try std.testing.expect(app.patchHasFile("f.txt"));
+    try std.testing.expectEqual(@as(usize, 1), patch_mod.patchFileCount(&app));
+    try std.testing.expect(patch_mod.patchHasFile(&app, "f.txt"));
 }
 
 test "branches sub-commits drill: selection, navigation, and teardown" {

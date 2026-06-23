@@ -5,6 +5,7 @@ const app_mod = @import("app.zig");
 const config_mod = @import("config.zig");
 const git_mod = @import("git.zig");
 const model = @import("model.zig");
+const patch_mod = @import("patch.zig");
 
 /// Active theme, set from config at startup and read by `styles()`.
 var ui_theme: config_mod.Theme = .{};
@@ -756,8 +757,8 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     y += files_h;
     const branches_title = if (app.branch_commits_active)
         (if (app.branchFilesActive())
-            (if (app.branchFilesPatchCount() > 0)
-                (std.fmt.bufPrint(&app.branches_title_buf, "Commit files [3] (patch: {d}) (esc back)", .{app.branchFilesPatchCount()}) catch "Commit files [3] (esc back)")
+            (if (patch_mod.branchFilesPatchCount(app) > 0)
+                (std.fmt.bufPrint(&app.branches_title_buf, "Commit files [3] (patch: {d}) (esc back)", .{patch_mod.branchFilesPatchCount(app)}) catch "Commit files [3] (esc back)")
             else
                 "Commit files [3]  (space: add to patch) (esc back)")
         else
@@ -777,8 +778,8 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     }
     y += branches_h;
     const commits_title = if (app.commitsFilesActive())
-        (if (app.commitFilesPatchCount() > 0)
-            (std.fmt.bufPrint(&app.commits_title_buf, "Commit files [4] (patch: {d}) (esc back)", .{app.commitFilesPatchCount()}) catch "Commit files [4] (esc back)")
+        (if (patch_mod.commitFilesPatchCount(app) > 0)
+            (std.fmt.bufPrint(&app.commits_title_buf, "Commit files [4] (patch: {d}) (esc back)", .{patch_mod.commitFilesPatchCount(app)}) catch "Commit files [4] (esc back)")
         else
             "Commit files [4]  (space: add to patch) (esc back)")
     else if (app.commits_tab == .reflog)
@@ -1559,7 +1560,7 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
     // Sub-commits drill: the Branches panel shows the ref's commits, or (one
     // level deeper) the selected commit's files.
     if (app.branch_commits_active) {
-        if (app.branchFilesActive()) return drawCommitFiles(win, app, app.branch_files, app.branch_file_index, .branches, app.branchFilesPatchCount() > 0);
+        if (app.branchFilesActive()) return drawCommitFiles(win, app, app.branch_files, app.branch_file_index, .branches, patch_mod.branchFilesPatchCount(app) > 0);
         if (app.branch_commits.len == 0) {
             print(win, 0, 0, "No commits", styles().muted);
             return;
@@ -1707,7 +1708,7 @@ fn drawCommitFiles(win: vaxis.Window, app: *const app_mod.App, files: []const mo
         const file = files[idx];
         var buf: [512]u8 = undefined;
         // A leading '+' marks files added to this commit's custom patch.
-        const in_patch = patch_active and app.patchHasFile(file.path);
+        const in_patch = patch_active and patch_mod.patchHasFile(app, file.path);
         const marker: u8 = if (in_patch) '+' else ' ';
         const line = std.fmt.bufPrint(&buf, "{c}{c} {s}", .{ marker, file.status, file.path }) catch file.path;
         const style = if (in_patch) styles().staged else switch (file.status) {
@@ -1745,7 +1746,7 @@ fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const m
 
 fn drawCommits(win: vaxis.Window, app: *const app_mod.App) void {
     // The Commits panel's own commit-files drill (not the Branches one).
-    if (app.commitsFilesActive()) return drawCommitFiles(win, app, app.commit_files, app.commit_file_index, .commits, app.commitFilesPatchCount() > 0);
+    if (app.commitsFilesActive()) return drawCommitFiles(win, app, app.commit_files, app.commit_file_index, .commits, patch_mod.commitFilesPatchCount(app) > 0);
     const commits = app.activeCommits();
     if (commits.len == 0) {
         const empty_label = if (app.initial_load_pending) "Loading..." else if (app.commits_tab == .reflog) "No reflog entries" else "No commits";
