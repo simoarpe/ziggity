@@ -21,8 +21,11 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 - Stash panel from `git stash list`.
 - Diff preview for selected files, commits, branches, and stash entries.
 - Keyboard navigation across side panels and the diff panel.
-- Files-panel directory-tree view (toggle with `` ` ``): collapsible directories
-  (`enter`), stage/unstage a whole directory (`space`).
+- Directory-tree view (toggle with `` ` ``) for the working-tree files **and** a
+  commit's / branch's file lists: a root node plus collapsible directories
+  (`enter`); selecting a directory shows the combined diff of everything beneath
+  it and the root shows every change. In the Files panel `space` stages/unstages
+  a whole directory.
 - Files-panel live fuzzy path filtering (smart-case subsequence matching) with
   recall of recent filters (`up`/`down` in the filter prompt).
 - Files-panel status filtering for staged, unstaged, tracked, and untracked files.
