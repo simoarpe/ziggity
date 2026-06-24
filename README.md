@@ -27,8 +27,7 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
   a directory shows the combined diff of everything beneath it, and the root
   shows every change. In the Files panel `space` stages/unstages a whole
   directory; in a commit's files it adds/removes the directory in the custom
-  patch. Set `tree_root = false` to hide the root row and list top-level entries
-  directly.
+  patch.
 - Files-panel live fuzzy path filtering (smart-case subsequence matching) with
   recall of recent filters (`up`/`down` in the filter prompt).
 - Files-panel status filtering for staged, unstaged, tracked, and untracked files.
@@ -155,8 +154,8 @@ Useful keys:
 - `` ` ``: toggle the directory-tree view — in the Files panel **and** a commit's
   / branch's file list. In tree view, `enter` collapses/expands the folder under
   the cursor (and `tab` still switches to the Diff panel); `space` stages a whole
-  directory (Files) or adds it to the custom patch (commit files). The `/` root
-  row is shown by default — set `tree_root = false` to hide it (see Config)
+  directory (Files) or adds it to the custom patch (commit files). A `/` root row
+  nests everything and, when selected, diffs all changes
 - `ctrl+b`: open files status filter menu
 - `j`/`k` or arrows: move selection
 - `h`/`l` or arrows: cycle focus between side panels
@@ -225,12 +224,6 @@ Supported settings:
 ```ini
 side_panel_width_percent = 34
 diff_context = 3
-
-# File directory-tree view (toggle at runtime with `` ` ``). When on, the tree
-# shows a `/` root row that nests every entry and, when selected, diffs all
-# changes. Set false to hide the root and list top-level entries directly.
-# (`enter` collapses/expands a folder; `tab` always switches to the Diff panel.)
-tree_root = true
 
 # Seconds between idle background working-tree refreshes (git status, run off the
 # UI thread). On a big repo a tight interval makes git status thrash; default 10.

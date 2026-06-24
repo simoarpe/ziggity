@@ -1380,11 +1380,13 @@ pub const TreeState = struct {
 
     /// Replace the visible rows from a path-sorted `entries` list (sorted in
     /// place here), keeping the cursor on `restore_path` when that row survives.
-    fn rebuild(self: *TreeState, allocator: std.mem.Allocator, entries: []filetree.Entry, restore_path: ?[]const u8, show_root: bool) !void {
+    fn rebuild(self: *TreeState, allocator: std.mem.Allocator, entries: []filetree.Entry, restore_path: ?[]const u8) !void {
         allocator.free(self.rows);
         self.rows = &.{};
         std.mem.sort(filetree.Entry, entries, {}, entryLessThan);
-        self.rows = try filetree.build(allocator, entries, &self.collapsed, show_root);
+        // Every file tree shows the synthetic root row (`/`) nesting everything
+        // beneath it; selecting it diffs all changes.
+        self.rows = try filetree.build(allocator, entries, &self.collapsed, true);
         self.cursor = 0;
         if (restore_path) |path| {
             for (self.rows, 0..) |row, i| {
@@ -3126,7 +3128,7 @@ pub const App = struct {
         var entries: std.ArrayList(filetree.Entry) = .empty;
         defer entries.deinit(self.allocator);
         try self.fileTreeEntries(&entries);
-        try self.files_tree.rebuild(self.allocator, entries.items, restore_path, self.config.tree_root);
+        try self.files_tree.rebuild(self.allocator, entries.items, restore_path);
     }
 
     fn toggleTreeView(self: *App) !void {
@@ -3172,14 +3174,14 @@ pub const App = struct {
         var entries: std.ArrayList(filetree.Entry) = .empty;
         defer entries.deinit(self.allocator);
         for (self.commit_files, 0..) |file, idx| try entries.append(self.allocator, .{ .path = file.path, .index = idx });
-        try self.commit_tree.rebuild(self.allocator, entries.items, restore_path, self.config.tree_root);
+        try self.commit_tree.rebuild(self.allocator, entries.items, restore_path);
     }
 
     fn rebuildBranchFilesTree(self: *App, restore_path: ?[]const u8) !void {
         var entries: std.ArrayList(filetree.Entry) = .empty;
         defer entries.deinit(self.allocator);
         for (self.branch_files, 0..) |file, idx| try entries.append(self.allocator, .{ .path = file.path, .index = idx });
-        try self.branch_tree.rebuild(self.allocator, entries.items, restore_path, self.config.tree_root);
+        try self.branch_tree.rebuild(self.allocator, entries.items, restore_path);
     }
 
     /// Bring a drill's tree rows in line with its (possibly just-reloaded) file
@@ -8149,7 +8151,6 @@ test "commit-files drill tree resolves directory vs file selection" {
     app.commit_files_active = true;
     app.focus = .commits;
     app.tree_view = true;
-    app.config.tree_root = true; // exercise the root row + all-changes path
     try app.rebuildCommitFilesTree(null);
 
     // root, README.md, src/, src/a.zig, src/b.zig
@@ -8195,7 +8196,6 @@ test "space on a directory toggles every file under it into the patch" {
     app.focus = .commits;
     app.commit_index = 0;
     app.tree_view = true;
-    app.config.tree_root = true; // so cursor 0 is the root (all files)
     try app.rebuildCommitFilesTree(null);
 
     // Cursor on the "src" directory: adding pulls in both files beneath it.
