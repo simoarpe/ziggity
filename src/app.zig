@@ -1410,7 +1410,7 @@ pub const TreeState = struct {
         return true;
     }
 
-    fn clear(self: *TreeState, allocator: std.mem.Allocator) void {
+    pub fn clear(self: *TreeState, allocator: std.mem.Allocator) void {
         allocator.free(self.rows);
         self.rows = &.{};
         self.cursor = 0;
@@ -2613,7 +2613,7 @@ pub const App = struct {
         return switch (focus) {
             .files => if (self.tree_view) self.files_tree.rows.len else self.visibleFileCount(),
             .branches => if (self.branchFilesActive())
-                self.branch_files.len
+                (if (self.tree_view) self.branch_tree.rows.len else self.branch_files.len)
             else if (self.branch_commits_active)
                 self.branch_commits.len
             else switch (self.branches_tab) {
@@ -2623,7 +2623,9 @@ pub const App = struct {
                 .worktrees => self.data.worktrees.len,
                 .submodules => self.data.submodules.len,
             },
-            .commits => if (self.commitsFilesActive()) self.commit_files.len else switch (self.commits_tab) {
+            .commits => if (self.commitsFilesActive())
+                (if (self.tree_view) self.commit_tree.rows.len else self.commit_files.len)
+            else switch (self.commits_tab) {
                 .commits => self.data.commits.len,
                 .reflog => self.data.reflog.len,
             },
@@ -2637,7 +2639,7 @@ pub const App = struct {
         return switch (focus) {
             .files => if (self.tree_view) self.files_tree.cursor else self.selectedFileVisibleOrdinal(),
             .branches => if (self.branchFilesActive())
-                self.branch_file_index
+                (if (self.tree_view) self.branch_tree.cursor else self.branch_file_index)
             else if (self.branch_commits_active)
                 self.branch_commit_index
             else switch (self.branches_tab) {
@@ -2647,7 +2649,9 @@ pub const App = struct {
                 .worktrees => self.worktree_index,
                 .submodules => self.submodule_index,
             },
-            .commits => if (self.commitsFilesActive()) self.commit_file_index else switch (self.commits_tab) {
+            .commits => if (self.commitsFilesActive())
+                (if (self.tree_view) self.commit_tree.cursor else self.commit_file_index)
+            else switch (self.commits_tab) {
                 .commits => self.commit_index,
                 .reflog => self.reflog_index,
             },
@@ -2969,8 +2973,13 @@ pub const App = struct {
                 }
             },
             .branches => if (self.branchFilesActive()) {
-                if (self.branch_files.len == 0) return;
-                self.branch_file_index = @min(clicked, self.branch_files.len - 1);
+                if (self.tree_view) {
+                    if (self.branch_tree.rows.len == 0) return;
+                    self.branch_tree.cursor = @min(clicked, self.branch_tree.rows.len - 1);
+                } else {
+                    if (self.branch_files.len == 0) return;
+                    self.branch_file_index = @min(clicked, self.branch_files.len - 1);
+                }
             } else if (self.branch_commits_active) {
                 if (self.branch_commits.len == 0) return;
                 self.branch_commit_index = @min(clicked, self.branch_commits.len - 1);
@@ -2998,8 +3007,13 @@ pub const App = struct {
             },
             .commits => {
                 if (self.commitsFilesActive()) {
-                    if (self.commit_files.len == 0) return;
-                    self.commit_file_index = @min(clicked, self.commit_files.len - 1);
+                    if (self.tree_view) {
+                        if (self.commit_tree.rows.len == 0) return;
+                        self.commit_tree.cursor = @min(clicked, self.commit_tree.rows.len - 1);
+                    } else {
+                        if (self.commit_files.len == 0) return;
+                        self.commit_file_index = @min(clicked, self.commit_files.len - 1);
+                    }
                 } else switch (self.commits_tab) {
                     .commits => {
                         if (self.data.commits.len == 0) return;
@@ -3152,6 +3166,23 @@ pub const App = struct {
         defer entries.deinit(self.allocator);
         for (self.branch_files, 0..) |file, idx| try entries.append(self.allocator, .{ .path = file.path, .index = idx });
         try self.branch_tree.rebuild(self.allocator, entries.items, restore_path);
+    }
+
+    /// Bring a drill's tree rows in line with its (possibly just-reloaded) file
+    /// list: rebuild and keep the cursor where it was in tree mode, or drop the
+    /// rows entirely in flat mode. Called whenever a drill's files change.
+    pub fn syncCommitFilesTree(self: *App) !void {
+        if (!self.tree_view) return self.commit_tree.clear(self.allocator);
+        const restore = if (self.commit_tree.selectedRow()) |r| try self.allocator.dupe(u8, r.path) else null;
+        defer if (restore) |p| self.allocator.free(p);
+        try self.rebuildCommitFilesTree(restore);
+    }
+
+    pub fn syncBranchFilesTree(self: *App) !void {
+        if (!self.tree_view) return self.branch_tree.clear(self.allocator);
+        const restore = if (self.branch_tree.selectedRow()) |r| try self.allocator.dupe(u8, r.path) else null;
+        defer if (restore) |p| self.allocator.free(p);
+        try self.rebuildBranchFilesTree(restore);
     }
 
     /// Toggle the collapsed state of the directory under the Files-panel cursor.
@@ -3318,13 +3349,54 @@ pub const App = struct {
     pub fn selectedCommitFile(self: *const App) ?model.CommitFile {
         if (self.branchFilesActive() and self.contentFocus() == .branches) {
             if (self.branch_files.len == 0) return null;
+            if (self.tree_view) {
+                const row = self.branch_tree.selectedRow() orelse return null;
+                return if (row.is_dir) null else self.branch_files[row.file_index];
+            }
             return self.branch_files[@min(self.branch_file_index, self.branch_files.len - 1)];
         }
         if (self.commitsFilesActive() and self.contentFocus() == .commits) {
             if (self.commit_files.len == 0) return null;
+            if (self.tree_view) {
+                const row = self.commit_tree.selectedRow() orelse return null;
+                return if (row.is_dir) null else self.commit_files[row.file_index];
+            }
             return self.commit_files[@min(self.commit_file_index, self.commit_files.len - 1)];
         }
         return null;
+    }
+
+    /// In a commit/branch file drill shown as a tree, the pathspec of the
+    /// directory under the cursor ("" for the root), or null when the cursor is
+    /// on a file or the list is flat. Drives the whole-directory commit diff.
+    pub fn selectedCommitDir(self: *const App) ?[]const u8 {
+        if (!self.tree_view) return null;
+        const tree = if (self.branchFilesActive() and self.contentFocus() == .branches)
+            &self.branch_tree
+        else if (self.commitsFilesActive() and self.contentFocus() == .commits)
+            &self.commit_tree
+        else
+            return null;
+        const row = tree.selectedRow() orelse return null;
+        return if (row.is_dir) row.path else null;
+    }
+
+    /// Toggle the collapsed directory under a drill's tree cursor, then rebuild.
+    fn toggleCommitFilesCollapse(self: *App, comptime which: enum { commit, branch }) !void {
+        const tree = switch (which) {
+            .commit => &self.commit_tree,
+            .branch => &self.branch_tree,
+        };
+        const row = tree.selectedRow() orelse return;
+        if (!row.is_dir) return;
+        const path = try self.allocator.dupe(u8, row.path);
+        defer self.allocator.free(path);
+        _ = try tree.toggleCollapse();
+        switch (which) {
+            .commit => try self.rebuildCommitFilesTree(path),
+            .branch => try self.rebuildBranchFilesTree(path),
+        }
+        try self.updatePreview();
     }
 
     /// The Branches-panel sub-commits drill is the active commit context — i.e.
@@ -3356,6 +3428,12 @@ pub const App = struct {
         if (self.focus == .branches) {
             if (self.branch_commits_active) {
                 if (!self.branch_files_active) return drills_mod.openBranchFiles(self); // commit -> files
+                // In tree view, <enter> on a directory collapses/expands it.
+                if (self.tree_view) {
+                    if (self.branch_tree.selectedRow()) |row| {
+                        if (row.is_dir) return self.toggleCommitFilesCollapse(.branch);
+                    }
+                }
                 return patch_mod.openPatchLineView(self); // file -> line-select patch view
             }
             // Enter on a local/remote branch or tag opens its commits.
@@ -3363,6 +3441,12 @@ pub const App = struct {
         }
         // Commits panel: a file in the commit-files view opens the patch line view.
         if (self.focus == .commits and self.commitsFilesActive()) {
+            // In tree view, <enter> on a directory collapses/expands it.
+            if (self.tree_view) {
+                if (self.commit_tree.selectedRow()) |row| {
+                    if (row.is_dir) return self.toggleCommitFilesCollapse(.commit);
+                }
+            }
             return patch_mod.openPatchLineView(self);
         }
         if (self.focus == .files) {
@@ -3563,7 +3647,9 @@ pub const App = struct {
             .status, .main => {},
             .files => if (self.tree_view) self.moveTreeCursor(if (down) 1 else -1) else (if (down) self.moveFileDown() else self.moveFileUp()),
             .branches => if (self.branchFilesActive()) {
-                self.branch_file_index = step(self.branch_file_index, down, self.branch_files.len);
+                if (self.tree_view) self.branch_tree.move(if (down) 1 else -1) else {
+                    self.branch_file_index = step(self.branch_file_index, down, self.branch_files.len);
+                }
             } else if (self.branch_commits_active) {
                 self.branch_commit_index = step(self.branch_commit_index, down, self.branch_commits.len);
             } else switch (self.branches_tab) {
@@ -3575,7 +3661,9 @@ pub const App = struct {
             },
             .commits => {
                 if (self.commitsFilesActive()) {
-                    self.commit_file_index = step(self.commit_file_index, down, self.commit_files.len);
+                    if (self.tree_view) self.commit_tree.move(if (down) 1 else -1) else {
+                        self.commit_file_index = step(self.commit_file_index, down, self.commit_files.len);
+                    }
                 } else switch (self.commits_tab) {
                     .commits => self.commit_index = step(self.commit_index, down, self.data.commits.len),
                     .reflog => self.reflog_index = step(self.reflog_index, down, self.data.reflog.len),
@@ -4865,6 +4953,10 @@ pub const App = struct {
                 if (self.branch_commits_active) {
                     const commit = self.selectedCommit() orelse return self.setCheapPreview(try self.allocator.dupe(u8, "No commits.\n"));
                     if (self.branchFilesActive()) {
+                        if (self.selectedCommitDir()) |dir| {
+                            if (dir.len == 0) return self.requestGitPreview(.{ .commit = commit.hash });
+                            return self.requestGitPreview(.{ .commit_dir = .{ .hash = commit.hash, .path = dir } });
+                        }
                         if (self.selectedCommitFile()) |file| return self.requestGitPreview(.{ .commit_file = .{ .hash = commit.hash, .path = file.path } });
                         return self.setCheapPreview(try self.allocator.dupe(u8, "This commit changed no files.\n"));
                     }
@@ -4886,6 +4978,10 @@ pub const App = struct {
             .commits => {
                 const commit = self.selectedCommit() orelse return self.setCheapPreview(try self.allocator.dupe(u8, "No commits found.\n"));
                 if (self.commitsFilesActive()) {
+                    if (self.selectedCommitDir()) |dir| {
+                        if (dir.len == 0) return self.requestGitPreview(.{ .commit = commit.hash });
+                        return self.requestGitPreview(.{ .commit_dir = .{ .hash = commit.hash, .path = dir } });
+                    }
                     if (self.selectedCommitFile()) |file| return self.requestGitPreview(.{ .commit_file = .{ .hash = commit.hash, .path = file.path } });
                     return self.setCheapPreview(try self.allocator.dupe(u8, "This commit changed no files.\n"));
                 }
@@ -8010,6 +8106,46 @@ test "file tree builds rows, selects files, and collapses directories" {
     try std.testing.expectEqual(@as(usize, 2), app.files_tree.cursor);
     app.moveTreeCursor(1); // clamps at the last row
     try std.testing.expectEqual(@as(usize, 2), app.files_tree.cursor);
+}
+
+test "commit-files drill tree resolves directory vs file selection" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var files = [_]model.CommitFile{
+        .{ .status = 'M', .path = @constCast("README.md") },
+        .{ .status = 'A', .path = @constCast("src/a.zig") },
+        .{ .status = 'M', .path = @constCast("src/b.zig") },
+    };
+    app.commit_files = &files;
+    app.commit_files_active = true;
+    app.focus = .commits;
+    app.tree_view = true;
+    try app.rebuildCommitFilesTree(null);
+
+    // root, README.md, src/, src/a.zig, src/b.zig
+    try std.testing.expectEqual(@as(usize, 5), app.commit_tree.rows.len);
+
+    app.commit_tree.cursor = 0; // root → whole-commit diff
+    try std.testing.expectEqualStrings("", app.selectedCommitDir().?);
+    try std.testing.expect(app.selectedCommitFile() == null);
+
+    app.commit_tree.cursor = 2; // the "src" directory
+    try std.testing.expectEqualStrings("src", app.selectedCommitDir().?);
+
+    app.commit_tree.cursor = 1; // README.md
+    try std.testing.expect(app.selectedCommitDir() == null);
+    try std.testing.expectEqualStrings("README.md", app.selectedCommitFile().?.path);
+
+    app.commit_tree.cursor = 3; // src/a.zig
+    try std.testing.expectEqualStrings("src/a.zig", app.selectedCommitFile().?.path);
+
+    // Leaving tree mode keeps a file selected (not a directory).
+    app.commit_tree.cursor = 2; // on the "src" directory
+    app.tree_view = false;
+    try std.testing.expect(app.selectedCommitDir() == null);
 }
 
 test "rename prompt prefills the selected branch name" {

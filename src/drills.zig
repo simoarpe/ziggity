@@ -22,6 +22,7 @@ pub fn openCommitFiles(app: *App) !void {
     app.commit_files = files;
     app.commit_file_index = 0;
     app.commit_files_active = true;
+    try app.syncCommitFilesTree();
     app.resetMainView();
     app.resetListHScroll(.commits);
     try app.updatePreview();
@@ -40,6 +41,7 @@ pub fn deactivateCommitFiles(app: *App) void {
     app.commit_files = &.{};
     app.commit_file_index = 0;
     app.commit_files_active = false;
+    app.commit_tree.clear(app.allocator);
 }
 
 /// Reload the Commits panel's file list after a refresh; drop it if its commit
@@ -52,6 +54,7 @@ pub fn reloadCommitFilesAfterRefresh(app: *App) void {
     model.deinitCommitFiles(app.allocator, app.commit_files);
     app.commit_files = files;
     app.commit_file_index = if (app.commit_files.len == 0) 0 else @min(app.commit_file_index, app.commit_files.len - 1);
+    app.syncCommitFilesTree() catch {};
 }
 
 // --- Branches panel: its own drill (branch -> sub-commits -> files) ---
@@ -105,6 +108,7 @@ pub fn openBranchFiles(app: *App) !void {
     app.branch_files = files;
     app.branch_file_index = 0;
     app.branch_files_active = true;
+    try app.syncBranchFilesTree();
     app.resetMainView();
     app.resetListHScroll(.branches);
     try app.updatePreview();
@@ -123,6 +127,7 @@ pub fn deactivateBranchFiles(app: *App) void {
     app.branch_files = &.{};
     app.branch_file_index = 0;
     app.branch_files_active = false;
+    app.branch_tree.clear(app.allocator);
 }
 
 /// Reload the sub-commits list from its ref after a refresh, keeping the
@@ -149,4 +154,5 @@ pub fn reloadBranchFilesAfterRefresh(app: *App) void {
     model.deinitCommitFiles(app.allocator, app.branch_files);
     app.branch_files = files;
     app.branch_file_index = if (app.branch_files.len == 0) 0 else @min(app.branch_file_index, app.branch_files.len - 1);
+    app.syncBranchFilesTree() catch {};
 }
