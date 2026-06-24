@@ -7,6 +7,7 @@ const std = @import("std");
 
 const app_mod = @import("app.zig");
 const diff_mod = @import("diff.zig");
+const filetree = @import("filetree.zig");
 const staging_mod = @import("staging.zig");
 
 const App = app_mod.App;
@@ -69,7 +70,9 @@ pub fn toggleFileInPatch(app: *App) !void {
         try app.setMessage("open a commit's files (enter) to build a patch", .{});
         return;
     };
-    if (app.selectedCommitFile() == null) {
+    // A directory row (in tree view) toggles every file beneath it; a file row
+    // toggles itself.
+    if (app.selectedCommitDir() == null and app.selectedCommitFile() == null) {
         try app.setMessage("open a commit's files (enter) to build a patch", .{});
         return;
     }
@@ -82,11 +85,13 @@ pub fn toggleFileInPatch(app: *App) !void {
     return applyPatchToggle(app);
 }
 
-/// Add/remove the selected file in the custom patch, starting a fresh patch (tied
-/// to the selected commit) if none is in progress. The caller has already ensured
-/// the selection belongs to the patch's commit.
+/// Add/remove the current selection (a single file, or — for a directory row in
+/// tree view — every file beneath it) in the custom patch, starting a fresh
+/// patch (tied to the selected commit) if none is in progress. The caller has
+/// already ensured the selection belongs to the patch's commit.
 pub fn applyPatchToggle(app: *App) !void {
     const commit = app.selectedCommit() orelse return;
+    if (app.selectedCommitDir()) |dir| return applyPatchDirToggle(app, commit.hash, dir);
     const file = app.selectedCommitFile() orelse {
         try app.setMessage("no file selected", .{});
         return;
@@ -104,6 +109,54 @@ pub fn applyPatchToggle(app: *App) !void {
     try app.patch_paths.append(app.allocator, try app.allocator.dupe(u8, file.path));
     try app.patch_line_sel.append(app.allocator, null); // whole file
     try app.setMessage("added {s} to patch ({d} files)", .{ file.path, app.patch_paths.items.len });
+}
+
+/// Toggle every file under directory `dir` (the empty path is the root, i.e. the
+/// whole commit) into the patch: if they are all already included, remove them;
+/// otherwise add the ones still missing (whole-file). `hash` is the source commit.
+fn applyPatchDirToggle(app: *App, hash: []const u8, dir: []const u8) !void {
+    const files = app.activeDrillFiles() orelse return;
+    const what = if (dir.len == 0) "all files" else dir;
+
+    var any_under = false;
+    var all_present = true;
+    for (files) |file| {
+        if (!filetree.underDir(file.path, dir)) continue;
+        any_under = true;
+        if (!patchHasFile(app, file.path)) all_present = false;
+    }
+    if (!any_under) {
+        try app.setMessage("no files under {s}", .{what});
+        return;
+    }
+
+    if (all_present) {
+        // Everything under the directory is already in the patch: remove it all.
+        var i: usize = 0;
+        while (i < app.patch_paths.items.len) {
+            if (filetree.underDir(app.patch_paths.items[i], dir)) {
+                app.allocator.free(app.patch_paths.orderedRemove(i));
+                if (app.patch_line_sel.orderedRemove(i)) |sel| app.allocator.free(sel);
+            } else i += 1;
+        }
+        if (app.patch_paths.items.len == 0) {
+            clearPatch(app);
+            try app.setMessage("removed {s} from patch (patch cleared)", .{what});
+        } else {
+            try app.setMessage("removed {s} from patch ({d} files)", .{ what, app.patch_paths.items.len });
+        }
+        return;
+    }
+
+    // Add the still-missing files under the directory (whole-file each).
+    if (app.patch_source == null) app.patch_source = try app.allocator.dupe(u8, hash);
+    for (files) |file| {
+        if (!filetree.underDir(file.path, dir)) continue;
+        if (patchHasFile(app, file.path)) continue;
+        try app.patch_paths.append(app.allocator, try app.allocator.dupe(u8, file.path));
+        try app.patch_line_sel.append(app.allocator, null); // whole file
+    }
+    try app.setMessage("added {s} to patch ({d} files)", .{ what, app.patch_paths.items.len });
 }
 
 /// Concatenate the source commit's per-file diffs into one applyable patch. A

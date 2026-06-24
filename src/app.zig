@@ -2245,6 +2245,16 @@ pub const App = struct {
             return self.requestEditFile();
         }
 
+        // The tree-view toggle (`) applies wherever a file list is shown — the
+        // Files panel and a commit's / branch's file drill. It is otherwise bound
+        // only under the Files focus, so handle the drill contexts explicitly.
+        const file_list_shown = self.focus == .files or
+            (self.focus == .commits and self.commitsFilesActive()) or
+            (self.focus == .branches and self.branchFilesActive());
+        if (self.config.keymap.toggle_tree.matches(key) and file_list_shown) {
+            return self.toggleTreeView();
+        }
+
         var action = actions.fromNormalKey(key, self.config.keymap, self.focus) orelse return;
         // A panel drilled into a commit's files shows files, not its list, so
         // the list-level bindings don't apply: the Branches sub-commits drill
@@ -3379,6 +3389,14 @@ pub const App = struct {
             return null;
         const row = tree.selectedRow() orelse return null;
         return if (row.is_dir) row.path else null;
+    }
+
+    /// The file list of whichever drill currently owns the selection (the Commits
+    /// panel or the Branches sub-commit drill), or null when neither is active.
+    pub fn activeDrillFiles(self: *const App) ?[]const model.CommitFile {
+        if (self.branchFilesActive() and self.contentFocus() == .branches) return self.branch_files;
+        if (self.commitsFilesActive() and self.contentFocus() == .commits) return self.commit_files;
+        return null;
     }
 
     /// Toggle the collapsed directory under a drill's tree cursor, then rebuild.
@@ -8146,6 +8164,46 @@ test "commit-files drill tree resolves directory vs file selection" {
     app.commit_tree.cursor = 2; // on the "src" directory
     app.tree_view = false;
     try std.testing.expect(app.selectedCommitDir() == null);
+}
+
+test "space on a directory toggles every file under it into the patch" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("aaaaaaa"), .short_hash = @constCast("aaa"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("c") },
+    };
+    app.data.commits = &commits;
+    var files = [_]model.CommitFile{
+        .{ .status = 'M', .path = @constCast("README.md") },
+        .{ .status = 'A', .path = @constCast("src/a.zig") },
+        .{ .status = 'M', .path = @constCast("src/b.zig") },
+    };
+    app.commit_files = &files;
+    app.commit_files_active = true;
+    app.focus = .commits;
+    app.commit_index = 0;
+    app.tree_view = true;
+    try app.rebuildCommitFilesTree(null);
+
+    // Cursor on the "src" directory: adding pulls in both files beneath it.
+    app.commit_tree.cursor = 2;
+    try patch_mod.toggleFileInPatch(&app);
+    try std.testing.expectEqual(@as(usize, 2), patch_mod.patchFileCount(&app));
+    try std.testing.expect(patch_mod.patchHasFile(&app, "src/a.zig"));
+    try std.testing.expect(patch_mod.patchHasFile(&app, "src/b.zig"));
+    try std.testing.expect(!patch_mod.patchHasFile(&app, "README.md"));
+
+    // Toggling the same directory again removes both (all were present).
+    try patch_mod.toggleFileInPatch(&app);
+    try std.testing.expectEqual(@as(usize, 0), patch_mod.patchFileCount(&app));
+
+    // The root row covers every file in the commit.
+    app.commit_tree.cursor = 0;
+    try patch_mod.toggleFileInPatch(&app);
+    try std.testing.expectEqual(@as(usize, 3), patch_mod.patchFileCount(&app));
 }
 
 test "rename prompt prefills the selected branch name" {
