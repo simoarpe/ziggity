@@ -1380,11 +1380,11 @@ pub const TreeState = struct {
 
     /// Replace the visible rows from a path-sorted `entries` list (sorted in
     /// place here), keeping the cursor on `restore_path` when that row survives.
-    fn rebuild(self: *TreeState, allocator: std.mem.Allocator, entries: []filetree.Entry, restore_path: ?[]const u8) !void {
+    fn rebuild(self: *TreeState, allocator: std.mem.Allocator, entries: []filetree.Entry, restore_path: ?[]const u8, show_root: bool) !void {
         allocator.free(self.rows);
         self.rows = &.{};
         std.mem.sort(filetree.Entry, entries, {}, entryLessThan);
-        self.rows = try filetree.build(allocator, entries, &self.collapsed, true);
+        self.rows = try filetree.build(allocator, entries, &self.collapsed, show_root);
         self.cursor = 0;
         if (restore_path) |path| {
             for (self.rows, 0..) |row, i| {
@@ -1890,6 +1890,11 @@ pub const App = struct {
         // follow items by identity (not row index) across the reload.
         const sel_keys = self.captureSelections();
         defer sel_keys.deinit(self.allocator);
+        // Capture the tree cursor's path too (an owned copy that survives the
+        // data swap) so the selection stays on the same file/dir after the
+        // rebuild instead of snapping to the top row.
+        const tree_path = self.captureTreePath() catch null;
+        defer if (tree_path) |p| self.allocator.free(p);
         self.data.deinit(self.allocator);
         self.data = gpa_data;
         self.refresh_generation +%= 1;
@@ -1900,7 +1905,7 @@ pub const App = struct {
             self.selectCurrentBranch();
             self.select_current_branch_pending = false;
         }
-        if (self.tree_view) self.rebuildTree(null) catch {};
+        if (self.tree_view) self.rebuildTree(tree_path) catch {};
         self.updatePreview() catch {};
         self.setMessage("ready", .{}) catch {};
     }
@@ -2354,15 +2359,14 @@ pub const App = struct {
             .scroll_right => self.scrollFocusedHorizontal(1),
             // Tab toggles focus into the Diff (main) panel and back to the side
             // panel it came from. In the staging view it closes it (back to the
-            // Files panel); `[`/`]` switch the staged/unstaged side there. In the
-            // Files panel it mirrors <enter>, opening the staging view.
+            // Files panel); `[`/`]` switch the staged/unstaged side there. Unlike
+            // <enter>, Tab never descends into a file list or collapses a tree
+            // folder — from any side panel it goes straight to the diff.
             .toggle_main => {
                 if (self.staging_active) {
                     try staging_mod.closeStaging(self);
                 } else if (self.focus == .main) {
                     try self.leaveMain();
-                } else if (self.focus == .files) {
-                    try self.descendOrOpenCommitFiles();
                 } else {
                     try self.enterMain();
                 }
@@ -3122,7 +3126,7 @@ pub const App = struct {
         var entries: std.ArrayList(filetree.Entry) = .empty;
         defer entries.deinit(self.allocator);
         try self.fileTreeEntries(&entries);
-        try self.files_tree.rebuild(self.allocator, entries.items, restore_path);
+        try self.files_tree.rebuild(self.allocator, entries.items, restore_path, self.config.tree_root);
     }
 
     fn toggleTreeView(self: *App) !void {
@@ -3168,14 +3172,14 @@ pub const App = struct {
         var entries: std.ArrayList(filetree.Entry) = .empty;
         defer entries.deinit(self.allocator);
         for (self.commit_files, 0..) |file, idx| try entries.append(self.allocator, .{ .path = file.path, .index = idx });
-        try self.commit_tree.rebuild(self.allocator, entries.items, restore_path);
+        try self.commit_tree.rebuild(self.allocator, entries.items, restore_path, self.config.tree_root);
     }
 
     fn rebuildBranchFilesTree(self: *App, restore_path: ?[]const u8) !void {
         var entries: std.ArrayList(filetree.Entry) = .empty;
         defer entries.deinit(self.allocator);
         for (self.branch_files, 0..) |file, idx| try entries.append(self.allocator, .{ .path = file.path, .index = idx });
-        try self.branch_tree.rebuild(self.allocator, entries.items, restore_path);
+        try self.branch_tree.rebuild(self.allocator, entries.items, restore_path, self.config.tree_root);
     }
 
     /// Bring a drill's tree rows in line with its (possibly just-reloaded) file
@@ -7084,7 +7088,7 @@ test "staging split layout + remember rules per off/on/auto" {
     try std.testing.expect(!staging_mod.stagingTogglePersists(.auto, true)); // mixed is transient
 }
 
-test "tab mirrors enter in the files panel (opens staging, not the diff)" {
+test "tab switches the files panel to the diff, never into staging" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
     var app = try testApp(allocator, &no_files);
@@ -7092,14 +7096,17 @@ test "tab mirrors enter in the files panel (opens staging, not the diff)" {
 
     app.focus = .files;
     const tab = vaxis.Key{ .codepoint = vaxis.Key.tab };
-    try app.handleKey(tab);
 
-    // With no file selected, Tab routes into the staging path (which reports
-    // "no file selected" and stays in Files) rather than the old behaviour of
-    // focusing the read-only diff panel (which would set focus to .main).
-    try std.testing.expectEqual(model.Focus.files, app.focus);
+    // Tab focuses the read-only diff (main) panel, like the other side panels —
+    // it does not open the interactive staging view (that is still <enter>).
+    try app.handleKey(tab);
+    try std.testing.expectEqual(model.Focus.main, app.focus);
+    try std.testing.expectEqual(model.Focus.files, app.main_origin);
     try std.testing.expect(!app.staging_active);
-    try std.testing.expectEqualStrings("no file selected", app.message);
+
+    // Tab again returns to the Files panel.
+    try app.handleKey(tab);
+    try std.testing.expectEqual(model.Focus.files, app.focus);
 }
 
 test "list view scrolls with the wheel but follows the selection on move" {
@@ -8096,6 +8103,7 @@ test "file tree builds rows, selects files, and collapses directories" {
     var app = try testApp(allocator, &files);
     defer deinitTestApp(&app);
 
+    // The root row is shown by default, with everything nested beneath it.
     app.tree_view = true;
     try app.rebuildTree(null);
     // root, README.md, src/, src/app.zig, src/sub/, src/sub/a.zig
@@ -8141,6 +8149,7 @@ test "commit-files drill tree resolves directory vs file selection" {
     app.commit_files_active = true;
     app.focus = .commits;
     app.tree_view = true;
+    app.config.tree_root = true; // exercise the root row + all-changes path
     try app.rebuildCommitFilesTree(null);
 
     // root, README.md, src/, src/a.zig, src/b.zig
@@ -8186,6 +8195,7 @@ test "space on a directory toggles every file under it into the patch" {
     app.focus = .commits;
     app.commit_index = 0;
     app.tree_view = true;
+    app.config.tree_root = true; // so cursor 0 is the root (all files)
     try app.rebuildCommitFilesTree(null);
 
     // Cursor on the "src" directory: adding pulls in both files beneath it.

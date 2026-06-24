@@ -1533,7 +1533,9 @@ fn drawTreeRowPrefix(win: vaxis.Window, row: u16, base: vaxis.Style, tr: filetre
         if (tr.path.len == 0) {
             _ = printSpan(win, row, col, "/", withFg(base, 12));
         } else {
-            col = printSpan(win, row, col, std.fs.path.basename(tr.path), withFg(base, 12));
+            // Display the segment(s) below the parent — for a compressed chain
+            // this is the whole "a/b/c", otherwise just the directory name.
+            col = printSpan(win, row, col, tr.path[tr.name_off..], withFg(base, 12));
             _ = printSpan(win, row, col, "/", withFg(base, 12));
         }
     }

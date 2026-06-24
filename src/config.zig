@@ -198,6 +198,10 @@ pub const ConfirmSkips = struct {
 pub const Config = struct {
     side_panel_width_percent: u8 = 34,
     diff_context: u8 = 3,
+    /// Show a synthetic root row (`/`) at the top of a file tree, nesting
+    /// everything beneath it; selecting it shows every change. On by default;
+    /// set `false` to render top-level entries (e.g. `src/`) directly instead.
+    tree_root: bool = true,
     /// Accordion mode: when true, the focused side-panel list grows to
     /// `expanded_side_panel_weight` while the others shrink. Default off.
     expand_focused_side_panel: bool = false,
@@ -280,6 +284,10 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "expand_focused_side_panel")) {
             if (parseBool(value)) |on| self.expand_focused_side_panel = on;
+            return;
+        }
+        if (std.mem.eql(u8, key, "tree_root")) {
+            if (parseBool(value)) |on| self.tree_root = on;
             return;
         }
         if (std.mem.eql(u8, key, "staging_split")) {
