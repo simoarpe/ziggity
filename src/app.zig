@@ -329,14 +329,26 @@ pub const BranchesTab = enum {
     local,
     remotes,
     tags,
-    worktrees,
-    submodules,
 
     pub fn label(self: BranchesTab) []const u8 {
         return switch (self) {
             .local => "Branches",
             .remotes => "Remotes",
             .tags => "Tags",
+        };
+    }
+};
+
+/// Tabs within the Files panel, switched with [ and ] (Worktrees/Submodules
+/// live here rather than under Branches, matching the upstream grouping).
+pub const FilesTab = enum {
+    files,
+    worktrees,
+    submodules,
+
+    pub fn label(self: FilesTab) []const u8 {
+        return switch (self) {
+            .files => "Files",
             .worktrees => "Worktrees",
             .submodules => "Submodules",
         };
@@ -1557,6 +1569,7 @@ pub const App = struct {
     /// (a stack buffer would dangle when the selection is copied between frames).
     confirm_text_buf: [1024]u8 = undefined,
     branches_tab: BranchesTab = .local,
+    files_tab: FilesTab = .files,
     commits_tab: CommitsTab = .commits,
     main_scroll: usize = 0,
     /// Horizontal scroll offset (cells) of the main diff / active staging pane,
@@ -2253,9 +2266,10 @@ pub const App = struct {
         }
 
         // The tree-view toggle (`) applies wherever a file list is shown — the
-        // Files panel and a commit's / branch's file drill. It is otherwise bound
-        // only under the Files focus, so handle the drill contexts explicitly.
-        const file_list_shown = self.focus == .files or
+        // Files panel's Files tab and a commit's / branch's file drill. It is
+        // otherwise bound only under the Files focus, so handle those contexts
+        // explicitly (and not the Worktrees/Submodules tabs of the Files panel).
+        const file_list_shown = (self.focus == .files and self.files_tab == .files) or
             (self.focus == .commits and self.commitsFilesActive()) or
             (self.focus == .branches and self.branchFilesActive());
         if (self.config.keymap.toggle_tree.matches(key) and file_list_shown) {
@@ -2272,7 +2286,11 @@ pub const App = struct {
         // (e.g. R=refresh, f=fetch), or does nothing if it has none.
         const in_branch_drill = self.branch_commits_active and actions.isBranchManagement(action);
         const in_commit_files = self.commitsFilesActive() and self.focus == .commits and actions.isCommitListAction(action);
-        if (in_branch_drill or in_commit_files) {
+        // The Files panel's Worktrees / Submodules tabs are not a working-tree
+        // file list, so the file-specific keys (stage-all, commit, discard-all,
+        // tree toggle, …) don't apply there.
+        const in_files_subtab = self.focus == .files and self.files_tab != .files and actions.isFilesContentAction(action);
+        if (in_branch_drill or in_commit_files or in_files_subtab) {
             action = actions.fromNormalKey(key, self.config.keymap, .status) orelse return;
         }
         // While a slow op runs, navigation/inspection stay live but mutating
@@ -2381,7 +2399,13 @@ pub const App = struct {
                 } else if (self.staging_active) {
                     try staging_mod.applyStagingSelection(self);
                 } else switch (self.focus) {
-                    .files => try staging_mod.toggleSelectedFileStaged(self),
+                    // Files tab: stage the file. Worktrees: point at opening
+                    // ziggity there. Submodules: init/update it.
+                    .files => switch (self.files_tab) {
+                        .files => try staging_mod.toggleSelectedFileStaged(self),
+                        .worktrees => try self.announceSelectedWorktree(),
+                        .submodules => try self.updateSelectedSubmodule(),
+                    },
                     // In the sub-commits drill, space on a file adds it to the
                     // custom patch (as in the Commits panel); on the commit list
                     // it does nothing; otherwise it checks out the branch.
@@ -2419,7 +2443,10 @@ pub const App = struct {
             .conflict_menu => try self.startConflictActionsMenu(),
             .stage_all => try staging_mod.toggleAllStaged(self),
             .edit_file => try self.requestEditFile(),
-            .discard_selected => try self.startDiscardMenu(),
+            .discard_selected => if (self.focus == .files and self.files_tab == .worktrees)
+                try self.removeSelectedWorktree()
+            else
+                try self.startDiscardMenu(),
             .discard_all => try self.startDiscardAllConfirmation(),
             .stash_menu => try stash_mod.startStashMenu(self),
             .start_file_filter => try self.startFileFilterPrompt(),
@@ -2627,7 +2654,11 @@ pub const App = struct {
     /// Number of items in the panel's currently-shown list (tab/mode aware).
     pub fn activeListLen(self: *const App, focus: model.Focus) usize {
         return switch (focus) {
-            .files => if (self.tree_view) self.files_tree.rows.len else self.visibleFileCount(),
+            .files => switch (self.files_tab) {
+                .files => if (self.tree_view) self.files_tree.rows.len else self.visibleFileCount(),
+                .worktrees => self.data.worktrees.len,
+                .submodules => self.data.submodules.len,
+            },
             .branches => if (self.branchFilesActive())
                 (if (self.tree_view) self.branch_tree.rows.len else self.branch_files.len)
             else if (self.branch_commits_active)
@@ -2636,8 +2667,6 @@ pub const App = struct {
                 .local => self.data.branches.len,
                 .remotes => self.data.remote_branches.len,
                 .tags => self.data.tags.len,
-                .worktrees => self.data.worktrees.len,
-                .submodules => self.data.submodules.len,
             },
             .commits => if (self.commitsFilesActive())
                 (if (self.tree_view) self.commit_tree.rows.len else self.commit_files.len)
@@ -2653,7 +2682,11 @@ pub const App = struct {
     /// Selected item index in the panel's currently-shown list (tab/mode aware).
     fn activeListSelected(self: *const App, focus: model.Focus) usize {
         return switch (focus) {
-            .files => if (self.tree_view) self.files_tree.cursor else self.selectedFileVisibleOrdinal(),
+            .files => switch (self.files_tab) {
+                .files => if (self.tree_view) self.files_tree.cursor else self.selectedFileVisibleOrdinal(),
+                .worktrees => self.worktree_index,
+                .submodules => self.submodule_index,
+            },
             .branches => if (self.branchFilesActive())
                 (if (self.tree_view) self.branch_tree.cursor else self.branch_file_index)
             else if (self.branch_commits_active)
@@ -2662,8 +2695,6 @@ pub const App = struct {
                 .local => self.branch_index,
                 .remotes => self.remote_index,
                 .tags => self.tag_index,
-                .worktrees => self.worktree_index,
-                .submodules => self.submodule_index,
             },
             .commits => if (self.commitsFilesActive())
                 (if (self.tree_view) self.commit_tree.cursor else self.commit_file_index)
@@ -2978,15 +3009,25 @@ pub const App = struct {
         const clicked = self.listScroll(rect.focus) + rel;
 
         switch (rect.focus) {
-            .files => {
-                if (self.tree_view) {
-                    if (self.files_tree.rows.len == 0) return;
-                    self.files_tree.cursor = @min(clicked, self.files_tree.rows.len - 1);
-                } else {
-                    const vis = self.visibleFileCount();
-                    if (vis == 0) return;
-                    if (self.fileIndexAtVisibleOrdinal(@min(clicked, vis - 1))) |idx| self.file_index = idx;
-                }
+            .files => switch (self.files_tab) {
+                .files => {
+                    if (self.tree_view) {
+                        if (self.files_tree.rows.len == 0) return;
+                        self.files_tree.cursor = @min(clicked, self.files_tree.rows.len - 1);
+                    } else {
+                        const vis = self.visibleFileCount();
+                        if (vis == 0) return;
+                        if (self.fileIndexAtVisibleOrdinal(@min(clicked, vis - 1))) |idx| self.file_index = idx;
+                    }
+                },
+                .worktrees => {
+                    if (self.data.worktrees.len == 0) return;
+                    self.worktree_index = @min(clicked, self.data.worktrees.len - 1);
+                },
+                .submodules => {
+                    if (self.data.submodules.len == 0) return;
+                    self.submodule_index = @min(clicked, self.data.submodules.len - 1);
+                },
             },
             .branches => if (self.branchFilesActive()) {
                 if (self.tree_view) {
@@ -3011,14 +3052,6 @@ pub const App = struct {
                 .tags => {
                     if (self.data.tags.len == 0) return;
                     self.tag_index = @min(clicked, self.data.tags.len - 1);
-                },
-                .worktrees => {
-                    if (self.data.worktrees.len == 0) return;
-                    self.worktree_index = @min(clicked, self.data.worktrees.len - 1);
-                },
-                .submodules => {
-                    if (self.data.submodules.len == 0) return;
-                    self.submodule_index = @min(clicked, self.data.submodules.len - 1);
                 },
             },
             .commits => {
@@ -3311,15 +3344,45 @@ pub const App = struct {
         return self.data.submodules[@min(self.submodule_index, self.data.submodules.len - 1)];
     }
 
+    /// `space`/`enter` on the Files panel's Worktrees tab: switching the active
+    /// worktree would re-root the app, so point the user at opening ziggity there.
+    pub fn announceSelectedWorktree(self: *App) !void {
+        if (self.selectedWorktree()) |wt| {
+            try self.setMessage("open ziggity in {s} to use that worktree", .{wt.path});
+        } else {
+            try self.setMessage("no worktree selected", .{});
+        }
+    }
+
+    /// `d` on the Worktrees tab removes the selected (non-current) worktree.
+    pub fn removeSelectedWorktree(self: *App) !void {
+        const wt = self.selectedWorktree() orelse {
+            try self.setMessage("no worktree selected", .{});
+            return;
+        };
+        if (wt.is_current) {
+            try self.setMessage("cannot remove the current worktree", .{});
+            return;
+        }
+        return self.requestConfirmation(.remove_worktree, "confirm remove worktree {s}", .{wt.path});
+    }
+
+    /// `space`/`enter` on the Submodules tab initialises/updates the submodule.
+    pub fn updateSelectedSubmodule(self: *App) !void {
+        const sm = self.selectedSubmodule() orelse {
+            try self.setMessage("no submodule selected", .{});
+            return;
+        };
+        return self.requestMutation(.{ .update_submodule = sm.path }, .{ .gerund = "updating submodule", .command = "git submodule update", .refresh = Refresh.submodules }, "updated {s}", .{sm.path});
+    }
+
     /// The ref name selected in the Branches panel, whichever tab is active.
-    /// Used to drive the main-panel preview. Null for the Worktrees tab, which
-    /// has no ref to show.
+    /// Used to drive the main-panel preview.
     pub fn selectedBranchRefName(self: *const App) ?[]const u8 {
         return switch (self.branches_tab) {
             .local => if (self.selectedBranch()) |branch| branch.name else null,
             .remotes => if (self.selectedRemoteBranch()) |branch| branch.name else null,
             .tags => if (self.selectedTag()) |tag| tag.name else null,
-            .worktrees, .submodules => null,
         };
     }
 
@@ -3474,6 +3537,9 @@ pub const App = struct {
             return patch_mod.openPatchLineView(self);
         }
         if (self.focus == .files) {
+            // The Worktrees / Submodules tabs aren't a working-tree file list:
+            // <enter> just inspects the selected entry in the main panel.
+            if (self.files_tab != .files) return self.enterMain();
             // In tree view, <enter> on a directory collapses/expands it.
             if (self.tree_view) {
                 if (self.treeSelectedRow()) |row| {
@@ -3489,6 +3555,24 @@ pub const App = struct {
 
     fn cycleTab(self: *App, direction: TabDirection) !void {
         switch (self.focus) {
+            .files => {
+                self.files_tab = switch (direction) {
+                    .next => switch (self.files_tab) {
+                        .files => .worktrees,
+                        .worktrees => .submodules,
+                        .submodules => .files,
+                    },
+                    .prev => switch (self.files_tab) {
+                        .files => .submodules,
+                        .worktrees => .files,
+                        .submodules => .worktrees,
+                    },
+                };
+                self.resetMainView();
+                self.resetListHScroll(.files);
+                try self.updatePreview();
+                try self.setMessage("{s}", .{self.files_tab.label()});
+            },
             .branches => {
                 // The sub-commits drill has no tabs; leave it intact (<esc>
                 // backs out of it) rather than switching the hidden branch tab.
@@ -3497,16 +3581,12 @@ pub const App = struct {
                     .next => switch (self.branches_tab) {
                         .local => .remotes,
                         .remotes => .tags,
-                        .tags => .worktrees,
-                        .worktrees => .submodules,
-                        .submodules => .local,
+                        .tags => .local,
                     },
                     .prev => switch (self.branches_tab) {
-                        .local => .submodules,
+                        .local => .tags,
                         .remotes => .local,
                         .tags => .remotes,
-                        .worktrees => .tags,
-                        .submodules => .worktrees,
                     },
                 };
                 self.resetMainView();
@@ -3669,7 +3749,11 @@ pub const App = struct {
     fn moveSelection(self: *App, panel: model.Focus, down: bool) void {
         switch (panel) {
             .status, .main => {},
-            .files => if (self.tree_view) self.moveTreeCursor(if (down) 1 else -1) else (if (down) self.moveFileDown() else self.moveFileUp()),
+            .files => switch (self.files_tab) {
+                .files => if (self.tree_view) self.moveTreeCursor(if (down) 1 else -1) else (if (down) self.moveFileDown() else self.moveFileUp()),
+                .worktrees => self.worktree_index = step(self.worktree_index, down, self.data.worktrees.len),
+                .submodules => self.submodule_index = step(self.submodule_index, down, self.data.submodules.len),
+            },
             .branches => if (self.branchFilesActive()) {
                 if (self.tree_view) self.branch_tree.move(if (down) 1 else -1) else {
                     self.branch_file_index = step(self.branch_file_index, down, self.branch_files.len);
@@ -3680,8 +3764,6 @@ pub const App = struct {
                 .local => self.branch_index = step(self.branch_index, down, self.data.branches.len),
                 .remotes => self.remote_index = step(self.remote_index, down, self.data.remote_branches.len),
                 .tags => self.tag_index = step(self.tag_index, down, self.data.tags.len),
-                .worktrees => self.worktree_index = step(self.worktree_index, down, self.data.worktrees.len),
-                .submodules => self.submodule_index = step(self.submodule_index, down, self.data.submodules.len),
             },
             .commits => {
                 if (self.commitsFilesActive()) {
@@ -3800,7 +3882,7 @@ pub const App = struct {
         if (self.staging_active) return true; // staging view + patch line view
         if (self.inCommitFilesView()) return true;
         // The Diff panel showing the selected working-tree file's diff.
-        if (self.focus == .main and self.contentFocus() == .files and self.selectedFile() != null) return true;
+        if (self.focus == .main and self.contentFocus() == .files and self.files_tab == .files and self.selectedFile() != null) return true;
         return false;
     }
 
@@ -4960,6 +5042,18 @@ pub const App = struct {
         switch (self.contentFocus()) {
             .status => return self.setCheapPreview(try self.statusPreview()),
             .files, .main => {
+                // The Files panel's Worktrees / Submodules tabs show an info card
+                // for the selected entry rather than a diff.
+                if (self.files_tab == .worktrees) {
+                    if (self.selectedWorktree()) |wt|
+                        return self.setCheapPreview(try std.fmt.allocPrint(self.allocator, "Worktree{s}\nPath:   {s}\nBranch: {s}\n", .{ if (wt.is_current) " (current)" else "", wt.path, wt.branch }));
+                    return self.setCheapPreview(try self.allocator.dupe(u8, "No worktrees.\n"));
+                }
+                if (self.files_tab == .submodules) {
+                    if (self.selectedSubmodule()) |sm|
+                        return self.setCheapPreview(try std.fmt.allocPrint(self.allocator, "Submodule ({s})\nPath: {s}\nSHA:  {s}\n\nspace to init/update.\n", .{ sm.stateLabel(), sm.path, sm.sha }));
+                    return self.setCheapPreview(try self.allocator.dupe(u8, "No submodules.\n"));
+                }
                 if (self.tree_view) {
                     if (self.files_tree.selectedRow()) |row| {
                         // A directory (or the root) shows the combined diff of
@@ -4985,16 +5079,6 @@ pub const App = struct {
                         return self.setCheapPreview(try self.allocator.dupe(u8, "This commit changed no files.\n"));
                     }
                     return self.requestGitPreview(.{ .commit = commit.hash });
-                }
-                if (self.branches_tab == .worktrees) {
-                    if (self.selectedWorktree()) |wt|
-                        return self.setCheapPreview(try std.fmt.allocPrint(self.allocator, "Worktree{s}\nPath:   {s}\nBranch: {s}\n", .{ if (wt.is_current) " (current)" else "", wt.path, wt.branch }));
-                    return self.setCheapPreview(try self.allocator.dupe(u8, "No worktrees.\n"));
-                }
-                if (self.branches_tab == .submodules) {
-                    if (self.selectedSubmodule()) |sm|
-                        return self.setCheapPreview(try std.fmt.allocPrint(self.allocator, "Submodule ({s})\nPath: {s}\nSHA:  {s}\n\nspace to init/update.\n", .{ sm.stateLabel(), sm.path, sm.sha }));
-                    return self.setCheapPreview(try self.allocator.dupe(u8, "No submodules.\n"));
                 }
                 if (self.selectedBranchRefName()) |name| return self.requestGitPreview(.{ .branch = name });
                 return self.setCheapPreview(try self.allocator.dupe(u8, "Nothing to show in this tab.\n"));

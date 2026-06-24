@@ -92,18 +92,6 @@ pub fn startDeleteForBranchTab(self: *App) !void {
             };
             return self.requestConfirmation(.delete_remote_branch, "confirm delete remote {s}", .{branch.name});
         },
-        .worktrees => {
-            const wt = self.selectedWorktree() orelse {
-                try self.setMessage("no worktree selected", .{});
-                return;
-            };
-            if (wt.is_current) {
-                try self.setMessage("cannot remove the current worktree", .{});
-                return;
-            }
-            return self.requestConfirmation(.remove_worktree, "confirm remove worktree {s}", .{wt.path});
-        },
-        .submodules => try self.setMessage("no delete action for submodules", .{}),
     }
 }
 
@@ -192,22 +180,6 @@ pub fn checkoutSelectedBranch(self: *App) !void {
                 return;
             };
             return self.requestMutation(.{ .checkout = tag.name }, .{ .gerund = "checking out", .command = "git checkout", .refresh = App.Refresh.checkout }, "checked out {s} (detached)", .{tag.name});
-        },
-        .worktrees => {
-            // Switching the active worktree would re-root the app; instead
-            // tell the user to open ziggity in that directory.
-            if (self.selectedWorktree()) |wt| {
-                try self.setMessage("open ziggity in {s} to use that worktree", .{wt.path});
-            } else {
-                try self.setMessage("no worktree selected", .{});
-            }
-        },
-        .submodules => {
-            const sm = self.selectedSubmodule() orelse {
-                try self.setMessage("no submodule selected", .{});
-                return;
-            };
-            return self.requestMutation(.{ .update_submodule = sm.path }, .{ .gerund = "updating submodule", .command = "git submodule update", .refresh = App.Refresh.submodules }, "updated {s}", .{sm.path});
         },
     }
 }

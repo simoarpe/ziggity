@@ -38,10 +38,14 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 - Hunk- and line-level staging: `enter` on a file opens a staging view to
   stage/unstage individual lines (`v` for a range) or whole hunks (`tab`
   switches between the unstaged and staged sides).
-- Branches panel tabs (Local/Remotes/Tags/Worktrees/Submodules) and Commits
-  panel tabs (Commits/Reflog), switched with `[`/`]`.
-- Worktrees tab: list worktrees (current marked) and remove one (`d`, confirmed).
-- Submodules tab: list submodules with state and init/update one (`space`).
+- Files panel tabs (Files/Worktrees/Submodules), Branches panel tabs
+  (Local/Remotes/Tags), and Commits panel tabs (Commits/Reflog), switched with
+  `[`/`]`. Each panel's title shows the full tab strip with the active view
+  highlighted (as does the single-pane staging view's Unstaged/Staged tabs).
+- Worktrees tab (Files panel): list worktrees (current marked) and remove one
+  (`d`, confirmed).
+- Submodules tab (Files panel): list submodules with state and init/update one
+  (`space`).
 - Branch workflows: new, rename, delete, merge, rebase, fast-forward,
   remote/tag checkout, checkout-by-name (`c`).
 - Tag actions (Tags tab): create (`n`), delete (`d`). Remote-branch delete
@@ -165,7 +169,10 @@ Useful keys:
   `enter` collapses/expands folders but `tab` always goes to the diff (press
   `tab` again to return to the side panel)
 - `1`/`2`/`3`/`4`/`5`: focus status, files, branches, commits, stash
-- `[`/`]`: switch panel tabs (branches: Local/Remotes/Tags; commits: Commits/Reflog) or the staging view's unstaged/staged side
+- `[`/`]`: switch panel tabs — files: Files/Worktrees/Submodules; branches:
+  Local/Remotes/Tags; commits: Commits/Reflog; or the staging view's
+  unstaged/staged side. The panel title shows the tab strip with the active view
+  highlighted
 - `enter`: inspect the selected item in the main panel; `esc`/`h` returns. On a
   directory row in tree view it collapses/expands that folder instead
 - `enter` on a commit: drill into its changed-file list (`j`/`k` to pick a file,

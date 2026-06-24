@@ -126,6 +126,27 @@ pub fn isCommitListAction(self: Action) bool {
     };
 }
 
+/// Working-tree file actions that only make sense on the Files panel's Files
+/// tab — suppressed on its Worktrees / Submodules tabs (which list refs, not a
+/// working-tree file set). `select`/`discard_selected`/`focus_main` are handled
+/// separately (repurposed per tab), so they are not listed here.
+pub fn isFilesContentAction(self: Action) bool {
+    return switch (self) {
+        .stage_all,
+        .edit_file,
+        .discard_all,
+        .stash_menu,
+        .start_commit,
+        .amend_commit,
+        .conflict_menu,
+        .open_status_filter,
+        .start_file_filter,
+        .toggle_tree,
+        => true,
+        else => false,
+    };
+}
+
 pub fn isMutating(self: Action) bool {
     return switch (self) {
         // Navigation, inspection, and global view toggles — always allowed.

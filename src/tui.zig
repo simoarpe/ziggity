@@ -752,47 +752,53 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     drawStatus(panel(root, 0, y, side_w, status_h, "Status [1]", app.focus == .status, null), app);
     y += status_h;
     {
-        const w = panel(root, 0, y, side_w, files_h, "Files [2]", app.focus == .files, listScrollInfo(app, .files));
+        const files_tabs = [_][]const u8{ "Files", "Worktrees", "Submodules" };
+        const w = tabbedPanel(root, 0, y, side_w, files_h, 2, &files_tabs, @intFromEnum(app.files_tab), "", app.focus == .files, listScrollInfo(app, .files));
         beginListPan(app, .files);
-        drawFiles(w, app);
+        switch (app.files_tab) {
+            .files => drawFiles(w, app),
+            .worktrees => drawWorktrees(w, app),
+            .submodules => drawSubmodules(w, app),
+        }
         endListPan(app, .files, w.width);
     }
     y += files_h;
-    const branches_title = if (app.branch_commits_active)
-        (if (app.branchFilesActive())
-            (if (patch_mod.branchFilesPatchCount(app) > 0)
-                (std.fmt.bufPrint(&app.branches_title_buf, "Commit files [3] (patch: {d}) (esc back)", .{patch_mod.branchFilesPatchCount(app)}) catch "Commit files [3] (esc back)")
-            else
-                "Commit files [3]  (space: add to patch) (esc back)")
-        else
-            (std.fmt.bufPrint(&app.branches_title_buf, "Commits [3] ({s}) (esc back)", .{app.branch_commits_ref}) catch "Commits [3] (esc back)"))
-    else switch (app.branches_tab) {
-        .local => "Branches [3]",
-        .remotes => "Remotes [3]",
-        .tags => "Tags [3]",
-        .worktrees => "Worktrees [3]",
-        .submodules => "Submodules [3]",
-    };
     {
-        const w = panel(root, 0, y, side_w, branches_h, branches_title, app.focus == .branches, listScrollInfo(app, .branches));
+        // Drilled into a branch's sub-commits / files: a plain descriptive title.
+        // Otherwise the title is the tab strip (Local / Remotes / Tags / …).
+        const branches_tabs = [_][]const u8{ "Local", "Remotes", "Tags" };
+        const w = if (app.branch_commits_active) blk: {
+            const t = if (app.branchFilesActive())
+                (if (patch_mod.branchFilesPatchCount(app) > 0)
+                    (std.fmt.bufPrint(&app.branches_title_buf, "Commit files [3] (patch: {d}) (esc back)", .{patch_mod.branchFilesPatchCount(app)}) catch "Commit files [3] (esc back)")
+                else
+                    "Commit files [3]  (space: add to patch) (esc back)")
+            else
+                (std.fmt.bufPrint(&app.branches_title_buf, "Commits [3] ({s}) (esc back)", .{app.branch_commits_ref}) catch "Commits [3] (esc back)");
+            break :blk panel(root, 0, y, side_w, branches_h, t, app.focus == .branches, listScrollInfo(app, .branches));
+        } else tabbedPanel(root, 0, y, side_w, branches_h, 3, &branches_tabs, @intFromEnum(app.branches_tab), "", app.focus == .branches, listScrollInfo(app, .branches));
         beginListPan(app, .branches);
         drawBranches(w, app);
         endListPan(app, .branches, w.width);
     }
     y += branches_h;
-    const commits_title = if (app.commitsFilesActive())
-        (if (patch_mod.commitFilesPatchCount(app) > 0)
-            (std.fmt.bufPrint(&app.commits_title_buf, "Commit files [4] (patch: {d}) (esc back)", .{patch_mod.commitFilesPatchCount(app)}) catch "Commit files [4] (esc back)")
-        else
-            "Commit files [4]  (space: add to patch) (esc back)")
-    else if (app.commits_tab == .reflog)
-        "Reflog [4]"
-    else if (app.commitFilterLabel(&app.commit_filter_label_buf)) |label|
-        (std.fmt.bufPrint(&app.commits_title_buf, "Commits [4] ({s})", .{label}) catch "Commits [4] (filtered)")
-    else
-        "Commits [4]";
     {
-        const w = panel(root, 0, y, side_w, commits_h, commits_title, app.focus == .commits, listScrollInfo(app, .commits));
+        const commits_tabs = [_][]const u8{ "Commits", "Reflog" };
+        const w = if (app.commitsFilesActive()) blk: {
+            const t = if (patch_mod.commitFilesPatchCount(app) > 0)
+                (std.fmt.bufPrint(&app.commits_title_buf, "Commit files [4] (patch: {d}) (esc back)", .{patch_mod.commitFilesPatchCount(app)}) catch "Commit files [4] (esc back)")
+            else
+                "Commit files [4]  (space: add to patch) (esc back)";
+            break :blk panel(root, 0, y, side_w, commits_h, t, app.focus == .commits, listScrollInfo(app, .commits));
+        } else blk: {
+            // Show an active commit-log filter (Commits tab only) after the tabs.
+            var sbuf: [128]u8 = undefined;
+            const suffix = if (app.commits_tab == .commits)
+                (if (app.commitFilterLabel(&app.commit_filter_label_buf)) |label| (std.fmt.bufPrint(&sbuf, "({s})", .{label}) catch label) else "")
+            else
+                "";
+            break :blk tabbedPanel(root, 0, y, side_w, commits_h, 4, &commits_tabs, @intFromEnum(app.commits_tab), suffix, app.focus == .commits, listScrollInfo(app, .commits));
+        };
         beginListPan(app, .commits);
         drawCommits(w, app);
         endListPan(app, .commits, w.width);
@@ -827,7 +833,13 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         // Split staging view: two panes (Unstaged | Staged) fill the main area.
         drawStagingSplit(root, app, side_w, 0, main_w, body_h);
     } else {
-        const main = panel(root, side_w, 0, main_w, body_h, main_title, app.focus == .main, .{ .len = app.mainContentLines(), .pos = app.main_scroll });
+        const scroll: ScrollInfo = .{ .len = app.mainContentLines(), .pos = app.main_scroll };
+        // In the single-pane staging view, `[`/`]` switch the unstaged/staged
+        // side, so show them as a highlighted tab strip.
+        const main = if (app.staging_active and !app.staging_patch_mode) blk: {
+            const staging_tabs = [_][]const u8{ "Unstaged", "Staged" };
+            break :blk tabbedPanel(root, side_w, 0, main_w, body_h, null, &staging_tabs, @as(usize, if (app.staging_staged_view) 1 else 0), "", app.focus == .main, scroll);
+        } else panel(root, side_w, 0, main_w, body_h, main_title, app.focus == .main, scroll);
         app.main_view_height = main.height;
         app.main_view_width = main.width;
         drawDiff(main, app);
@@ -871,7 +883,7 @@ const help_lines = [_][]const u8{
     "  f / p / P      fetch / pull / push (async)",
     "  mouse drag     select text in the Diff panel (auto-copies on release)",
     "",
-    "Files",
+    "Files  (tabs: Files / Worktrees / Submodules - [ / ] to switch)",
     "  space          stage/unstage (whole dir in tree view)",
     "  a              stage/unstage all",
     "  c / A          commit (popup) / amend last commit",
@@ -883,6 +895,8 @@ const help_lines = [_][]const u8{
     "  `              toggle directory tree",
     "  enter          open the hunk/line staging view",
     "  m              merge/rebase actions: continue, amend+continue, abort",
+    "  Worktrees tab  space/enter inspect   d remove",
+    "  Submodules tab space init/update   enter inspect",
     "",
     "Staging view",
     "  j/k            move by line",
@@ -893,12 +907,12 @@ const help_lines = [_][]const u8{
     "  c / A          commit / amend the staged changes",
     "  e              open the file in your editor",
     "",
-    "Branches  (tabs: Local / Remotes / Tags / Worktrees / Submodules)",
-    "  space          checkout / apply / init-update",
+    "Branches  (tabs: Local / Remotes / Tags)",
+    "  space          checkout (creates a tracking branch on the Remotes tab)",
     "  c              checkout by name (type a branch/ref; \"-\" = previous)",
     "  n              new branch (new tag / add remote by tab)",
     "  R              rename branch",
-    "  d              delete branch / tag / remote branch / worktree",
+    "  d              delete branch / tag / remote branch",
     "  M / r / f      merge / rebase / fast-forward",
     "  Remotes tab    e edit URL   x remove remote   u set upstream",
     "",
@@ -1349,9 +1363,12 @@ fn listScrollInfo(app: *const app_mod.App, focus: model.Focus) ScrollInfo {
 /// `title` is drawn via `printSegment`, which keeps a reference to the bytes
 /// until the post-render flush — so it must be a string literal or App-owned
 /// memory (e.g. `app.*_title_buf`), never a stack buffer local to `render`.
-fn panel(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, title: []const u8, focused: bool, scroll: ?ScrollInfo) vaxis.Window {
+/// Draw a panel's rounded border + scrollbar and return the outer (`raw`, for
+/// the title row) and inner (content) windows. `raw == inner` when too small.
+const PanelFrame = struct { raw: vaxis.Window, inner: vaxis.Window };
+fn panelBorder(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, focused: bool, scroll: ?ScrollInfo) PanelFrame {
     const raw = root.child(.{ .x_off = @intCast(x), .y_off = @intCast(y), .width = w, .height = h });
-    if (w < 4 or h < 3) return raw;
+    if (w < 4 or h < 3) return .{ .raw = raw, .inner = raw };
     const st = styles();
     const border_style = if (focused) st.active_border else st.inactive_border;
     const inner = raw.child(.{
@@ -1361,13 +1378,58 @@ fn panel(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, title: []const u8, 
             .glyphs = .single_rounded,
         },
     });
-    _ = raw.printSegment(.{ .text = title, .style = if (focused) st.active_title else st.title }, .{
+    if (scroll) |s| drawScrollbar(raw, s.len, s.pos, focused);
+    return .{ .raw = raw, .inner = inner };
+}
+
+fn panel(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, title: []const u8, focused: bool, scroll: ?ScrollInfo) vaxis.Window {
+    const frame = panelBorder(root, x, y, w, h, focused, scroll);
+    if (w < 4 or h < 3) return frame.inner;
+    const st = styles();
+    _ = frame.raw.printSegment(.{ .text = title, .style = if (focused) st.active_title else st.title }, .{
         .row_offset = 0,
         .col_offset = 2,
         .wrap = .none,
     });
-    if (scroll) |s| drawScrollbar(raw, s.len, s.pos, focused);
-    return inner;
+    return frame.inner;
+}
+
+/// Write `text` on the title row at column `col` (clipped to leave the last
+/// column for the border), returning the column after it. Uses `printSpan`,
+/// which copies each byte into its cell via the glyph table — unlike vaxis
+/// `printSegment`, which stores the grapheme *by reference* and would render
+/// garbage when the title is backed by a stack buffer (the `[N]` / filter text).
+fn drawTitleSpan(raw: vaxis.Window, w: u16, col: u16, text: []const u8, style: vaxis.Style) u16 {
+    const limit = w -| 1;
+    if (col >= limit) return col;
+    const avail = limit - col;
+    const shown = if (text.len > avail) text[0..avail] else text;
+    return printSpan(raw, 0, col, shown, style);
+}
+
+/// A panel whose title is the strip of views that `[`/`]` switches between (the
+/// active one highlighted, the rest dimmed), joined by " - ". `number` is the
+/// optional `[N]` focus-key hint; `suffix` is trailing text (e.g. a filter).
+fn tabbedPanel(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, number: ?u8, tabs: []const []const u8, active: usize, suffix: []const u8, focused: bool, scroll: ?ScrollInfo) vaxis.Window {
+    const frame = panelBorder(root, x, y, w, h, focused, scroll);
+    if (w < 4 or h < 3) return frame.inner;
+    const st = styles();
+    const active_style = if (focused) st.active_title else st.title;
+
+    var col: u16 = 2;
+    if (number) |n| {
+        var nbuf: [8]u8 = undefined;
+        col = drawTitleSpan(frame.raw, w, col, std.fmt.bufPrint(&nbuf, "[{d}] ", .{n}) catch "", st.title);
+    }
+    for (tabs, 0..) |tab, i| {
+        if (i > 0) col = drawTitleSpan(frame.raw, w, col, " - ", st.muted);
+        col = drawTitleSpan(frame.raw, w, col, tab, if (i == active) active_style else st.muted);
+    }
+    if (suffix.len > 0) {
+        col = drawTitleSpan(frame.raw, w, col, " ", st.muted);
+        _ = drawTitleSpan(frame.raw, w, col, suffix, st.muted);
+    }
+    return frame.inner;
 }
 
 /// Draw a proportional scrollbar thumb on a panel's right border when its
@@ -1589,8 +1651,6 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
         return drawCommitRows(win, app, app.branch_commits, app.branch_commit_index, .branches);
     }
     if (app.branches_tab == .tags) return drawTags(win, app);
-    if (app.branches_tab == .worktrees) return drawWorktrees(win, app);
-    if (app.branches_tab == .submodules) return drawSubmodules(win, app);
 
     const branches = switch (app.branches_tab) {
         .remotes => app.data.remote_branches,
@@ -1686,7 +1746,7 @@ fn drawWorktrees(win: vaxis.Window, app: *const app_mod.App) void {
         const marker: u8 = if (wt.is_current) '*' else ' ';
         const name = std.fs.path.basename(wt.path);
         const line = std.fmt.bufPrint(&buf, "{c} {s} [{s}]", .{ marker, name, wt.branch }) catch wt.path;
-        drawSelectable(win, row, line, if (wt.is_current) styles().staged else styles().normal, selOf(idx == app.worktree_index, app.focus == .branches));
+        drawSelectable(win, row, line, if (wt.is_current) styles().staged else styles().normal, selOf(idx == app.worktree_index, app.focus == .files));
     }
 }
 
@@ -1710,7 +1770,7 @@ fn drawSubmodules(win: vaxis.Window, app: *const app_mod.App) void {
             '+', 'U' => styles().warning,
             else => styles().normal,
         };
-        drawSelectable(win, row, line, style, selOf(idx == app.submodule_index, app.focus == .branches));
+        drawSelectable(win, row, line, style, selOf(idx == app.submodule_index, app.focus == .files));
     }
 }
 
@@ -2068,6 +2128,7 @@ fn drawHints(win: vaxis.Window, row: u16, start_col: u16, hints: []const u8, key
 const FooterCtx = struct {
     focus: model.Focus = .status,
     branches_tab: app_mod.BranchesTab = .local,
+    files_tab: app_mod.FilesTab = .files,
     /// Building a patch line-by-line (the per-line selection view).
     staging_patch: bool = false,
     /// The hunk/line staging view is open.
@@ -2121,13 +2182,18 @@ fn footerHints(c: FooterCtx) []const u8 {
             .local => "space checkout  c by-name  n new  R rename  d delete  M merge  r rebase  f ff  W diff  [/] tabs" ++ global_branches,
             .remotes => "space checkout  n add  e edit  x remove  u upstream  d del-branch  W diff  [/] tabs" ++ global_branches,
             .tags => "space checkout  n new-tag  d delete-tag  W diff  [/] tabs" ++ global_branches,
-            .worktrees => "d remove  [/] tabs" ++ global_branches,
-            .submodules => "space init/update  [/] tabs" ++ global_branches,
+        };
+    }
+    if (c.focus == .files) {
+        return switch (c.files_tab) {
+            .files => "space stage  a all  c commit  A amend  e edit  d discard  s stash  / filter  ` tree  enter hunks  [/] tabs" ++ global,
+            .worktrees => "enter inspect  d remove  [/] tabs" ++ global,
+            .submodules => "space init/update  enter inspect  [/] tabs" ++ global,
         };
     }
     return switch (c.focus) {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push" ++ global,
-        .files => "space stage  a all  c commit  A amend  e edit  d discard  s stash  / filter  ` tree  enter hunks" ++ global,
+        .files => unreachable,
         .branches => unreachable,
         .commits => "enter files  g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  W diff  / filter  b bisect  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
@@ -2143,6 +2209,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
     return footerHints(.{
         .focus = app.focus,
         .branches_tab = app.branches_tab,
+        .files_tab = app.files_tab,
         .staging_patch = app.staging_patch_mode,
         .staging = app.staging_active,
         .commits_files = app.commitsFilesActive(),
@@ -2622,7 +2689,7 @@ test "footer hints have no key contradictions per stage" {
 
     // Branches list: `R` renames here, so the footer must advertise rename and
     // must NOT also claim "R refresh" (the global key is shadowed).
-    inline for ([_]app_mod.BranchesTab{ .local, .remotes, .tags, .worktrees, .submodules }) |tab| {
+    inline for ([_]app_mod.BranchesTab{ .local, .remotes, .tags }) |tab| {
         const s = footerHints(.{ .focus = .branches, .branches_tab = tab });
         try std.testing.expect(!has(s, "R refresh"));
     }
@@ -2693,8 +2760,8 @@ test "footer hints have no key contradictions per stage" {
         .{ .focus = .branches, .branches_tab = .local },
         .{ .focus = .branches, .branches_tab = .remotes },
         .{ .focus = .branches, .branches_tab = .tags },
-        .{ .focus = .branches, .branches_tab = .worktrees },
-        .{ .focus = .branches, .branches_tab = .submodules },
+        .{ .focus = .files, .files_tab = .worktrees },
+        .{ .focus = .files, .files_tab = .submodules },
     };
     for (top_level) |c| try std.testing.expect(!has(footerHints(c), "esc back"));
     const sub_view = [_]FooterCtx{

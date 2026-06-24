@@ -107,7 +107,6 @@ pub fn selectionWebUrl(app: *const App, base: []const u8) ![]u8 {
             .tags => if (app.selectedTag()) |tag| {
                 return std.fmt.allocPrint(app.allocator, "{s}/tree/{s}", .{ base, tag.name });
             },
-            .worktrees, .submodules => {},
         },
         .status, .files, .stash, .main => {},
     }
