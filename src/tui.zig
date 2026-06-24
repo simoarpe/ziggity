@@ -5,6 +5,7 @@ const app_mod = @import("app.zig");
 const config_mod = @import("config.zig");
 const credentials_mod = @import("credentials.zig");
 const git_mod = @import("git.zig");
+const filetree = @import("filetree.zig");
 const model = @import("model.zig");
 const patch_mod = @import("patch.zig");
 const staging_mod = @import("staging.zig");
@@ -1520,41 +1521,53 @@ fn statusCharStyle(c: u8, is_index: bool, conflict: bool, base: vaxis.Style) vax
     return withFg(base, if (is_index) ui_theme.staged else ui_theme.unstaged);
 }
 
+/// Draw a tree row's indentation and — for a directory — its collapse glyph and
+/// name (the synthetic root, an empty path, shows as "/"). Returns the column a
+/// file row should continue from (directory rows are fully drawn here).
+fn drawTreeRowPrefix(win: vaxis.Window, row: u16, base: vaxis.Style, tr: filetree.Row) u16 {
+    const indent: usize = @min(@as(usize, tr.depth) * 2, indent_spaces.len);
+    var col = printSpan(win, row, 0, indent_spaces[0..indent], base);
+    if (tr.is_dir) {
+        col = printGlyph(win, row, col, if (tr.collapsed) glyph_collapsed else glyph_expanded, withFg(base, 12));
+        col = printSpan(win, row, col, " ", base);
+        if (tr.path.len == 0) {
+            _ = printSpan(win, row, col, "/", withFg(base, 12));
+        } else {
+            col = printSpan(win, row, col, std.fs.path.basename(tr.path), withFg(base, 12));
+            _ = printSpan(win, row, col, "/", withFg(base, 12));
+        }
+    }
+    return col;
+}
+
 fn drawFileTree(win: vaxis.Window, app: *const app_mod.App) void {
-    if (app.tree_rows.len == 0) {
+    if (app.files_tree.rows.len == 0) {
         print(win, 0, 0, "No files match filter", styles().muted);
         return;
     }
     const start = app.listScroll(.files);
     var row: u16 = 0;
     var i = start;
-    while (i < app.tree_rows.len and row < win.height) : ({
+    while (i < app.files_tree.rows.len and row < win.height) : ({
         i += 1;
         row += 1;
     }) {
-        const tr = app.tree_rows[i];
+        const tr = app.files_tree.rows[i];
         var base = styles().normal;
-        const sel = selOf(i == app.tree_cursor, app.focus == .files);
+        const sel = selOf(i == app.files_tree.cursor, app.focus == .files);
         applySel(&base, sel);
         if (sel != .none) fillRow(win, row, base);
 
-        const indent: usize = @min(@as(usize, tr.depth) * 2, indent_spaces.len);
-        var col = printSpan(win, row, 0, indent_spaces[0..indent], base);
-        const name = std.fs.path.basename(tr.path);
-        if (tr.is_dir) {
-            col = printGlyph(win, row, col, if (tr.collapsed) glyph_collapsed else glyph_expanded, withFg(base, 12));
-            col = printSpan(win, row, col, " ", base);
-            col = printSpan(win, row, col, name, withFg(base, 12));
-            _ = printSpan(win, row, col, "/", withFg(base, 12));
-        } else {
-            const file = app.data.files[tr.file_index];
-            // Two status columns colored independently, like the flat list.
-            col = printSpan(win, row, col, file.short_status[0..1], statusCharStyle(file.short_status[0], true, file.conflict, base));
-            col = printSpan(win, row, col, file.short_status[1..2], statusCharStyle(file.short_status[1], false, file.conflict, base));
-            col = printSpan(win, row, col, " ", base);
-            const name_fg: u8 = if (file.conflict) ui_theme.warning else if (file.has_unstaged) ui_theme.unstaged else ui_theme.staged;
-            _ = printSpan(win, row, col, name, withFg(base, name_fg));
-        }
+        var col = drawTreeRowPrefix(win, row, base, tr);
+        if (tr.is_dir) continue;
+
+        const file = app.data.files[tr.file_index];
+        // Two status columns colored independently, like the flat list.
+        col = printSpan(win, row, col, file.short_status[0..1], statusCharStyle(file.short_status[0], true, file.conflict, base));
+        col = printSpan(win, row, col, file.short_status[1..2], statusCharStyle(file.short_status[1], false, file.conflict, base));
+        col = printSpan(win, row, col, " ", base);
+        const name_fg: u8 = if (file.conflict) ui_theme.warning else if (file.has_unstaged) ui_theme.unstaged else ui_theme.staged;
+        _ = printSpan(win, row, col, std.fs.path.basename(tr.path), withFg(base, name_fg));
     }
 }
 

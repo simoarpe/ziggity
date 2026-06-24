@@ -20,9 +20,20 @@ pub const Entry = struct {
 /// Build the flattened, currently-visible rows of a directory tree from a
 /// path-sorted list of files. Directories listed in `collapsed` are shown but
 /// their descendants are hidden. Rows reference the input paths (no copies).
-pub fn build(allocator: std.mem.Allocator, entries: []const Entry, collapsed: *const std.BufSet) ![]Row {
+///
+/// When `show_root` is set, a synthetic root directory row (the empty path "",
+/// covering every file) is placed first and everything else is indented one
+/// level beneath it; collapsing the root hides the whole tree.
+pub fn build(allocator: std.mem.Allocator, entries: []const Entry, collapsed: *const std.BufSet, show_root: bool) ![]Row {
     var rows: std.ArrayList(Row) = .empty;
     errdefer rows.deinit(allocator);
+
+    const base: u16 = if (show_root) 1 else 0;
+    if (show_root) {
+        const root_collapsed = collapsed.contains("");
+        try rows.append(allocator, .{ .is_dir = true, .depth = 0, .path = "", .collapsed = root_collapsed });
+        if (root_collapsed) return rows.toOwnedSlice(allocator);
+    }
 
     var prev_dir: []const u8 = "";
     var i: usize = 0;
@@ -39,7 +50,7 @@ pub fn build(allocator: std.mem.Allocator, entries: []const Entry, collapsed: *c
             const is_collapsed = collapsed.contains(dir_path);
             try rows.append(allocator, .{
                 .is_dir = true,
-                .depth = depthCast(d),
+                .depth = depthCast(d) + base,
                 .path = dir_path,
                 .collapsed = is_collapsed,
             });
@@ -58,7 +69,7 @@ pub fn build(allocator: std.mem.Allocator, entries: []const Entry, collapsed: *c
 
         try rows.append(allocator, .{
             .is_dir = false,
-            .depth = depthCast(segs),
+            .depth = depthCast(segs) + base,
             .path = entry.path,
             .file_index = entry.index,
         });
@@ -145,7 +156,7 @@ test "build groups files under nested directories" {
         .{ .path = "src/sub/a.zig", .index = 2 },
         .{ .path = "src/sub/b.zig", .index = 3 },
     };
-    const rows = try build(std.testing.allocator, &entries, &collapsed);
+    const rows = try build(std.testing.allocator, &entries, &collapsed, false);
     defer std.testing.allocator.free(rows);
 
     try std.testing.expectEqual(@as(usize, 6), rows.len);
@@ -169,7 +180,7 @@ test "build hides descendants of a collapsed directory" {
         .{ .path = "src/sub/b.zig", .index = 2 },
         .{ .path = "src/zed.zig", .index = 3 },
     };
-    const rows = try build(std.testing.allocator, &entries, &collapsed);
+    const rows = try build(std.testing.allocator, &entries, &collapsed, false);
     defer std.testing.allocator.free(rows);
 
     // src, src/app.zig, src/sub (collapsed, no children), src/zed.zig
@@ -179,6 +190,32 @@ test "build hides descendants of a collapsed directory" {
     try expectRow(rows[2], true, 1, "src/sub");
     try std.testing.expect(rows[2].collapsed);
     try expectRow(rows[3], false, 1, "src/zed.zig");
+}
+
+test "build with a root node nests everything under the empty path" {
+    var collapsed = std.BufSet.init(std.testing.allocator);
+    defer collapsed.deinit();
+
+    const entries = [_]Entry{
+        .{ .path = "README.md", .index = 0 },
+        .{ .path = "src/app.zig", .index = 1 },
+    };
+    const rows = try build(std.testing.allocator, &entries, &collapsed, true);
+    defer std.testing.allocator.free(rows);
+
+    // Root row first, then everything indented one level beneath it.
+    try std.testing.expectEqual(@as(usize, 4), rows.len);
+    try expectRow(rows[0], true, 0, "");
+    try expectRow(rows[1], false, 1, "README.md");
+    try expectRow(rows[2], true, 1, "src");
+    try expectRow(rows[3], false, 2, "src/app.zig");
+
+    // Collapsing the root hides the whole tree, leaving only the root row.
+    try collapsed.insert("");
+    const collapsed_rows = try build(std.testing.allocator, &entries, &collapsed, true);
+    defer std.testing.allocator.free(collapsed_rows);
+    try std.testing.expectEqual(@as(usize, 1), collapsed_rows.len);
+    try std.testing.expect(collapsed_rows[0].collapsed);
 }
 
 test "underDir and dirOf" {
