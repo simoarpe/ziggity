@@ -3344,13 +3344,18 @@ pub const App = struct {
         return self.data.submodules[@min(self.submodule_index, self.data.submodules.len - 1)];
     }
 
-    /// `space`/`enter` on the Files panel's Worktrees tab: switching the active
-    /// worktree would re-root the app, so point the user at opening ziggity there.
+    /// `space`/`enter` on the Files panel's Worktrees tab. Switching the active
+    /// worktree would re-root the app, so for another worktree we point the user
+    /// at opening ziggity there; the current one just says so.
     pub fn announceSelectedWorktree(self: *App) !void {
-        if (self.selectedWorktree()) |wt| {
-            try self.setMessage("open ziggity in {s} to use that worktree", .{wt.path});
-        } else {
+        const wt = self.selectedWorktree() orelse {
             try self.setMessage("no worktree selected", .{});
+            return;
+        };
+        if (wt.is_current) {
+            try self.setMessage("you are already in this worktree", .{});
+        } else {
+            try self.setMessage("open ziggity in {s} to use that worktree", .{wt.path});
         }
     }
 
