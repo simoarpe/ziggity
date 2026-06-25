@@ -1784,26 +1784,30 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
 
 /// Compact "time ago" for a commit unix timestamp `ts` relative to `now`, into
 /// `buf` (e.g. "5s", "3m", "2h", "4d", "6w", "2M", "1y"). Empty when `ts` is
-/// unknown. Units mirror the conventional single-letter scheme (capital M is
-/// months, lowercase m is minutes).
+/// unknown. Mirrors git's `--date=relative` rounding (rounds to the nearest
+/// unit, switching units at 90s/90m/36h/14d/70d/365d) rather than truncating —
+/// so e.g. a ~2-year-old commit reads "2y", not "1y". Capital M is months,
+/// lowercase m is minutes.
 fn recencyStr(buf: []u8, ts: i64, now: i64) []const u8 {
     if (ts <= 0) return "";
-    const secs: i64 = if (now > ts) now - ts else 0;
-    const periods = [_]struct { label: []const u8, s: i64 }{
-        .{ .label = "s", .s = 1 },
-        .{ .label = "m", .s = 60 },
-        .{ .label = "h", .s = 3600 },
-        .{ .label = "d", .s = 86400 },
-        .{ .label = "w", .s = 604800 },
-        .{ .label = "M", .s = 2592000 },
-        .{ .label = "y", .s = 31536000 },
-    };
-    var i: usize = 1;
-    while (i < periods.len) : (i += 1) {
-        if (secs < periods[i].s)
-            return std.fmt.bufPrint(buf, "{d}{s}", .{ @divFloor(secs, periods[i - 1].s), periods[i - 1].label }) catch "";
-    }
-    return std.fmt.bufPrint(buf, "{d}{s}", .{ @divFloor(secs, periods[periods.len - 1].s), periods[periods.len - 1].label }) catch "";
+    const p = struct {
+        fn f(b: []u8, n: i64, unit: []const u8) []const u8 {
+            return std.fmt.bufPrint(b, "{d}{s}", .{ n, unit }) catch "";
+        }
+    }.f;
+    var d: i64 = if (now > ts) now - ts else 0;
+    if (d < 90) return p(buf, d, "s");
+    d = @divFloor(d + 30, 60); // minutes (rounded)
+    if (d < 90) return p(buf, d, "m");
+    d = @divFloor(d + 30, 60); // hours
+    if (d < 36) return p(buf, d, "h");
+    d = @divFloor(d + 12, 24); // days
+    if (d < 14) return p(buf, d, "d");
+    if (d < 70) return p(buf, @divFloor(d + 3, 7), "w");
+    if (d < 365) return p(buf, @divFloor(d + 15, 30), "M");
+    // Years from total months, accounting for 365.25 days/year (git's formula).
+    const total_months = @divFloor(d * 12 * 100 + 91500, 36525);
+    return p(buf, @divFloor(total_months, 12), "y");
 }
 
 /// Whether `upstream` is the obvious default for `name` — `origin/<same-name>` —
@@ -2759,6 +2763,23 @@ fn withFg(base: vaxis.Style, index: u8) vaxis.Style {
     var s = base;
     s.fg = .{ .index = index };
     return s;
+}
+
+test "recencyStr rounds like git --date=relative" {
+    const now: i64 = 2_000_000_000;
+    var buf: [8]u8 = undefined;
+    const day: i64 = 86400;
+    try std.testing.expectEqualStrings("", recencyStr(&buf, 0, now)); // unknown
+    try std.testing.expectEqualStrings("0s", recencyStr(&buf, now, now));
+    try std.testing.expectEqualStrings("30s", recencyStr(&buf, now - 30, now));
+    try std.testing.expectEqualStrings("2m", recencyStr(&buf, now - 90, now)); // 90s -> 2 minutes
+    try std.testing.expectEqualStrings("2h", recencyStr(&buf, now - 7200, now));
+    try std.testing.expectEqualStrings("3d", recencyStr(&buf, now - 3 * day, now));
+    try std.testing.expectEqualStrings("3w", recencyStr(&buf, now - 20 * day, now));
+    try std.testing.expectEqualStrings("2M", recencyStr(&buf, now - 70 * day, now));
+    try std.testing.expectEqualStrings("1y", recencyStr(&buf, now - 365 * day, now));
+    // The case that floor got wrong: ~2 years reads "2y", not "1y".
+    try std.testing.expectEqualStrings("2y", recencyStr(&buf, now - 730 * day, now));
 }
 
 test "every help-section keyword matches a real help header" {
