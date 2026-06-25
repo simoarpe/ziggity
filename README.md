@@ -16,7 +16,10 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
   (`↑ahead`/`↓behind`, `✓` in sync, `?` no upstream) and a working-tree summary.
   The current branch shows the same push/pull status in the Branches panel.
 - Files panel from `git status --porcelain -z`.
-- Branches panel from `git branch --format`.
+- Branches panel from `git branch --format`: each local branch shows a "time
+  ago" recency column, its name, and per-branch tracking status (`✓` in sync,
+  `↑`/`↓` ahead/behind, `(gone)`); the upstream ref is shown only when it isn't
+  the obvious `origin/<same-name>`.
 - Recent commits panel from `git log`.
 - Stash panel from `git stash list`.
 - Diff preview for selected files, commits, branches, and stash entries.

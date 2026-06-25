@@ -627,7 +627,7 @@ pub const Git = struct {
             .alphabetical => "--sort=refname",
             .date, .recency => "--sort=-committerdate",
         };
-        const bytes = try self.output(&.{ "branch", sort_flag, "--format=%(HEAD)%00%(refname:short)%00%(upstream:short)%00%(upstream:track)" });
+        const bytes = try self.output(&.{ "branch", sort_flag, "--format=%(HEAD)%00%(refname:short)%00%(upstream:short)%00%(upstream:track)%00%(committerdate:unix)" });
         defer self.allocator.free(bytes);
         const list = try parseBranches(self.allocator, bytes);
         errdefer {
@@ -1346,12 +1346,14 @@ pub fn parseBranches(allocator: std.mem.Allocator, bytes: []const u8) ![]model.B
         // deleted, or "[ahead N, behind M]" / "[ahead N]" / "[behind M]" / ""
         // otherwise.
         const track = fields.next() orelse "";
+        const date = std.mem.trim(u8, fields.next() orelse "", " \t\r\n");
         var branch = model.Branch{
             .name = try allocator.dupe(u8, name),
             .current = head.len > 0 and head[0] == '*',
             .upstream_gone = std.mem.eql(u8, track, "[gone]"),
             .ahead = trackCount(track, "ahead "),
             .behind = trackCount(track, "behind "),
+            .commit_time = std.fmt.parseInt(i64, date, 10) catch 0,
         };
         errdefer branch.deinit(allocator);
         if (upstream.len > 0) branch.upstream = try allocator.dupe(u8, upstream);
@@ -1362,9 +1364,9 @@ pub fn parseBranches(allocator: std.mem.Allocator, bytes: []const u8) ![]model.B
 }
 
 test "parseBranches reads ahead/behind from upstream:track" {
-    const bytes = " \x00feature\x00origin/feature\x00[ahead 2]\n" ++
-        " \x00topic\x00origin/topic\x00[ahead 3, behind 1]\n" ++
-        "*\x00main\x00origin/main\x00\n";
+    const bytes = " \x00feature\x00origin/feature\x00[ahead 2]\x001700000000\n" ++
+        " \x00topic\x00origin/topic\x00[ahead 3, behind 1]\x001699999999\n" ++
+        "*\x00main\x00origin/main\x00\x001700000123\n";
     const branches = try parseBranches(std.testing.allocator, bytes);
     defer {
         for (branches) |*b| b.deinit(std.testing.allocator);
@@ -1373,10 +1375,12 @@ test "parseBranches reads ahead/behind from upstream:track" {
     try std.testing.expectEqual(@as(usize, 3), branches.len);
     try std.testing.expectEqual(@as(usize, 2), branches[0].ahead);
     try std.testing.expectEqual(@as(usize, 0), branches[0].behind);
+    try std.testing.expectEqual(@as(i64, 1700000000), branches[0].commit_time);
     try std.testing.expectEqual(@as(usize, 3), branches[1].ahead);
     try std.testing.expectEqual(@as(usize, 1), branches[1].behind);
     try std.testing.expectEqual(@as(usize, 0), branches[2].ahead);
     try std.testing.expect(branches[2].current);
+    try std.testing.expectEqual(@as(i64, 1700000123), branches[2].commit_time);
 }
 
 /// The number following `label` ("ahead "/"behind ") in a `%(upstream:track)`

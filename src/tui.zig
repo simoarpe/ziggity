@@ -564,6 +564,9 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
         // Reflect foreground-busy state for the ticker (spinner animation speed).
         app.busy_flag.store(app.foregroundBusy(), .release);
 
+        // Wall-clock time for the branches "time ago" column (unix seconds).
+        app.now_unix = @intCast(@divFloor(std.Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s));
+
         if (render_needed) try renderAndFlush(&vx, writer, app);
     }
 }
@@ -1724,6 +1727,7 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
         return;
     }
     const start = app.listScroll(.branches);
+    const now = app.now_unix;
     var row: u16 = 0;
     var idx = start;
     while (idx < branches.len and row < win.height) : ({
@@ -1731,9 +1735,7 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
         row += 1;
     }) {
         const branch = branches[idx];
-        var buf: [512]u8 = undefined;
         const marker: u8 = if (branch.current) '*' else ' ';
-        const line = std.fmt.bufPrint(&buf, "{c} {s}", .{ marker, branch.name }) catch branch.name;
 
         const base = blk: {
             var s = if (branch.current) styles().staged else styles().normal;
@@ -1742,7 +1744,22 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
             if (sel != .none) fillRow(win, row, s);
             break :blk s;
         };
-        var end = printSpan(win, row, 0, line, base);
+
+        var end: u16 = 0;
+        // Local branches lead with a compact "time ago" recency column (green
+        // for the current branch, cyan otherwise).
+        if (app.branches_tab == .local) {
+            var rbuf: [8]u8 = undefined;
+            const rec = recencyStr(&rbuf, branch.commit_time, now);
+            const pad: usize = if (rec.len < 3) 3 - rec.len else 0;
+            end = printSpan(win, row, end, indent_spaces[0..pad], base);
+            end = printSpan(win, row, end, rec, withFg(base, if (branch.current) ui_theme.staged else ui_theme.accent));
+            end = printSpan(win, row, end, " ", base);
+        }
+
+        var buf: [512]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{c} {s}", .{ marker, branch.name }) catch branch.name;
+        end = printSpan(win, row, end, line, base);
 
         // The Remotes tab shows just the ref name. Local branches show their
         // tracking status: ahead/behind (per-branch), in-sync (✓), or gone — and
@@ -1763,6 +1780,30 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
             }
         }
     }
+}
+
+/// Compact "time ago" for a commit unix timestamp `ts` relative to `now`, into
+/// `buf` (e.g. "5s", "3m", "2h", "4d", "6w", "2M", "1y"). Empty when `ts` is
+/// unknown. Units mirror the conventional single-letter scheme (capital M is
+/// months, lowercase m is minutes).
+fn recencyStr(buf: []u8, ts: i64, now: i64) []const u8 {
+    if (ts <= 0) return "";
+    const secs: i64 = if (now > ts) now - ts else 0;
+    const periods = [_]struct { label: []const u8, s: i64 }{
+        .{ .label = "s", .s = 1 },
+        .{ .label = "m", .s = 60 },
+        .{ .label = "h", .s = 3600 },
+        .{ .label = "d", .s = 86400 },
+        .{ .label = "w", .s = 604800 },
+        .{ .label = "M", .s = 2592000 },
+        .{ .label = "y", .s = 31536000 },
+    };
+    var i: usize = 1;
+    while (i < periods.len) : (i += 1) {
+        if (secs < periods[i].s)
+            return std.fmt.bufPrint(buf, "{d}{s}", .{ @divFloor(secs, periods[i - 1].s), periods[i - 1].label }) catch "";
+    }
+    return std.fmt.bufPrint(buf, "{d}{s}", .{ @divFloor(secs, periods[periods.len - 1].s), periods[periods.len - 1].label }) catch "";
 }
 
 /// Whether `upstream` is the obvious default for `name` — `origin/<same-name>` —

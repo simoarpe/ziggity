@@ -1625,6 +1625,9 @@ pub const App = struct {
     reroot_request: ?[]u8 = null,
     reroot_push: bool = false,
     repo_stack: std.ArrayList([]u8) = .empty,
+    /// Current wall-clock time (unix seconds), refreshed each frame by the TUI
+    /// loop; drives the branches panel's "time ago" recency column.
+    now_unix: i64 = 0,
     commits_tab: CommitsTab = .commits,
     main_scroll: usize = 0,
     /// Horizontal scroll offset (cells) of the main diff / active staging pane,
