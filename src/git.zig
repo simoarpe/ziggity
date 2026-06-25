@@ -1343,12 +1343,15 @@ pub fn parseBranches(allocator: std.mem.Allocator, bytes: []const u8) ![]model.B
         const name = fields.next() orelse continue;
         const upstream = fields.next() orelse "";
         // `%(upstream:track)` is "[gone]" when the tracked remote branch was
-        // deleted, or "[ahead N, behind M]" / "" otherwise.
+        // deleted, or "[ahead N, behind M]" / "[ahead N]" / "[behind M]" / ""
+        // otherwise.
         const track = fields.next() orelse "";
         var branch = model.Branch{
             .name = try allocator.dupe(u8, name),
             .current = head.len > 0 and head[0] == '*',
             .upstream_gone = std.mem.eql(u8, track, "[gone]"),
+            .ahead = trackCount(track, "ahead "),
+            .behind = trackCount(track, "behind "),
         };
         errdefer branch.deinit(allocator);
         if (upstream.len > 0) branch.upstream = try allocator.dupe(u8, upstream);
@@ -1356,6 +1359,36 @@ pub fn parseBranches(allocator: std.mem.Allocator, bytes: []const u8) ![]model.B
     }
 
     return branches.toOwnedSlice(allocator);
+}
+
+test "parseBranches reads ahead/behind from upstream:track" {
+    const bytes = " \x00feature\x00origin/feature\x00[ahead 2]\n" ++
+        " \x00topic\x00origin/topic\x00[ahead 3, behind 1]\n" ++
+        "*\x00main\x00origin/main\x00\n";
+    const branches = try parseBranches(std.testing.allocator, bytes);
+    defer {
+        for (branches) |*b| b.deinit(std.testing.allocator);
+        std.testing.allocator.free(branches);
+    }
+    try std.testing.expectEqual(@as(usize, 3), branches.len);
+    try std.testing.expectEqual(@as(usize, 2), branches[0].ahead);
+    try std.testing.expectEqual(@as(usize, 0), branches[0].behind);
+    try std.testing.expectEqual(@as(usize, 3), branches[1].ahead);
+    try std.testing.expectEqual(@as(usize, 1), branches[1].behind);
+    try std.testing.expectEqual(@as(usize, 0), branches[2].ahead);
+    try std.testing.expect(branches[2].current);
+}
+
+/// The number following `label` ("ahead "/"behind ") in a `%(upstream:track)`
+/// string like "[ahead 2, behind 1]", or 0 if absent.
+fn trackCount(track: []const u8, label: []const u8) usize {
+    const at = std.mem.indexOf(u8, track, label) orelse return 0;
+    var i = at + label.len;
+    var n: usize = 0;
+    while (i < track.len and track[i] >= '0' and track[i] <= '9') : (i += 1) {
+        n = n * 10 + (track[i] - '0');
+    }
+    return n;
 }
 
 /// Move the current (checked-out) branch to index 0, preserving the relative

@@ -109,6 +109,10 @@ pub const Branch = struct {
     /// The branch tracks a remote branch that has been deleted ("[gone]" from
     /// `%(upstream:track)`), e.g. after the upstream PR was merged and pruned.
     upstream_gone: bool = false,
+    /// Commits this branch is ahead of / behind its upstream (from
+    /// `%(upstream:track)`); both 0 when in sync or with no upstream.
+    ahead: usize = 0,
+    behind: usize = 0,
 
     pub fn deinit(self: *Branch, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
@@ -461,7 +465,7 @@ fn dupeBranch(a: std.mem.Allocator, b: Branch) std.mem.Allocator.Error!Branch {
     const name = try a.dupe(u8, b.name);
     errdefer a.free(name);
     const upstream = if (b.upstream) |u| try a.dupe(u8, u) else null;
-    return .{ .name = name, .upstream = upstream, .current = b.current, .upstream_gone = b.upstream_gone };
+    return .{ .name = name, .upstream = upstream, .current = b.current, .upstream_gone = b.upstream_gone, .ahead = b.ahead, .behind = b.behind };
 }
 
 fn dupeTag(a: std.mem.Allocator, t: Tag) std.mem.Allocator.Error!Tag {

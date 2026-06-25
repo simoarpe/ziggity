@@ -1733,10 +1733,7 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
         const branch = branches[idx];
         var buf: [512]u8 = undefined;
         const marker: u8 = if (branch.current) '*' else ' ';
-        const line = if (branch.upstream) |upstream|
-            std.fmt.bufPrint(&buf, "{c} {s} -> {s} ", .{ marker, branch.name, upstream }) catch branch.name
-        else
-            std.fmt.bufPrint(&buf, "{c} {s} ", .{ marker, branch.name }) catch branch.name;
+        const line = std.fmt.bufPrint(&buf, "{c} {s}", .{ marker, branch.name }) catch branch.name;
 
         const base = blk: {
             var s = if (branch.current) styles().staged else styles().normal;
@@ -1745,19 +1742,35 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
             if (sel != .none) fillRow(win, row, s);
             break :blk s;
         };
-        const end = printSpan(win, row, 0, line, base);
+        var end = printSpan(win, row, 0, line, base);
 
+        // The Remotes tab shows just the ref name. Local branches show their
+        // tracking status: ahead/behind (per-branch), in-sync (✓), or gone — and
+        // the upstream ref only when it isn't the obvious origin/<same-name>.
         if (app.branches_tab == .local) {
             if (branch.upstream_gone) {
-                // The tracked remote branch was deleted — flag it in red, in
-                // place of the (now meaningless) ahead/behind status.
-                _ = printSpan(win, row, end, "(upstream gone)", withFg(base, ui_theme.unstaged));
-            } else if (branch.current) {
-                // The current branch shows its push/pull status (others lack it).
-                _ = drawBranchStatus(win, row, end, base, app.data.upstream != null, app.data.ahead orelse 0, app.data.behind orelse 0);
+                end = printSpan(win, row, end, " ", base);
+                _ = printSpan(win, row, end, "(gone)", withFg(base, ui_theme.unstaged));
+            } else if (branch.upstream) |upstream| {
+                if (!upstreamIsDefault(branch.name, upstream)) {
+                    end = printSpan(win, row, end, " ", base);
+                    end = printGlyph(win, row, end, glyph_to_branch, withFg(base, ui_theme.muted));
+                    end = printSpan(win, row, end, " ", base);
+                    end = printSpan(win, row, end, upstream, withFg(base, ui_theme.muted));
+                }
+                end = printSpan(win, row, end, " ", base);
+                _ = drawBranchStatus(win, row, end, base, true, branch.ahead, branch.behind);
             }
         }
     }
+}
+
+/// Whether `upstream` is the obvious default for `name` — `origin/<same-name>` —
+/// so its display can be elided. A differently-named ref or a non-origin remote
+/// is still shown (it's information the bare status can't convey).
+fn upstreamIsDefault(name: []const u8, upstream: []const u8) bool {
+    const slash = std.mem.indexOfScalar(u8, upstream, '/') orelse return false;
+    return std.mem.eql(u8, upstream[0..slash], "origin") and std.mem.eql(u8, upstream[slash + 1 ..], name);
 }
 
 fn drawTags(win: vaxis.Window, app: *const app_mod.App) void {
