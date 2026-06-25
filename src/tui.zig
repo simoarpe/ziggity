@@ -798,7 +798,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     };
     app.panel_rect_count = 6;
 
-    drawStatus(panel(root, 0, y, side_w, status_h, "Status [1]", app.focus == .status, null), app);
+    drawStatus(panel(root, 0, y, side_w, status_h, "[1] Status", app.focus == .status, null), app);
     y += status_h;
     {
         const files_tabs = [_][]const u8{ "Files", "Worktrees", "Submodules" };
@@ -854,7 +854,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     }
     y += commits_h;
     {
-        const w = panel(root, 0, y, side_w, stash_h, "Stash [5]", app.focus == .stash, listScrollInfo(app, .stash));
+        const w = panel(root, 0, y, side_w, stash_h, "[5] Stash", app.focus == .stash, listScrollInfo(app, .stash));
         beginListPan(app, .stash);
         drawStash(w, app);
         endListPan(app, .stash, w.width);
