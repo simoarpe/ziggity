@@ -42,10 +42,12 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
   (Local/Remotes/Tags), and Commits panel tabs (Commits/Reflog), switched with
   `[`/`]`. Each panel's title shows the full tab strip with the active view
   highlighted (as does the single-pane staging view's Unstaged/Staged tabs).
-- Worktrees tab (Files panel): list worktrees (current marked) and remove one
-  (`d`, confirmed).
-- Submodules tab (Files panel): list submodules with state and init/update one
-  (`space`).
+- Worktrees tab (Files panel): list worktrees (current marked), create a new one
+  (`n`, or `w` on a Branches ref to check it out there), open one in your editor
+  (`o`), and remove one (`d`, confirmed).
+- Submodules tab (Files panel): list submodules with state; update (`space`), add
+  (`n`), edit URL (`e`), remove (`d`, confirmed), and a bulk-actions menu (`b`:
+  init-all / update-all / update-recursive / deinit-all).
 - Branch workflows: new, rename, delete, merge, rebase, fast-forward,
   remote/tag checkout, checkout-by-name (`c`).
 - Tag actions (Tags tab): create (`n`), delete (`d`). Remote-branch delete

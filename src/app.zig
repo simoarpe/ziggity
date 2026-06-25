@@ -109,6 +109,10 @@ pub const TextPromptKind = enum {
     commit_path,
     push_upstream,
     diff_ref,
+    new_worktree,
+    add_submodule_url,
+    add_submodule_path,
+    set_submodule_url,
 
     pub fn title(self: TextPromptKind) []const u8 {
         return switch (self) {
@@ -124,6 +128,10 @@ pub const TextPromptKind = enum {
             .commit_path => "Filter commits by path",
             .push_upstream => "Set upstream (remote branch) to push to",
             .diff_ref => "Enter a ref to diff against",
+            .new_worktree => "New worktree path",
+            .add_submodule_url => "Submodule URL",
+            .add_submodule_path => "Submodule path",
+            .set_submodule_url => "Submodule URL",
         };
     }
 };
@@ -135,6 +143,7 @@ pub const Confirmation = enum {
     delete_tag,
     delete_remote_branch,
     remove_worktree,
+    remove_submodule,
     remove_remote,
     undo,
     force_push,
@@ -406,6 +415,17 @@ pub const MenuAction = enum {
     diff_enter_ref,
     diff_reverse_direction,
     diff_exit,
+    submodule_init_all,
+    submodule_update_all,
+    submodule_update_recursive,
+    submodule_deinit_all,
+};
+
+pub const submodule_bulk_menu = [_]MenuItem{
+    .{ .label = "Init all submodules", .action = .submodule_init_all },
+    .{ .label = "Update all submodules", .action = .submodule_update_all },
+    .{ .label = "Update all submodules recursively", .action = .submodule_update_recursive },
+    .{ .label = "Deinit all submodules", .action = .submodule_deinit_all },
 };
 
 pub const MenuItem = struct {
@@ -1032,7 +1052,12 @@ pub const Mutation = union(enum) {
     create_tag: []const u8,
     delete_tag: []const u8,
     remove_worktree: []const u8,
+    add_worktree: struct { path: []const u8, base: []const u8 },
     update_submodule: []const u8,
+    add_submodule: struct { url: []const u8, path: []const u8 },
+    set_submodule_url: struct { path: []const u8, url: []const u8 },
+    remove_submodule: []const u8,
+    submodule_bulk: git_mod.Git.SubmoduleBulk,
     undo,
     merge: []const u8,
     rebase: []const u8,
@@ -1076,7 +1101,12 @@ pub const Mutation = union(enum) {
             .create_tag => |n| wgit.createTag(n),
             .delete_tag => |n| wgit.deleteTag(n),
             .remove_worktree => |p| wgit.removeWorktree(p),
+            .add_worktree => |x| wgit.addWorktree(x.path, x.base),
             .update_submodule => |p| wgit.updateSubmodule(p),
+            .add_submodule => |x| wgit.addSubmodule(x.url, x.path),
+            .set_submodule_url => |x| wgit.setSubmoduleUrl(x.path, x.url),
+            .remove_submodule => |p| wgit.removeSubmodule(p),
+            .submodule_bulk => |op| wgit.bulkSubmodule(op),
             .undo => wgit.undoLastOperation(),
             .merge => |b| wgit.mergeBranch(b),
             .rebase => |b| wgit.rebaseOnto(b),
@@ -1126,7 +1156,12 @@ pub const Mutation = union(enum) {
             .create_tag => |n| .{ .create_tag = try gpa.dupe(u8, n) },
             .delete_tag => |n| .{ .delete_tag = try gpa.dupe(u8, n) },
             .remove_worktree => |p| .{ .remove_worktree = try gpa.dupe(u8, p) },
+            .add_worktree => |x| .{ .add_worktree = .{ .path = try gpa.dupe(u8, x.path), .base = try gpa.dupe(u8, x.base) } },
             .update_submodule => |p| .{ .update_submodule = try gpa.dupe(u8, p) },
+            .add_submodule => |x| .{ .add_submodule = .{ .url = try gpa.dupe(u8, x.url), .path = try gpa.dupe(u8, x.path) } },
+            .set_submodule_url => |x| .{ .set_submodule_url = .{ .path = try gpa.dupe(u8, x.path), .url = try gpa.dupe(u8, x.url) } },
+            .remove_submodule => |p| .{ .remove_submodule = try gpa.dupe(u8, p) },
+            .submodule_bulk => |op| .{ .submodule_bulk = op },
             .undo => .undo,
             .merge => |b| .{ .merge = try gpa.dupe(u8, b) },
             .rebase => |b| .{ .rebase = try gpa.dupe(u8, b) },
@@ -1148,7 +1183,19 @@ pub const Mutation = union(enum) {
 
     pub fn deinit(self: Mutation, gpa: std.mem.Allocator) void {
         switch (self) {
-            .commit, .checkout, .revert, .create_fixup, .create_tag, .delete_tag, .remove_worktree, .update_submodule, .merge, .rebase, .autosquash => |s| gpa.free(s),
+            .commit, .checkout, .revert, .create_fixup, .create_tag, .delete_tag, .remove_worktree, .update_submodule, .remove_submodule, .merge, .rebase, .autosquash => |s| gpa.free(s),
+            .add_worktree => |x| {
+                gpa.free(x.path);
+                gpa.free(x.base);
+            },
+            .add_submodule => |x| {
+                gpa.free(x.url);
+                gpa.free(x.path);
+            },
+            .set_submodule_url => |x| {
+                gpa.free(x.path);
+                gpa.free(x.url);
+            },
             .cherry_pick_many => |hs| freeStrList(gpa, hs),
             .delete_branch => |x| gpa.free(x.name),
             .delete_remote_branch => |x| {
@@ -1181,7 +1228,7 @@ pub const Mutation = union(enum) {
                 freeStrList(gpa, b.add);
                 freeStrList(gpa, b.reset);
             },
-            .amend, .undo, .fast_forward_current, .bisect_skip, .bisect_reset, .amend_continue_rebase => {},
+            .amend, .undo, .fast_forward_current, .bisect_skip, .bisect_reset, .amend_continue_rebase, .submodule_bulk => {},
         }
     }
 
@@ -1675,6 +1722,13 @@ pub const App = struct {
     // and the remote acted on by edit/remove. No allocation needed.
     remote_name_buf: [128]u8 = undefined,
     remote_name_len: usize = 0,
+    /// Scratch for chained worktree/submodule prompts: the base ref a new
+    /// worktree checks out (empty = HEAD), and the URL stashed between the two
+    /// `git submodule add` prompts.
+    worktree_base_buf: [512]u8 = undefined,
+    worktree_base_len: usize = 0,
+    submodule_url_buf: [1024]u8 = undefined,
+    submodule_url_len: usize = 0,
     mode: Mode = .normal,
     status_filter_index: usize = 0,
     help_scroll: usize = 0,
@@ -2276,6 +2330,28 @@ pub const App = struct {
             return self.toggleTreeView();
         }
 
+        // The Files panel's Worktrees / Submodules tabs add their own context
+        // keys, resolved here before the file-list bindings.
+        if (self.focus == .files) {
+            const km = self.config.keymap;
+            switch (self.files_tab) {
+                .worktrees => {
+                    if (km.new_branch.matches(key)) return self.startNewWorktree();
+                    if (km.open_browser.matches(key)) return self.openSelectedWorktreeInEditor();
+                },
+                .submodules => {
+                    if (km.new_branch.matches(key)) return self.startAddSubmodule();
+                    if (km.edit_file.matches(key)) return self.startEditSubmoduleUrl();
+                    if (km.bisect.matches(key)) return self.startSubmoduleBulkMenu();
+                },
+                .files => {},
+            }
+        }
+        // `w` on a selected branch/tag creates a worktree checked out at it.
+        if (self.focus == .branches and !self.branch_commits_active and self.config.keymap.worktree_from_branch.matches(key)) {
+            return self.startWorktreeFromBranch();
+        }
+
         var action = actions.fromNormalKey(key, self.config.keymap, self.focus) orelse return;
         // A panel drilled into a commit's files shows files, not its list, so
         // the list-level bindings don't apply: the Branches sub-commits drill
@@ -2445,6 +2521,8 @@ pub const App = struct {
             .edit_file => try self.requestEditFile(),
             .discard_selected => if (self.focus == .files and self.files_tab == .worktrees)
                 try self.removeSelectedWorktree()
+            else if (self.focus == .files and self.files_tab == .submodules)
+                try self.startRemoveSubmodule()
             else
                 try self.startDiscardMenu(),
             .discard_all => try self.startDiscardAllConfirmation(),
@@ -3381,6 +3459,65 @@ pub const App = struct {
         return self.requestMutation(.{ .update_submodule = sm.path }, .{ .gerund = "updating submodule", .command = "git submodule update", .refresh = Refresh.submodules }, "updated {s}", .{sm.path});
     }
 
+    /// `n` on the Worktrees tab: create a new worktree (a fresh branch from HEAD).
+    pub fn startNewWorktree(self: *App) !void {
+        self.worktree_base_len = 0; // base = HEAD
+        return self.startTextPrompt(.new_worktree);
+    }
+
+    /// `w` on the Branches panel: create a worktree checked out at the selected
+    /// branch/tag (prompts only for the path).
+    pub fn startWorktreeFromBranch(self: *App) !void {
+        const ref = self.selectedBranchRefName() orelse {
+            try self.setMessage("select a branch or tag to create a worktree from", .{});
+            return;
+        };
+        const n = @min(ref.len, self.worktree_base_buf.len);
+        @memcpy(self.worktree_base_buf[0..n], ref[0..n]);
+        self.worktree_base_len = n;
+        return self.startTextPrompt(.new_worktree);
+    }
+
+    /// `o` on the Worktrees tab: open the worktree's directory in the editor.
+    pub fn openSelectedWorktreeInEditor(self: *App) !void {
+        const wt = self.selectedWorktree() orelse {
+            try self.setMessage("no worktree selected", .{});
+            return;
+        };
+        return self.requestEditPath(wt.path);
+    }
+
+    /// `n` on the Submodules tab: add a submodule (prompt URL, then path).
+    pub fn startAddSubmodule(self: *App) !void {
+        self.submodule_url_len = 0;
+        return self.startTextPrompt(.add_submodule_url);
+    }
+
+    /// `e` on the Submodules tab: change the selected submodule's URL.
+    pub fn startEditSubmoduleUrl(self: *App) !void {
+        if (self.selectedSubmodule() == null) {
+            try self.setMessage("no submodule selected", .{});
+            return;
+        }
+        return self.startTextPrompt(.set_submodule_url);
+    }
+
+    /// `d` on the Submodules tab: remove the selected submodule (confirmed).
+    pub fn startRemoveSubmodule(self: *App) !void {
+        const sm = self.selectedSubmodule() orelse {
+            try self.setMessage("no submodule selected", .{});
+            return;
+        };
+        return self.requestConfirmation(.remove_submodule, "confirm remove submodule {s}", .{sm.path});
+    }
+
+    /// `b` on the Submodules tab: open the bulk-actions menu.
+    pub fn startSubmoduleBulkMenu(self: *App) !void {
+        self.mode = .menu;
+        self.active_menu = .{ .title = "Bulk submodule actions", .items = &submodule_bulk_menu, .index = 0 };
+        try self.setMessage("bulk submodule actions", .{});
+    }
+
     /// The ref name selected in the Branches panel, whichever tab is active.
     /// Used to drive the main-panel preview.
     pub fn selectedBranchRefName(self: *const App) ?[]const u8 {
@@ -3655,6 +3792,12 @@ pub const App = struct {
                 }
                 break :blk "Remove the selected worktree?";
             },
+            .remove_submodule => blk: {
+                if (self.selectedSubmodule()) |sm| {
+                    break :blk std.fmt.bufPrint(buf, "Remove submodule {s}? (deinit + git rm)", .{sm.path}) catch "Remove the selected submodule?";
+                }
+                break :blk "Remove the selected submodule?";
+            },
             .remove_remote => blk: {
                 if (self.remote_name_len > 0) {
                     break :blk std.fmt.bufPrint(buf, "Remove remote {s}? Local tracking refs are deleted.", .{self.remote_name_buf[0..self.remote_name_len]}) catch "Remove the selected remote?";
@@ -3918,7 +4061,12 @@ pub const App = struct {
             try self.setMessage("no file selected", .{});
             return;
         };
+        return self.requestEditPath(path);
+    }
 
+    /// Build an editor command for `path` (a file or, for a worktree, a
+    /// directory) and hand it to the TUI loop to run.
+    fn requestEditPath(self: *App, path: []const u8) !void {
         var det_buf: [128]u8 = undefined;
         const detected = self.detectEditor(&det_buf);
         const r = editor_mod.resolve(
@@ -4138,6 +4286,9 @@ pub const App = struct {
             .push_upstream => {},
             // Diff against a typed ref: no focus change or prefill.
             .diff_ref => {},
+            // Worktree/submodule prompts run from the Files panel's tabs.
+            .new_worktree => self.focus = .files,
+            .add_submodule_url, .add_submodule_path, .set_submodule_url => self.focus = .files,
         }
         self.mode = .text_prompt;
         self.text_prompt_kind = kind;
@@ -4405,6 +4556,46 @@ pub const App = struct {
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
                 return;
+            },
+            .new_worktree => {
+                const base = self.worktree_base_buf[0..self.worktree_base_len];
+                defer {
+                    self.mode = .normal;
+                    self.text_prompt_kind = null;
+                    self.input_buffer.clearRetainingCapacity();
+                }
+                return self.requestMutation(.{ .add_worktree = .{ .path = value, .base = base } }, .{ .gerund = "creating worktree", .command = "git worktree add", .refresh = Refresh.worktree_add }, "created worktree {s}", .{value});
+            },
+            .add_submodule_url => {
+                // Stash the URL and ask for the path in a second prompt.
+                const n = @min(value.len, self.submodule_url_buf.len);
+                @memcpy(self.submodule_url_buf[0..n], value[0..n]);
+                self.submodule_url_len = n;
+                self.text_prompt_kind = .add_submodule_path;
+                self.input_buffer.clearRetainingCapacity();
+                try self.setMessage("path for the new submodule", .{});
+                return;
+            },
+            .add_submodule_path => {
+                const url = self.submodule_url_buf[0..self.submodule_url_len];
+                defer {
+                    self.mode = .normal;
+                    self.text_prompt_kind = null;
+                    self.input_buffer.clearRetainingCapacity();
+                }
+                return self.requestMutation(.{ .add_submodule = .{ .url = url, .path = value } }, .{ .gerund = "adding submodule", .command = "git submodule add", .refresh = Refresh.submodules }, "added submodule {s}", .{value});
+            },
+            .set_submodule_url => {
+                const sm = self.selectedSubmodule() orelse {
+                    self.cancelTextPrompt("no submodule selected");
+                    return;
+                };
+                defer {
+                    self.mode = .normal;
+                    self.text_prompt_kind = null;
+                    self.input_buffer.clearRetainingCapacity();
+                }
+                return self.requestMutation(.{ .set_submodule_url = .{ .path = sm.path, .url = value } }, .{ .gerund = "updating submodule URL", .command = "git submodule set-url", .refresh = Refresh.submodules }, "updated URL for {s}", .{sm.path});
             },
             // Handled before the non-empty guard above.
             .commit_grep, .commit_author, .commit_path => unreachable,
@@ -4740,6 +4931,10 @@ pub const App = struct {
                 try self.setMessage("exited diffing mode", .{});
                 try self.updatePreview();
             },
+            .submodule_init_all => return self.requestMutation(.{ .submodule_bulk = .init_all }, .{ .gerund = "initialising submodules", .command = "git submodule init", .refresh = Refresh.submodules }, "initialised all submodules", .{}),
+            .submodule_update_all => return self.requestMutation(.{ .submodule_bulk = .update_all }, .{ .gerund = "updating submodules", .command = "git submodule update", .refresh = Refresh.submodules }, "updated all submodules", .{}),
+            .submodule_update_recursive => return self.requestMutation(.{ .submodule_bulk = .update_recursive }, .{ .gerund = "updating submodules", .command = "git submodule update --init --recursive", .refresh = Refresh.submodules }, "updated all submodules recursively", .{}),
+            .submodule_deinit_all => return self.requestMutation(.{ .submodule_bulk = .deinit_all }, .{ .gerund = "deinitialising submodules", .command = "git submodule deinit --all -f", .refresh = Refresh.submodules }, "deinitialised all submodules", .{}),
         }
     }
 
@@ -4969,6 +5164,13 @@ pub const App = struct {
                     return;
                 };
                 return self.requestMutation(.{ .remove_worktree = wt.path }, .{ .gerund = "removing worktree", .command = "git worktree remove", .refresh = Refresh.worktrees }, "removed worktree {s}", .{wt.path});
+            },
+            .remove_submodule => {
+                const sm = self.selectedSubmodule() orelse {
+                    try self.setMessage("no submodule selected", .{});
+                    return;
+                };
+                return self.requestMutation(.{ .remove_submodule = sm.path }, .{ .gerund = "removing submodule", .command = "git submodule deinit + git rm", .refresh = Refresh.submodules }, "removed submodule {s}", .{sm.path});
             },
             .remove_remote => {
                 const name = self.remote_name_buf[0..self.remote_name_len];
@@ -5645,6 +5847,8 @@ pub const App = struct {
         pub const stash = ScopeSet.init(.{ .files = true, .status = true, .stash = true });
         pub const stash_apply = ScopeSet.init(.{ .files = true, .status = true });
         pub const worktrees = ScopeSet.init(.{ .worktrees = true });
+        // Adding a worktree also creates a branch, so refresh both lists.
+        pub const worktree_add = ScopeSet.init(.{ .worktrees = true, .branches = true });
         pub const submodules = ScopeSet.init(.{ .files = true, .submodules = true });
         pub const upstream = ScopeSet.init(.{ .branches = true, .status = true });
         pub const all = ScopeSet.initFull();

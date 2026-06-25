@@ -895,8 +895,8 @@ const help_lines = [_][]const u8{
     "  `              toggle directory tree",
     "  enter          open the hunk/line staging view",
     "  m              merge/rebase actions: continue, amend+continue, abort",
-    "  Worktrees tab  space/enter inspect   d remove",
-    "  Submodules tab space init/update   enter inspect",
+    "  Worktrees tab  space/enter inspect   n new   o open in editor   d remove",
+    "  Submodules tab space update   n add   e edit URL   d remove   b bulk menu",
     "",
     "Staging view",
     "  j/k            move by line",
@@ -912,6 +912,7 @@ const help_lines = [_][]const u8{
     "  c              checkout by name (type a branch/ref; \"-\" = previous)",
     "  n              new branch (new tag / add remote by tab)",
     "  R              rename branch",
+    "  w              create a worktree checked out at the selected ref",
     "  d              delete branch / tag / remote branch",
     "  M / r / f      merge / rebase / fast-forward",
     "  Remotes tab    e edit URL   x remove remote   u set upstream",
@@ -1321,6 +1322,7 @@ fn drawConfirmPopup(root: vaxis.Window, app: *app_mod.App) void {
         .delete_tag => "Delete tag",
         .delete_remote_branch => "Delete remote branch",
         .remove_worktree => "Remove worktree",
+        .remove_submodule => "Remove submodule",
         .remove_remote => "Remove remote",
         .undo => "Undo",
         .force_push, .force_push_plain => "Force push",
@@ -2179,16 +2181,16 @@ fn footerHints(c: FooterCtx) []const u8 {
     }
     if (c.focus == .branches) {
         return switch (c.branches_tab) {
-            .local => "space checkout  c by-name  n new  R rename  d delete  M merge  r rebase  f ff  W diff  [/] tabs" ++ global_branches,
-            .remotes => "space checkout  n add  e edit  x remove  u upstream  d del-branch  W diff  [/] tabs" ++ global_branches,
-            .tags => "space checkout  n new-tag  d delete-tag  W diff  [/] tabs" ++ global_branches,
+            .local => "space checkout  c by-name  n new  R rename  d delete  M merge  r rebase  f ff  w worktree  W diff  [/] tabs" ++ global_branches,
+            .remotes => "space checkout  n add  e edit  x remove  u upstream  d del-branch  w worktree  W diff  [/] tabs" ++ global_branches,
+            .tags => "space checkout  n new-tag  d delete-tag  w worktree  W diff  [/] tabs" ++ global_branches,
         };
     }
     if (c.focus == .files) {
         return switch (c.files_tab) {
             .files => "space stage  a all  c commit  A amend  e edit  d discard  s stash  / filter  ` tree  enter hunks  [/] tabs" ++ global,
-            .worktrees => "enter inspect  d remove  [/] tabs" ++ global,
-            .submodules => "space init/update  enter inspect  [/] tabs" ++ global,
+            .worktrees => "enter inspect  n new  o open  d remove  [/] tabs" ++ global,
+            .submodules => "space update  n add  e edit-url  d remove  b bulk  enter inspect  [/] tabs" ++ global,
         };
     }
     return switch (c.focus) {

@@ -713,6 +713,13 @@ pub const Git = struct {
         return self.exec(&.{ "worktree", "remove", "--", path });
     }
 
+    /// Create a worktree at `path`. With an empty `base`, git makes a new branch
+    /// (named after the path) from HEAD; otherwise it checks out `base` there.
+    pub fn addWorktree(self: *Git, path: []const u8, base: []const u8) !ExecResult {
+        if (base.len == 0) return self.exec(&.{ "worktree", "add", path });
+        return self.exec(&.{ "worktree", "add", path, base });
+    }
+
     pub fn loadSubmodules(self: *Git) ![]model.Submodule {
         var result = try self.exec(&.{ "submodule", "status" });
         defer result.deinit(self.allocator);
@@ -722,6 +729,39 @@ pub const Git = struct {
 
     pub fn updateSubmodule(self: *Git, path: []const u8) !ExecResult {
         return self.exec(&.{ "submodule", "update", "--init", "--", path });
+    }
+
+    pub fn addSubmodule(self: *Git, url: []const u8, path: []const u8) !ExecResult {
+        return self.exec(&.{ "submodule", "add", "--", url, path });
+    }
+
+    /// Point the submodule at a new URL (in `.gitmodules`) and sync it into the
+    /// active config.
+    pub fn setSubmoduleUrl(self: *Git, path: []const u8, url: []const u8) !ExecResult {
+        var r = try self.exec(&.{ "submodule", "set-url", "--", path, url });
+        if (!r.ok()) return r;
+        r.deinit(self.allocator);
+        return self.exec(&.{ "submodule", "sync", "--", path });
+    }
+
+    /// Remove a submodule: deinit it, then `git rm` (which also drops its
+    /// `.gitmodules` entry from the index).
+    pub fn removeSubmodule(self: *Git, path: []const u8) !ExecResult {
+        var r = try self.exec(&.{ "submodule", "deinit", "-f", "--", path });
+        if (!r.ok()) return r;
+        r.deinit(self.allocator);
+        return self.exec(&.{ "rm", "-f", "--", path });
+    }
+
+    pub const SubmoduleBulk = enum { init_all, update_all, update_recursive, deinit_all };
+
+    pub fn bulkSubmodule(self: *Git, op: SubmoduleBulk) !ExecResult {
+        return switch (op) {
+            .init_all => self.exec(&.{ "submodule", "init" }),
+            .update_all => self.exec(&.{ "submodule", "update" }),
+            .update_recursive => self.exec(&.{ "submodule", "update", "--init", "--recursive" }),
+            .deinit_all => self.exec(&.{ "submodule", "deinit", "--all", "-f" }),
+        };
     }
 
     pub fn loadCommits(self: *Git, ref_name: []const u8, limit: usize) ![]model.Commit {
