@@ -403,6 +403,55 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             render_needed = true;
         }
 
+        // A queued in-process re-root (entering/leaving a worktree or submodule):
+        // drain the read-only background workers — they borrow the old `root` —
+        // switch repositories, then start a fresh load against the new root.
+        // Mutations/network ops are gated by `foregroundBusy` in the request, so
+        // only these read-only futures can be in flight here.
+        if (app.reroot_request) |new_root| {
+            if (preview_future) |*f| {
+                f.await(io);
+                preview_future = null;
+                if (preview_run.result) |r| async_allocator.free(r);
+                preview_run.result = null;
+            }
+            if (worktree_future) |*f| {
+                f.await(io);
+                worktree_future = null;
+                if (worktree_run.result) |*r| r.deinit(async_allocator);
+                worktree_run.result = null;
+            }
+            if (scoped_load_future) |*f| {
+                f.await(io);
+                scoped_load_future = null;
+                if (scoped_load_run.result) |*r| r.deinit(async_allocator);
+                scoped_load_run.result = null;
+                scoped_load_run.freeFilters();
+            }
+            if (repo_load_future) |*f| {
+                f.await(io);
+                repo_load_future = null;
+                if (repo_load_run.result) |*r| r.deinit(async_allocator);
+                repo_load_run.result = null;
+            }
+
+            app.reroot_request = null;
+            const push = app.reroot_push;
+            app.reRootTo(new_root, push) catch {};
+            app.allocator.free(new_root);
+
+            // On a successful switch the app marks an initial load pending; start
+            // it against the new root. (A failed switch leaves the app unchanged.)
+            if (app.initial_load_pending) {
+                repo_load_run = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ, .branch_sort = app.git.branch_sort, .untracked = app.git.untracked_files };
+                repo_load_future = io.concurrent(repoLoadWorker, .{&repo_load_run}) catch blk: {
+                    app.applyRepoLoad(null, async_allocator);
+                    break :blk null;
+                };
+            }
+            render_needed = true;
+        }
+
         // Start a queued network op once nothing else is in flight.
         if (async_future == null) {
             if (app.async_requested) |op| {
@@ -895,8 +944,9 @@ const help_lines = [_][]const u8{
     "  `              toggle directory tree",
     "  enter          open the hunk/line staging view",
     "  m              merge/rebase actions: continue, amend+continue, abort",
-    "  Worktrees tab  space/enter inspect   n new   o open in editor   d remove",
-    "  Submodules tab space update   n add   e edit URL   d remove   b bulk menu",
+    "  Worktrees tab  space/enter switch into it   n new   o open in editor   d remove",
+    "  Submodules tab enter enter it   space update   n add   e edit URL   d remove   b bulk",
+    "  (inside a worktree/submodule, esc walks back out to the parent repo)",
     "",
     "Staging view",
     "  j/k            move by line",
@@ -1473,9 +1523,15 @@ fn drawScrollbar(raw: vaxis.Window, len: usize, pos: usize, focused: bool) void 
 fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
     const st = styles();
 
-    // Line 0: <repo> → <branch>  <ahead/behind status>
+    // Line 0: [<parent> / ...] <repo> → <branch>  <ahead/behind status>
     const repo = std.fs.path.basename(app.git.root);
     var col: u16 = 0;
+    // Breadcrumb of parent repos when drilled into a worktree/submodule (esc
+    // walks back out one level at a time).
+    for (app.repo_stack.items) |parent| {
+        col = printSpan(win, 0, col, std.fs.path.basename(parent), st.muted);
+        col = printSpan(win, 0, col, " / ", st.muted);
+    }
     col = printSpan(win, 0, col, repo, st.normal);
     col = printSpan(win, 0, col, " ", st.muted);
     col = printGlyph(win, 0, col, glyph_to_branch, st.muted);
@@ -2189,8 +2245,8 @@ fn footerHints(c: FooterCtx) []const u8 {
     if (c.focus == .files) {
         return switch (c.files_tab) {
             .files => "space stage  a all  c commit  A amend  e edit  d discard  s stash  / filter  ` tree  enter hunks  [/] tabs" ++ global,
-            .worktrees => "enter inspect  n new  o open  d remove  [/] tabs" ++ global,
-            .submodules => "space update  n add  e edit-url  d remove  b bulk  enter inspect  [/] tabs" ++ global,
+            .worktrees => "space/enter switch  n new  o editor  d remove  [/] tabs" ++ global,
+            .submodules => "enter enter  space update  n add  e edit-url  d remove  b bulk  [/] tabs" ++ global,
         };
     }
     return switch (c.focus) {

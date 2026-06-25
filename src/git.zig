@@ -115,10 +115,17 @@ pub const Git = struct {
     const command_log_cap = 200;
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map) !Git {
+        return initAt(allocator, io, environ, ".");
+    }
+
+    /// Like `init`, but discovers the repository containing `cwd` (used to
+    /// re-root the app onto a worktree or submodule directory).
+    pub fn initAt(allocator: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, cwd: []const u8) !Git {
         // One call yields both the worktree root and the absolute `.git` dir.
         var argv = [_][]const u8{ "git", "rev-parse", "--show-toplevel", "--absolute-git-dir" };
         const result = try std.process.run(allocator, io, .{
             .argv = &argv,
+            .cwd = .{ .path = cwd },
             .stdout_limit = .limited(1024 * 1024),
             .stderr_limit = .limited(1024 * 1024),
         });

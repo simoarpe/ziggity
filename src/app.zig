@@ -1617,6 +1617,14 @@ pub const App = struct {
     confirm_text_buf: [1024]u8 = undefined,
     branches_tab: BranchesTab = .local,
     files_tab: FilesTab = .files,
+    /// In-process re-root: a pending request to switch the whole app to another
+    /// repository (a worktree or submodule directory), performed by the TUI loop
+    /// once its background workers are drained. `repo_stack` holds the parent
+    /// roots so <esc> can walk back out; `reroot_push` records whether entering
+    /// (push the current root) or backing out (already popped).
+    reroot_request: ?[]u8 = null,
+    reroot_push: bool = false,
+    repo_stack: std.ArrayList([]u8) = .empty,
     commits_tab: CommitsTab = .commits,
     main_scroll: usize = 0,
     /// Horizontal scroll offset (cells) of the main diff / active staging pane,
@@ -1929,6 +1937,9 @@ pub const App = struct {
         if (self.push_upstream_remote) |r| self.allocator.free(r);
         if (self.push_upstream_branch) |b| self.allocator.free(b);
         self.clearLockRecovery();
+        if (self.reroot_request) |p| self.allocator.free(p);
+        for (self.repo_stack.items) |p| self.allocator.free(p);
+        self.repo_stack.deinit(self.allocator);
         self.git.deinit();
         self.* = undefined;
     }
@@ -2415,6 +2426,10 @@ pub const App = struct {
                 } else if (self.focus == .branches and self.branch_commits_active) {
                     // Branches panel: sub-commits -> branch list.
                     try drills_mod.closeBranchCommits(self);
+                } else if (self.repo_stack.items.len > 0) {
+                    // Inside a worktree/submodule we drilled into: walk back out
+                    // to the parent repository.
+                    try self.requestReRootBack();
                 } else {
                     // Top level: nothing to back out of. Esc does not quit.
                     try self.setMessage("press q to quit", .{});
@@ -2479,7 +2494,7 @@ pub const App = struct {
                     // ziggity there. Submodules: init/update it.
                     .files => switch (self.files_tab) {
                         .files => try staging_mod.toggleSelectedFileStaged(self),
-                        .worktrees => try self.announceSelectedWorktree(),
+                        .worktrees => try self.enterSelectedWorktree(),
                         .submodules => try self.updateSelectedSubmodule(),
                     },
                     // In the sub-commits drill, space on a file adds it to the
@@ -3422,21 +3437,6 @@ pub const App = struct {
         return self.data.submodules[@min(self.submodule_index, self.data.submodules.len - 1)];
     }
 
-    /// `space`/`enter` on the Files panel's Worktrees tab. Switching the active
-    /// worktree would re-root the app, so for another worktree we point the user
-    /// at opening ziggity there; the current one just says so.
-    pub fn announceSelectedWorktree(self: *App) !void {
-        const wt = self.selectedWorktree() orelse {
-            try self.setMessage("no worktree selected", .{});
-            return;
-        };
-        if (wt.is_current) {
-            try self.setMessage("you are already in this worktree", .{});
-        } else {
-            try self.setMessage("open ziggity in {s} to use that worktree", .{wt.path});
-        }
-    }
-
     /// `d` on the Worktrees tab removes the selected (non-current) worktree.
     pub fn removeSelectedWorktree(self: *App) !void {
         const wt = self.selectedWorktree() orelse {
@@ -3516,6 +3516,184 @@ pub const App = struct {
         self.mode = .menu;
         self.active_menu = .{ .title = "Bulk submodule actions", .items = &submodule_bulk_menu, .index = 0 };
         try self.setMessage("bulk submodule actions", .{});
+    }
+
+    /// `space`/`enter` on another worktree: switch the whole app into it. The
+    /// current worktree just says so.
+    pub fn enterSelectedWorktree(self: *App) !void {
+        const wt = self.selectedWorktree() orelse {
+            try self.setMessage("no worktree selected", .{});
+            return;
+        };
+        if (wt.is_current) {
+            try self.setMessage("you are already in this worktree", .{});
+            return;
+        }
+        return self.requestReRoot(wt.path);
+    }
+
+    /// `enter` on an (initialised) submodule: switch the whole app into it.
+    pub fn enterSelectedSubmodule(self: *App) !void {
+        const sm = self.selectedSubmodule() orelse {
+            try self.setMessage("no submodule selected", .{});
+            return;
+        };
+        if (sm.status == '-') {
+            try self.setMessage("update the submodule first (space)", .{});
+            return;
+        }
+        const abs = try std.fs.path.join(self.allocator, &.{ self.git.root, sm.path });
+        defer self.allocator.free(abs);
+        return self.requestReRoot(abs);
+    }
+
+    /// Queue a re-root onto `path` (an absolute repo directory), pushing the
+    /// current root so <esc> returns. Refused mid-operation. The TUI loop drains
+    /// its workers, then runs `reRootTo`.
+    fn requestReRoot(self: *App, path: []const u8) !void {
+        if (self.foregroundBusy()) {
+            try self.setMessage("operation in progress...", .{});
+            return;
+        }
+        if (self.reroot_request) |old| self.allocator.free(old);
+        self.reroot_request = try self.allocator.dupe(u8, path);
+        self.reroot_push = true;
+    }
+
+    /// <esc> at the top level when inside a sub-repo: walk back out to the parent.
+    fn requestReRootBack(self: *App) !void {
+        if (self.foregroundBusy()) {
+            try self.setMessage("operation in progress...", .{});
+            return;
+        }
+        const parent = self.repo_stack.pop() orelse return; // owned; transfer below
+        if (self.reroot_request) |old| self.allocator.free(old);
+        self.reroot_request = parent;
+        self.reroot_push = false;
+    }
+
+    /// Free every piece of repo-specific state ahead of a re-root: loaded data,
+    /// drill/staging/patch/preview/diff buffers, filters, credentials, and the
+    /// selection. Persistent state (config, exe_path, editor buffers, the repo
+    /// stack) is left intact. Each field is reset to a valid empty state, not
+    /// `undefined`, so the eventual `deinit` stays correct.
+    fn resetRepoState(self: *App) void {
+        const a = self.allocator;
+
+        drills_mod.deactivateBranchCommits(self); // frees branch commits + files, clears branch tree
+        drills_mod.deactivateCommitFiles(self); // frees commit files, clears commit tree
+        a.free(self.branch_commits_ref);
+        self.branch_commits_ref = &.{};
+
+        self.files_tree.deinit(a);
+        self.files_tree = .{ .collapsed = std.BufSet.init(a) };
+
+        staging_mod.clearStagePending(self);
+        if (self.staging) |*parsed| parsed.deinit(a);
+        self.staging = null;
+        a.free(self.staging_diff);
+        self.staging_diff = &.{};
+        a.free(self.staging_other_diff);
+        self.staging_other_diff = &.{};
+        a.free(self.staging_path);
+        self.staging_path = &.{};
+        self.staging_active = false;
+        self.staging_patch_mode = false;
+        self.staging_staged_view = false;
+
+        patch_mod.clearPatch(self);
+        a.free(self.patch_work_included);
+        self.patch_work_included = &.{};
+
+        for (self.copied_commits.items) |e| a.free(e);
+        self.copied_commits.clearRetainingCapacity();
+        if (self.marked_base) |b| a.free(b);
+        self.marked_base = null;
+
+        diffmode_mod.clearDiffBase(self);
+
+        self.preview_cache.clearAll(a);
+        a.free(self.preview_desired_key);
+        self.preview_desired_key = &.{};
+        a.free(self.preview_inflight_key);
+        self.preview_inflight_key = &.{};
+        self.preview_loading = false;
+        if (self.preview_wanted) |job| job.deinit(page_alloc);
+        self.preview_wanted = null;
+        a.free(self.diff);
+        self.diff = a.dupe(u8, "") catch &.{};
+
+        a.free(self.file_filter);
+        self.file_filter = a.dupe(u8, "") catch &.{};
+        self.file_display_filter = .all;
+        self.file_filter_buffer.clearRetainingCapacity();
+
+        a.free(self.commit_preserved_subject);
+        self.commit_preserved_subject = &.{};
+        a.free(self.commit_preserved_body);
+        self.commit_preserved_body = &.{};
+        self.commit_buffer.clearRetainingCapacity();
+        self.commit_body_buffer.clearRetainingCapacity();
+
+        if (self.push_upstream_remote) |r| a.free(r);
+        self.push_upstream_remote = null;
+        if (self.push_upstream_branch) |b| a.free(b);
+        self.push_upstream_branch = null;
+
+        credentials_mod.clearGitCredentials(self);
+        self.clearLockRecovery();
+
+        self.file_index = 0;
+        self.branch_index = 0;
+        self.remote_index = 0;
+        self.tag_index = 0;
+        self.worktree_index = 0;
+        self.submodule_index = 0;
+        self.commit_index = 0;
+        self.reflog_index = 0;
+        self.stash_index = 0;
+        self.main_scroll = 0;
+        self.main_hscroll = 0;
+        self.tree_view = false;
+
+        self.data.deinit(a);
+        self.data = .{};
+    }
+
+    /// Switch the whole app to the git repository at `path`. The TUI loop must
+    /// have drained its background workers first (they borrow the old root). On
+    /// `push`, the current root is saved so <esc> can return. Validates `path`
+    /// before tearing anything down, so a failure leaves the app unchanged.
+    pub fn reRootTo(self: *App, path: []const u8, push: bool) !void {
+        var new_git = git_mod.Git.initAt(self.allocator, self.git.io, self.git.environ, path) catch {
+            try self.setMessage("not a git repository: {s}", .{path});
+            return;
+        };
+        errdefer new_git.deinit();
+        new_git.branch_sort = self.config.branch_sort_order;
+
+        // Last fallible step before the (infallible) swap.
+        if (push) try self.repo_stack.append(self.allocator, try self.allocator.dupe(u8, self.git.root));
+
+        self.resetRepoState();
+        self.git.deinit();
+        self.git = new_git;
+
+        if (self.commit_draft_path) |p| self.allocator.free(p);
+        self.commit_draft_path = if (self.git.git_dir.len > 0)
+            (std.fs.path.join(self.allocator, &.{ self.git.git_dir, "ZIGGITY_PENDING_COMMIT" }) catch null)
+        else
+            null;
+        self.commit_draft_loaded = false;
+
+        self.focus = .files;
+        self.main_origin = .files;
+        self.files_tab = .files;
+        self.branches_tab = .local;
+        self.commits_tab = .commits;
+        self.mode = .normal;
+
+        self.beginInitialLoad();
     }
 
     /// The ref name selected in the Branches panel, whichever tab is active.
@@ -3680,8 +3858,9 @@ pub const App = struct {
         }
         if (self.focus == .files) {
             // The Worktrees / Submodules tabs aren't a working-tree file list:
-            // <enter> just inspects the selected entry in the main panel.
-            if (self.files_tab != .files) return self.enterMain();
+            // <enter> switches the whole app into the selected worktree/submodule.
+            if (self.files_tab == .worktrees) return self.enterSelectedWorktree();
+            if (self.files_tab == .submodules) return self.enterSelectedSubmodule();
             // In tree view, <enter> on a directory collapses/expands it.
             if (self.tree_view) {
                 if (self.treeSelectedRow()) |row| {
