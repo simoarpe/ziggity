@@ -824,15 +824,15 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         const w = if (app.branch_commits_active) blk: {
             const t = if (app.branchFilesActive())
                 (if (patch_mod.branchFilesPatchCount(app) > 0)
-                    (std.fmt.bufPrint(&app.branches_title_buf, "Commit files [3] (patch: {d}) (esc back)", .{patch_mod.branchFilesPatchCount(app)}) catch "Commit files [3] (esc back)")
+                    (std.fmt.bufPrint(&app.branches_title_buf, "[3] Commit files (patch: {d}) (esc back)", .{patch_mod.branchFilesPatchCount(app)}) catch "[3] Commit files (esc back)")
                 else
-                    "Commit files [3]  (space: add to patch) (esc back)")
+                    "[3] Commit files  (space: add to patch) (esc back)")
             else
-                (std.fmt.bufPrint(&app.branches_title_buf, "Commits [3] ({s}) (esc back)", .{app.branch_commits_ref}) catch "Commits [3] (esc back)");
+                (std.fmt.bufPrint(&app.branches_title_buf, "[3] Commits ({s}) (esc back)", .{app.branch_commits_ref}) catch "[3] Commits (esc back)");
             break :blk panel(root, 0, y, side_w, branches_h, t, app.focus == .branches, listScrollInfo(app, .branches));
         } else if (app.remoteDrillActive()) blk: {
             // Drilled into a remote's branches.
-            const t = std.fmt.bufPrint(&app.branches_title_buf, "{s} [3] (esc back)", .{app.remote_drill.?}) catch "Remote [3] (esc back)";
+            const t = std.fmt.bufPrint(&app.branches_title_buf, "[3] {s} (esc back)", .{app.remote_drill.?}) catch "[3] Remote (esc back)";
             break :blk panel(root, 0, y, side_w, branches_h, t, app.focus == .branches, listScrollInfo(app, .branches));
         } else tabbedPanel(root, 0, y, side_w, branches_h, 3, &branches_tabs, @intFromEnum(app.branches_tab), "", app.focus == .branches, listScrollInfo(app, .branches));
         beginListPan(app, .branches);
@@ -844,9 +844,9 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         const commits_tabs = [_][]const u8{ "Commits", "Reflog" };
         const w = if (app.commitsFilesActive()) blk: {
             const t = if (patch_mod.commitFilesPatchCount(app) > 0)
-                (std.fmt.bufPrint(&app.commits_title_buf, "Commit files [4] (patch: {d}) (esc back)", .{patch_mod.commitFilesPatchCount(app)}) catch "Commit files [4] (esc back)")
+                (std.fmt.bufPrint(&app.commits_title_buf, "[4] Commit files (patch: {d}) (esc back)", .{patch_mod.commitFilesPatchCount(app)}) catch "[4] Commit files (esc back)")
             else
-                "Commit files [4]  (space: add to patch) (esc back)";
+                "[4] Commit files  (space: add to patch) (esc back)";
             break :blk panel(root, 0, y, side_w, commits_h, t, app.focus == .commits, listScrollInfo(app, .commits));
         } else blk: {
             // Show an active commit-log filter (Commits tab only) after the tabs.
