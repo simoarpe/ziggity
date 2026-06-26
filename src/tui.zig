@@ -1857,7 +1857,7 @@ fn drawRemotesList(win: vaxis.Window, app: *const app_mod.App) void {
         const col = printSpan(win, row, 0, remote.name, base);
         var buf: [16]u8 = undefined;
         const count = std.fmt.bufPrint(&buf, " ({d})", .{app.remoteBranchCount(remote.name)}) catch "";
-        _ = printSpan(win, row, col, count, withFg(base, ui_theme.muted));
+        _ = printSpan(win, row, col, count, withFg(base, ui_theme.accent));
     }
 }
 
