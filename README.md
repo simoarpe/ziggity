@@ -59,8 +59,13 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
   parent repo.
 - Branch workflows: new, rename, delete, merge, rebase, fast-forward,
   remote/tag checkout, checkout-by-name (`c`).
-- Tag actions (Tags tab): create (`n`), delete (`d`). Remote-branch delete
-  (`d` on the Remotes tab).
+- Tag actions (Tags tab): checkout (`space`, detached), create (`n` — then an
+  optional message: empty makes a lightweight tag, a message makes an annotated
+  one; an existing name prompts to overwrite with `--force`), push to a remote
+  (`P`), reset onto the tag (`g`, soft/mixed/hard), and delete (`d`) via a
+  local / remote / both menu. The tag's annotation shows beside its name. The
+  push and remote-delete skip the remote prompt when there's only one remote.
+  Remote-branch delete is `d` on the Remotes tab.
 - Merge/rebase conflict resolution: take ours/theirs on conflicted files and
   continue/abort (`m`); MERGING/REBASING shown in the status panel.
 - Commit workflows: commit, amend (`A`), reset (soft/mixed/hard), revert,
@@ -208,6 +213,8 @@ Useful keys:
 - `M`: merge the selected branch into the current branch (after confirmation)
 - `r`: rebase the current branch onto the selected branch (after confirmation)
 - `space` on the Remotes/Tags tab: check out the remote branch or tag
+- `n`/`P`/`g`/`d` (Tags tab): new tag (with optional message) / push the tag to a
+  remote / reset onto the tag / delete (local / remote / both menu)
 - `g`: reset to the selected commit (menu: soft / mixed / hard)
 - `t`: revert the selected commit
 - `B`: mark the selected commit as the base for a `rebase --onto`
@@ -232,10 +239,19 @@ Useful keys:
 
 ## Config
 
-`ziggity` loads defaults, then optionally reads:
+`ziggity` loads defaults, then optionally reads (each overriding the previous):
 
 1. The path in `ZIGGITY_CONFIG`
 2. `<repo>/.ziggity.ini`
+
+There is **no** auto-loaded global file: ziggity does not read
+`~/.config/ziggity/` (or any XDG path) on its own. To apply settings to every
+repo, point `ZIGGITY_CONFIG` at a file from your shell profile, e.g.
+`export ZIGGITY_CONFIG="$HOME/.config/ziggity/config.ini"`; a repo's
+`.ziggity.ini` then overrides those globals per-repo. Without any of these,
+settings fall back to per-repo auto-detection (notably the editor — see below),
+which can differ between repos depending on each one's git config and
+environment.
 
 Supported settings:
 
@@ -313,6 +329,8 @@ color.hunk = 14
 color.header = 13
 color.accent = 14
 color.muted = 8
+color.hash = 3                   # commit short hashes in the log
+color.tag = 3                    # a tag's annotation/subject in the Tags list
 ```
 
 Key values may be a single character or one of `space`, `enter`, `tab`, `esc`,
