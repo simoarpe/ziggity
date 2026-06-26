@@ -16,49 +16,34 @@ pub fn startNewForBranchTab(self: *App) !void {
     return self.startTextPrompt(.new_branch);
 }
 
-/// The remote name implied by the selected Remotes-tab entry (the prefix of
-/// a `remote/branch` ref), stashed into remote_name_buf. Null off-tab/empty.
-pub fn selectedRemoteName(self: *App) ?[]const u8 {
-    if (self.branches_tab != .remotes) return null;
-    const branch = self.selectedRemoteBranch() orelse return null;
-    const slash = std.mem.indexOfScalar(u8, branch.name, '/') orelse return null;
-    const name = branch.name[0..slash];
-    if (name.len == 0 or name.len > self.remote_name_buf.len) return null;
-    @memcpy(self.remote_name_buf[0..name.len], name);
-    self.remote_name_len = name.len;
-    return self.remote_name_buf[0..name.len];
-}
-
+/// `e` on the remotes list: rename the remote (enter to keep) then edit its URL.
 pub fn startEditRemote(self: *App) !void {
-    if (self.branches_tab != .remotes) {
-        try self.setMessage("switch to the Remotes tab to edit a remote", .{});
-        return;
-    }
-    const name = selectedRemoteName(self) orelse {
+    const remote = self.selectedRemote() orelse {
         try self.setMessage("no remote selected", .{});
         return;
     };
-    // Prefill the current URL so the user edits rather than retypes.
-    const current = self.git.remoteUrl(name) catch null;
-    defer if (current) |c| self.allocator.free(c);
+    const n = @min(remote.name.len, self.remote_name_buf.len);
+    @memcpy(self.remote_name_buf[0..n], remote.name[0..n]);
+    self.remote_name_len = n;
     self.mode = .text_prompt;
-    self.text_prompt_kind = .edit_remote_url;
+    self.text_prompt_kind = .rename_remote;
     self.focus = .branches;
     self.input_buffer.clearRetainingCapacity();
-    if (current) |c| try self.input_buffer.appendSlice(self.allocator, std.mem.trim(u8, c, " \t\r\n"));
-    try self.setMessage("edit URL for {s}", .{name});
+    try self.input_buffer.appendSlice(self.allocator, remote.name);
+    self.prompt_cursor = self.input_buffer.items.len;
+    self.prompt_scroll = 0;
+    try self.setMessage("rename remote {s} (enter to keep)", .{remote.name});
 }
 
 pub fn startRemoveRemote(self: *App) !void {
-    if (self.branches_tab != .remotes) {
-        try self.setMessage("switch to the Remotes tab to remove a remote", .{});
-        return;
-    }
-    const name = selectedRemoteName(self) orelse {
+    const remote = self.selectedRemote() orelse {
         try self.setMessage("no remote selected", .{});
         return;
     };
-    return self.requestConfirmation(.remove_remote, "confirm remove remote {s}", .{name});
+    const n = @min(remote.name.len, self.remote_name_buf.len);
+    @memcpy(self.remote_name_buf[0..n], remote.name[0..n]);
+    self.remote_name_len = n;
+    return self.requestConfirmation(.remove_remote, "confirm remove remote {s}", .{remote.name});
 }
 
 pub fn setUpstreamToSelected(self: *App) !void {

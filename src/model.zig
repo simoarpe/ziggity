@@ -124,6 +124,18 @@ pub const Branch = struct {
     }
 };
 
+/// A configured remote (`git remote -v`): its name and primary fetch URL.
+pub const Remote = struct {
+    name: []u8,
+    url: []u8 = &.{},
+
+    pub fn deinit(self: *Remote, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.url);
+        self.* = undefined;
+    }
+};
+
 pub const Tag = struct {
     name: []u8,
     subject: []u8 = &.{},
@@ -273,9 +285,9 @@ pub const RepoData = struct {
     files: []FileStatus = &.{},
     branches: []Branch = &.{},
     remote_branches: []Branch = &.{},
-    /// Configured remote names (`git remote`), independent of whether any of
-    /// their branches have been fetched. Used to suggest a push target.
-    remotes: [][]u8 = &.{},
+    /// Configured remotes (`git remote -v`: name + fetch URL), independent of
+    /// whether any of their branches have been fetched.
+    remotes: []Remote = &.{},
     tags: []Tag = &.{},
     worktrees: []Worktree = &.{},
     submodules: []Submodule = &.{},
@@ -295,7 +307,7 @@ pub const RepoData = struct {
         allocator.free(self.branches);
         for (self.remote_branches) |*branch| branch.deinit(allocator);
         allocator.free(self.remote_branches);
-        for (self.remotes) |name| allocator.free(name);
+        for (self.remotes) |*remote| remote.deinit(allocator);
         allocator.free(self.remotes);
         for (self.tags) |*tag| tag.deinit(allocator);
         allocator.free(self.tags);
@@ -339,8 +351,8 @@ pub const RepoData = struct {
         self.remote_branches = branches;
     }
 
-    pub fn replaceRemotes(self: *RepoData, allocator: std.mem.Allocator, remotes: [][]u8) void {
-        for (self.remotes) |name| allocator.free(name);
+    pub fn replaceRemotes(self: *RepoData, allocator: std.mem.Allocator, remotes: []Remote) void {
+        for (self.remotes) |*r| r.deinit(allocator);
         allocator.free(self.remotes);
         self.remotes = remotes;
     }
@@ -397,7 +409,7 @@ pub const RepoData = struct {
         out.files = try dupeList(FileStatus, allocator, self.files, dupeFile);
         out.branches = try dupeList(Branch, allocator, self.branches, dupeBranch);
         out.remote_branches = try dupeList(Branch, allocator, self.remote_branches, dupeBranch);
-        out.remotes = try dupeStringList(allocator, self.remotes);
+        out.remotes = try dupeList(Remote, allocator, self.remotes, dupeRemote);
         out.tags = try dupeList(Tag, allocator, self.tags, dupeTag);
         out.worktrees = try dupeList(Worktree, allocator, self.worktrees, dupeWorktree);
         out.submodules = try dupeList(Submodule, allocator, self.submodules, dupeSubmodule);
@@ -471,6 +483,13 @@ fn dupeBranch(a: std.mem.Allocator, b: Branch) std.mem.Allocator.Error!Branch {
     return .{ .name = name, .upstream = upstream, .current = b.current, .upstream_gone = b.upstream_gone, .ahead = b.ahead, .behind = b.behind, .commit_time = b.commit_time };
 }
 
+fn dupeRemote(a: std.mem.Allocator, r: Remote) std.mem.Allocator.Error!Remote {
+    const name = try a.dupe(u8, r.name);
+    errdefer a.free(name);
+    const url = try a.dupe(u8, r.url);
+    return .{ .name = name, .url = url };
+}
+
 fn dupeTag(a: std.mem.Allocator, t: Tag) std.mem.Allocator.Error!Tag {
     const name = try a.dupe(u8, t.name);
     errdefer a.free(name);
@@ -541,6 +560,10 @@ pub fn dupeStringList(a: std.mem.Allocator, src: []const []const u8) std.mem.All
 }
 pub fn dupeTags(a: std.mem.Allocator, src: []const Tag) std.mem.Allocator.Error![]Tag {
     return dupeList(Tag, a, src, dupeTag);
+}
+
+pub fn dupeRemotes(a: std.mem.Allocator, src: []const Remote) std.mem.Allocator.Error![]Remote {
+    return dupeList(Remote, a, src, dupeRemote);
 }
 pub fn dupeWorktrees(a: std.mem.Allocator, src: []const Worktree) std.mem.Allocator.Error![]Worktree {
     return dupeList(Worktree, a, src, dupeWorktree);

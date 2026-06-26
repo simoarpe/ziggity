@@ -684,22 +684,11 @@ pub const Git = struct {
 
     /// The configured remote names (`git remote`), one per line, independent of
     /// whether any of their branches have been fetched.
-    pub fn loadRemotes(self: *Git) ![][]u8 {
-        var result = try self.exec(&.{"remote"});
+    pub fn loadRemotes(self: *Git) ![]model.Remote {
+        var result = try self.exec(&.{ "remote", "-v" });
         defer result.deinit(self.allocator);
-        if (!result.ok()) return self.allocator.alloc([]u8, 0);
-        var names: std.ArrayList([]u8) = .empty;
-        errdefer {
-            for (names.items) |n| self.allocator.free(n);
-            names.deinit(self.allocator);
-        }
-        var it = std.mem.tokenizeScalar(u8, result.stdout, '\n');
-        while (it.next()) |line| {
-            const name = std.mem.trim(u8, line, " \t\r");
-            if (name.len == 0) continue;
-            try names.append(self.allocator, try self.allocator.dupe(u8, name));
-        }
-        return names.toOwnedSlice(self.allocator);
+        if (!result.ok()) return self.allocator.alloc(model.Remote, 0);
+        return parseRemotes(self.allocator, result.stdout);
     }
 
     pub fn loadTags(self: *Git) ![]model.Tag {
@@ -1063,6 +1052,16 @@ pub const Git = struct {
         return self.exec(&.{ "remote", "add", name, url });
     }
 
+    pub fn renameRemote(self: *Git, old: []const u8, new: []const u8) !ExecResult {
+        return self.exec(&.{ "remote", "rename", old, new });
+    }
+
+    /// Create (and check out) a new local branch `name` starting at `start`
+    /// (a remote ref like "origin/main" becomes a tracking branch).
+    pub fn newBranchFrom(self: *Git, name: []const u8, start: []const u8) !ExecResult {
+        return self.exec(&.{ "checkout", "-b", name, start });
+    }
+
     pub fn setRemoteUrl(self: *Git, name: []const u8, url: []const u8) !ExecResult {
         return self.exec(&.{ "remote", "set-url", name, url });
     }
@@ -1221,6 +1220,10 @@ pub const Git = struct {
 
     pub fn fetch(self: *Git) !ExecResult {
         return self.exec(&.{ "fetch", "--all", "--no-write-fetch-head" });
+    }
+
+    pub fn fetchRemote(self: *Git, name: []const u8) !ExecResult {
+        return self.exec(&.{ "fetch", name });
     }
 
     pub fn pull(self: *Git) !ExecResult {
@@ -1393,6 +1396,54 @@ fn trackCount(track: []const u8, label: []const u8) usize {
         n = n * 10 + (track[i] - '0');
     }
     return n;
+}
+
+/// Parse `git remote -v` into one `Remote` per name, keeping the fetch URL.
+pub fn parseRemotes(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Remote {
+    var remotes: std.ArrayList(model.Remote) = .empty;
+    errdefer {
+        for (remotes.items) |*r| r.deinit(allocator);
+        remotes.deinit(allocator);
+    }
+    var lines = std.mem.tokenizeScalar(u8, bytes, '\n');
+    while (lines.next()) |line| {
+        var toks = std.mem.tokenizeAny(u8, line, " \t");
+        const name = toks.next() orelse continue;
+        const url = toks.next() orelse "";
+        const kind = toks.next() orelse "";
+        if (!std.mem.eql(u8, kind, "(fetch)")) continue; // one row per remote
+        var seen = false;
+        for (remotes.items) |r| {
+            if (std.mem.eql(u8, r.name, name)) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) continue;
+        const n = try allocator.dupe(u8, name);
+        errdefer allocator.free(n);
+        const u = try allocator.dupe(u8, url);
+        try remotes.append(allocator, .{ .name = n, .url = u });
+    }
+    return remotes.toOwnedSlice(allocator);
+}
+
+test "parseRemotes keeps one fetch URL per remote" {
+    const bytes =
+        "origin\thttps://example.com/x.git (fetch)\n" ++
+        "origin\thttps://example.com/x.git (push)\n" ++
+        "upstream\tgit@github.com:y/z.git (fetch)\n" ++
+        "upstream\tgit@github.com:y/z.git (push)\n";
+    const remotes = try parseRemotes(std.testing.allocator, bytes);
+    defer {
+        for (remotes) |*r| r.deinit(std.testing.allocator);
+        std.testing.allocator.free(remotes);
+    }
+    try std.testing.expectEqual(@as(usize, 2), remotes.len);
+    try std.testing.expectEqualStrings("origin", remotes[0].name);
+    try std.testing.expectEqualStrings("https://example.com/x.git", remotes[0].url);
+    try std.testing.expectEqualStrings("upstream", remotes[1].name);
+    try std.testing.expectEqualStrings("git@github.com:y/z.git", remotes[1].url);
 }
 
 /// Move the current (checked-out) branch to index 0, preserving the relative

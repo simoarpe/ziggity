@@ -828,6 +828,10 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
             else
                 (std.fmt.bufPrint(&app.branches_title_buf, "Commits [3] ({s}) (esc back)", .{app.branch_commits_ref}) catch "Commits [3] (esc back)");
             break :blk panel(root, 0, y, side_w, branches_h, t, app.focus == .branches, listScrollInfo(app, .branches));
+        } else if (app.remoteDrillActive()) blk: {
+            // Drilled into a remote's branches.
+            const t = std.fmt.bufPrint(&app.branches_title_buf, "{s} [3] (esc back)", .{app.remote_drill.?}) catch "Remote [3] (esc back)";
+            break :blk panel(root, 0, y, side_w, branches_h, t, app.focus == .branches, listScrollInfo(app, .branches));
         } else tabbedPanel(root, 0, y, side_w, branches_h, 3, &branches_tabs, @intFromEnum(app.branches_tab), "", app.focus == .branches, listScrollInfo(app, .branches));
         beginListPan(app, .branches);
         drawBranches(w, app);
@@ -961,14 +965,19 @@ const help_lines = [_][]const u8{
     "  e              open the file in your editor",
     "",
     "Branches  (tabs: Local / Remotes / Tags)",
-    "  space          checkout (creates a tracking branch on the Remotes tab)",
+    "  space          checkout the selected branch",
     "  c              checkout by name (type a branch/ref; \"-\" = previous)",
-    "  n              new branch (new tag / add remote by tab)",
+    "  n              new branch (new tag on the Tags tab)",
     "  R              rename branch",
     "  w              create a worktree checked out at the selected ref",
-    "  d              delete branch / tag / remote branch",
+    "  d              delete branch / tag",
     "  M / r / f      merge / rebase / fast-forward",
-    "  Remotes tab    e edit URL   x remove remote   u set upstream",
+    "",
+    "Remotes tab  (two levels: the remotes list, then a remote's branches)",
+    "  remotes list   enter/space view branches   n add   e edit (rename+URL)",
+    "                 d remove   f fetch this remote",
+    "  a remote's br. space checkout   n new local branch   M merge   r rebase",
+    "                 g reset   u set upstream   d delete remote branch   esc back",
     "",
     "Commits  (tabs: Commits / Reflog)",
     "  enter          view the commit's changed files",
@@ -1377,6 +1386,8 @@ fn drawConfirmPopup(root: vaxis.Window, app: *app_mod.App) void {
         .remove_worktree => "Remove worktree",
         .remove_submodule => "Remove submodule",
         .remove_remote => "Remove remote",
+        .merge_remote => "Merge remote branch",
+        .rebase_remote => "Rebase onto remote branch",
         .undo => "Undo",
         .force_push, .force_push_plain => "Force push",
         .delete_index_lock => "Git locked",
@@ -1712,17 +1723,21 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
         return drawCommitRows(win, app, app.branch_commits, app.branch_commit_index, .branches);
     }
     if (app.branches_tab == .tags) return drawTags(win, app);
+    // Remotes tab, level 0: the list of remotes (drills into branches on enter).
+    if (app.remotesListActive()) return drawRemotesList(win, app);
 
-    const branches = switch (app.branches_tab) {
-        .remotes => app.data.remote_branches,
-        else => app.data.branches,
-    };
-    const selected = switch (app.branches_tab) {
-        .remotes => app.remote_index,
-        else => app.branch_index,
-    };
+    var branches: []const model.Branch = app.data.branches;
+    var selected: usize = app.branch_index;
+    if (app.remoteDrillActive()) {
+        const r = app.drilledRemoteRange() orelse {
+            print(win, 0, 0, if (app.initial_load_pending) "Loading..." else "No remote branches", styles().muted);
+            return;
+        };
+        branches = app.data.remote_branches[r.start..r.end];
+        selected = app.remote_index - r.start;
+    }
     if (branches.len == 0) {
-        const empty_label = if (app.initial_load_pending) "Loading..." else if (app.branches_tab == .remotes) "No remote branches" else "No branches";
+        const empty_label = if (app.initial_load_pending) "Loading..." else "No branches";
         print(win, 0, 0, empty_label, styles().muted);
         return;
     }
@@ -1816,6 +1831,32 @@ fn recencyStr(buf: []u8, ts: i64, now: i64) []const u8 {
 fn upstreamIsDefault(name: []const u8, upstream: []const u8) bool {
     const slash = std.mem.indexOfScalar(u8, upstream, '/') orelse return false;
     return std.mem.eql(u8, upstream[0..slash], "origin") and std.mem.eql(u8, upstream[slash + 1 ..], name);
+}
+
+/// Remotes tab, level 0: the list of remotes with their branch counts. <enter>
+/// drills into the selected remote's branches.
+fn drawRemotesList(win: vaxis.Window, app: *const app_mod.App) void {
+    if (app.data.remotes.len == 0) {
+        print(win, 0, 0, if (app.initial_load_pending) "Loading..." else "No remotes", styles().muted);
+        return;
+    }
+    const start = app.listScroll(.branches);
+    var row: u16 = 0;
+    var idx = start;
+    while (idx < app.data.remotes.len and row < win.height) : ({
+        idx += 1;
+        row += 1;
+    }) {
+        const remote = app.data.remotes[idx];
+        var base = styles().normal;
+        const sel = selOf(idx == app.remotes_index, app.focus == .branches);
+        applySel(&base, sel);
+        if (sel != .none) fillRow(win, row, base);
+        const col = printSpan(win, row, 0, remote.name, base);
+        var buf: [16]u8 = undefined;
+        const count = std.fmt.bufPrint(&buf, " ({d})", .{app.remoteBranchCount(remote.name)}) catch "";
+        _ = printSpan(win, row, col, count, withFg(base, ui_theme.muted));
+    }
 }
 
 fn drawTags(win: vaxis.Window, app: *const app_mod.App) void {
@@ -2245,6 +2286,8 @@ const FooterCtx = struct {
     focus: model.Focus = .status,
     branches_tab: app_mod.BranchesTab = .local,
     files_tab: app_mod.FilesTab = .files,
+    /// Remotes tab: drilled into a remote's branches (vs the remotes list).
+    remote_drill: bool = false,
     /// Building a patch line-by-line (the per-line selection view).
     staging_patch: bool = false,
     /// The hunk/line staging view is open.
@@ -2296,7 +2339,10 @@ fn footerHints(c: FooterCtx) []const u8 {
     if (c.focus == .branches) {
         return switch (c.branches_tab) {
             .local => "space checkout  c by-name  n new  R rename  d delete  M merge  r rebase  f ff  w worktree  W diff  [/] tabs" ++ global_branches,
-            .remotes => "space checkout  n add  e edit  x remove  u upstream  d del-branch  w worktree  W diff  [/] tabs" ++ global_branches,
+            .remotes => if (c.remote_drill)
+                "space checkout  n new-local  M merge  r rebase  g reset  u upstream  d delete  w worktree  W diff  enter commits  esc back" ++ global_branches
+            else
+                "enter/space branches  n add  e edit  d remove  f fetch  [/] tabs" ++ global_branches,
             .tags => "space checkout  n new-tag  d delete-tag  w worktree  W diff  [/] tabs" ++ global_branches,
         };
     }
@@ -2326,6 +2372,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
         .focus = app.focus,
         .branches_tab = app.branches_tab,
         .files_tab = app.files_tab,
+        .remote_drill = app.remoteDrillActive(),
         .staging_patch = app.staging_patch_mode,
         .staging = app.staging_active,
         .commits_files = app.commitsFilesActive(),

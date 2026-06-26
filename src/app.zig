@@ -113,6 +113,8 @@ pub const TextPromptKind = enum {
     add_submodule_url,
     add_submodule_path,
     set_submodule_url,
+    rename_remote,
+    new_local_from_remote,
 
     pub fn title(self: TextPromptKind) []const u8 {
         return switch (self) {
@@ -132,6 +134,8 @@ pub const TextPromptKind = enum {
             .add_submodule_url => "Submodule URL",
             .add_submodule_path => "Submodule path",
             .set_submodule_url => "Submodule URL",
+            .rename_remote => "Rename remote",
+            .new_local_from_remote => "New local branch name",
         };
     }
 };
@@ -145,6 +149,8 @@ pub const Confirmation = enum {
     remove_worktree,
     remove_submodule,
     remove_remote,
+    merge_remote,
+    rebase_remote,
     undo,
     force_push,
     force_push_plain,
@@ -807,7 +813,7 @@ const RepoLoadCtx = struct {
     files: ?[]model.FileStatus = null,
     branches: ?[]model.Branch = null,
     remote_branches: ?[]model.Branch = null,
-    remotes: ?[][]u8 = null,
+    remotes: ?[]model.Remote = null,
     tags: ?[]model.Tag = null,
     worktrees: ?[]model.Worktree = null,
     submodules: ?[]model.Submodule = null,
@@ -1058,6 +1064,8 @@ pub const Mutation = union(enum) {
     set_submodule_url: struct { path: []const u8, url: []const u8 },
     remove_submodule: []const u8,
     submodule_bulk: git_mod.Git.SubmoduleBulk,
+    fetch_remote: []const u8,
+    new_branch_from: struct { name: []const u8, start: []const u8 },
     undo,
     merge: []const u8,
     rebase: []const u8,
@@ -1107,6 +1115,8 @@ pub const Mutation = union(enum) {
             .set_submodule_url => |x| wgit.setSubmoduleUrl(x.path, x.url),
             .remove_submodule => |p| wgit.removeSubmodule(p),
             .submodule_bulk => |op| wgit.bulkSubmodule(op),
+            .fetch_remote => |name| wgit.fetchRemote(name),
+            .new_branch_from => |x| wgit.newBranchFrom(x.name, x.start),
             .undo => wgit.undoLastOperation(),
             .merge => |b| wgit.mergeBranch(b),
             .rebase => |b| wgit.rebaseOnto(b),
@@ -1162,6 +1172,8 @@ pub const Mutation = union(enum) {
             .set_submodule_url => |x| .{ .set_submodule_url = .{ .path = try gpa.dupe(u8, x.path), .url = try gpa.dupe(u8, x.url) } },
             .remove_submodule => |p| .{ .remove_submodule = try gpa.dupe(u8, p) },
             .submodule_bulk => |op| .{ .submodule_bulk = op },
+            .fetch_remote => |name| .{ .fetch_remote = try gpa.dupe(u8, name) },
+            .new_branch_from => |x| .{ .new_branch_from = .{ .name = try gpa.dupe(u8, x.name), .start = try gpa.dupe(u8, x.start) } },
             .undo => .undo,
             .merge => |b| .{ .merge = try gpa.dupe(u8, b) },
             .rebase => |b| .{ .rebase = try gpa.dupe(u8, b) },
@@ -1183,7 +1195,11 @@ pub const Mutation = union(enum) {
 
     pub fn deinit(self: Mutation, gpa: std.mem.Allocator) void {
         switch (self) {
-            .commit, .checkout, .revert, .create_fixup, .create_tag, .delete_tag, .remove_worktree, .update_submodule, .remove_submodule, .merge, .rebase, .autosquash => |s| gpa.free(s),
+            .commit, .checkout, .revert, .create_fixup, .create_tag, .delete_tag, .remove_worktree, .update_submodule, .remove_submodule, .fetch_remote, .merge, .rebase, .autosquash => |s| gpa.free(s),
+            .new_branch_from => |x| {
+                gpa.free(x.name);
+                gpa.free(x.start);
+            },
             .add_worktree => |x| {
                 gpa.free(x.path);
                 gpa.free(x.base);
@@ -1502,6 +1518,13 @@ pub const App = struct {
     /// Branches selection onto the freshly checked-out (now current) branch.
     select_current_branch_pending: bool = false,
     remote_index: usize = 0,
+    /// The Remotes tab is two-level (like the upstream): a list of remotes, and
+    /// — when drilled in via <enter> — that remote's branches. `remotes_index`
+    /// selects in the list; `remote_drill` is the drilled remote's name (null on
+    /// the list); `remote_index` then indexes the flat `remote_branches`,
+    /// constrained to the drilled remote's contiguous range.
+    remotes_index: usize = 0,
+    remote_drill: ?[]u8 = null,
     tag_index: usize = 0,
     worktree_index: usize = 0,
     submodule_index: usize = 0,
@@ -1894,6 +1917,7 @@ pub const App = struct {
         model.deinitCommitFiles(self.allocator, self.branch_files);
         model.deinitCommits(self.allocator, self.branch_commits);
         self.allocator.free(self.branch_commits_ref);
+        if (self.remote_drill) |r| self.allocator.free(r);
         self.files_tree.deinit(self.allocator);
         self.commit_tree.deinit(self.allocator);
         self.branch_tree.deinit(self.allocator);
@@ -2102,7 +2126,7 @@ pub const App = struct {
         }
         if (s.contains(.remotes)) {
             if (model.dupeBranches(a, src.remote_branches)) |b| self.data.replaceRemoteBranches(a, b) else |_| {}
-            if (model.dupeStringList(a, src.remotes)) |r| self.data.replaceRemotes(a, r) else |_| {}
+            if (model.dupeRemotes(a, src.remotes)) |r| self.data.replaceRemotes(a, r) else |_| {}
         }
         if (s.contains(.tags)) {
             if (model.dupeTags(a, src.tags)) |t| self.data.replaceTags(a, t) else |_| {}
@@ -2365,6 +2389,24 @@ pub const App = struct {
         if (self.focus == .branches and !self.branch_commits_active and self.config.keymap.worktree_from_branch.matches(key)) {
             return self.startWorktreeFromBranch();
         }
+        // The two-level Remotes tab has its own context keys, by level.
+        if (self.focus == .branches and self.branches_tab == .remotes and !self.branch_commits_active) {
+            const km = self.config.keymap;
+            if (self.remotesListActive()) {
+                if (km.select.matches(key)) return self.openRemoteDrill(); // space: drill in
+                if (km.new_branch.matches(key)) return self.startTextPrompt(.add_remote_name); // n: add remote
+                if (km.edit_remote.matches(key)) return branches_mod.startEditRemote(self); // e: rename + URL
+                if (km.discard.matches(key) or km.remove_remote.matches(key)) return branches_mod.startRemoveRemote(self); // d/x: remove
+                if (km.fast_forward.matches(key)) return self.fetchSelectedRemote(); // f: fetch this remote
+            } else { // drilled into a remote's branches
+                if (km.new_branch.matches(key)) return self.startNewLocalFromRemote(); // n: new local branch
+                if (km.merge.matches(key)) return self.mergeSelectedRemoteBranch(); // M
+                if (km.rebase.matches(key)) return self.rebaseOntoSelectedRemoteBranch(); // r
+                if (km.reset.matches(key)) return self.openRemoteResetMenu(); // g
+                // space (checkout), d (delete branch), u (upstream), enter, w, W
+                // fall through to the existing branch handlers (drill-aware).
+            }
+        }
 
         var action = actions.fromNormalKey(key, self.config.keymap, self.focus) orelse return;
         // A panel drilled into a commit's files shows files, not its list, so
@@ -2429,6 +2471,9 @@ pub const App = struct {
                 } else if (self.focus == .branches and self.branch_commits_active) {
                     // Branches panel: sub-commits -> branch list.
                     try drills_mod.closeBranchCommits(self);
+                } else if (self.focus == .branches and self.remoteDrillActive()) {
+                    // Remotes tab: a remote's branches -> the remotes list.
+                    try self.closeRemoteDrill();
                 } else if (self.repo_stack.items.len > 0) {
                     // Inside a worktree/submodule we drilled into: walk back out
                     // to the parent repository.
@@ -2761,7 +2806,7 @@ pub const App = struct {
                 self.branch_commits.len
             else switch (self.branches_tab) {
                 .local => self.data.branches.len,
-                .remotes => self.data.remote_branches.len,
+                .remotes => if (self.remotesListActive()) self.data.remotes.len else if (self.drilledRemoteRange()) |r| r.end - r.start else 0,
                 .tags => self.data.tags.len,
             },
             .commits => if (self.commitsFilesActive())
@@ -2789,7 +2834,7 @@ pub const App = struct {
                 self.branch_commit_index
             else switch (self.branches_tab) {
                 .local => self.branch_index,
-                .remotes => self.remote_index,
+                .remotes => if (self.remotesListActive()) self.remotes_index else if (self.drilledRemoteRange()) |r| self.remote_index -| r.start else 0,
                 .tags => self.tag_index,
             },
             .commits => if (self.commitsFilesActive())
@@ -3142,8 +3187,12 @@ pub const App = struct {
                     self.branch_index = @min(clicked, self.data.branches.len - 1);
                 },
                 .remotes => {
-                    if (self.data.remote_branches.len == 0) return;
-                    self.remote_index = @min(clicked, self.data.remote_branches.len - 1);
+                    if (self.remotesListActive()) {
+                        if (self.data.remotes.len == 0) return;
+                        self.remotes_index = @min(clicked, self.data.remotes.len - 1);
+                    } else if (self.drilledRemoteRange()) |r| {
+                        self.remote_index = r.start + @min(clicked, (r.end - r.start) - 1);
+                    }
                 },
                 .tags => {
                     if (self.data.tags.len == 0) return;
@@ -3420,9 +3469,137 @@ pub const App = struct {
         return self.data.branches[@min(self.branch_index, self.data.branches.len - 1)];
     }
 
+    /// The Remotes tab is showing the list of remotes (not drilled in).
+    pub fn remotesListActive(self: *const App) bool {
+        return self.branches_tab == .remotes and self.remote_drill == null;
+    }
+
+    /// The Remotes tab is drilled into a remote's branches.
+    pub fn remoteDrillActive(self: *const App) bool {
+        return self.branches_tab == .remotes and self.remote_drill != null;
+    }
+
+    pub fn selectedRemote(self: *const App) ?model.Remote {
+        if (self.data.remotes.len == 0) return null;
+        return self.data.remotes[@min(self.remotes_index, self.data.remotes.len - 1)];
+    }
+
+    /// How many remote-tracking branches belong to `name` (`name/...`).
+    pub fn remoteBranchCount(self: *const App, name: []const u8) usize {
+        var n: usize = 0;
+        for (self.data.remote_branches) |b| {
+            if (b.name.len > name.len and std.mem.startsWith(u8, b.name, name) and b.name[name.len] == '/') n += 1;
+        }
+        return n;
+    }
+
+    /// The contiguous `remote_branches` range [start, end) belonging to the
+    /// drilled remote (they sort together by full ref name), or null.
+    pub fn drilledRemoteRange(self: *const App) ?struct { start: usize, end: usize } {
+        const name = self.remote_drill orelse return null;
+        var start: ?usize = null;
+        var end: usize = 0;
+        for (self.data.remote_branches, 0..) |b, i| {
+            if (b.name.len > name.len and std.mem.startsWith(u8, b.name, name) and b.name[name.len] == '/') {
+                if (start == null) start = i;
+                end = i + 1;
+            }
+        }
+        if (start) |s| return .{ .start = s, .end = end };
+        return null;
+    }
+
+    /// The selected remote branch — only when drilled into a remote (on the
+    /// remotes list itself there is no branch selected).
     pub fn selectedRemoteBranch(self: *const App) ?model.Branch {
-        if (self.data.remote_branches.len == 0) return null;
-        return self.data.remote_branches[@min(self.remote_index, self.data.remote_branches.len - 1)];
+        const r = self.drilledRemoteRange() orelse return null;
+        const i = std.math.clamp(self.remote_index, r.start, r.end - 1);
+        return self.data.remote_branches[i];
+    }
+
+    /// <enter> on the remotes list: drill into the selected remote's branches.
+    pub fn openRemoteDrill(self: *App) !void {
+        const remote = self.selectedRemote() orelse {
+            try self.setMessage("no remote selected", .{});
+            return;
+        };
+        if (self.remote_drill) |old| self.allocator.free(old);
+        self.remote_drill = try self.allocator.dupe(u8, remote.name);
+        if (self.drilledRemoteRange()) |r| self.remote_index = r.start else self.remote_index = 0;
+        self.resetMainView();
+        self.resetListHScroll(.branches);
+        try self.updatePreview();
+        try self.setMessage("{s}", .{remote.name});
+    }
+
+    /// <esc> from a remote's branches: back to the remotes list.
+    pub fn closeRemoteDrill(self: *App) !void {
+        if (self.remote_drill) |old| self.allocator.free(old);
+        self.remote_drill = null;
+        self.resetMainView();
+        self.resetListHScroll(.branches);
+        try self.updatePreview();
+    }
+
+    /// `f` on the remotes list: fetch just the selected remote.
+    pub fn fetchSelectedRemote(self: *App) !void {
+        const remote = self.selectedRemote() orelse {
+            try self.setMessage("no remote selected", .{});
+            return;
+        };
+        var buf: [128]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&buf, "git fetch {s}", .{remote.name}) catch "git fetch";
+        return self.requestMutation(.{ .fetch_remote = remote.name }, .{ .gerund = "fetching", .command = cmd, .refresh = Refresh.all }, "fetched {s}", .{remote.name});
+    }
+
+    /// `n` on a remote branch: create a new local branch from it (named).
+    pub fn startNewLocalFromRemote(self: *App) !void {
+        const b = self.selectedRemoteBranch() orelse {
+            try self.setMessage("no remote branch selected", .{});
+            return;
+        };
+        const n = @min(b.name.len, self.remote_name_buf.len);
+        @memcpy(self.remote_name_buf[0..n], b.name[0..n]);
+        self.remote_name_len = n;
+        // Suggest the branch name without its remote prefix.
+        const suggestion = if (std.mem.indexOfScalar(u8, b.name, '/')) |s| b.name[s + 1 ..] else b.name;
+        self.mode = .text_prompt;
+        self.text_prompt_kind = .new_local_from_remote;
+        self.focus = .branches;
+        self.input_buffer.clearRetainingCapacity();
+        try self.input_buffer.appendSlice(self.allocator, suggestion);
+        self.prompt_cursor = self.input_buffer.items.len;
+        self.prompt_scroll = 0;
+        try self.setMessage("new local branch from {s}", .{b.name});
+    }
+
+    /// `M` on a remote branch: merge it into the current branch (confirmed).
+    pub fn mergeSelectedRemoteBranch(self: *App) !void {
+        const b = self.selectedRemoteBranch() orelse {
+            try self.setMessage("no remote branch selected", .{});
+            return;
+        };
+        return self.requestConfirmation(.merge_remote, "confirm merge {s}", .{b.name});
+    }
+
+    /// `r` on a remote branch: rebase the current branch onto it (confirmed).
+    pub fn rebaseOntoSelectedRemoteBranch(self: *App) !void {
+        const b = self.selectedRemoteBranch() orelse {
+            try self.setMessage("no remote branch selected", .{});
+            return;
+        };
+        return self.requestConfirmation(.rebase_remote, "confirm rebase onto {s}", .{b.name});
+    }
+
+    /// `g` on a remote branch: open the soft/mixed/hard reset menu targeting it.
+    pub fn openRemoteResetMenu(self: *App) !void {
+        const b = self.selectedRemoteBranch() orelse {
+            try self.setMessage("no remote branch selected", .{});
+            return;
+        };
+        self.mode = .menu;
+        self.active_menu = .{ .title = "Reset to remote branch", .items = &commit_reset_menu, .index = 0 };
+        try self.setMessage("reset to {s}", .{b.name});
     }
 
     pub fn selectedTag(self: *const App) ?model.Tag {
@@ -3846,6 +4023,8 @@ pub const App = struct {
                 }
                 return patch_mod.openPatchLineView(self); // file -> line-select patch view
             }
+            // On the Remotes list, <enter> drills into the remote's branches.
+            if (self.remotesListActive()) return self.openRemoteDrill();
             // Enter on a local/remote branch or tag opens its commits.
             if (self.selectedBranchRefName()) |ref| return drills_mod.openBranchCommits(self, ref);
         }
@@ -3898,9 +4077,9 @@ pub const App = struct {
                 try self.setMessage("{s}", .{self.files_tab.label()});
             },
             .branches => {
-                // The sub-commits drill has no tabs; leave it intact (<esc>
-                // backs out of it) rather than switching the hidden branch tab.
-                if (self.branch_commits_active) return;
+                // A drill (sub-commits, or a remote's branches) has no tabs;
+                // leave it intact (<esc> backs out) rather than switching tabs.
+                if (self.branch_commits_active or self.remote_drill != null) return;
                 self.branches_tab = switch (direction) {
                     .next => switch (self.branches_tab) {
                         .local => .remotes,
@@ -3979,6 +4158,14 @@ pub const App = struct {
                     break :blk std.fmt.bufPrint(buf, "Remove submodule {s}? (deinit + git rm)", .{sm.path}) catch "Remove the selected submodule?";
                 }
                 break :blk "Remove the selected submodule?";
+            },
+            .merge_remote => blk: {
+                if (self.selectedRemoteBranch()) |b| break :blk std.fmt.bufPrint(buf, "Merge {s} into the current branch?", .{b.name}) catch "Merge the selected remote branch?";
+                break :blk "Merge the selected remote branch?";
+            },
+            .rebase_remote => blk: {
+                if (self.selectedRemoteBranch()) |b| break :blk std.fmt.bufPrint(buf, "Rebase the current branch onto {s}?", .{b.name}) catch "Rebase onto the selected remote branch?";
+                break :blk "Rebase onto the selected remote branch?";
             },
             .remove_remote => blk: {
                 if (self.remote_name_len > 0) {
@@ -4092,7 +4279,15 @@ pub const App = struct {
                 self.branch_commit_index = step(self.branch_commit_index, down, self.branch_commits.len);
             } else switch (self.branches_tab) {
                 .local => self.branch_index = step(self.branch_index, down, self.data.branches.len),
-                .remotes => self.remote_index = step(self.remote_index, down, self.data.remote_branches.len),
+                .remotes => {
+                    if (self.remotesListActive()) {
+                        self.remotes_index = step(self.remotes_index, down, self.data.remotes.len);
+                    } else if (self.drilledRemoteRange()) |r| {
+                        if (down) {
+                            if (self.remote_index + 1 < r.end) self.remote_index += 1;
+                        } else if (self.remote_index > r.start) self.remote_index -= 1;
+                    }
+                },
                 .tags => self.tag_index = step(self.tag_index, down, self.data.tags.len),
             },
             .commits => {
@@ -4459,7 +4654,7 @@ pub const App = struct {
                 if (self.branches_tab != .tags) self.branches_tab = .tags;
                 self.focus = .branches;
             },
-            .add_remote_name, .add_remote_url, .edit_remote_url => {
+            .add_remote_name, .add_remote_url, .edit_remote_url, .rename_remote, .new_local_from_remote => {
                 if (self.branches_tab != .remotes) self.branches_tab = .remotes;
                 self.focus = .branches;
             },
@@ -4779,6 +4974,42 @@ pub const App = struct {
                 }
                 return self.requestMutation(.{ .set_submodule_url = .{ .path = sm.path, .url = value } }, .{ .gerund = "updating submodule URL", .command = "git submodule set-url", .refresh = Refresh.submodules }, "updated URL for {s}", .{sm.path});
             },
+            .rename_remote => {
+                // Rename if changed, then chain to the URL prompt (prefilled).
+                const old = self.remote_name_buf[0..self.remote_name_len];
+                if (!std.mem.eql(u8, old, value)) {
+                    var result = try self.git.renameRemote(old, value);
+                    defer result.deinit(self.allocator);
+                    if (!result.ok()) {
+                        self.cancelTextPrompt("rename failed (name in use?)");
+                        return;
+                    }
+                }
+                const m = @min(value.len, self.remote_name_buf.len);
+                // value aliases input_buffer; copy the new name out before clearing.
+                var namebuf: [128]u8 = undefined;
+                @memcpy(namebuf[0..m], value[0..m]);
+                @memcpy(self.remote_name_buf[0..m], value[0..m]);
+                self.remote_name_len = m;
+                const url = self.git.remoteUrl(namebuf[0..m]) catch null;
+                defer if (url) |u| self.allocator.free(u);
+                self.text_prompt_kind = .edit_remote_url;
+                self.input_buffer.clearRetainingCapacity();
+                if (url) |u| try self.input_buffer.appendSlice(self.allocator, std.mem.trim(u8, u, " \t\r\n"));
+                self.prompt_cursor = self.input_buffer.items.len;
+                self.prompt_scroll = 0;
+                try self.setMessage("URL for {s}", .{namebuf[0..m]});
+                return;
+            },
+            .new_local_from_remote => {
+                const start = self.remote_name_buf[0..self.remote_name_len];
+                defer {
+                    self.mode = .normal;
+                    self.text_prompt_kind = null;
+                    self.input_buffer.clearRetainingCapacity();
+                }
+                return self.requestMutation(.{ .new_branch_from = .{ .name = value, .start = start } }, .{ .gerund = "creating branch", .command = "git checkout -b", .refresh = Refresh.checkout }, "created {s}", .{value});
+            },
             // Handled before the non-empty guard above.
             .commit_grep, .commit_author, .commit_path => unreachable,
         }
@@ -5000,15 +5231,23 @@ pub const App = struct {
                 return self.requestMutation(.{ .delete_branch = .{ .name = branch.name, .force = force } }, .{ .gerund = "deleting", .command = "git branch -d", .refresh = Refresh.branches }, "deleted {s}", .{branch.name});
             },
             .reset_soft, .reset_mixed, .reset_hard => {
-                const commit = self.selectedCommit() orelse {
-                    try self.setMessage("no commit selected", .{});
-                    return;
-                };
                 const mode: git_mod.Git.ResetMode = switch (action) {
                     .reset_soft => .soft,
                     .reset_mixed => .mixed,
                     .reset_hard => .hard,
                     else => unreachable,
+                };
+                // The Remotes drill resets to the selected remote branch ref.
+                if (self.remoteDrillActive() and self.contentFocus() == .branches) {
+                    const b = self.selectedRemoteBranch() orelse {
+                        try self.setMessage("no remote branch selected", .{});
+                        return;
+                    };
+                    return self.runMutationScoped(try self.git.resetTo(b.name, mode), Refresh.checkout, "reset to {s}", .{b.name});
+                }
+                const commit = self.selectedCommit() orelse {
+                    try self.setMessage("no commit selected", .{});
+                    return;
                 };
                 return self.runMutationScoped(try self.git.resetTo(commit.hash, mode), Refresh.checkout, "reset to {s}", .{commit.short_hash});
             },
@@ -5354,6 +5593,24 @@ pub const App = struct {
                 };
                 return self.requestMutation(.{ .remove_submodule = sm.path }, .{ .gerund = "removing submodule", .command = "git submodule deinit + git rm", .refresh = Refresh.submodules }, "removed submodule {s}", .{sm.path});
             },
+            .merge_remote => {
+                const b = self.selectedRemoteBranch() orelse {
+                    try self.setMessage("no remote branch selected", .{});
+                    return;
+                };
+                var buf: [128]u8 = undefined;
+                const cmd = std.fmt.bufPrint(&buf, "git merge {s}", .{b.name}) catch "git merge";
+                return self.requestMutation(.{ .merge = b.name }, .{ .gerund = "merging", .command = cmd, .refresh = Refresh.checkout }, "merged {s}", .{b.name});
+            },
+            .rebase_remote => {
+                const b = self.selectedRemoteBranch() orelse {
+                    try self.setMessage("no remote branch selected", .{});
+                    return;
+                };
+                var buf: [128]u8 = undefined;
+                const cmd = std.fmt.bufPrint(&buf, "git rebase {s}", .{b.name}) catch "git rebase";
+                return self.requestMutation(.{ .rebase = b.name }, .{ .gerund = "rebasing", .command = cmd, .refresh = Refresh.checkout }, "rebased onto {s}", .{b.name});
+            },
             .remove_remote => {
                 const name = self.remote_name_buf[0..self.remote_name_len];
                 if (name.len == 0) {
@@ -5468,6 +5725,12 @@ pub const App = struct {
                         return self.setCheapPreview(try self.allocator.dupe(u8, "This commit changed no files.\n"));
                     }
                     return self.requestGitPreview(.{ .commit = commit.hash });
+                }
+                // The remotes list shows the selected remote's URL.
+                if (self.remotesListActive()) {
+                    if (self.selectedRemote()) |remote|
+                        return self.setCheapPreview(try std.fmt.allocPrint(self.allocator, "Remote: {s}\nURL:    {s}\n\nenter to view its branches.\n", .{ remote.name, remote.url }));
+                    return self.setCheapPreview(try self.allocator.dupe(u8, "No remotes.\n"));
                 }
                 if (self.selectedBranchRefName()) |name| return self.requestGitPreview(.{ .branch = name });
                 return self.setCheapPreview(try self.allocator.dupe(u8, "Nothing to show in this tab.\n"));
@@ -5777,10 +6040,10 @@ pub const App = struct {
     /// configured, else the first configured remote, else "origin". Uses the
     /// real remote list (`git remote`), so it's correct even before any fetch.
     fn suggestedRemote(self: *const App) []const u8 {
-        for (self.data.remotes) |name| {
-            if (std.mem.eql(u8, name, "origin")) return "origin";
+        for (self.data.remotes) |remote| {
+            if (std.mem.eql(u8, remote.name, "origin")) return "origin";
         }
-        if (self.data.remotes.len > 0) return self.data.remotes[0];
+        if (self.data.remotes.len > 0) return self.data.remotes[0].name;
         return "origin";
     }
 
@@ -6200,6 +6463,13 @@ pub const App = struct {
         self.normalizeFileSelectionForFilter();
         if (self.data.branches.len == 0) self.branch_index = 0 else self.branch_index = @min(self.branch_index, self.data.branches.len - 1);
         if (self.data.remote_branches.len == 0) self.remote_index = 0 else self.remote_index = @min(self.remote_index, self.data.remote_branches.len - 1);
+        if (self.data.remotes.len == 0) self.remotes_index = 0 else self.remotes_index = @min(self.remotes_index, self.data.remotes.len - 1);
+        // A drilled remote may have vanished (e.g. removed); fall back to the list.
+        if (self.remote_drill != null and self.drilledRemoteRange() == null) {
+            self.allocator.free(self.remote_drill.?);
+            self.remote_drill = null;
+        }
+        if (self.drilledRemoteRange()) |r| self.remote_index = std.math.clamp(self.remote_index, r.start, r.end - 1);
         if (self.data.tags.len == 0) self.tag_index = 0 else self.tag_index = @min(self.tag_index, self.data.tags.len - 1);
         if (self.data.worktrees.len == 0) self.worktree_index = 0 else self.worktree_index = @min(self.worktree_index, self.data.worktrees.len - 1);
         if (self.data.submodules.len == 0) self.submodule_index = 0 else self.submodule_index = @min(self.submodule_index, self.data.submodules.len - 1);
@@ -6824,20 +7094,41 @@ test "add-remote prompt stashes the name and asks for the URL" {
     try std.testing.expectEqual(@as(usize, 0), app.input_buffer.items.len);
 }
 
-test "selectedRemoteName extracts the remote from the selected ref" {
+test "remotes tab drills from the list into a remote's branches" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
     var app = try testApp(allocator, &no_files);
     defer deinitTestApp(&app);
 
-    var remotes = [_]model.Branch{.{ .name = @constCast("origin/main") }};
-    app.data.remote_branches = &remotes;
+    var remotes = [_]model.Remote{ .{ .name = @constCast("origin") }, .{ .name = @constCast("upstream") } };
+    var rb = [_]model.Branch{
+        .{ .name = @constCast("origin/main") },
+        .{ .name = @constCast("origin/feature") },
+        .{ .name = @constCast("upstream/main") },
+    };
+    app.data.remotes = &remotes;
+    app.data.remote_branches = &rb;
     app.branches_tab = .remotes;
-    app.remote_index = 0;
 
-    try std.testing.expectEqualStrings("origin", branches_mod.selectedRemoteName(&app).?);
-    app.branches_tab = .local;
-    try std.testing.expect(branches_mod.selectedRemoteName(&app) == null);
+    // Level 0: the remotes list. No branch is "selected" here.
+    try std.testing.expect(app.remotesListActive());
+    try std.testing.expect(app.selectedRemoteBranch() == null);
+    try std.testing.expectEqual(@as(usize, 2), app.remoteBranchCount("origin"));
+    try std.testing.expectEqual(@as(usize, 1), app.remoteBranchCount("upstream"));
+
+    // Drill into the second remote (upstream).
+    app.remotes_index = 1;
+    try app.openRemoteDrill();
+    try std.testing.expect(app.remoteDrillActive());
+    const r = app.drilledRemoteRange().?;
+    try std.testing.expectEqual(@as(usize, 2), r.start); // upstream/main is index 2
+    try std.testing.expectEqual(@as(usize, 3), r.end);
+    try std.testing.expectEqualStrings("upstream/main", app.selectedRemoteBranch().?.name);
+
+    // Back out to the list.
+    try app.closeRemoteDrill();
+    try std.testing.expect(app.remotesListActive());
+    try std.testing.expect(app.selectedRemoteBranch() == null);
 }
 
 test "webUrlFromRemote normalizes the common remote URL forms" {
@@ -7853,12 +8144,12 @@ test "suggested push remote uses the configured remote list" {
 
     // A single non-origin remote is suggested even with no fetched branches
     // (the bug the old remote-branch heuristic had).
-    var one = [_][]u8{@constCast("upstream")};
+    var one = [_]model.Remote{.{ .name = @constCast("upstream") }};
     app.data.remotes = &one;
     try std.testing.expectEqualStrings("upstream", app.suggestedRemote());
 
     // With several remotes, "origin" is preferred regardless of order.
-    var many = [_][]u8{ @constCast("fork"), @constCast("origin"), @constCast("upstream") };
+    var many = [_]model.Remote{ .{ .name = @constCast("fork") }, .{ .name = @constCast("origin") }, .{ .name = @constCast("upstream") } };
     app.data.remotes = &many;
     try std.testing.expectEqualStrings("origin", app.suggestedRemote());
 }
