@@ -1222,10 +1222,6 @@ pub const Git = struct {
         return self.exec(&.{ "fetch", "--all", "--no-write-fetch-head" });
     }
 
-    pub fn fetchRemote(self: *Git, name: []const u8) !ExecResult {
-        return self.exec(&.{ "fetch", name });
-    }
-
     pub fn pull(self: *Git) !ExecResult {
         return self.exec(&.{ "pull", "--no-edit" });
     }

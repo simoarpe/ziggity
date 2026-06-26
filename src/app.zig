@@ -200,10 +200,13 @@ pub const AsyncOp = enum {
     /// <branch>`. The remote/branch are appended by the worker from
     /// `push_upstream_remote`/`push_upstream_branch` (see `startPush`).
     push_set_upstream,
+    /// Fetch a single remote: `fetch <remote>`. The remote name is appended by
+    /// the worker from `fetch_remote_name` (see `fetchSelectedRemote`).
+    fetch_remote,
 
     pub fn label(self: AsyncOp) []const u8 {
         return switch (self) {
-            .fetch => "fetch",
+            .fetch, .fetch_remote => "fetch",
             .pull => "pull",
             .push, .push_force, .push_force_plain, .push_set_upstream => "push",
         };
@@ -211,7 +214,7 @@ pub const AsyncOp = enum {
 
     pub fn gerund(self: AsyncOp) []const u8 {
         return switch (self) {
-            .fetch => "fetching",
+            .fetch, .fetch_remote => "fetching",
             .pull => "pulling",
             .push, .push_set_upstream => "pushing",
             .push_force => "force push with lease",
@@ -229,6 +232,8 @@ pub const AsyncOp = enum {
             // refs without asking. A branch surfaces as "(upstream gone)" once a
             // prune happens — i.e. exactly when git itself would consider it gone.
             .fetch => &.{ "fetch", "--all", "--no-write-fetch-head" },
+            // The remote name is appended by the worker (from `fetch_remote_name`).
+            .fetch_remote => &.{"fetch"},
             .pull => &.{ "pull", "--no-edit" },
             .push => &.{"push"},
             .push_force => &.{ "push", "--force-with-lease" },
@@ -1064,7 +1069,6 @@ pub const Mutation = union(enum) {
     set_submodule_url: struct { path: []const u8, url: []const u8 },
     remove_submodule: []const u8,
     submodule_bulk: git_mod.Git.SubmoduleBulk,
-    fetch_remote: []const u8,
     new_branch_from: struct { name: []const u8, start: []const u8 },
     undo,
     merge: []const u8,
@@ -1115,7 +1119,6 @@ pub const Mutation = union(enum) {
             .set_submodule_url => |x| wgit.setSubmoduleUrl(x.path, x.url),
             .remove_submodule => |p| wgit.removeSubmodule(p),
             .submodule_bulk => |op| wgit.bulkSubmodule(op),
-            .fetch_remote => |name| wgit.fetchRemote(name),
             .new_branch_from => |x| wgit.newBranchFrom(x.name, x.start),
             .undo => wgit.undoLastOperation(),
             .merge => |b| wgit.mergeBranch(b),
@@ -1172,7 +1175,6 @@ pub const Mutation = union(enum) {
             .set_submodule_url => |x| .{ .set_submodule_url = .{ .path = try gpa.dupe(u8, x.path), .url = try gpa.dupe(u8, x.url) } },
             .remove_submodule => |p| .{ .remove_submodule = try gpa.dupe(u8, p) },
             .submodule_bulk => |op| .{ .submodule_bulk = op },
-            .fetch_remote => |name| .{ .fetch_remote = try gpa.dupe(u8, name) },
             .new_branch_from => |x| .{ .new_branch_from = .{ .name = try gpa.dupe(u8, x.name), .start = try gpa.dupe(u8, x.start) } },
             .undo => .undo,
             .merge => |b| .{ .merge = try gpa.dupe(u8, b) },
@@ -1195,7 +1197,7 @@ pub const Mutation = union(enum) {
 
     pub fn deinit(self: Mutation, gpa: std.mem.Allocator) void {
         switch (self) {
-            .commit, .checkout, .revert, .create_fixup, .create_tag, .delete_tag, .remove_worktree, .update_submodule, .remove_submodule, .fetch_remote, .merge, .rebase, .autosquash => |s| gpa.free(s),
+            .commit, .checkout, .revert, .create_fixup, .create_tag, .delete_tag, .remove_worktree, .update_submodule, .remove_submodule, .merge, .rebase, .autosquash => |s| gpa.free(s),
             .new_branch_from => |x| {
                 gpa.free(x.name);
                 gpa.free(x.start);
@@ -1805,6 +1807,9 @@ pub const App = struct {
     /// async worker, replaced on the next set-upstream push, freed at shutdown.
     push_upstream_remote: ?[]u8 = null,
     push_upstream_branch: ?[]u8 = null,
+    /// The remote name for a queued per-remote `fetch <remote>` async op (owned;
+    /// borrowed by the worker, persists across a credential retry).
+    fetch_remote_name: ?[]u8 = null,
     /// Lock-recovery state: the lock file path to delete (owned) and the action
     /// to retry after deleting it. Set when a command fails with a lock error
     /// that survived the automatic retries (see `offerLockRecovery`).
@@ -1963,6 +1968,7 @@ pub const App = struct {
         if (self.exe_path) |p| self.allocator.free(p);
         if (self.push_upstream_remote) |r| self.allocator.free(r);
         if (self.push_upstream_branch) |b| self.allocator.free(b);
+        if (self.fetch_remote_name) |r| self.allocator.free(r);
         self.clearLockRecovery();
         if (self.reroot_request) |p| self.allocator.free(p);
         for (self.repo_stack.items) |p| self.allocator.free(p);
@@ -3541,15 +3547,16 @@ pub const App = struct {
         try self.updatePreview();
     }
 
-    /// `f` on the remotes list: fetch just the selected remote.
+    /// `f` on the remotes list: fetch just the selected remote, through the
+    /// credential-aware network path (so an HTTPS remote can prompt for auth).
     pub fn fetchSelectedRemote(self: *App) !void {
         const remote = self.selectedRemote() orelse {
             try self.setMessage("no remote selected", .{});
             return;
         };
-        var buf: [128]u8 = undefined;
-        const cmd = std.fmt.bufPrint(&buf, "git fetch {s}", .{remote.name}) catch "git fetch";
-        return self.requestMutation(.{ .fetch_remote = remote.name }, .{ .gerund = "fetching", .command = cmd, .refresh = Refresh.all }, "fetched {s}", .{remote.name});
+        if (self.fetch_remote_name) |old| self.allocator.free(old);
+        self.fetch_remote_name = try self.allocator.dupe(u8, remote.name);
+        return self.requestAsync(.fetch_remote);
     }
 
     /// `n` on a remote branch: create a new local branch from it (named).
@@ -3817,6 +3824,8 @@ pub const App = struct {
 
         if (self.push_upstream_remote) |r| a.free(r);
         self.push_upstream_remote = null;
+        if (self.fetch_remote_name) |r| a.free(r);
+        self.fetch_remote_name = null;
         if (self.push_upstream_branch) |b| a.free(b);
         self.push_upstream_branch = null;
 
@@ -8607,6 +8616,7 @@ fn deinitTestApp(app: *App) void {
     if (app.exe_path) |p| app.allocator.free(p);
     if (app.push_upstream_remote) |r| app.allocator.free(r);
     if (app.push_upstream_branch) |b| app.allocator.free(b);
+    if (app.fetch_remote_name) |r| app.allocator.free(r);
     app.clearLockRecovery();
     app.input_buffer.deinit(app.allocator);
     if (app.staging) |*parsed| parsed.deinit(app.allocator);

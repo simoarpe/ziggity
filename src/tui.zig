@@ -463,6 +463,8 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     async_job.upstream_remote = app.push_upstream_remote;
                     async_job.upstream_branch = app.push_upstream_branch;
                 }
+                // A per-remote fetch carries the remote name (appended after "fetch").
+                if (op == .fetch_remote) async_job.upstream_remote = app.fetch_remote_name;
                 // Attach entered credentials (a cloned, askpass-wired env) when
                 // available; on clone failure fall back to the bare env.
                 if (credentials_mod.gitCredentialsSet(app)) {
