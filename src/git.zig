@@ -1031,12 +1031,29 @@ pub const Git = struct {
         return self.exec(&.{ "branch", "-m", old_name, new_name });
     }
 
-    pub fn createTag(self: *Git, name: []const u8) !ExecResult {
-        return self.exec(&.{ "tag", "--", name });
+    /// Create a tag at HEAD. A non-empty `message` makes it annotated
+    /// (`-a -m`); empty makes it lightweight. `force` (`-f`) overwrites an
+    /// existing tag of the same name.
+    pub fn createTag(self: *Git, name: []const u8, message: []const u8, force: bool) !ExecResult {
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(self.allocator);
+        try args.append(self.allocator, "tag");
+        if (force) try args.append(self.allocator, "-f");
+        if (message.len > 0) try args.appendSlice(self.allocator, &.{ "-a", "-m", message });
+        try args.appendSlice(self.allocator, &.{ "--", name });
+        return self.exec(args.items);
     }
 
     pub fn deleteTag(self: *Git, name: []const u8) !ExecResult {
         return self.exec(&.{ "tag", "-d", "--", name });
+    }
+
+    /// Delete a tag on a remote: `git push <remote> --delete refs/tags/<tag>`.
+    /// The `refs/tags/` prefix disambiguates from a same-named branch.
+    pub fn deleteRemoteTag(self: *Git, remote: []const u8, name: []const u8) !ExecResult {
+        const ref = try std.fmt.allocPrint(self.allocator, "refs/tags/{s}", .{name});
+        defer self.allocator.free(ref);
+        return self.exec(&.{ "push", remote, "--delete", ref });
     }
 
     pub fn deleteRemoteBranch(self: *Git, remote: []const u8, branch: []const u8) !ExecResult {

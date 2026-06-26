@@ -459,7 +459,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 app.async_active = true;
                 async_job = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ, .op = op };
                 // A first push of an upstream-less branch carries the target.
-                if (op == .push_set_upstream) {
+                if (op == .push_set_upstream or op == .push_tag) {
                     async_job.upstream_remote = app.push_upstream_remote;
                     async_job.upstream_branch = app.push_upstream_branch;
                 }
@@ -981,6 +981,14 @@ const help_lines = [_][]const u8{
     "  a remote's br. space checkout   n new local branch   M merge   r rebase",
     "                 g reset   u set upstream   d delete remote branch   esc back",
     "",
+    "Tags tab",
+    "  space          checkout the tag (detached HEAD)",
+    "  n              new tag (then an optional message: empty = lightweight,",
+    "                 a message makes it annotated; overwrite prompts to force)",
+    "  P              push the tag to a remote",
+    "  g              reset menu (soft / mixed / hard) onto the tag",
+    "  d              delete menu (local / remote / both)",
+    "",
     "Commits  (tabs: Commits / Reflog)",
     "  enter          view the commit's changed files",
     "  g / t          reset menu / revert",
@@ -1384,6 +1392,7 @@ fn drawConfirmPopup(root: vaxis.Window, app: *app_mod.App) void {
         .merge_branch => "Merge branch",
         .rebase_branch => "Rebase branch",
         .delete_tag => "Delete tag",
+        .force_tag => "Overwrite tag",
         .delete_remote_branch => "Delete remote branch",
         .remove_worktree => "Remove worktree",
         .remove_submodule => "Remove submodule",
@@ -1883,7 +1892,7 @@ fn drawTags(win: vaxis.Window, app: *const app_mod.App) void {
         const col = printSpan(win, row, 0, tag.name, base);
         if (tag.subject.len > 0) {
             const c2 = printSpan(win, row, col, "  ", base);
-            _ = printSpan(win, row, c2, tag.subject, withFg(base, ui_theme.muted));
+            _ = printSpan(win, row, c2, tag.subject, withFg(base, ui_theme.tag));
         }
     }
 }
@@ -2345,7 +2354,7 @@ fn footerHints(c: FooterCtx) []const u8 {
                 "space checkout  n new-local  M merge  r rebase  g reset  u upstream  d delete  w worktree  W diff  enter commits  esc back" ++ global_branches
             else
                 "enter/space branches  n add  e edit  d remove  f fetch  [/] tabs" ++ global_branches,
-            .tags => "space checkout  n new-tag  d delete-tag  w worktree  W diff  [/] tabs" ++ global_branches,
+            .tags => "space checkout  n new-tag  d delete  P push  g reset  w worktree  W diff  [/] tabs" ++ global_branches,
         };
     }
     if (c.focus == .files) {

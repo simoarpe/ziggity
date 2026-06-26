@@ -110,6 +110,8 @@ pub const Theme = struct {
     header: u8 = 13,
     /// Commit short hashes in the log (the classic `git log --oneline` yellow).
     hash: u8 = 3,
+    /// A tag's annotation/subject shown beside its name in the Tags list.
+    tag: u8 = 3,
     /// Footer (bottom bar) keybinding hints: the key is highlighted in
     /// `footer_key`, its description shown in `footer`.
     footer: u8 = 12,
@@ -182,6 +184,7 @@ pub const ConfirmSkips = struct {
     merge_branch: bool = false,
     rebase_branch: bool = false,
     delete_tag: bool = false,
+    force_tag: bool = false,
     delete_remote_branch: bool = false,
     remove_worktree: bool = false,
     remove_submodule: bool = false,

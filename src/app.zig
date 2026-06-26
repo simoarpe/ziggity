@@ -101,6 +101,9 @@ pub const TextPromptKind = enum {
     checkout_by_name,
     rename_branch,
     new_tag,
+    new_tag_message,
+    push_tag,
+    delete_remote_tag,
     add_remote_name,
     add_remote_url,
     edit_remote_url,
@@ -122,6 +125,9 @@ pub const TextPromptKind = enum {
             .checkout_by_name => "Checkout branch by name",
             .rename_branch => "Rename branch",
             .new_tag => "New tag name",
+            .new_tag_message => "Tag message (empty = lightweight)",
+            .push_tag => "Push tag to remote",
+            .delete_remote_tag => "Delete tag on remote",
             .add_remote_name => "New remote name",
             .add_remote_url => "New remote URL",
             .edit_remote_url => "Remote URL",
@@ -145,6 +151,9 @@ pub const Confirmation = enum {
     merge_branch,
     rebase_branch,
     delete_tag,
+    /// Offered when creating a tag whose name already exists locally; confirming
+    /// re-creates it with `--force`.
+    force_tag,
     delete_remote_branch,
     remove_worktree,
     remove_submodule,
@@ -203,12 +212,16 @@ pub const AsyncOp = enum {
     /// Fetch a single remote: `fetch <remote>`. The remote name is appended by
     /// the worker from `fetch_remote_name` (see `fetchSelectedRemote`).
     fetch_remote,
+    /// Push a tag to a remote: `push <remote> <tag>`. The remote and tag are
+    /// appended by the worker from `push_upstream_remote`/`push_upstream_branch`
+    /// (see `pushSelectedTag`).
+    push_tag,
 
     pub fn label(self: AsyncOp) []const u8 {
         return switch (self) {
             .fetch, .fetch_remote => "fetch",
             .pull => "pull",
-            .push, .push_force, .push_force_plain, .push_set_upstream => "push",
+            .push, .push_force, .push_force_plain, .push_set_upstream, .push_tag => "push",
         };
     }
 
@@ -216,7 +229,7 @@ pub const AsyncOp = enum {
         return switch (self) {
             .fetch, .fetch_remote => "fetching",
             .pull => "pulling",
-            .push, .push_set_upstream => "pushing",
+            .push, .push_set_upstream, .push_tag => "pushing",
             .push_force => "force push with lease",
             .push_force_plain => "force push",
         };
@@ -239,6 +252,9 @@ pub const AsyncOp = enum {
             .push_force => &.{ "push", "--force-with-lease" },
             .push_force_plain => &.{ "push", "--force" },
             .push_set_upstream => &.{ "push", "--set-upstream" },
+            // The remote and tag are appended by the worker (from
+            // `push_upstream_remote`/`push_upstream_branch`).
+            .push_tag => &.{"push"},
         };
     }
 };
@@ -430,6 +446,16 @@ pub const MenuAction = enum {
     submodule_update_all,
     submodule_update_recursive,
     submodule_deinit_all,
+    delete_tag_local,
+    delete_tag_remote,
+    delete_tag_both,
+};
+
+/// The Tags `d` menu: delete the tag locally, on a remote, or both.
+pub const tag_delete_menu = [_]MenuItem{
+    .{ .label = "Delete local tag", .action = .delete_tag_local },
+    .{ .label = "Delete remote tag", .action = .delete_tag_remote },
+    .{ .label = "Delete local and remote tag", .action = .delete_tag_both },
 };
 
 pub const submodule_bulk_menu = [_]MenuItem{
@@ -1060,8 +1086,9 @@ pub const Mutation = union(enum) {
     cherry_pick_many: []const []const u8,
     delete_branch: struct { name: []const u8, force: bool },
     delete_remote_branch: struct { remote: []const u8, ref: []const u8 },
-    create_tag: []const u8,
+    create_tag: struct { name: []const u8, message: []const u8, force: bool },
     delete_tag: []const u8,
+    delete_remote_tag: struct { remote: []const u8, name: []const u8, also_local: bool },
     remove_worktree: []const u8,
     add_worktree: struct { path: []const u8, base: []const u8 },
     update_submodule: []const u8,
@@ -1110,8 +1137,18 @@ pub const Mutation = union(enum) {
             .cherry_pick_many => |hs| wgit.cherryPickMany(hs),
             .delete_branch => |x| wgit.deleteBranch(x.name, x.force),
             .delete_remote_branch => |x| wgit.deleteRemoteBranch(x.remote, x.ref),
-            .create_tag => |n| wgit.createTag(n),
+            .create_tag => |x| wgit.createTag(x.name, x.message, x.force),
             .delete_tag => |n| wgit.deleteTag(n),
+            .delete_remote_tag => |x| blk: {
+                // "Delete both" removes the local tag first, then the remote one;
+                // report the local failure if it fails, else the remote result.
+                if (x.also_local) {
+                    var r = try wgit.deleteTag(x.name);
+                    if (!r.ok()) break :blk r;
+                    r.deinit(gpa);
+                }
+                break :blk try wgit.deleteRemoteTag(x.remote, x.name);
+            },
             .remove_worktree => |p| wgit.removeWorktree(p),
             .add_worktree => |x| wgit.addWorktree(x.path, x.base),
             .update_submodule => |p| wgit.updateSubmodule(p),
@@ -1166,8 +1203,9 @@ pub const Mutation = union(enum) {
             .cherry_pick_many => |hs| .{ .cherry_pick_many = try dupeStrList(gpa, hs) },
             .delete_branch => |x| .{ .delete_branch = .{ .name = try gpa.dupe(u8, x.name), .force = x.force } },
             .delete_remote_branch => |x| .{ .delete_remote_branch = .{ .remote = try gpa.dupe(u8, x.remote), .ref = try gpa.dupe(u8, x.ref) } },
-            .create_tag => |n| .{ .create_tag = try gpa.dupe(u8, n) },
+            .create_tag => |x| .{ .create_tag = .{ .name = try gpa.dupe(u8, x.name), .message = try gpa.dupe(u8, x.message), .force = x.force } },
             .delete_tag => |n| .{ .delete_tag = try gpa.dupe(u8, n) },
+            .delete_remote_tag => |x| .{ .delete_remote_tag = .{ .remote = try gpa.dupe(u8, x.remote), .name = try gpa.dupe(u8, x.name), .also_local = x.also_local } },
             .remove_worktree => |p| .{ .remove_worktree = try gpa.dupe(u8, p) },
             .add_worktree => |x| .{ .add_worktree = .{ .path = try gpa.dupe(u8, x.path), .base = try gpa.dupe(u8, x.base) } },
             .update_submodule => |p| .{ .update_submodule = try gpa.dupe(u8, p) },
@@ -1197,7 +1235,15 @@ pub const Mutation = union(enum) {
 
     pub fn deinit(self: Mutation, gpa: std.mem.Allocator) void {
         switch (self) {
-            .commit, .checkout, .revert, .create_fixup, .create_tag, .delete_tag, .remove_worktree, .update_submodule, .remove_submodule, .merge, .rebase, .autosquash => |s| gpa.free(s),
+            .commit, .checkout, .revert, .create_fixup, .delete_tag, .remove_worktree, .update_submodule, .remove_submodule, .merge, .rebase, .autosquash => |s| gpa.free(s),
+            .create_tag => |x| {
+                gpa.free(x.name);
+                gpa.free(x.message);
+            },
+            .delete_remote_tag => |x| {
+                gpa.free(x.remote);
+                gpa.free(x.name);
+            },
             .new_branch_from => |x| {
                 gpa.free(x.name);
                 gpa.free(x.start);
@@ -1723,6 +1769,14 @@ pub const App = struct {
     // Text the TUI loop should copy to the system clipboard (OSC 52), owned;
     // set by a copy action, consumed and freed by the loop.
     clipboard_request: ?[]u8 = null,
+    // Tag-creation scratch: the annotation message entered after the tag name,
+    // held across the optional "tag exists — overwrite?" force confirmation.
+    // (The tag name itself is stashed in `remote_name_buf`.)
+    tag_message_buf: [1024]u8 = undefined,
+    tag_message_len: usize = 0,
+    // Whether the pending remote-tag delete should also drop the local tag
+    // (the "Delete local and remote tag" menu choice).
+    tag_delete_also_local: bool = false,
     // An editor launch the TUI loop should perform (open the selected file):
     // `command` is a `sh -c` line, owned; `suspend_tui` means hand the terminal
     // to a terminal editor and resume on exit (vs just spawning a GUI editor).
@@ -2412,6 +2466,13 @@ pub const App = struct {
                 // space (checkout), d (delete branch), u (upstream), enter, w, W
                 // fall through to the existing branch handlers (drill-aware).
             }
+        }
+        // The Tags tab adds reset-to-tag (g) and push-tag (P) on top of the
+        // shared branch keys (space checkout, n new, d delete-menu, w, W).
+        if (self.focus == .branches and self.branches_tab == .tags and !self.branch_commits_active) {
+            const km = self.config.keymap;
+            if (km.reset.matches(key)) return self.openTagResetMenu(); // g
+            if (km.push.matches(key)) return self.pushSelectedTag(); // P
         }
 
         var action = actions.fromNormalKey(key, self.config.keymap, self.focus) orelse return;
@@ -3609,6 +3670,77 @@ pub const App = struct {
         try self.setMessage("reset to {s}", .{b.name});
     }
 
+    /// `g` on a tag: open the soft/mixed/hard reset menu targeting the tag's ref.
+    pub fn openTagResetMenu(self: *App) !void {
+        const tag = self.selectedTag() orelse {
+            try self.setMessage("no tag selected", .{});
+            return;
+        };
+        self.mode = .menu;
+        self.active_menu = .{ .title = "Reset to tag", .items = &commit_reset_menu, .index = 0 };
+        try self.setMessage("reset to {s}", .{tag.name});
+    }
+
+    /// `P` on a tag: push it to a remote. With a single remote, push straight to
+    /// it; otherwise prompt for the remote (prefilled with the suggested one).
+    pub fn pushSelectedTag(self: *App) !void {
+        const tag = self.selectedTag() orelse {
+            try self.setMessage("no tag selected", .{});
+            return;
+        };
+        // Stash the tag name (the ref pushed) in the scratch name buffer.
+        const n = @min(tag.name.len, self.remote_name_buf.len);
+        @memcpy(self.remote_name_buf[0..n], tag.name[0..n]);
+        self.remote_name_len = n;
+        if (self.data.remotes.len <= 1) {
+            try self.setPushTagTarget(self.suggestedRemote(), tag.name);
+            return self.requestAsync(.push_tag);
+        }
+        return self.startTextPrompt(.push_tag);
+    }
+
+    /// Record the remote + tag for an async `push <remote> <tag>` (reuses the
+    /// push-upstream remote/branch slots the worker appends).
+    fn setPushTagTarget(self: *App, remote: []const u8, tag: []const u8) !void {
+        if (self.push_upstream_remote) |r| self.allocator.free(r);
+        if (self.push_upstream_branch) |b| self.allocator.free(b);
+        self.push_upstream_remote = try self.allocator.dupe(u8, remote);
+        self.push_upstream_branch = try self.allocator.dupe(u8, tag);
+    }
+
+    /// `d` on a tag: offer local / remote / both deletion.
+    pub fn startTagDeleteMenu(self: *App) !void {
+        const tag = self.selectedTag() orelse {
+            try self.setMessage("no tag selected", .{});
+            return;
+        };
+        self.mode = .menu;
+        self.active_menu = .{ .title = "Delete tag", .items = &tag_delete_menu, .index = 0 };
+        try self.setMessage("delete tag {s}", .{tag.name});
+    }
+
+    /// Begin a remote-tag deletion: stash the tag name + whether to also drop the
+    /// local tag, then prompt for the remote (prefilled with the suggested one).
+    fn startRemoteTagDelete(self: *App, also_local: bool) !void {
+        const tag = self.selectedTag() orelse {
+            try self.setMessage("no tag selected", .{});
+            return;
+        };
+        const n = @min(tag.name.len, self.remote_name_buf.len);
+        @memcpy(self.remote_name_buf[0..n], tag.name[0..n]);
+        self.remote_name_len = n;
+        self.tag_delete_also_local = also_local;
+        return self.startTextPrompt(.delete_remote_tag);
+    }
+
+    /// True when a tag of this name already exists locally.
+    fn tagExists(self: *const App, name: []const u8) bool {
+        for (self.data.tags) |t| {
+            if (std.mem.eql(u8, t.name, name)) return true;
+        }
+        return false;
+    }
+
     pub fn selectedTag(self: *const App) ?model.Tag {
         if (self.data.tags.len == 0) return null;
         return self.data.tags[@min(self.tag_index, self.data.tags.len - 1)];
@@ -4150,6 +4282,10 @@ pub const App = struct {
                 }
                 break :blk "Delete the selected tag?";
             },
+            .force_tag => blk: {
+                const name = self.remote_name_buf[0..self.remote_name_len];
+                break :blk std.fmt.bufPrint(buf, "Tag {s} already exists. Overwrite it (force)?", .{name}) catch "Overwrite the existing tag (force)?";
+            },
             .delete_remote_branch => blk: {
                 if (self.selectedRemoteBranch()) |branch| {
                     break :blk std.fmt.bufPrint(buf, "Delete remote branch {s}? This pushes a deletion.", .{branch.name}) catch "Delete the selected remote branch?";
@@ -4659,9 +4795,16 @@ pub const App = struct {
                 self.focus = .branches;
                 prefill = branch.name;
             },
-            .new_tag => {
+            .new_tag, .new_tag_message => {
                 if (self.branches_tab != .tags) self.branches_tab = .tags;
                 self.focus = .branches;
+            },
+            // The remote-selection prompts prefill with the suggested remote so
+            // a single Enter targets it; the tag name is already stashed.
+            .push_tag, .delete_remote_tag => {
+                if (self.branches_tab != .tags) self.branches_tab = .tags;
+                self.focus = .branches;
+                prefill = self.suggestedRemote();
             },
             .add_remote_name, .add_remote_url, .edit_remote_url, .rename_remote, .new_local_from_remote => {
                 if (self.branches_tab != .remotes) self.branches_tab = .remotes;
@@ -4851,6 +4994,28 @@ pub const App = struct {
                 self.input_buffer.clearRetainingCapacity();
                 return self.applyCommitFilter(which, value);
             },
+            // The tag-message step also accepts an empty value (a lightweight
+            // tag), so it is handled before the non-empty guard.
+            .new_tag_message => {
+                const name = self.remote_name_buf[0..self.remote_name_len];
+                // An existing tag needs --force to overwrite — confirm first,
+                // carrying the message across in its own buffer.
+                if (self.tagExists(name)) {
+                    const m = @min(value.len, self.tag_message_buf.len);
+                    @memcpy(self.tag_message_buf[0..m], value[0..m]);
+                    self.tag_message_len = m;
+                    self.mode = .normal;
+                    self.text_prompt_kind = null;
+                    self.input_buffer.clearRetainingCapacity();
+                    return self.requestConfirmation(.force_tag, "tag {s} exists — overwrite?", .{name});
+                }
+                defer {
+                    self.mode = .normal;
+                    self.text_prompt_kind = null;
+                    self.input_buffer.clearRetainingCapacity();
+                }
+                return self.requestMutation(.{ .create_tag = .{ .name = name, .message = value, .force = false } }, .{ .gerund = "creating tag", .command = "git tag", .refresh = Refresh.tags }, "created tag {s}", .{name});
+            },
             else => {},
         }
 
@@ -4894,12 +5059,45 @@ pub const App = struct {
                 return self.runMutationScoped(result, Refresh.branches, "renamed to {s}", .{value});
             },
             .new_tag => {
+                if (value.len == 0) {
+                    self.cancelTextPrompt("enter a tag name");
+                    return;
+                }
+                // Stash the name and ask for an optional annotation message.
+                const n = @min(value.len, self.remote_name_buf.len);
+                @memcpy(self.remote_name_buf[0..n], value[0..n]);
+                self.remote_name_len = n;
+                self.text_prompt_kind = .new_tag_message;
+                self.input_buffer.clearRetainingCapacity();
+                self.prompt_cursor = 0;
+                try self.setMessage("tag message for {s} (empty = lightweight)", .{self.remote_name_buf[0..n]});
+                return;
+            },
+            .push_tag => {
+                if (value.len == 0) {
+                    self.cancelTextPrompt("enter a remote (e.g. origin)");
+                    return;
+                }
+                const tag = self.remote_name_buf[0..self.remote_name_len];
+                try self.setPushTagTarget(value, tag);
+                self.mode = .normal;
+                self.text_prompt_kind = null;
+                self.input_buffer.clearRetainingCapacity();
+                return self.requestAsync(.push_tag);
+            },
+            .delete_remote_tag => {
+                if (value.len == 0) {
+                    self.cancelTextPrompt("enter a remote (e.g. origin)");
+                    return;
+                }
+                const tag = self.remote_name_buf[0..self.remote_name_len];
+                const refresh = if (self.tag_delete_also_local) Refresh.tags else Refresh.remotes;
                 defer {
                     self.mode = .normal;
                     self.text_prompt_kind = null;
                     self.input_buffer.clearRetainingCapacity();
                 }
-                return self.requestMutation(.{ .create_tag = value }, .{ .gerund = "creating tag", .command = "git tag", .refresh = Refresh.tags }, "created tag {s}", .{value});
+                return self.requestMutation(.{ .delete_remote_tag = .{ .remote = value, .name = tag, .also_local = self.tag_delete_also_local } }, .{ .gerund = "deleting remote tag", .command = "git push --delete", .refresh = refresh }, "deleted remote tag {s}", .{tag});
             },
             .add_remote_name => {
                 // Stash the name and ask for the URL in a second prompt.
@@ -5020,7 +5218,7 @@ pub const App = struct {
                 return self.requestMutation(.{ .new_branch_from = .{ .name = value, .start = start } }, .{ .gerund = "creating branch", .command = "git checkout -b", .refresh = Refresh.checkout }, "created {s}", .{value});
             },
             // Handled before the non-empty guard above.
-            .commit_grep, .commit_author, .commit_path => unreachable,
+            .commit_grep, .commit_author, .commit_path, .new_tag_message => unreachable,
         }
     }
 
@@ -5254,6 +5452,14 @@ pub const App = struct {
                     };
                     return self.runMutationScoped(try self.git.resetTo(b.name, mode), Refresh.checkout, "reset to {s}", .{b.name});
                 }
+                // The Tags tab resets to the selected tag's ref.
+                if (self.focus == .branches and self.branches_tab == .tags) {
+                    const tag = self.selectedTag() orelse {
+                        try self.setMessage("no tag selected", .{});
+                        return;
+                    };
+                    return self.runMutationScoped(try self.git.resetTo(tag.name, mode), Refresh.checkout, "reset to {s}", .{tag.name});
+                }
                 const commit = self.selectedCommit() orelse {
                     try self.setMessage("no commit selected", .{});
                     return;
@@ -5365,6 +5571,15 @@ pub const App = struct {
             .submodule_update_all => return self.requestMutation(.{ .submodule_bulk = .update_all }, .{ .gerund = "updating submodules", .command = "git submodule update", .refresh = Refresh.submodules }, "updated all submodules", .{}),
             .submodule_update_recursive => return self.requestMutation(.{ .submodule_bulk = .update_recursive }, .{ .gerund = "updating submodules", .command = "git submodule update --init --recursive", .refresh = Refresh.submodules }, "updated all submodules recursively", .{}),
             .submodule_deinit_all => return self.requestMutation(.{ .submodule_bulk = .deinit_all }, .{ .gerund = "deinitialising submodules", .command = "git submodule deinit --all -f", .refresh = Refresh.submodules }, "deinitialised all submodules", .{}),
+            .delete_tag_local => {
+                const tag = self.selectedTag() orelse {
+                    try self.setMessage("no tag selected", .{});
+                    return;
+                };
+                return self.requestConfirmation(.delete_tag, "confirm delete tag {s}", .{tag.name});
+            },
+            .delete_tag_remote => return self.startRemoteTagDelete(false),
+            .delete_tag_both => return self.startRemoteTagDelete(true),
         }
     }
 
@@ -5574,6 +5789,11 @@ pub const App = struct {
                     return;
                 };
                 return self.requestMutation(.{ .delete_tag = tag.name }, .{ .gerund = "deleting tag", .command = "git tag -d", .refresh = Refresh.tags }, "deleted tag {s}", .{tag.name});
+            },
+            .force_tag => {
+                const name = self.remote_name_buf[0..self.remote_name_len];
+                const message = self.tag_message_buf[0..self.tag_message_len];
+                return self.requestMutation(.{ .create_tag = .{ .name = name, .message = message, .force = true } }, .{ .gerund = "creating tag", .command = "git tag -f", .refresh = Refresh.tags }, "created tag {s}", .{name});
             },
             .delete_remote_branch => {
                 const branch = self.selectedRemoteBranch() orelse {
@@ -7138,6 +7358,97 @@ test "remotes tab drills from the list into a remote's branches" {
     try app.closeRemoteDrill();
     try std.testing.expect(app.remotesListActive());
     try std.testing.expect(app.selectedRemoteBranch() == null);
+}
+
+test "new-tag prompt chains to an optional message, then creates an annotated tag" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = undefined };
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+    app.branches_tab = .tags;
+    app.mode = .text_prompt;
+    app.text_prompt_kind = .new_tag;
+    try app.input_buffer.appendSlice(allocator, "v1.0");
+    try app.submitTextPrompt();
+
+    // Step 1 stashes the name and asks for a message; input is cleared.
+    try std.testing.expectEqual(TextPromptKind.new_tag_message, app.text_prompt_kind.?);
+    try std.testing.expectEqualStrings("v1.0", app.remote_name_buf[0..app.remote_name_len]);
+    try std.testing.expectEqual(@as(usize, 0), app.input_buffer.items.len);
+
+    // Step 2 with a non-empty message produces an annotated create_tag mutation.
+    try app.input_buffer.appendSlice(allocator, "first release");
+    try app.submitTextPrompt();
+    const m = app.mutation_requested.?;
+    try std.testing.expectEqualStrings("v1.0", m.create_tag.name);
+    try std.testing.expectEqualStrings("first release", m.create_tag.message);
+    try std.testing.expect(!m.create_tag.force);
+}
+
+test "creating a tag that already exists prompts to force-overwrite" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = undefined };
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+    var tags = [_]model.Tag{.{ .name = @constCast("v1.0") }};
+    app.data.tags = &tags;
+    app.branches_tab = .tags;
+
+    app.mode = .text_prompt;
+    app.text_prompt_kind = .new_tag;
+    try app.input_buffer.appendSlice(allocator, "v1.0");
+    try app.submitTextPrompt(); // -> message step
+    try app.input_buffer.appendSlice(allocator, "");
+    try app.submitTextPrompt(); // exists -> force confirmation
+
+    try std.testing.expectEqual(Confirmation.force_tag, app.pending_confirmation.?);
+    try std.testing.expectEqualStrings("v1.0", app.remote_name_buf[0..app.remote_name_len]);
+}
+
+test "tags tab d opens a local/remote/both delete menu" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var tags = [_]model.Tag{.{ .name = @constCast("v1.0") }};
+    app.data.tags = &tags;
+    app.branches_tab = .tags;
+
+    try branches_mod.startDeleteForBranchTab(&app);
+    try std.testing.expectEqual(@as(usize, 3), app.active_menu.?.items.len);
+    try std.testing.expectEqual(MenuAction.delete_tag_local, app.active_menu.?.items[0].action);
+    try std.testing.expectEqual(MenuAction.delete_tag_remote, app.active_menu.?.items[1].action);
+    try std.testing.expectEqual(MenuAction.delete_tag_both, app.active_menu.?.items[2].action);
+}
+
+test "pushing a tag with a single remote targets it directly" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = undefined };
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+    var remotes = [_]model.Remote{.{ .name = @constCast("origin") }};
+    var tags = [_]model.Tag{.{ .name = @constCast("v1.0") }};
+    app.data.remotes = &remotes;
+    app.data.tags = &tags;
+    app.branches_tab = .tags;
+
+    try app.pushSelectedTag();
+    try std.testing.expectEqual(AsyncOp.push_tag, app.async_requested.?);
+    try std.testing.expectEqualStrings("origin", app.push_upstream_remote.?);
+    try std.testing.expectEqualStrings("v1.0", app.push_upstream_branch.?);
 }
 
 test "webUrlFromRemote normalizes the common remote URL forms" {

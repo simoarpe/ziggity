@@ -63,13 +63,7 @@ pub fn setUpstreamToSelected(self: *App) !void {
 pub fn startDeleteForBranchTab(self: *App) !void {
     switch (self.branches_tab) {
         .local => return startBranchDeleteMenu(self),
-        .tags => {
-            const tag = self.selectedTag() orelse {
-                try self.setMessage("no tag selected", .{});
-                return;
-            };
-            return self.requestConfirmation(.delete_tag, "confirm delete tag {s}", .{tag.name});
-        },
+        .tags => return self.startTagDeleteMenu(),
         .remotes => {
             const branch = self.selectedRemoteBranch() orelse {
                 try self.setMessage("no remote branch selected", .{});
