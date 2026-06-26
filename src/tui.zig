@@ -1875,6 +1875,12 @@ fn drawTags(win: vaxis.Window, app: *const app_mod.App) void {
         print(win, 0, 0, "No tags", styles().muted);
         return;
     }
+    // Align every subject into one column at the widest tag name (+2 gap), so
+    // the annotations line up instead of starting at a ragged edge. Tag names
+    // are git refs (ASCII, no spaces), so byte length is their display width.
+    var name_w: usize = 0;
+    for (app.data.tags) |t| name_w = @max(name_w, t.name.len);
+    const subj_col: u16 = @intCast(@min(name_w + 2, @as(usize, win.width)));
     const start = app.listScroll(.branches);
     var row: u16 = 0;
     var idx = start;
@@ -1889,10 +1895,9 @@ fn drawTags(win: vaxis.Window, app: *const app_mod.App) void {
         const sel = selOf(idx == app.tag_index, app.focus == .branches);
         applySel(&base, sel);
         if (sel != .none) fillRow(win, row, base);
-        const col = printSpan(win, row, 0, tag.name, base);
+        _ = printSpan(win, row, 0, tag.name, base);
         if (tag.subject.len > 0) {
-            const c2 = printSpan(win, row, col, "  ", base);
-            _ = printSpan(win, row, c2, tag.subject, withFg(base, ui_theme.tag));
+            _ = printSpan(win, row, subj_col, tag.subject, withFg(base, ui_theme.tag));
         }
     }
 }
