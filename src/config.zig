@@ -50,6 +50,7 @@ pub const KeyMap = struct {
     cherry_pick: Binding = .{ .codepoint = 'c' },
     reset_cherry_pick: Binding = .{ .codepoint = 'r', .ctrl = true },
     tag_commit: Binding = .{ .codepoint = 'T' },
+    open_pull_request: Binding = .{ .codepoint = 'G' },
     conflict_menu: Binding = .{ .codepoint = 'm' },
     stash_create: Binding = .{ .codepoint = 's' },
     new_branch: Binding = .{ .codepoint = 'n' },

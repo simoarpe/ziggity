@@ -1000,6 +1000,7 @@ const help_lines = [_][]const u8{
     "  e / r          edit (stop here) / reword",
     "  F / S          create fixup! commit / autosquash fixups above",
     "  B              mark base, then rebase a branch to move commits onto it",
+    "  G              open the new pull/merge request page for the branch",
     "  W              diff mode: compare against another ref",
     "  /              filter the log by message / author / path (esc clears)",
     "  b              bisect menu (start, then mark good/bad/skip/reset)",
@@ -2386,7 +2387,7 @@ fn footerHints(c: FooterCtx) []const u8 {
         .commits => if (c.reflog)
             "space checkout  g reset  n new-branch  c/v/^r copy/paste/clear  o browser  W diff  [/] tabs" ++ global
         else
-            "enter files  space checkout  n branch  T tag  g reset  t revert  c/v/^r copy/paste/clear  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  W diff  / filter  b bisect  ^j/^k move" ++ global,
+            "enter files  space checkout  n branch  T tag  g reset  t revert  c/v/^r copy/paste/clear  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  G pr  W diff  / filter  b bisect  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => if (c.main_file)
             "j/k scroll  H/L pan  e edit  PgUp/PgDn page  drag select  ^o copy all  esc back" ++ global

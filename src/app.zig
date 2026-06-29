@@ -2682,6 +2682,7 @@ pub const App = struct {
             .amend_commit => try commits_mod.amendLastCommit(self),
             .cherry_pick => try self.toggleCommitCopy(),
             .tag_commit => try self.startTagAtCommit(),
+            .open_pull_request => try diffmode_mod.openPullRequest(self),
             .reset_cherry_pick => {
                 if (self.copied_commits.items.len == 0) {
                     try self.setMessage("no copied commits to clear", .{});

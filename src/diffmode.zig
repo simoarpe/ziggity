@@ -77,6 +77,48 @@ pub fn openSelectionInBrowser(app: *App) !void {
     try app.setMessage("opening {s}", .{url});
 }
 
+/// `G`: open the host's "create pull/merge request" page for the current
+/// branch in the browser. No forge API is needed — it's a plain compare URL.
+pub fn openPullRequest(app: *App) !void {
+    const branch = app.data.current_branch;
+    if (branch.len == 0) {
+        try app.setMessage("no current branch to open a pull request for", .{});
+        return;
+    }
+    const remote = currentRemoteName(app);
+    const raw = app.git.remoteUrl(remote) catch {
+        try app.setMessage("no '{s}' remote to open", .{remote});
+        return;
+    };
+    defer app.allocator.free(raw);
+    const base = (try app_mod.webUrlFromRemote(app.allocator, std.mem.trim(u8, raw, " \t\r\n"))) orelse {
+        try app.setMessage("cannot derive a web URL from {s}", .{std.mem.trim(u8, raw, " \t\r\n")});
+        return;
+    };
+    defer app.allocator.free(base);
+
+    const url = try pullRequestUrl(app.allocator, base, branch);
+    defer app.allocator.free(url);
+    app.git.openUrl(url) catch {
+        try app.setMessage("failed to launch the browser", .{});
+        return;
+    };
+    try app.setMessage("opening {s}", .{url});
+}
+
+/// Build the host's new-pull-request URL for `branch`. GitLab and Bitbucket use
+/// their own paths; everything else (GitHub, Gitea, …) uses the GitHub-style
+/// compare URL, matching the rest of the web-URL handling.
+fn pullRequestUrl(allocator: std.mem.Allocator, base: []const u8, branch: []const u8) ![]u8 {
+    if (std.mem.indexOf(u8, base, "gitlab") != null) {
+        return std.fmt.allocPrint(allocator, "{s}/-/merge_requests/new?merge_request%5Bsource_branch%5D={s}", .{ base, branch });
+    }
+    if (std.mem.indexOf(u8, base, "bitbucket") != null) {
+        return std.fmt.allocPrint(allocator, "{s}/pull-requests/new?source={s}", .{ base, branch });
+    }
+    return std.fmt.allocPrint(allocator, "{s}/compare/{s}?expand=1", .{ base, branch });
+}
+
 /// The remote whose web host we open: the current branch's upstream remote,
 /// falling back to "origin".
 pub fn currentRemoteName(app: *const App) []const u8 {
@@ -111,4 +153,19 @@ pub fn selectionWebUrl(app: *const App, base: []const u8) ![]u8 {
         .status, .files, .stash, .main => {},
     }
     return app.allocator.dupe(u8, base);
+}
+
+test "pullRequestUrl picks the host's new-request path" {
+    const a = std.testing.allocator;
+    const gh = try pullRequestUrl(a, "https://github.com/o/r", "feature/x");
+    defer a.free(gh);
+    try std.testing.expectEqualStrings("https://github.com/o/r/compare/feature/x?expand=1", gh);
+
+    const gl = try pullRequestUrl(a, "https://gitlab.com/o/r", "wip");
+    defer a.free(gl);
+    try std.testing.expectEqualStrings("https://gitlab.com/o/r/-/merge_requests/new?merge_request%5Bsource_branch%5D=wip", gl);
+
+    const bb = try pullRequestUrl(a, "https://bitbucket.org/o/r", "wip");
+    defer a.free(bb);
+    try std.testing.expectEqualStrings("https://bitbucket.org/o/r/pull-requests/new?source=wip", bb);
 }
