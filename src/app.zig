@@ -1909,6 +1909,9 @@ pub const App = struct {
     filter_history_index: ?usize = null,
     input_buffer: std.ArrayList(u8) = .empty,
     text_prompt_kind: ?TextPromptKind = null,
+    // An unfinished new-branch name kept when the prompt is cancelled, so `n`
+    // restores it; cleared once a branch is actually created. Owned.
+    new_branch_draft: []u8 = &.{},
     // Holds the remote name between the two-step add-remote prompt (name → URL)
     // and the remote acted on by edit/remove. No allocation needed.
     remote_name_buf: [128]u8 = undefined,
@@ -2114,6 +2117,7 @@ pub const App = struct {
         self.patch_line_sel.deinit(self.allocator);
         self.allocator.free(self.patch_work_included);
         self.input_buffer.deinit(self.allocator);
+        self.allocator.free(self.new_branch_draft);
         self.preview_cache.deinit(self.allocator);
         self.allocator.free(self.preview_desired_key);
         self.allocator.free(self.preview_inflight_key);
@@ -5078,6 +5082,7 @@ pub const App = struct {
             .new_branch => {
                 if (self.branches_tab != .local) self.branches_tab = .local;
                 self.focus = .branches;
+                prefill = self.new_branch_draft; // restore an unfinished name
             },
             // Checking out by name lands on a local branch (or creates a
             // detached HEAD for a tag/commit), so anchor the panel on Local.
@@ -5272,10 +5277,24 @@ pub const App = struct {
     }
 
     fn cancelTextPrompt(self: *App, comptime reason: []const u8) void {
+        // Keep an unfinished new-branch name so reopening `n` restores it.
+        if (self.text_prompt_kind == .new_branch) self.saveNewBranchDraft();
         self.mode = .normal;
         self.text_prompt_kind = null;
         self.input_buffer.clearRetainingCapacity();
         self.setMessage(reason, .{}) catch {};
+    }
+
+    fn saveNewBranchDraft(self: *App) void {
+        const text = std.mem.trim(u8, self.input_buffer.items, " \t\r\n");
+        const dup = self.allocator.dupe(u8, text) catch return;
+        self.allocator.free(self.new_branch_draft);
+        self.new_branch_draft = dup;
+    }
+
+    fn clearNewBranchDraft(self: *App) void {
+        self.allocator.free(self.new_branch_draft);
+        self.new_branch_draft = &.{};
     }
 
     /// True once a username and password/token have been entered this session.
@@ -5337,6 +5356,7 @@ pub const App = struct {
                 self.mode = .normal;
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
+                self.clearNewBranchDraft(); // created -> forget the draft
                 return self.runMutationScoped(result, Refresh.branches, "created branch {s}", .{value});
             },
             // New branch at the selected reflog entry's commit (recovery).
@@ -7705,6 +7725,27 @@ test "cherry-pick clipboard toggles copied commits" {
     try std.testing.expectEqual(@as(usize, 1), app.copied_commits.items.len);
 }
 
+test "new-branch prompt remembers a cancelled name and forgets it on create" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // Type a partial name, then cancel: the draft is kept (trimmed).
+    try app.startTextPrompt(.new_branch);
+    try app.input_buffer.appendSlice(allocator, "feature/wip");
+    app.cancelTextPrompt("cancelled");
+    try std.testing.expectEqualStrings("feature/wip", app.new_branch_draft);
+
+    // Reopening restores it into the input buffer.
+    try app.startTextPrompt(.new_branch);
+    try std.testing.expectEqualStrings("feature/wip", app.input_buffer.items);
+
+    // On a successful create the confirm path calls clearNewBranchDraft.
+    app.clearNewBranchDraft();
+    try std.testing.expectEqual(@as(usize, 0), app.new_branch_draft.len);
+}
+
 test "add-remote prompt stashes the name and asks for the URL" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -9516,6 +9557,7 @@ fn deinitTestApp(app: *App) void {
     if (app.fetch_remote_name) |r| app.allocator.free(r);
     app.clearLockRecovery();
     app.input_buffer.deinit(app.allocator);
+    app.allocator.free(app.new_branch_draft);
     if (app.staging) |*parsed| parsed.deinit(app.allocator);
     app.allocator.free(app.staging_diff);
     app.allocator.free(app.staging_other_diff);
