@@ -57,8 +57,10 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
   initialized submodule, re-roots the whole app onto that repository; the Status
   panel shows a `parent / current` breadcrumb and `esc` walks back out to the
   parent repo.
-- Branch workflows: new, rename, delete, merge, rebase, fast-forward,
-  remote/tag checkout, checkout-by-name (`c`).
+- Branch workflows (local tab): new, rename, delete, merge, rebase,
+  fast-forward, remote/tag checkout, checkout-by-name (`c`), reset to a branch
+  (`g`), force-checkout (`F`), tag a branch (`T`), move its commits onto a new
+  branch (`N`), open the pull request page (`G`), and a sort-order menu (`s`).
 - Tag actions (Tags tab): checkout (`space`, detached), create (`n` — then an
   optional message: empty makes a lightweight tag, a message makes an annotated
   one; an existing name prompts to overwrite with `--force`), push to a remote
@@ -104,7 +106,11 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 - Remote management (Branches panel, Remotes tab): add (`n`), edit URL (`e`),
   remove (`x`), and set the current branch's upstream (`u`).
 - Stash menu (`s` in the Files panel): stash all, including untracked,
-  staged-only, or just the selected file — plus apply/pop/drop on the Stash panel.
+  staged-only, or just the selected file — plus apply/pop/drop/rename (`r`) on the
+  Stash panel.
+- More Files-panel actions: add a file to `.gitignore` (`i`), commit skipping
+  hooks (`w`, `--no-verify`), copy a file's path (`y`), and find the base commit
+  for the staged change and make a `fixup!` for it (`ctrl+f`, via blame).
 - lazygit-style action feedback: fast actions (stage, checkout, commit, reset,
   stash apply/pop/drop, …) succeed silently with a one-line summary in the
   bottom bar; only failures pop a dialog. Slow / multi-step actions (merge,
@@ -225,6 +231,9 @@ Useful keys:
 - `d`: delete the selected local branch (menu: delete / force delete)
 - `M`: merge the selected branch into the current branch (after confirmation)
 - `r`: rebase the current branch onto the selected branch (after confirmation)
+- `g`/`F` (Branches Local): reset to the branch / force-checkout (discards changes)
+- `T`/`N` (Branches Local): tag the branch / move its commits onto a new branch
+- `G`/`s` (Branches Local): open the pull request page / branch sort-order menu
 - `space` on the Remotes/Tags tab: check out the remote branch or tag
 - `n`/`P`/`g`/`d` (Tags tab): new tag (with optional message) / push the tag to a
   remote / reset onto the tag / delete (local / remote / both menu)
@@ -250,6 +259,9 @@ Useful keys:
 - `d`: open the discard menu for the selected file (all changes, or unstaged only)
 - `D`: discard all working tree changes after confirmation
 - `c`: commit staged changes
+- `w`/`i`/`y`/`ctrl+f` (Files): commit `--no-verify` / add to `.gitignore` / copy
+  the file path / find the fixup base commit and make a `fixup!`
+- `r` (Stash panel): rename the selected stash
 - `e`/`x`/`u` (Remotes tab): edit remote URL / remove remote / set upstream
 - `m`: merge/rebase actions (continue, amend+continue, abort) while in progress
 - `f`: fetch
