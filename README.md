@@ -69,10 +69,19 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
 - Merge/rebase conflict resolution: take ours/theirs on conflicted files and
   continue/abort (`m`); MERGING/REBASING shown in the status panel.
 - Commit workflows: commit, amend (`A`), reset (soft/mixed/hard), revert,
-  cherry-pick copy/paste (`c` copies commits to a clipboard, `v` pastes them
-  onto HEAD), a navigable changed-file list per commit, and interactive rebase
-  actions (drop `d`, squash `s`, fixup `f`, edit `e`, reword `r`,
-  move `ctrl+j`/`ctrl+k`, create `fixup!` commit `F`, autosquash `S`).
+  checkout a commit (`space`, detached), branch from a commit (`n`), move the
+  branch's commits onto a new branch (`N`), tag a commit (`T`), change a commit's
+  author (`a`), cherry-pick copy/paste/clear (`c` copies commits to a clipboard,
+  `v` pastes them onto HEAD, `ctrl+r` clears), a copy-attribute menu (`y`), open
+  the new pull/merge request page (`G`), a navigable changed-file list per commit,
+  and per-commit interactive rebase actions (drop `d`, squash `s`, fixup `f`,
+  edit `e`, reword `r`, move `ctrl+j`/`ctrl+k`, create `fixup!` commit `F`,
+  autosquash `S`).
+- Interactive rebase editor (`i`): compose a plan for the commits down to the
+  selected one — mark each pick/drop/squash/fixup/edit, reorder with
+  `ctrl+j`/`ctrl+k` — then run it as one rebase.
+- Reflog tab recovery: checkout (`space`), reset HEAD to an entry (`g`), or branch
+  from an entry (`n`).
 - Rebase onto a marked base (`B` marks a commit; rebasing a branch then replays
   the marked commit through HEAD onto it via `git rebase --onto`).
 - Mid-rebase amend: when a rebase stops at an `edit` step, the `m` actions menu
@@ -131,6 +140,10 @@ The lazygit-parity feature roadmap is complete. Smaller gaps that remain:
 - Redo (undo is implemented; redo of an undo is not).
 - Moving a custom patch to a *different* commit (only apply / remove-from-commit
   are implemented).
+- Selecting a *range* of commits (e.g. "select commits of the current branch")
+  for a bulk action — ziggity's commit list is single-select today.
+- Rewording a commit in your external `$EDITOR`: ziggity rewords in its own
+  in-app message editor (`r`) instead, which serves the same purpose.
 - Full lazygit config compatibility.
 - Score-based fuzzy ranking (current fuzzy filter matches but preserves order).
 
@@ -217,6 +230,15 @@ Useful keys:
   remote / reset onto the tag / delete (local / remote / both menu)
 - `g`: reset to the selected commit (menu: soft / mixed / hard)
 - `t`: revert the selected commit
+- `space`/`n`/`N` (Commits/Reflog): checkout the commit (detached) / branch from
+  it / move the branch's commits onto a new branch (needs an upstream)
+- `T`/`a` (Commits): tag the selected commit / change its author (reset or set)
+- `y`/`ctrl+r` (Commits/Reflog): copy-attribute menu (hash/subject/author) / clear
+  the cherry-pick selection
+- `i` (Commits): interactive rebase editor (mark pick/drop/squash/fixup/edit,
+  reorder, run)
+- `ctrl+l` (Commits): log display menu (toggle the date / author columns)
+- `G` (Commits): open the new pull/merge request page for the branch
 - `B`: mark the selected commit as the base for a `rebase --onto`
 - `W`: diff the selected commit/branch against another marked ref
 - `/` (Commits panel): filter the log by message / author / path
