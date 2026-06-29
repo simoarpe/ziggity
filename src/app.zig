@@ -1860,6 +1860,14 @@ pub const App = struct {
     commit_graph_sel: usize = 0,
     commit_graph_scroll: usize = 0,
     commit_graph_lines: usize = 0,
+    // The viewport height the renderer last used (so keyboard navigation can keep
+    // the cursor visible), and a one-shot "center the cursor" request set on load.
+    commit_graph_view_h: u16 = 0,
+    commit_graph_recenter: bool = false,
+    // Horizontal pan (H/L) for graphs wider than the dialog, and the widest line
+    // so the renderer can clamp the pan.
+    commit_graph_hscroll: u16 = 0,
+    commit_graph_max_width: usize = 0,
     commit_graph_hash_buf: [64]u8 = undefined,
     // Whether the pending remote-tag delete should also drop the local tag
     // (the "Delete local and remote tag" menu choice).
@@ -3295,12 +3303,9 @@ pub const App = struct {
                 return true;
             },
             .commit_graph => {
-                // Move the cursor (the view scrolls to follow it in the renderer).
-                if (down) {
-                    if (self.commit_graph_lines > 0) self.commit_graph_sel = @min(self.commit_graph_sel + lines, self.commit_graph_lines - 1);
-                } else {
-                    self.commit_graph_sel -|= lines;
-                }
+                // The wheel scrolls the view only; the cursor stays put.
+                const max_scroll = self.commit_graph_lines -| self.commit_graph_view_h;
+                self.commit_graph_scroll = if (down) @min(self.commit_graph_scroll + lines, max_scroll) else self.commit_graph_scroll -| lines;
                 return true;
             },
             else => return false,

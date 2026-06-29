@@ -85,10 +85,13 @@ pub fn complete(app: *App, text: ?[]u8, generation: u64, gpa: std.mem.Allocator)
         app.commit_graph = app.allocator.dupe(u8, t) catch null;
         app.commit_graph_plain = stripAnsi(app.allocator, t) catch null;
         app.commit_graph_lines = countLines(app.commit_graph orelse "");
+        app.commit_graph_max_width = widestLine(app.commit_graph_plain orelse "");
+        app.commit_graph_hscroll = 0;
         // Highlight the row for the commit that was selected (on open, or kept
-        // across a scope toggle).
+        // across a scope toggle), and ask the renderer to center it once.
         app.commit_graph_sel = findTargetRow(app);
         app.commit_graph_scroll = 0;
+        app.commit_graph_recenter = true;
     }
 }
 
@@ -99,18 +102,28 @@ pub fn handleKey(app: *App, key: anytype) !void {
     const lines = app.commit_graph_lines;
     if (km.up.matches(key) or key.matches(up_key, .{})) {
         app.commit_graph_sel -|= 1;
-        return;
+        return ensureCursorVisible(app);
     }
     if (km.down.matches(key) or key.matches(down_key, .{})) {
         if (lines > 0 and app.commit_graph_sel + 1 < lines) app.commit_graph_sel += 1;
-        return;
+        return ensureCursorVisible(app);
     }
     if (key.matches(pgup_key, .{})) {
         app.commit_graph_sel -|= 10;
-        return;
+        return ensureCursorVisible(app);
     }
     if (key.matches(pgdn_key, .{})) {
         if (lines > 0) app.commit_graph_sel = @min(app.commit_graph_sel + 10, lines - 1);
+        return ensureCursorVisible(app);
+    }
+    // H / L pan the graph horizontally when it's wider than the dialog (the
+    // renderer clamps the pan to the content width).
+    if (km.scroll_left.matches(key)) {
+        app.commit_graph_hscroll -|= app_mod.horizontal_scroll_step;
+        return;
+    }
+    if (km.scroll_right.matches(key)) {
+        app.commit_graph_hscroll +|= app_mod.horizontal_scroll_step;
         return;
     }
     // `a` toggles the all-branches / current-branch scope.
@@ -149,6 +162,19 @@ fn cursorHash(app: *App) ?[]const u8 {
 pub fn selectRow(app: *App, line_index: usize) void {
     if (app.commit_graph_lines == 0) return;
     app.commit_graph_sel = @min(line_index, app.commit_graph_lines - 1);
+}
+
+/// After keyboard navigation, scroll the view just enough to keep the cursor
+/// visible. The mouse wheel does NOT call this — wheel scrolls the view freely
+/// and the cursor stays put.
+fn ensureCursorVisible(app: *App) void {
+    const h = app.commit_graph_view_h;
+    if (h == 0) return;
+    if (app.commit_graph_sel < app.commit_graph_scroll) {
+        app.commit_graph_scroll = app.commit_graph_sel;
+    } else if (app.commit_graph_sel >= app.commit_graph_scroll + h) {
+        app.commit_graph_scroll = app.commit_graph_sel - h + 1;
+    }
 }
 
 /// Strip ANSI escape sequences from `s`, preserving visible characters and
@@ -234,6 +260,13 @@ fn findTargetRow(app: *App) usize {
         }
     }
     return 0;
+}
+
+fn widestLine(s: []const u8) usize {
+    var max: usize = 0;
+    var it = std.mem.splitScalar(u8, s, '\n');
+    while (it.next()) |line| max = @max(max, line.len);
+    return max;
 }
 
 fn countLines(s: []const u8) usize {

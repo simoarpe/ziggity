@@ -1002,13 +1002,17 @@ fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
     const w: u16 = root.width -| 4;
     const h: u16 = root.height -| 2;
-    const scope = if (app.commit_graph_all) "all branches" else "current branch";
-    var title_buf: [48]u8 = undefined;
-    const title = std.fmt.bufPrint(&title_buf, "Commit graph - {s}", .{scope}) catch "Commit graph";
+    var title_buf: [96]u8 = undefined;
+    const title = if (app.commit_graph_all)
+        "Commit graph - all branches"
+    else if (app.data.current_branch.len > 0)
+        (std.fmt.bufPrint(&title_buf, "Commit graph - {s} (current branch)", .{app.data.current_branch}) catch "Commit graph - current branch")
+    else
+        "Commit graph - current branch (detached)";
     const win = popup(root, w, h, title, null);
 
     const footer_row: u16 = win.height -| 1;
-    print(win, footer_row, 0, "j/k move  a all/current  ^o copy hash  enter jump  esc close", st.bottom_accent);
+    print(win, footer_row, 0, "j/k move  H/L pan  a all/current  ^o copy hash  enter jump  esc close", st.bottom_accent);
 
     if (app.commit_graph_loading or app.commit_graph == null) {
         var sbuf: [48]u8 = undefined;
@@ -1022,12 +1026,21 @@ fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
     const avail: usize = footer_row; // content rows above the footer
     if (avail == 0) return;
 
-    // Keep the cursor row visible.
-    if (app.commit_graph_sel < app.commit_graph_scroll) {
-        app.commit_graph_scroll = app.commit_graph_sel;
-    } else if (app.commit_graph_sel >= app.commit_graph_scroll + avail) {
-        app.commit_graph_scroll = app.commit_graph_sel - avail + 1;
+    app.commit_graph_view_h = @intCast(avail);
+    const max_scroll = app.commit_graph_lines -| avail;
+    // On open / scope toggle, center the cursor row once. Otherwise leave the
+    // scroll where the user (keyboard or wheel) put it.
+    if (app.commit_graph_recenter) {
+        app.commit_graph_scroll = if (app.commit_graph_sel > avail / 2) app.commit_graph_sel - avail / 2 else 0;
+        app.commit_graph_recenter = false;
     }
+    if (app.commit_graph_scroll > max_scroll) app.commit_graph_scroll = max_scroll;
+
+    // Clamp the horizontal pan to the widest line.
+    const content_w: usize = win.width;
+    const max_hscroll: u16 = @intCast(app.commit_graph_max_width -| content_w);
+    if (app.commit_graph_hscroll > max_hscroll) app.commit_graph_hscroll = max_hscroll;
+    const h_off = app.commit_graph_hscroll;
 
     // Register the visible rows (ANSI-stripped) for mouse selection/copy.
     const px0: u16 = (root.width - w) / 2;
@@ -1053,8 +1066,9 @@ fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
         const lo: u16 = if (sel) |s| s.lo else 0;
         const hi: u16 = if (sel) |s| s.hi else 0;
         // The graph carries git's own ANSI colours; printAnsi renders them over
-        // the (possibly selected) background, with the drag-selection span lit.
-        printAnsi(win, row, line, base, lo, hi, 0);
+        // the (possibly selected) background, with the drag-selection span lit
+        // and the horizontal pan applied.
+        printAnsi(win, row, line, base, lo, hi, h_off);
         row += 1;
     }
     drawScrollbarRange(root, px0 + w - 1, py0 + 1, avail, app.commit_graph_lines, app.commit_graph_scroll, true);
@@ -1154,7 +1168,8 @@ const help_lines = [_][]const u8{
     "                 enter opens that file to pick individual lines,",
     "                 e opens the file in your editor",
     "  ctrl+p         custom patch menu (apply / remove from commit / reset)",
-    "  ctrl+l         commit graph viewer (a/enter/esc = scope / jump / close)",
+    "  ctrl+l         commit graph viewer (j/k move, H/L pan, a scope, ^o copy,",
+    "                 enter jump, esc close; wheel scrolls, drag selects)",
     "  ctrl+j/ctrl+k  move commit down / up",
     "  i              interactive rebase: a plan editor for the commits down to",
     "                 the selected one. p/d/s/f/e mark pick/drop/squash/fixup/edit,",
