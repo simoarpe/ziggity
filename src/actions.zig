@@ -27,6 +27,7 @@ pub const Action = enum {
     start_commit,
     amend_commit,
     cherry_pick,
+    reset_cherry_pick,
     conflict_menu,
     command_log,
     help,
@@ -288,6 +289,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
             if (keymap.commit_mark_base.matches(key)) return .mark_base;
             if (keymap.bisect.matches(key)) return .bisect_menu;
             if (keymap.cherry_pick.matches(key)) return .cherry_pick;
+            if (keymap.reset_cherry_pick.matches(key)) return .reset_cherry_pick;
         },
         .stash => {
             if (keymap.stash_apply.matches(key)) return .select;

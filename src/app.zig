@@ -2676,6 +2676,15 @@ pub const App = struct {
             .start_commit => try commits_mod.startCommitPrompt(self),
             .amend_commit => try commits_mod.amendLastCommit(self),
             .cherry_pick => try self.toggleCommitCopy(),
+            .reset_cherry_pick => {
+                if (self.copied_commits.items.len == 0) {
+                    try self.setMessage("no copied commits to clear", .{});
+                } else {
+                    const n = self.copied_commits.items.len;
+                    self.clearCopiedCommits();
+                    try self.setMessage("cleared {d} copied commit(s)", .{n});
+                }
+            },
             .new_branch => try branches_mod.startNewForBranchTab(self),
             .checkout_by_name => try self.startTextPrompt(.checkout_by_name),
             .delete_branch => try branches_mod.startDeleteForBranchTab(self),
