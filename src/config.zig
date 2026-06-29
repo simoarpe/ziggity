@@ -201,6 +201,7 @@ pub const ConfirmSkips = struct {
     delete_tag: bool = false,
     force_tag: bool = false,
     force_checkout: bool = false,
+    checkout_ref: bool = false,
     delete_remote_branch: bool = false,
     remove_worktree: bool = false,
     remove_submodule: bool = false,

@@ -1012,7 +1012,7 @@ fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
     const win = popup(root, w, h, title, null);
 
     const footer_row: u16 = win.height -| 1;
-    print(win, footer_row, 0, "j/k move  H/L pan  a all/current  ^o copy hash  enter jump  esc close", st.bottom_accent);
+    print(win, footer_row, 0, "j/k move  H/L pan  a all/current  ^o copy hash  enter go-to  esc close", st.bottom_accent);
 
     if (app.commit_graph_loading or app.commit_graph == null) {
         var sbuf: [48]u8 = undefined;
@@ -1569,6 +1569,7 @@ fn drawConfirmPopup(root: vaxis.Window, app: *app_mod.App) void {
         .delete_tag => "Delete tag",
         .force_tag => "Overwrite tag",
         .force_checkout => "Force checkout",
+        .checkout_ref => "Checkout",
         .delete_remote_branch => "Delete remote branch",
         .remove_worktree => "Remove worktree",
         .remove_submodule => "Remove submodule",

@@ -255,8 +255,10 @@ Useful keys:
   a cancellable spinner; `j`/`k` move the cursor, `H`/`L` pan a wide graph,
   `a` toggles current-branch / all-branches (keeping the cursor on the same
   commit and naming the branch in the title), `ctrl+o` copies the cursor commit's
-  hash, `enter` jumps the panel selection to the row, `esc` closes. The mouse
-  wheel scrolls the view, drag selects/copies text, and a click moves the cursor
+  hash, `enter` goes to the commit (moves the Commits-panel selection if it's on
+  the current branch, otherwise asks to check out the branch — or the commit,
+  detached), `esc` closes. The mouse wheel scrolls the view, drag selects/copies
+  text, and a click moves the cursor
 - `G` (Commits): open the new pull/merge request page for the branch
 - `B`: mark the selected commit as the base for a `rebase --onto`
 - `W`: diff the selected commit/branch against another marked ref

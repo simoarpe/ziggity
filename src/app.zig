@@ -169,6 +169,8 @@ pub const Confirmation = enum {
     force_tag,
     /// Offered before a force-checkout, which discards uncommitted changes.
     force_checkout,
+    /// Offered before checking out a commit/branch picked in the graph viewer.
+    checkout_ref,
     delete_remote_branch,
     remove_worktree,
     remove_submodule,
@@ -1869,6 +1871,10 @@ pub const App = struct {
     commit_graph_hscroll: u16 = 0,
     commit_graph_max_width: usize = 0,
     commit_graph_hash_buf: [64]u8 = undefined,
+    // The ref a graph `enter` will check out (a branch name or commit hash),
+    // pending the confirmation; owned.
+    graph_checkout_ref: []u8 = &.{},
+    graph_checkout_is_branch: bool = false,
     // Whether the pending remote-tag delete should also drop the local tag
     // (the "Delete local and remote tag" menu choice).
     tag_delete_also_local: bool = false,
@@ -4518,6 +4524,12 @@ pub const App = struct {
                 }
                 break :blk "Force checkout, discarding uncommitted changes?";
             },
+            .checkout_ref => blk: {
+                if (self.graph_checkout_is_branch) {
+                    break :blk std.fmt.bufPrint(buf, "Check out branch {s}?", .{self.graph_checkout_ref}) catch "Check out the selected branch?";
+                }
+                break :blk std.fmt.bufPrint(buf, "Check out {s}? This detaches HEAD.", .{self.graph_checkout_ref}) catch "Check out the selected commit (detached HEAD)?";
+            },
             .delete_remote_branch => blk: {
                 if (self.selectedRemoteBranch()) |branch| {
                     break :blk std.fmt.bufPrint(buf, "Delete remote branch {s}? This pushes a deletion.", .{branch.name}) catch "Delete the selected remote branch?";
@@ -6176,6 +6188,11 @@ pub const App = struct {
                     return;
                 };
                 return self.runMutationScoped(try self.git.forceCheckout(branch.name), Refresh.checkout, "force-checked out {s}", .{branch.name});
+            },
+            .checkout_ref => {
+                const ref = self.graph_checkout_ref;
+                if (ref.len == 0) return;
+                return self.requestMutation(.{ .checkout = ref }, .{ .gerund = "checking out", .command = "git checkout", .refresh = Refresh.checkout }, "checked out {s}", .{ref});
             },
             .delete_remote_branch => {
                 const branch = self.selectedRemoteBranch() orelse {

@@ -198,15 +198,21 @@ fn stripAnsi(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
     return allocator.realloc(out, n);
 }
 
-/// enter: resolve the commit on the cursor row and select it in the Commits panel.
+/// enter on a commit:
+///   - on the current branch  -> move the Commits-panel selection to it (no
+///     side effect);
+///   - on another branch       -> confirm a checkout of that branch (if the
+///     commit is a branch tip) or a detached checkout of the commit.
 fn jumpToSelected(app: *App) !void {
     const graph = app.commit_graph orelse return close(app);
-    const line = nthLine(graph, app.commit_graph_sel) orelse return close(app);
+    const plain = app.commit_graph_plain orelse graph;
+    const line = nthLine(plain, app.commit_graph_sel) orelse return close(app);
     var buf: [64]u8 = undefined;
     const hash = firstHash(line, &buf) orelse {
         try app.setMessage("no commit on that row", .{});
         return;
     };
+    // A commit in the current branch's log: pure navigation, no prompt.
     for (app.data.commits, 0..) |c, i| {
         if (std.mem.startsWith(u8, c.short_hash, hash) or std.mem.startsWith(u8, c.hash, hash)) {
             app.commit_index = i;
@@ -216,8 +222,34 @@ fn jumpToSelected(app: *App) !void {
             return;
         }
     }
-    // Not in the loaded window; just close on the commit.
-    close(app);
+    // Off-branch: confirm a checkout. Prefer a local branch the commit tips.
+    const is_branch = firstLocalBranch(line) != null;
+    const ref = firstLocalBranch(line) orelse hash;
+    app.allocator.free(app.graph_checkout_ref);
+    app.graph_checkout_ref = try app.allocator.dupe(u8, ref);
+    app.graph_checkout_is_branch = is_branch;
+    close(app); // leave the viewer before showing the confirmation
+    if (is_branch) {
+        return app.requestConfirmation(.checkout_ref, "check out branch {s}?", .{ref});
+    }
+    return app.requestConfirmation(.checkout_ref, "check out {s}? (detaches HEAD)", .{ref});
+}
+
+/// The first local branch name in a graph row's `(decoration)`, or null. Skips
+/// `HEAD`, `tag:` entries, and remote-tracking refs (those containing `/`).
+fn firstLocalBranch(line: []const u8) ?[]const u8 {
+    const open_paren = std.mem.indexOfScalar(u8, line, '(') orelse return null;
+    const close_paren = std.mem.indexOfScalarPos(u8, line, open_paren, ')') orelse return null;
+    var it = std.mem.splitScalar(u8, line[open_paren + 1 .. close_paren], ',');
+    while (it.next()) |raw| {
+        const ref = std.mem.trim(u8, raw, " \t");
+        if (ref.len == 0) continue;
+        if (std.mem.startsWith(u8, ref, "tag:")) continue;
+        if (std.mem.startsWith(u8, ref, "HEAD")) continue;
+        if (std.mem.indexOfScalar(u8, ref, '/') != null) continue; // remote-tracking
+        return ref;
+    }
+    return null;
 }
 
 pub fn close(app: *App) void {
@@ -245,6 +277,8 @@ pub fn deinit(app: *App) void {
     freeGraph(app);
     app.allocator.free(app.commit_graph_target);
     app.commit_graph_target = &.{};
+    app.allocator.free(app.graph_checkout_ref);
+    app.graph_checkout_ref = &.{};
 }
 
 fn findTargetRow(app: *App) usize {
@@ -356,6 +390,14 @@ test "firstHash ignores ANSI colour codes" {
     var buf: [64]u8 = undefined;
     const line = "\x1b[31m*\x1b[m \x1b[33mfeedface\x1b[m subject";
     try std.testing.expectEqualStrings("feedface", firstHash(line, &buf).?);
+}
+
+test "firstLocalBranch picks a checkoutable local branch from the decoration" {
+    try std.testing.expectEqualStrings("feature", firstLocalBranch("* abc1234 (feature) subject").?);
+    // Skips HEAD, tags and remote-tracking refs.
+    try std.testing.expectEqualStrings("dev", firstLocalBranch("* abc1234 (HEAD -> main, origin/main, tag: v1, dev) subj").?);
+    try std.testing.expect(firstLocalBranch("* abc1234 (origin/main, tag: v1) subj") == null);
+    try std.testing.expect(firstLocalBranch("* abc1234 plain subject, no parens") == null);
 }
 
 test "countLines counts rows with and without a trailing newline" {
