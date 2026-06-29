@@ -6,6 +6,7 @@ const branches_mod = @import("branches.zig");
 const stash_mod = @import("stash.zig");
 const commits_mod = @import("commits.zig");
 const commitops_mod = @import("commitops.zig");
+const rebaseplan_mod = @import("rebaseplan.zig");
 const config_mod = @import("config.zig");
 const diffmode_mod = @import("diffmode.zig");
 const credentials_mod = @import("credentials.zig");
@@ -31,6 +32,7 @@ pub const Mode = enum {
     command_log,
     help,
     operation,
+    rebase_plan,
 };
 
 /// Environment variable names for the credential bridge. When the user has
@@ -1810,6 +1812,12 @@ pub const App = struct {
     // commit (Commits tab `T`), or empty to tag HEAD (Tags tab `n`).
     tag_target_buf: [64]u8 = undefined,
     tag_target_len: usize = 0,
+    // The interactive-rebase editor (`i`): an owned, newest-first plan of
+    // commits with their actions, the parent of the oldest one as the rebase
+    // base, and the cursor. Non-null only while `mode == .rebase_plan`.
+    rebase_plan: ?[]rebaseplan_mod.Entry = null,
+    rebase_plan_base: []u8 = &.{},
+    rebase_plan_index: usize = 0,
     // Whether the pending remote-tag delete should also drop the local tag
     // (the "Delete local and remote tag" menu choice).
     tag_delete_also_local: bool = false,
@@ -2007,6 +2015,7 @@ pub const App = struct {
     pub fn deinit(self: *App) void {
         staging_mod.clearStagePending(self);
         self.stage_pending.deinit(self.allocator);
+        rebaseplan_mod.free(self);
         self.data.deinit(self.allocator);
         model.deinitCommitFiles(self.allocator, self.commit_files);
         model.deinitCommitFiles(self.allocator, self.branch_files);
@@ -2353,6 +2362,10 @@ pub const App = struct {
         }
         if (self.mode == .menu) {
             try self.handleMenuKey(key);
+            return;
+        }
+        if (self.mode == .rebase_plan) {
+            try rebaseplan_mod.handleKey(self, key);
             return;
         }
         if (self.mode == .text_prompt) {
@@ -2713,6 +2726,7 @@ pub const App = struct {
             .tag_commit => try self.startTagAtCommit(),
             .open_pull_request => try diffmode_mod.openPullRequest(self),
             .move_to_new_branch => try self.startMoveCommitsToNewBranch(),
+            .interactive_rebase => try rebaseplan_mod.start(self),
             .copy_commit_attr => {
                 if (self.selectedCommit() == null) {
                     try self.setMessage("no commit selected", .{});
@@ -3976,6 +3990,7 @@ pub const App = struct {
 
         drills_mod.deactivateBranchCommits(self); // frees branch commits + files, clears branch tree
         drills_mod.deactivateCommitFiles(self); // frees commit files, clears commit tree
+        rebaseplan_mod.free(self); // frees any in-progress interactive-rebase plan
         a.free(self.branch_commits_ref);
         self.branch_commits_ref = &.{};
 
@@ -7572,6 +7587,36 @@ test "new-tag prompt chains to an optional message, then creates an annotated ta
     try std.testing.expectEqualStrings("first release", m.create_tag.message);
     try std.testing.expect(!m.create_tag.force);
     try std.testing.expectEqual(@as(usize, 0), m.create_tag.target.len); // HEAD
+}
+
+test "i builds an interactive-rebase plan from HEAD down to the selected commit" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), .short_hash = @constCast("aaaaaaa"), .author = @constCast("S"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("newest") },
+        .{ .hash = @constCast("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), .short_hash = @constCast("bbbbbbb"), .author = @constCast("S"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("middle") },
+        .{ .hash = @constCast("cccccccccccccccccccccccccccccccccccccccc"), .short_hash = @constCast("ccccccc"), .author = @constCast("S"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("oldest") },
+    };
+    app.data.commits = &commits;
+    app.commits_tab = .commits;
+    app.commit_index = 1; // select the middle commit
+
+    try rebaseplan_mod.start(&app);
+    try std.testing.expectEqual(Mode.rebase_plan, app.mode);
+    // Plan covers HEAD (index 0) down to the selected commit (index 1): 2 entries.
+    try std.testing.expectEqual(@as(usize, 2), app.rebase_plan.?.len);
+    try std.testing.expectEqualStrings("aaaaaaa", app.rebase_plan.?[0].short_hash);
+    try std.testing.expectEqualStrings("bbbbbbb", app.rebase_plan.?[1].short_hash);
+    // Base is the parent of the oldest commit in the plan (the selected one).
+    try std.testing.expectEqualStrings("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", app.rebase_plan_base);
+    for (app.rebase_plan.?) |e| try std.testing.expectEqual(rebaseplan_mod.Action.pick, e.action);
+
+    rebaseplan_mod.cancel(&app);
+    try std.testing.expectEqual(Mode.normal, app.mode);
+    try std.testing.expect(app.rebase_plan == null);
 }
 
 test "a amends the selected commit's author via a rebase exec todo" {

@@ -842,7 +842,9 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     y += branches_h;
     {
         const commits_tabs = [_][]const u8{ "Commits", "Reflog" };
-        const w = if (app.commitsFilesActive()) blk: {
+        const w = if (app.mode == .rebase_plan) blk: {
+            break :blk panel(root, 0, y, side_w, commits_h, "[4] Interactive rebase (enter run, esc cancel)", app.focus == .commits, listScrollInfo(app, .commits));
+        } else if (app.commitsFilesActive()) blk: {
             const t = if (patch_mod.commitFilesPatchCount(app) > 0)
                 (std.fmt.bufPrint(&app.commits_title_buf, "[4] Commit files (patch: {d}) (esc back)", .{patch_mod.commitFilesPatchCount(app)}) catch "[4] Commit files (esc back)")
             else
@@ -1012,6 +1014,9 @@ const help_lines = [_][]const u8{
     "                 e opens the file in your editor",
     "  ctrl+p         custom patch menu (apply / remove from commit / reset)",
     "  ctrl+j/ctrl+k  move commit down / up",
+    "  i              interactive rebase: a plan editor for the commits down to",
+    "                 the selected one. p/d/s/f/e mark pick/drop/squash/fixup/edit,",
+    "                 ctrl+j/ctrl+k reorder, enter runs it, esc cancels.",
     "  Reflog tab     a recovery view of where HEAD has been:",
     "                 space checkout the entry (detached), g reset HEAD to it,",
     "                 n new branch at it, c/v copy/paste, o browser, W diff.",
@@ -2072,7 +2077,41 @@ fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const m
     }
 }
 
+fn drawRebasePlan(win: vaxis.Window, app: *const app_mod.App) void {
+    const plan = app.rebase_plan orelse return;
+    const start = app.listScroll(.commits);
+    var row: u16 = 0;
+    var idx = start;
+    while (idx < plan.len and row < win.height) : ({
+        idx += 1;
+        row += 1;
+    }) {
+        const e = plan[idx];
+        var base = styles().normal;
+        const sel = selOf(idx == app.rebase_plan_index, app.focus == .commits);
+        applySel(&base, sel);
+        if (sel != .none) fillRow(win, row, base);
+        // The action label is coloured by kind: drop dim, squash/fixup warning,
+        // edit accent, pick normal. The hash stays the log yellow.
+        const act = e.action;
+        const act_fg: u8 = switch (act) {
+            .pick => ui_theme.added,
+            .drop => ui_theme.removed,
+            .squash, .fixup => ui_theme.warning,
+            .edit => ui_theme.accent,
+        };
+        var buf: [16]u8 = undefined;
+        const head = std.fmt.bufPrint(&buf, "{s} ", .{act.label()}) catch "";
+        var col = printSpan(win, row, 0, head, withFg(base, act_fg));
+        col = printSpan(win, row, col, e.short_hash, withFg(base, ui_theme.hash));
+        col = printSpan(win, row, col, " ", base);
+        _ = printSpan(win, row, col, e.subject, base);
+    }
+}
+
 fn drawCommits(win: vaxis.Window, app: *const app_mod.App) void {
+    // The interactive-rebase editor takes over the Commits panel while active.
+    if (app.mode == .rebase_plan) return drawRebasePlan(win, app);
     // The Commits panel's own commit-files drill (not the Branches one).
     if (app.commitsFilesActive()) {
         const patch_active = patch_mod.commitFilesPatchCount(app) > 0;
@@ -2324,6 +2363,8 @@ const FooterCtx = struct {
     commits_files: bool = false,
     /// Commits panel showing the Reflog tab (vs the commit log).
     reflog: bool = false,
+    /// The interactive-rebase plan editor is open.
+    rebase_plan: bool = false,
     /// Branches panel drilled into a branch's commit list.
     branch_commits: bool = false,
     /// Within the Branches drill, showing a commit's file list (vs the commits).
@@ -2340,6 +2381,9 @@ const FooterCtx = struct {
 fn footerHints(c: FooterCtx) []const u8 {
     const global = "  @ log  ? help  z undo  R refresh  q quit";
     const global_branches = "  @ log  ? help  z undo  q quit";
+    if (c.rebase_plan) {
+        return "j/k move  p pick  d drop  s squash  f fixup  e edit  ^j/^k reorder  enter run  esc cancel";
+    }
     if (c.staging_patch) {
         return "j/k line  v range  space add/remove line (@@=hunk)  ^p patch  e edit  esc back" ++ global;
     }
@@ -2410,6 +2454,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
         .staging = app.staging_active,
         .commits_files = app.commitsFilesActive(),
         .reflog = app.commits_tab == .reflog,
+        .rebase_plan = app.mode == .rebase_plan,
         .branch_commits = app.branch_commits_active,
         .branch_files = app.branchFilesActive(),
         .conflict = app.data.state != .clean,
