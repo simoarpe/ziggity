@@ -1017,6 +1017,11 @@ pub const Git = struct {
         return self.exec(&.{ "checkout", branch_name });
     }
 
+    /// Force-checkout a branch, discarding uncommitted changes (`checkout -f`).
+    pub fn forceCheckout(self: *Git, branch_name: []const u8) !ExecResult {
+        return self.exec(&.{ "checkout", "-f", branch_name });
+    }
+
     /// Create a new branch from HEAD and switch to it.
     pub fn createBranch(self: *Git, name: []const u8) !ExecResult {
         return self.exec(&.{ "checkout", "-b", name });

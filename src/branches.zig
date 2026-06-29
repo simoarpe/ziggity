@@ -49,6 +49,19 @@ pub fn startRemoveRemote(self: *App) !void {
     return self.requestConfirmation(.remove_remote, "confirm remove remote {s}", .{remote.name});
 }
 
+/// `F` on a local branch: force-checkout it, discarding uncommitted changes.
+pub fn forceCheckoutSelectedBranch(self: *App) !void {
+    const branch = self.selectedBranch() orelse {
+        try self.setMessage("no branch selected", .{});
+        return;
+    };
+    if (branch.current) {
+        try self.setMessage("already on {s}", .{branch.name});
+        return;
+    }
+    return self.requestConfirmation(.force_checkout, "force checkout {s}? (discards changes)", .{branch.name});
+}
+
 pub fn setUpstreamToSelected(self: *App) !void {
     if (self.branches_tab != .remotes) {
         try self.setMessage("select a remote branch (Remotes tab) to track", .{});

@@ -77,12 +77,25 @@ pub fn openSelectionInBrowser(app: *App) !void {
     try app.setMessage("opening {s}", .{url});
 }
 
-/// `G`: open the host's "create pull/merge request" page for the current
-/// branch in the browser. No forge API is needed — it's a plain compare URL.
+/// `G` on the Commits tab: open a pull request for the current branch.
 pub fn openPullRequest(app: *App) !void {
-    const branch = app.data.current_branch;
+    return openPrForBranch(app, app.data.current_branch);
+}
+
+/// `G` on the local Branches tab: open a pull request for the selected branch.
+pub fn openPullRequestForBranch(app: *App) !void {
+    const branch = app.selectedBranch() orelse {
+        try app.setMessage("no branch selected", .{});
+        return;
+    };
+    return openPrForBranch(app, branch.name);
+}
+
+/// Open the host's "create pull/merge request" page for `branch` in the browser.
+/// No forge API is needed — it's a plain compare URL.
+fn openPrForBranch(app: *App, branch: []const u8) !void {
     if (branch.len == 0) {
-        try app.setMessage("no current branch to open a pull request for", .{});
+        try app.setMessage("no branch to open a pull request for", .{});
         return;
     }
     const remote = currentRemoteName(app);

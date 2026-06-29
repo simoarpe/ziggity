@@ -162,6 +162,8 @@ pub const Confirmation = enum {
     /// Offered when creating a tag whose name already exists locally; confirming
     /// re-creates it with `--force`.
     force_tag,
+    /// Offered before a force-checkout, which discards uncommitted changes.
+    force_checkout,
     delete_remote_branch,
     remove_worktree,
     remove_submodule,
@@ -464,6 +466,16 @@ pub const MenuAction = enum {
     set_commit_author,
     toggle_log_dates,
     toggle_log_author,
+    sort_branches_date,
+    sort_branches_recency,
+    sort_branches_alpha,
+};
+
+/// The `s` branch-sort menu on the local Branches tab.
+pub const branch_sort_menu = [_]MenuItem{
+    .{ .label = "Sort by date (newest first)", .action = .sort_branches_date },
+    .{ .label = "Sort by recency (recently checked out)", .action = .sort_branches_recency },
+    .{ .label = "Sort alphabetically", .action = .sort_branches_alpha },
 };
 
 /// The `ctrl+l` commit-log display menu.
@@ -2535,6 +2547,18 @@ pub const App = struct {
             if (km.reset.matches(key)) return self.openTagResetMenu(); // g
             if (km.push.matches(key)) return self.pushSelectedTag(); // P
         }
+        // The local Branches tab adds reset-to-branch (g), tag-at-branch (T),
+        // move-commits (N), open-PR (G), force-checkout (F), and the sort menu (s)
+        // on top of the shared branch keys.
+        if (self.focus == .branches and self.branches_tab == .local and !self.branch_commits_active) {
+            const km = self.config.keymap;
+            if (km.reset.matches(key)) return self.openBranchResetMenu(); // g
+            if (km.tag_commit.matches(key)) return self.startTagAtBranch(); // T
+            if (km.move_to_new_branch.matches(key)) return self.startMoveCommitsToNewBranch(); // N
+            if (km.open_pull_request.matches(key)) return diffmode_mod.openPullRequestForBranch(self); // G
+            if (km.force_checkout.matches(key)) return branches_mod.forceCheckoutSelectedBranch(self); // F
+            if (km.branch_sort.matches(key)) return self.openBranchSortMenu(); // s
+        }
         // Both Commits-panel tabs offer `n` (create a branch at the selected
         // commit). On the Reflog tab this doubles as recovery. (space checkout
         // and g reset route through their shared, tab-aware handlers.)
@@ -3776,6 +3800,38 @@ pub const App = struct {
         try self.setMessage("reset to {s}", .{b.name});
     }
 
+    /// `g` on a local branch: open the soft/mixed/hard reset menu targeting it.
+    pub fn openBranchResetMenu(self: *App) !void {
+        const b = self.selectedBranch() orelse {
+            try self.setMessage("no branch selected", .{});
+            return;
+        };
+        self.mode = .menu;
+        self.active_menu = .{ .title = "Reset to branch", .items = &commit_reset_menu, .index = 0 };
+        try self.setMessage("reset to {s}", .{b.name});
+    }
+
+    /// `T` on a local branch: create a tag at the branch (vs the Tags tab's `n`,
+    /// which tags HEAD). Reuses the tag-creation prompt flow with the branch
+    /// name stashed as the tag target.
+    fn startTagAtBranch(self: *App) !void {
+        const b = self.selectedBranch() orelse {
+            try self.setMessage("no branch selected", .{});
+            return;
+        };
+        const n = @min(b.name.len, self.tag_target_buf.len);
+        @memcpy(self.tag_target_buf[0..n], b.name[0..n]);
+        self.tag_target_len = n;
+        return self.startTextPrompt(.new_tag);
+    }
+
+    /// `s` on the local Branches tab: choose the branch sort order.
+    fn openBranchSortMenu(self: *App) !void {
+        self.mode = .menu;
+        self.active_menu = .{ .title = "Sort branches by", .items = &branch_sort_menu, .index = 0 };
+        try self.setMessage("sort branches", .{});
+    }
+
     /// `g` on a tag: open the soft/mixed/hard reset menu targeting the tag's ref.
     pub fn openTagResetMenu(self: *App) !void {
         const tag = self.selectedTag() orelse {
@@ -4393,6 +4449,12 @@ pub const App = struct {
                 const name = self.remote_name_buf[0..self.remote_name_len];
                 break :blk std.fmt.bufPrint(buf, "Tag {s} already exists. Overwrite it (force)?", .{name}) catch "Overwrite the existing tag (force)?";
             },
+            .force_checkout => blk: {
+                if (self.selectedBranch()) |b| {
+                    break :blk std.fmt.bufPrint(buf, "Force checkout {s}? This discards uncommitted changes.", .{b.name}) catch "Force checkout, discarding uncommitted changes?";
+                }
+                break :blk "Force checkout, discarding uncommitted changes?";
+            },
             .delete_remote_branch => blk: {
                 if (self.selectedRemoteBranch()) |branch| {
                     break :blk std.fmt.bufPrint(buf, "Delete remote branch {s}? This pushes a deletion.", .{branch.name}) catch "Delete the selected remote branch?";
@@ -4954,11 +5016,9 @@ pub const App = struct {
                 prefill = branch.name;
             },
             .new_tag, .new_tag_message => {
-                // Tagging the selected commit (`T`) keeps focus on the Commits
-                // panel; tagging HEAD (`n`) anchors on the Tags tab.
-                if (self.tag_target_len > 0) {
-                    self.focus = .commits;
-                } else {
+                // Tagging a specific ref (`T` on a commit or branch) keeps the
+                // current panel focus; tagging HEAD (`n`) anchors on the Tags tab.
+                if (self.tag_target_len == 0) {
                     if (self.branches_tab != .tags) self.branches_tab = .tags;
                     self.focus = .branches;
                 }
@@ -5659,6 +5719,14 @@ pub const App = struct {
                     };
                     return self.runMutationScoped(try self.git.resetTo(tag.name, mode), Refresh.checkout, "reset to {s}", .{tag.name});
                 }
+                // The local Branches tab resets to the selected branch ref.
+                if (self.focus == .branches and self.branches_tab == .local) {
+                    const b = self.selectedBranch() orelse {
+                        try self.setMessage("no branch selected", .{});
+                        return;
+                    };
+                    return self.runMutationScoped(try self.git.resetTo(b.name, mode), Refresh.checkout, "reset to {s}", .{b.name});
+                }
                 const commit = self.selectedCommit() orelse {
                     try self.setMessage("no commit selected", .{});
                     return;
@@ -5788,6 +5856,18 @@ pub const App = struct {
             .toggle_log_author => {
                 self.log_show_author = !self.log_show_author;
                 try self.setMessage("commit author {s}", .{if (self.log_show_author) "shown" else "hidden"});
+            },
+            .sort_branches_date, .sort_branches_recency, .sort_branches_alpha => {
+                const order: model.BranchSortOrder = switch (action) {
+                    .sort_branches_date => .date,
+                    .sort_branches_recency => .recency,
+                    .sort_branches_alpha => .alphabetical,
+                    else => unreachable,
+                };
+                self.config.branch_sort_order = order;
+                self.git.branch_sort = order;
+                self.refreshViews(Refresh.branches);
+                try self.setMessage("sorted branches by {s}", .{@tagName(order)});
             },
             .copy_commit_hash, .copy_commit_subject, .copy_commit_author => {
                 const commit = self.selectedCommit() orelse {
@@ -6018,6 +6098,13 @@ pub const App = struct {
                 const name = self.remote_name_buf[0..self.remote_name_len];
                 const message = self.tag_message_buf[0..self.tag_message_len];
                 return self.requestMutation(.{ .create_tag = .{ .name = name, .message = message, .force = true, .target = self.tag_target_buf[0..self.tag_target_len] } }, .{ .gerund = "creating tag", .command = "git tag -f", .refresh = Refresh.tags }, "created tag {s}", .{name});
+            },
+            .force_checkout => {
+                const branch = self.selectedBranch() orelse {
+                    try self.setMessage("no branch selected", .{});
+                    return;
+                };
+                return self.runMutationScoped(try self.git.forceCheckout(branch.name), Refresh.checkout, "force-checked out {s}", .{branch.name});
             },
             .delete_remote_branch => {
                 const branch = self.selectedRemoteBranch() orelse {
@@ -7729,6 +7816,43 @@ test "N moves the current branch's commits onto a new branch" {
     app.mode = .normal;
     try app.startMoveCommitsToNewBranch();
     try std.testing.expectEqual(Mode.normal, app.mode); // no prompt opened
+}
+
+test "branch sort menu changes the sort order" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = undefined };
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    try std.testing.expectEqual(model.BranchSortOrder.date, app.config.branch_sort_order);
+    try app.runMenuAction(.sort_branches_alpha);
+    try std.testing.expectEqual(model.BranchSortOrder.alphabetical, app.config.branch_sort_order);
+    try std.testing.expectEqual(model.BranchSortOrder.alphabetical, app.git.branch_sort);
+}
+
+test "T on a local branch tags that branch, not HEAD" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = undefined };
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    var branches = [_]model.Branch{.{ .name = @constCast("feature") }};
+    app.data.branches = &branches;
+    app.branches_tab = .local;
+    app.focus = .branches;
+
+    try app.startTagAtBranch();
+    try std.testing.expectEqual(model.Focus.branches, app.focus); // stays on branches
+    try app.input_buffer.appendSlice(allocator, "v1");
+    try app.submitTextPrompt(); // name -> message step
+    try app.submitTextPrompt(); // empty message -> create
+    try std.testing.expectEqualStrings("feature", app.mutation_requested.?.create_tag.target);
 }
 
 test "T on the commits tab tags the selected commit, not HEAD" {

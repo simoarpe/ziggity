@@ -976,6 +976,9 @@ const help_lines = [_][]const u8{
     "  w              create a worktree checked out at the selected ref",
     "  d              delete branch / tag",
     "  M / r / f      merge / rebase / fast-forward",
+    "  g / F          reset to the branch / force-checkout (discards changes)",
+    "  T / N          tag the branch / move commits onto a new branch",
+    "  G / s          open the pull request page / branch sort menu",
     "",
     "Remotes tab  (two levels: the remotes list, then a remote's branches)",
     "  remotes list   enter/space view branches   n add   e edit (rename+URL)",
@@ -1411,6 +1414,7 @@ fn drawConfirmPopup(root: vaxis.Window, app: *app_mod.App) void {
         .rebase_branch => "Rebase branch",
         .delete_tag => "Delete tag",
         .force_tag => "Overwrite tag",
+        .force_checkout => "Force checkout",
         .delete_remote_branch => "Delete remote branch",
         .remove_worktree => "Remove worktree",
         .remove_submodule => "Remove submodule",
@@ -2422,7 +2426,7 @@ fn footerHints(c: FooterCtx) []const u8 {
     }
     if (c.focus == .branches) {
         return switch (c.branches_tab) {
-            .local => "space checkout  c by-name  n new  R rename  d delete  M merge  r rebase  f ff  w worktree  W diff  [/] tabs" ++ global_branches,
+            .local => "space checkout  c by-name  n new  R rename  d delete  M merge  r rebase  g reset  f ff  F force-co  T tag  N move  G pr  s sort  w worktree  W diff  [/] tabs" ++ global_branches,
             .remotes => if (c.remote_drill)
                 "space checkout  n new-local  M merge  r rebase  g reset  u upstream  d delete  w worktree  W diff  enter commits  esc back" ++ global_branches
             else
