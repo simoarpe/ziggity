@@ -327,6 +327,23 @@ pub const Git = struct {
         return self.output(&.{ "diff", "--no-ext-diff", "--no-color", context_arg, "--", path });
     }
 
+    /// The whole staged (or unstaged) diff with 3 lines of context — used to
+    /// find which commit a change should be fixed up into.
+    pub fn diffForFixup(self: *Git, staged: bool) ![]u8 {
+        if (staged) {
+            return self.output(&.{ "diff", "--staged", "--no-ext-diff", "--no-color", "--unified=3", "--" });
+        }
+        return self.output(&.{ "diff", "--no-ext-diff", "--no-color", "--unified=3", "--" });
+    }
+
+    /// `git blame` the old (HEAD) lines `start..end` of `file`, in porcelain form
+    /// so each line's originating commit hash can be parsed.
+    pub fn blameRange(self: *Git, file: []const u8, start: usize, end: usize) !ExecResult {
+        const range = try std.fmt.allocPrint(self.allocator, "{d},{d}", .{ start, end });
+        defer self.allocator.free(range);
+        return self.exec(&.{ "blame", "-L", range, "--porcelain", "HEAD", "--", file });
+    }
+
     /// Apply a patch to the index. `reverse` unstages (used on the staged
     /// side). The patch is written to a temp file under .git since
     /// `std.process.run` cannot feed stdin.

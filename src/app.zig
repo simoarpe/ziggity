@@ -7,6 +7,7 @@ const stash_mod = @import("stash.zig");
 const commits_mod = @import("commits.zig");
 const commitops_mod = @import("commitops.zig");
 const rebaseplan_mod = @import("rebaseplan.zig");
+const fixupbase_mod = @import("fixupbase.zig");
 const config_mod = @import("config.zig");
 const diffmode_mod = @import("diffmode.zig");
 const credentials_mod = @import("credentials.zig");
@@ -2786,6 +2787,7 @@ pub const App = struct {
                 self.clipboard_request = try self.allocator.dupe(u8, file.path);
                 try self.setMessage("copied to clipboard: {s}", .{file.path});
             },
+            .find_fixup_base => try fixupbase_mod.findBaseAndFixup(self),
             .amend_commit => try commits_mod.amendLastCommit(self),
             .cherry_pick => try self.toggleCommitCopy(),
             .tag_commit => try self.startTagAtCommit(),

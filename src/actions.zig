@@ -38,6 +38,7 @@ pub const Action = enum {
     commit_no_verify,
     ignore_file,
     copy_file_info,
+    find_fixup_base,
     stash_rename,
     conflict_menu,
     command_log,
@@ -157,6 +158,7 @@ pub fn isFilesContentAction(self: Action) bool {
         .toggle_tree,
         .ignore_file,
         .copy_file_info,
+        .find_fixup_base,
         => true,
         else => false,
     };
@@ -282,6 +284,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
             if (keymap.conflict_menu.matches(key)) return .conflict_menu;
             if (keymap.ignore_file.matches(key)) return .ignore_file;
             if (keymap.copy_file_info.matches(key)) return .copy_file_info;
+            if (keymap.find_fixup_base.matches(key)) return .find_fixup_base;
         },
         .branches => {
             if (keymap.new_branch.matches(key)) return .new_branch;

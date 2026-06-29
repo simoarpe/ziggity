@@ -950,6 +950,7 @@ const help_lines = [_][]const u8{
     "  e              open the file in your editor (also from the staging,",
     "                 patch, and diff views; configurable, see README)",
     "  i / y          add the file to .gitignore / copy its path to the clipboard",
+    "  ctrl+f         find the base commit for the staged change, make a fixup!",
     "  d / D          discard menu / discard all",
     "  s              stash menu (all / +untracked / staged / file)",
     "  / / ctrl+b     filter by path / status filter",
@@ -2438,7 +2439,7 @@ fn footerHints(c: FooterCtx) []const u8 {
     }
     if (c.focus == .files) {
         return switch (c.files_tab) {
-            .files => "space stage  a all  c/w commit/no-verify  A amend  e edit  d discard  i ignore  y copy  s stash  / filter  ` tree  enter hunks  [/] tabs" ++ global,
+            .files => "space stage  a all  c/w commit/no-verify  A amend  e edit  d discard  i ignore  y copy  ^f fixup-base  s stash  / filter  ` tree  enter hunks  [/] tabs" ++ global,
             .worktrees => "space/enter switch  n new  o editor  d remove  [/] tabs" ++ global,
             .submodules => "enter enter  space update  n add  e edit-url  d remove  b bulk  [/] tabs" ++ global,
         };
