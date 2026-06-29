@@ -118,6 +118,7 @@ pub const TextPromptKind = enum {
     set_submodule_url,
     rename_remote,
     new_local_from_remote,
+    new_branch_from_commit,
 
     pub fn title(self: TextPromptKind) []const u8 {
         return switch (self) {
@@ -142,6 +143,7 @@ pub const TextPromptKind = enum {
             .set_submodule_url => "Submodule URL",
             .rename_remote => "Rename remote",
             .new_local_from_remote => "New local branch name",
+            .new_branch_from_commit => "New branch name (from reflog entry)",
         };
     }
 };
@@ -2474,6 +2476,13 @@ pub const App = struct {
             if (km.reset.matches(key)) return self.openTagResetMenu(); // g
             if (km.push.matches(key)) return self.pushSelectedTag(); // P
         }
+        // The Reflog tab is a recovery view: `n` creates a branch at the
+        // selected entry. (space checkout and g reset route through their
+        // shared handlers, which are reflog-aware.)
+        if (self.focus == .commits and self.commits_tab == .reflog and !self.commitsFilesActive()) {
+            const km = self.config.keymap;
+            if (km.new_branch.matches(key)) return self.startNewBranchFromReflog(); // n
+        }
 
         var action = actions.fromNormalKey(key, self.config.keymap, self.focus) orelse return;
         // A panel drilled into a commit's files shows files, not its list, so
@@ -2620,8 +2629,11 @@ pub const App = struct {
                     } else try branches_mod.checkoutSelectedBranch(self),
                     .stash => try stash_mod.applySelectedStash(self),
                     // In a commit's file list, space toggles the file into the
-                    // custom patch.
-                    .commits => if (self.commitsFilesActive()) try patch_mod.toggleFileInPatch(self),
+                    // custom patch; on the Reflog tab it checks out the entry.
+                    .commits => if (self.commitsFilesActive())
+                        try patch_mod.toggleFileInPatch(self)
+                    else if (self.commits_tab == .reflog)
+                        try self.checkoutReflogEntry(),
                     .status, .main => {},
                 }
             },
@@ -4709,6 +4721,27 @@ pub const App = struct {
         self.copied_commits.clearRetainingCapacity();
     }
 
+    /// `space` on the Reflog tab: check out the selected entry's commit (a
+    /// detached HEAD), to inspect a previous state.
+    fn checkoutReflogEntry(self: *App) !void {
+        const entry = self.selectedCommit() orelse {
+            try self.setMessage("no reflog entry selected", .{});
+            return;
+        };
+        return self.requestMutation(.{ .checkout = entry.hash }, .{ .gerund = "checking out", .command = "git checkout", .refresh = Refresh.checkout }, "checked out {s} (detached)", .{entry.short_hash});
+    }
+
+    /// `n` on the Reflog tab: create a branch at the selected entry's commit, to
+    /// recover work that is no longer on any branch. The prompt holds the list
+    /// selection fixed, so `selectedCommit()` still names the entry on confirm.
+    fn startNewBranchFromReflog(self: *App) !void {
+        if (self.selectedCommit() == null) {
+            try self.setMessage("no reflog entry selected", .{});
+            return;
+        }
+        return self.startTextPrompt(.new_branch_from_commit);
+    }
+
     pub fn isMarkedBase(self: *const App, hash: []const u8) bool {
         const base = self.marked_base orelse return false;
         return std.mem.eql(u8, base, hash);
@@ -4811,6 +4844,9 @@ pub const App = struct {
                 self.focus = .branches;
             },
             .commit_grep, .commit_author, .commit_path => self.focus = .commits,
+            // Keep focus on the Commits panel (Reflog tab) so the frozen list
+            // selection still names the entry the branch is created from.
+            .new_branch_from_commit => self.focus = .commits,
             // Prefill handled below (it needs to format remote + branch).
             .push_upstream => {},
             // Diff against a typed ref: no focus change or prefill.
@@ -5030,6 +5066,19 @@ pub const App = struct {
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
                 return self.runMutationScoped(result, Refresh.branches, "created branch {s}", .{value});
+            },
+            // New branch at the selected reflog entry's commit (recovery).
+            .new_branch_from_commit => {
+                const entry = self.selectedCommit() orelse {
+                    self.cancelTextPrompt("no reflog entry selected");
+                    return;
+                };
+                defer {
+                    self.mode = .normal;
+                    self.text_prompt_kind = null;
+                    self.input_buffer.clearRetainingCapacity();
+                }
+                return self.requestMutation(.{ .new_branch_from = .{ .name = value, .start = entry.hash } }, .{ .gerund = "creating branch", .command = "git checkout -b", .refresh = Refresh.branches }, "created branch {s}", .{value});
             },
             // Checkout by typed name: `git checkout <value>` resolves a local
             // branch, DWIM-tracks a remote branch, detaches onto a tag/commit,
@@ -9042,7 +9091,7 @@ test "commit file drill-down tracks selection and deactivates cleanly" {
     try std.testing.expect(app.selectedCommitFile() == null);
 }
 
-test "commit reset menu opens on the commits tab and refuses reflog" {
+test "commit reset menu opens on both the commits and reflog tabs" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
     var app = try testApp(allocator, &no_files);
@@ -9063,10 +9112,63 @@ test "commit reset menu opens on the commits tab and refuses reflog" {
     try std.testing.expectEqual(@as(usize, 3), app.active_menu.?.items.len);
     try std.testing.expectEqual(MenuAction.reset_hard, app.active_menu.?.items[2].action);
 
+    // The Reflog tab also opens the reset menu — resetting HEAD to a reflog
+    // entry is the reflog's primary recovery use. `selectedCommit()` resolves
+    // to the reflog entry there, so the reset targets it.
     app.closeMenu();
+    var reflog = [_]model.Commit{.{
+        .hash = @constCast("2222222222222222222222222222222222222222"),
+        .short_hash = @constCast("2222222"),
+        .author = @constCast("Sam"),
+        .time = @constCast("now"),
+        .refs = @constCast("HEAD@{1}"),
+        .subject = @constCast("reset: moving to HEAD~1"),
+    }};
+    app.data.reflog = &reflog;
     app.commits_tab = .reflog;
     try commitops_mod.startCommitResetMenu(&app);
-    try std.testing.expectEqual(Mode.normal, app.mode);
+    try std.testing.expectEqual(Mode.menu, app.mode);
+    try std.testing.expectEqualStrings("2222222", app.selectedCommit().?.short_hash);
+}
+
+test "reflog tab: space checks out the entry, n branches from it" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = undefined };
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    var reflog = [_]model.Commit{.{
+        .hash = @constCast("3333333333333333333333333333333333333333"),
+        .short_hash = @constCast("3333333"),
+        .author = @constCast("Sam"),
+        .time = @constCast("now"),
+        .refs = @constCast("HEAD@{0}"),
+        .subject = @constCast("commit: lost work"),
+    }};
+    app.data.reflog = &reflog;
+    app.commits_tab = .reflog;
+    app.focus = .commits;
+
+    // space -> detached checkout of the entry's commit.
+    try app.checkoutReflogEntry();
+    try std.testing.expectEqualStrings("3333333333333333333333333333333333333333", app.mutation_requested.?.checkout);
+    // The loop would consume the queued mutation; clear it so the next request
+    // isn't rejected as "operation in progress".
+    app.mutation_requested.?.deinit(page_alloc);
+    app.mutation_requested = null;
+
+    // n -> prompt, then a branch created at the entry's commit.
+    try app.startNewBranchFromReflog();
+    try std.testing.expectEqual(TextPromptKind.new_branch_from_commit, app.text_prompt_kind.?);
+    try std.testing.expectEqual(model.Focus.commits, app.focus); // selection stays put
+    try app.input_buffer.appendSlice(allocator, "recovered");
+    try app.submitTextPrompt();
+    const m = app.mutation_requested.?;
+    try std.testing.expectEqualStrings("recovered", m.new_branch_from.name);
+    try std.testing.expectEqualStrings("3333333333333333333333333333333333333333", m.new_branch_from.start);
 }
 
 test "rebase todo ordering for drop, squash, and move" {

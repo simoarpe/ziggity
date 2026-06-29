@@ -1005,6 +1005,11 @@ const help_lines = [_][]const u8{
     "                 e opens the file in your editor",
     "  ctrl+p         custom patch menu (apply / remove from commit / reset)",
     "  ctrl+j/ctrl+k  move commit down / up",
+    "  Reflog tab     a recovery view of where HEAD has been:",
+    "                 space checkout the entry (detached), g reset HEAD to it,",
+    "                 n new branch at it, c/v copy/paste, o browser, W diff.",
+    "                 The history-rewriting keys (revert/rebase/fixup/…) do not",
+    "                 apply to reflog entries.",
     "",
     "Stash",
     "  space / g / d  apply / pop / drop",
@@ -2310,6 +2315,8 @@ const FooterCtx = struct {
     staging: bool = false,
     /// Commits panel drilled into a commit's file list.
     commits_files: bool = false,
+    /// Commits panel showing the Reflog tab (vs the commit log).
+    reflog: bool = false,
     /// Branches panel drilled into a branch's commit list.
     branch_commits: bool = false,
     /// Within the Branches drill, showing a commit's file list (vs the commits).
@@ -2373,7 +2380,10 @@ fn footerHints(c: FooterCtx) []const u8 {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push" ++ global,
         .files => unreachable,
         .branches => unreachable,
-        .commits => "enter files  g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  W diff  / filter  b bisect  ^j/^k move" ++ global,
+        .commits => if (c.reflog)
+            "space checkout  g reset  n new-branch  c/v copy/paste  o browser  W diff  [/] tabs" ++ global
+        else
+            "enter files  g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  W diff  / filter  b bisect  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => if (c.main_file)
             "j/k scroll  H/L pan  e edit  PgUp/PgDn page  drag select  ^o copy all  esc back" ++ global
@@ -2392,6 +2402,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
         .staging_patch = app.staging_patch_mode,
         .staging = app.staging_active,
         .commits_files = app.commitsFilesActive(),
+        .reflog = app.commits_tab == .reflog,
         .branch_commits = app.branch_commits_active,
         .branch_files = app.branchFilesActive(),
         .conflict = app.data.state != .clean,

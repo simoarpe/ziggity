@@ -11,7 +11,14 @@ const App = app_mod.App;
 const RebaseAction = app_mod.RebaseAction;
 
 pub fn startCommitResetMenu(app: *App) !void {
-    const commit = try commitForAction(app) orelse return;
+    // Reset is allowed on both the Commits tab and the Reflog tab: resetting
+    // HEAD to a reflog entry is the reflog's primary recovery use. The reset
+    // menu's action targets `selectedCommit()`, which is the reflog entry when
+    // the Reflog tab is active.
+    const commit = app.selectedCommit() orelse {
+        try app.setMessage("no commit selected", .{});
+        return;
+    };
     app.mode = .menu;
     app.active_menu = .{ .title = "Reset to commit", .items = &app_mod.commit_reset_menu, .index = 0 };
     try app.setMessage("reset to {s}", .{commit.short_hash});
