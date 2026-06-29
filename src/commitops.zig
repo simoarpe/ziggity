@@ -46,6 +46,69 @@ pub fn rebaseSelectedCommit(app: *App, action: RebaseAction) !void {
     return runRebase(app, action, i, null);
 }
 
+/// `a`: change the selected commit's author. With `author` null, reset it to the
+/// configured git user; otherwise set it to the given "Name <email>". Runs a
+/// non-interactive rebase whose todo `exec`s `git commit --amend` at the target,
+/// so it works for any commit, not just HEAD. Commits tab only.
+pub fn amendCommitAuthor(app: *App, author: ?[]const u8) !void {
+    if (app.commits_tab != .commits) {
+        try app.setMessage("author edits apply to the Commits tab", .{});
+        return;
+    }
+    if (app.data.state != .clean) {
+        try app.setMessage("finish the in-progress rebase/merge first (m)", .{});
+        return;
+    }
+    const commits = app.data.commits;
+    if (commits.len == 0) {
+        try app.setMessage("no commit selected", .{});
+        return;
+    }
+    const i = @min(app.commit_index, commits.len - 1);
+
+    // The amend command run by the rebase's `exec` line (sh -c).
+    var cmd_buf: std.ArrayList(u8) = .empty;
+    defer cmd_buf.deinit(app.allocator);
+    try cmd_buf.appendSlice(app.allocator, "git commit --amend --no-edit");
+    if (author) |a| {
+        try cmd_buf.appendSlice(app.allocator, " --author=");
+        try shellQuote(&cmd_buf, app.allocator, a);
+    } else {
+        try cmd_buf.appendSlice(app.allocator, " --reset-author");
+    }
+
+    const base_ref = try std.fmt.allocPrint(app.allocator, "{s}^", .{commits[i].hash});
+    defer app.allocator.free(base_ref);
+
+    // Oldest-first todo: pick the target, exec the amend, then pick newer commits.
+    var aw: std.Io.Writer.Allocating = .init(app.allocator);
+    defer aw.deinit();
+    var k = i;
+    while (true) : (k -= 1) {
+        try aw.writer.print("pick {s}\n", .{commits[k].hash});
+        if (k == i) try aw.writer.print("exec {s}\n", .{cmd_buf.items});
+        if (k == 0) break;
+    }
+    const todo = try aw.toOwnedSlice();
+    defer app.allocator.free(todo);
+
+    return app.requestMutation(
+        .{ .rebase_todo = .{ .base_ref = base_ref, .todo = todo, .message = null } },
+        .{ .gerund = "editing author", .command = "git rebase -i" },
+        "updated author of {s}",
+        .{commits[i].short_hash},
+    );
+}
+
+/// POSIX single-quote `s` into `out` for safe inclusion in an `sh -c` line.
+fn shellQuote(out: *std.ArrayList(u8), allocator: std.mem.Allocator, s: []const u8) !void {
+    try out.append(allocator, '\'');
+    for (s) |c| {
+        if (c == '\'') try out.appendSlice(allocator, "'\\''") else try out.append(allocator, c);
+    }
+    try out.append(allocator, '\'');
+}
+
 /// Build the rebase todo + base ref for `action` on commit index `i` (in the
 /// newest-first commit list), run it, and report.
 pub fn runRebase(app: *App, action: RebaseAction, i: usize, message: ?[]const u8) !void {

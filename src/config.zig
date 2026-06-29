@@ -53,6 +53,7 @@ pub const KeyMap = struct {
     open_pull_request: Binding = .{ .codepoint = 'G' },
     move_to_new_branch: Binding = .{ .codepoint = 'N' },
     copy_commit_attr: Binding = .{ .codepoint = 'y' },
+    amend_attribute: Binding = .{ .codepoint = 'a' },
     conflict_menu: Binding = .{ .codepoint = 'm' },
     stash_create: Binding = .{ .codepoint = 's' },
     new_branch: Binding = .{ .codepoint = 'n' },

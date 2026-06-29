@@ -993,6 +993,7 @@ const help_lines = [_][]const u8{
     "  enter          view the commit's changed files",
     "  space / n      checkout the commit (detached) / new branch at it",
     "  N              move the branch's commits onto a new branch (needs upstream)",
+    "  a              change the commit's author (reset to you, or set one)",
     "  T              create a tag at the selected commit (name, then message)",
     "  g / t          reset menu / revert",
     "  c / v          copy commit to clipboard / paste (cherry-pick) onto HEAD",

@@ -120,6 +120,7 @@ pub const TextPromptKind = enum {
     new_local_from_remote,
     new_branch_from_commit,
     move_to_new_branch,
+    set_commit_author,
 
     pub fn title(self: TextPromptKind) []const u8 {
         return switch (self) {
@@ -146,6 +147,7 @@ pub const TextPromptKind = enum {
             .new_local_from_remote => "New local branch name",
             .new_branch_from_commit => "New branch name (at the selected commit)",
             .move_to_new_branch => "New branch name (move commits onto it)",
+            .set_commit_author => "Author as: Name <email>",
         };
     }
 };
@@ -456,6 +458,14 @@ pub const MenuAction = enum {
     copy_commit_hash,
     copy_commit_subject,
     copy_commit_author,
+    reset_commit_author,
+    set_commit_author,
+};
+
+/// The `a` author menu on the Commits tab.
+pub const author_menu = [_]MenuItem{
+    .{ .label = "Reset author to your git user", .action = .reset_commit_author },
+    .{ .label = "Set author...", .action = .set_commit_author },
 };
 
 /// The `y` copy-attribute menu on the Commits/Reflog tabs.
@@ -2712,6 +2722,13 @@ pub const App = struct {
                     try self.setMessage("copy commit attribute", .{});
                 }
             },
+            .amend_attribute => {
+                if (try commitops_mod.commitForAction(self)) |_| {
+                    self.mode = .menu;
+                    self.active_menu = .{ .title = "Change author", .items = &author_menu, .index = 0 };
+                    try self.setMessage("change commit author", .{});
+                }
+            },
             .reset_cherry_pick => {
                 if (self.copied_commits.items.len == 0) {
                     try self.setMessage("no copied commits to clear", .{});
@@ -4930,6 +4947,7 @@ pub const App = struct {
             // selection still names the entry the branch is created from.
             .new_branch_from_commit => self.focus = .commits,
             .move_to_new_branch => self.focus = .commits,
+            .set_commit_author => self.focus = .commits,
             // Prefill handled below (it needs to format remote + branch).
             .push_upstream => {},
             // Diff against a typed ref: no focus change or prefill.
@@ -5173,6 +5191,12 @@ pub const App = struct {
                     self.input_buffer.clearRetainingCapacity();
                 }
                 return self.requestMutation(.{ .move_to_new_branch = .{ .name = value, .original = original } }, .{ .gerund = "moving commits", .command = "git checkout -b", .refresh = Refresh.all }, "moved commits onto {s}", .{value});
+            },
+            .set_commit_author => {
+                self.mode = .normal;
+                self.text_prompt_kind = null;
+                defer self.input_buffer.clearRetainingCapacity();
+                return commitops_mod.amendCommitAuthor(self, value);
             },
             // Checkout by typed name: `git checkout <value>` resolves a local
             // branch, DWIM-tracks a remote branch, detaches onto a tag/commit,
@@ -5723,6 +5747,8 @@ pub const App = struct {
             },
             .delete_tag_remote => return self.startRemoteTagDelete(false),
             .delete_tag_both => return self.startRemoteTagDelete(true),
+            .reset_commit_author => return commitops_mod.amendCommitAuthor(self, null),
+            .set_commit_author => return self.startTextPrompt(.set_commit_author),
             .copy_commit_hash, .copy_commit_subject, .copy_commit_author => {
                 const commit = self.selectedCommit() orelse {
                     try self.setMessage("no commit selected", .{});
@@ -7546,6 +7572,40 @@ test "new-tag prompt chains to an optional message, then creates an annotated ta
     try std.testing.expectEqualStrings("first release", m.create_tag.message);
     try std.testing.expect(!m.create_tag.force);
     try std.testing.expectEqual(@as(usize, 0), m.create_tag.target.len); // HEAD
+}
+
+test "a amends the selected commit's author via a rebase exec todo" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = undefined };
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("1111111111111111111111111111111111111111"), .short_hash = @constCast("1111111"), .author = @constCast("A"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("newest") },
+        .{ .hash = @constCast("2222222222222222222222222222222222222222"), .short_hash = @constCast("2222222"), .author = @constCast("A"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("target") },
+    };
+    app.data.commits = &commits;
+    app.commits_tab = .commits;
+    app.commit_index = 1; // target the older commit
+
+    // Reset author: exec amends with --reset-author, base is target^, target
+    // picked first with the exec right after it, then the newer commit.
+    try commitops_mod.amendCommitAuthor(&app, null);
+    const m = app.mutation_requested.?;
+    try std.testing.expectEqualStrings("2222222222222222222222222222222222222222^", m.rebase_todo.base_ref);
+    try std.testing.expectEqualStrings(
+        "pick 2222222222222222222222222222222222222222\nexec git commit --amend --no-edit --reset-author\npick 1111111111111111111111111111111111111111\n",
+        m.rebase_todo.todo,
+    );
+    app.mutation_requested.?.deinit(page_alloc);
+    app.mutation_requested = null;
+
+    // Set author: the name/email is single-quoted into the exec line.
+    try commitops_mod.amendCommitAuthor(&app, "Ada <ada@x.io>");
+    try std.testing.expect(std.mem.indexOf(u8, app.mutation_requested.?.rebase_todo.todo, "--author='Ada <ada@x.io>'") != null);
 }
 
 test "y copies the selected commit's attributes" {
