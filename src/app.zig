@@ -462,6 +462,14 @@ pub const MenuAction = enum {
     copy_commit_author,
     reset_commit_author,
     set_commit_author,
+    toggle_log_dates,
+    toggle_log_author,
+};
+
+/// The `ctrl+l` commit-log display menu.
+pub const log_options_menu = [_]MenuItem{
+    .{ .label = "Toggle commit dates", .action = .toggle_log_dates },
+    .{ .label = "Toggle commit author", .action = .toggle_log_author },
 };
 
 /// The `a` author menu on the Commits tab.
@@ -1818,6 +1826,10 @@ pub const App = struct {
     rebase_plan: ?[]rebaseplan_mod.Entry = null,
     rebase_plan_base: []u8 = &.{},
     rebase_plan_index: usize = 0,
+    // Commit-log display toggles (the `ctrl+l` menu): show the relative date
+    // and/or author column before each commit's subject.
+    log_show_dates: bool = false,
+    log_show_author: bool = false,
     // Whether the pending remote-tag delete should also drop the local tag
     // (the "Delete local and remote tag" menu choice).
     tag_delete_also_local: bool = false,
@@ -2727,6 +2739,11 @@ pub const App = struct {
             .open_pull_request => try diffmode_mod.openPullRequest(self),
             .move_to_new_branch => try self.startMoveCommitsToNewBranch(),
             .interactive_rebase => try rebaseplan_mod.start(self),
+            .log_menu => {
+                self.mode = .menu;
+                self.active_menu = .{ .title = "Log display", .items = &log_options_menu, .index = 0 };
+                try self.setMessage("log display options", .{});
+            },
             .copy_commit_attr => {
                 if (self.selectedCommit() == null) {
                     try self.setMessage("no commit selected", .{});
@@ -5764,6 +5781,14 @@ pub const App = struct {
             .delete_tag_both => return self.startRemoteTagDelete(true),
             .reset_commit_author => return commitops_mod.amendCommitAuthor(self, null),
             .set_commit_author => return self.startTextPrompt(.set_commit_author),
+            .toggle_log_dates => {
+                self.log_show_dates = !self.log_show_dates;
+                try self.setMessage("commit dates {s}", .{if (self.log_show_dates) "shown" else "hidden"});
+            },
+            .toggle_log_author => {
+                self.log_show_author = !self.log_show_author;
+                try self.setMessage("commit author {s}", .{if (self.log_show_author) "shown" else "hidden"});
+            },
             .copy_commit_hash, .copy_commit_subject, .copy_commit_author => {
                 const commit = self.selectedCommit() orelse {
                     try self.setMessage("no commit selected", .{});

@@ -34,6 +34,7 @@ pub const Action = enum {
     copy_commit_attr,
     amend_attribute,
     interactive_rebase,
+    log_menu,
     conflict_menu,
     command_log,
     help,
@@ -302,6 +303,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
             if (keymap.copy_commit_attr.matches(key)) return .copy_commit_attr;
             if (keymap.amend_attribute.matches(key)) return .amend_attribute;
             if (keymap.interactive_rebase.matches(key)) return .interactive_rebase;
+            if (keymap.log_menu.matches(key)) return .log_menu;
         },
         .stash => {
             if (keymap.stash_apply.matches(key)) return .select;

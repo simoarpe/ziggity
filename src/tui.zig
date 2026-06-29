@@ -1013,6 +1013,7 @@ const help_lines = [_][]const u8{
     "                 enter opens that file to pick individual lines,",
     "                 e opens the file in your editor",
     "  ctrl+p         custom patch menu (apply / remove from commit / reset)",
+    "  ctrl+l         log display menu (toggle the date / author columns)",
     "  ctrl+j/ctrl+k  move commit down / up",
     "  i              interactive rebase: a plan editor for the commits down to",
     "                 the selected one. p/d/s/f/e mark pick/drop/squash/fixup/edit,",
@@ -2072,7 +2073,16 @@ fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const m
         const hash_fg = if (marked) ui_theme.warning else if (copied) ui_theme.staged else ui_theme.hash;
         var buf: [80]u8 = undefined;
         const head = std.fmt.bufPrint(&buf, "{c}{s} ", .{ marker, commit.short_hash }) catch "";
-        const col = printSpan(win, row, 0, head, withFg(base, hash_fg));
+        var col = printSpan(win, row, 0, head, withFg(base, hash_fg));
+        // Optional date / author columns, toggled via the ctrl+l log menu.
+        if (app.log_show_dates and commit.time.len > 0) {
+            col = printSpan(win, row, col, commit.time, withFg(base, ui_theme.muted));
+            col = printSpan(win, row, col, " ", base);
+        }
+        if (app.log_show_author and commit.author.len > 0) {
+            col = printSpan(win, row, col, commit.author, withFg(base, ui_theme.accent));
+            col = printSpan(win, row, col, " ", base);
+        }
         _ = printSpan(win, row, col, commit.subject, base);
     }
 }
