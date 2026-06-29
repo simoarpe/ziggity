@@ -9,6 +9,7 @@ const filetree = @import("filetree.zig");
 const model = @import("model.zig");
 const patch_mod = @import("patch.zig");
 const staging_mod = @import("staging.zig");
+const commitgraph_mod = @import("commitgraph.zig");
 
 /// Active theme, set from config at startup and read by `styles()`.
 var ui_theme: config_mod.Theme = .{};
@@ -26,6 +27,7 @@ const Event = union(enum) {
     mutation_done,
     repo_load_done,
     scoped_load_done,
+    graph_done,
 };
 
 /// A network op run off the UI loop. Allocations use the page allocator (which
@@ -122,6 +124,40 @@ const WorktreeRun = struct {
 fn worktreeWorker(wr: *WorktreeRun) void {
     wr.result = app_mod.WorktreeSnapshot.load(async_allocator, wr.io, wr.environ, wr.root, wr.untracked) catch null;
     _ = wr.loop.tryPostEvent(.worktree_done) catch false;
+}
+
+/// The commit-graph viewer's `git log --graph` load, run off the UI loop so a
+/// big repo's graph doesn't block navigation. Posts `.graph_done`.
+const GraphRun = struct {
+    io: std.Io,
+    loop: *vaxis.Loop(Event),
+    root: []const u8,
+    environ: *std.process.Environ.Map,
+    all: bool,
+    generation: u64,
+    result: ?[]u8 = null,
+};
+
+fn graphWorker(gr: *GraphRun) void {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(async_allocator);
+    const base = [_][]const u8{ "git", "--no-optional-locks", "log", "--graph", "--oneline", "--decorate", "--color=always", "-n", "5000" };
+    argv.appendSlice(async_allocator, &base) catch return postGraph(gr);
+    if (gr.all) argv.append(async_allocator, "--all") catch return postGraph(gr);
+    const r = git_mod.runWithLockRetry(async_allocator, gr.io, .{
+        .argv = argv.items,
+        .cwd = .{ .path = gr.root },
+        .environ_map = gr.environ,
+        .stdout_limit = .limited(16 * 1024 * 1024),
+        .stderr_limit = .limited(1 * 1024 * 1024),
+    }) catch return postGraph(gr);
+    gr.result = r.stdout; // owned by async_allocator; freed in completeGraph
+    async_allocator.free(r.stderr);
+    postGraph(gr);
+}
+
+fn postGraph(gr: *GraphRun) void {
+    _ = gr.loop.tryPostEvent(.graph_done) catch false;
 }
 
 /// A slow git mutation (merge/rebase/bisect/…) run off the UI loop on a
@@ -279,6 +315,13 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
         if (worktree_run.result) |*r| r.deinit(async_allocator);
     };
 
+    var graph_run: GraphRun = undefined;
+    var graph_future: ?std.Io.Future(void) = null;
+    defer if (graph_future) |*f| {
+        f.cancel(io);
+        if (graph_run.result) |r| async_allocator.free(r);
+    };
+
     var mutation_run: MutationRun = undefined;
     var mutation_future: ?std.Io.Future(void) = null;
     defer if (mutation_future) |*f| {
@@ -382,6 +425,14 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     app.applyScopedLoad(scoped_load_run.result, async_allocator);
                     scoped_load_run.result = null;
                     scoped_load_run.freeFilters();
+                }
+            },
+            .graph_done => {
+                if (graph_future) |*f| {
+                    f.await(io);
+                    graph_future = null;
+                    commitgraph_mod.complete(app, graph_run.result, graph_run.generation, async_allocator);
+                    graph_run.result = null;
                 }
             },
         }
@@ -514,6 +565,26 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     app.applyWorktreeSnapshot(null, generation, async_allocator) catch {};
                     break :blk null;
                 };
+            }
+        }
+
+        // Start a queued commit-graph load (ctrl+l) off the loop.
+        if (graph_future == null) {
+            if (commitgraph_mod.takeLoad(app)) |req| {
+                graph_run = .{
+                    .io = io,
+                    .loop = &loop,
+                    .root = app.git.root,
+                    .environ = app.git.environ,
+                    .all = req.all,
+                    .generation = req.generation,
+                    .result = null,
+                };
+                graph_future = io.concurrent(graphWorker, .{&graph_run}) catch blk: {
+                    commitgraph_mod.complete(app, null, req.generation, async_allocator);
+                    break :blk null;
+                };
+                render_needed = true;
             }
         }
 
@@ -920,8 +991,59 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         .command_log => drawCommandLogPopup(root, app),
         .help => drawHelpPopup(root, app),
         .operation => drawOperationPopup(root, app),
+        .commit_graph => drawCommitGraphPopup(root, app),
         else => {},
     }
+}
+
+fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
+    const st = styles();
+    const w: u16 = root.width -| 4;
+    const h: u16 = root.height -| 2;
+    const scope = if (app.commit_graph_all) "all branches" else "current branch";
+    var title_buf: [48]u8 = undefined;
+    const title = std.fmt.bufPrint(&title_buf, "Commit graph - {s}", .{scope}) catch "Commit graph";
+    const win = popup(root, w, h, title, null);
+
+    const footer_row: u16 = win.height -| 1;
+    print(win, footer_row, 0, "j/k move  a all/current  enter jump  esc close", st.bottom_accent);
+
+    if (app.commit_graph_loading or app.commit_graph == null) {
+        var sbuf: [48]u8 = undefined;
+        const msg = std.fmt.bufPrint(&sbuf, "{s} loading graph...", .{spinnerGlyph(app.spinner_frame)}) catch "loading graph...";
+        print(win, win.height / 2, 1, msg, st.muted);
+        return;
+    }
+
+    const graph = app.commit_graph.?;
+    const avail: usize = footer_row; // content rows above the footer
+    if (avail == 0) return;
+
+    // Keep the cursor row visible.
+    if (app.commit_graph_sel < app.commit_graph_scroll) {
+        app.commit_graph_scroll = app.commit_graph_sel;
+    } else if (app.commit_graph_sel >= app.commit_graph_scroll + avail) {
+        app.commit_graph_scroll = app.commit_graph_sel - avail + 1;
+    }
+
+    var it = std.mem.splitScalar(u8, graph, '\n');
+    var idx: usize = 0;
+    var row: u16 = 0;
+    while (it.next()) |line| : (idx += 1) {
+        if (idx < app.commit_graph_scroll) continue;
+        if (row >= footer_row) break;
+        const selected = idx == app.commit_graph_sel;
+        var base = st.normal;
+        if (selected) {
+            applySel(&base, .active);
+            fillRow(win, row, base);
+        }
+        // The graph carries git's own ANSI colours; printAnsi renders them over
+        // the (possibly selected) background.
+        printAnsi(win, row, line, base, 0, 0, 0);
+        row += 1;
+    }
+    drawScrollbarRange(root, (root.width - w) / 2 + w - 1, (root.height - h) / 2 + 1, avail, app.commit_graph_lines, app.commit_graph_scroll, true);
 }
 
 const help_lines = [_][]const u8{
@@ -1018,7 +1140,7 @@ const help_lines = [_][]const u8{
     "                 enter opens that file to pick individual lines,",
     "                 e opens the file in your editor",
     "  ctrl+p         custom patch menu (apply / remove from commit / reset)",
-    "  ctrl+l         log display menu (toggle the date / author columns)",
+    "  ctrl+l         commit graph viewer (a/enter/esc = scope / jump / close)",
     "  ctrl+j/ctrl+k  move commit down / up",
     "  i              interactive rebase: a plan editor for the commits down to",
     "                 the selected one. p/d/s/f/e mark pick/drop/squash/fixup/edit,",
@@ -2080,16 +2202,7 @@ fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const m
         const hash_fg = if (marked) ui_theme.warning else if (copied) ui_theme.staged else ui_theme.hash;
         var buf: [80]u8 = undefined;
         const head = std.fmt.bufPrint(&buf, "{c}{s} ", .{ marker, commit.short_hash }) catch "";
-        var col = printSpan(win, row, 0, head, withFg(base, hash_fg));
-        // Optional date / author columns, toggled via the ctrl+l log menu.
-        if (app.log_show_dates and commit.time.len > 0) {
-            col = printSpan(win, row, col, commit.time, withFg(base, ui_theme.muted));
-            col = printSpan(win, row, col, " ", base);
-        }
-        if (app.log_show_author and commit.author.len > 0) {
-            col = printSpan(win, row, col, commit.author, withFg(base, ui_theme.accent));
-            col = printSpan(win, row, col, " ", base);
-        }
+        const col = printSpan(win, row, 0, head, withFg(base, hash_fg));
         _ = printSpan(win, row, col, commit.subject, base);
     }
 }
@@ -2451,7 +2564,7 @@ fn footerHints(c: FooterCtx) []const u8 {
         .commits => if (c.reflog)
             "space checkout  g reset  n new-branch  c/v/^r copy/paste/clear  y copy  o browser  W diff  [/] tabs" ++ global
         else
-            "enter files  space checkout  n/N branch/move  T tag  g reset  t revert  c/v/^r copy/paste/clear  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  G pr  W diff  / filter  b bisect  ^j/^k move" ++ global,
+            "enter files  space checkout  n/N branch/move  T tag  g reset  t revert  c/v/^r copy/paste/clear  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  G pr  ^l graph  W diff  / filter  b bisect  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  r rename  enter view" ++ global,
         .main => if (c.main_file)
             "j/k scroll  H/L pan  e edit  PgUp/PgDn page  drag select  ^o copy all  esc back" ++ global

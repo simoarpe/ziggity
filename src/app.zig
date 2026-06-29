@@ -8,6 +8,7 @@ const commits_mod = @import("commits.zig");
 const commitops_mod = @import("commitops.zig");
 const rebaseplan_mod = @import("rebaseplan.zig");
 const fixupbase_mod = @import("fixupbase.zig");
+const commitgraph_mod = @import("commitgraph.zig");
 const config_mod = @import("config.zig");
 const diffmode_mod = @import("diffmode.zig");
 const credentials_mod = @import("credentials.zig");
@@ -34,6 +35,7 @@ pub const Mode = enum {
     help,
     operation,
     rebase_plan,
+    commit_graph,
 };
 
 /// Environment variable names for the credential bridge. When the user has
@@ -467,8 +469,6 @@ pub const MenuAction = enum {
     copy_commit_author,
     reset_commit_author,
     set_commit_author,
-    toggle_log_dates,
-    toggle_log_author,
     sort_branches_date,
     sort_branches_recency,
     sort_branches_alpha,
@@ -479,12 +479,6 @@ pub const branch_sort_menu = [_]MenuItem{
     .{ .label = "Sort by date (newest first)", .action = .sort_branches_date },
     .{ .label = "Sort by recency (recently checked out)", .action = .sort_branches_recency },
     .{ .label = "Sort alphabetically", .action = .sort_branches_alpha },
-};
-
-/// The `ctrl+l` commit-log display menu.
-pub const log_options_menu = [_]MenuItem{
-    .{ .label = "Toggle commit dates", .action = .toggle_log_dates },
-    .{ .label = "Toggle commit author", .action = .toggle_log_author },
 };
 
 /// The `a` author menu on the Commits tab.
@@ -1851,10 +1845,18 @@ pub const App = struct {
     rebase_plan: ?[]rebaseplan_mod.Entry = null,
     rebase_plan_base: []u8 = &.{},
     rebase_plan_index: usize = 0,
-    // Commit-log display toggles (the `ctrl+l` menu): show the relative date
-    // and/or author column before each commit's subject.
-    log_show_dates: bool = false,
-    log_show_author: bool = false,
+    // The commit-graph viewer (`ctrl+l`): git's coloured `log --graph` output
+    // (owned), the scope toggle, the cursor/scroll, an off-thread load with a
+    // generation guard, and the short hash to highlight on open.
+    commit_graph: ?[]u8 = null,
+    commit_graph_all: bool = false,
+    commit_graph_loading: bool = false,
+    commit_graph_wanted: bool = false,
+    commit_graph_generation: u64 = 0,
+    commit_graph_target: []u8 = &.{},
+    commit_graph_sel: usize = 0,
+    commit_graph_scroll: usize = 0,
+    commit_graph_lines: usize = 0,
     // Whether the pending remote-tag delete should also drop the local tag
     // (the "Delete local and remote tag" menu choice).
     tag_delete_also_local: bool = false,
@@ -2053,6 +2055,7 @@ pub const App = struct {
         staging_mod.clearStagePending(self);
         self.stage_pending.deinit(self.allocator);
         rebaseplan_mod.free(self);
+        commitgraph_mod.deinit(self);
         self.data.deinit(self.allocator);
         model.deinitCommitFiles(self.allocator, self.commit_files);
         model.deinitCommitFiles(self.allocator, self.branch_files);
@@ -2403,6 +2406,10 @@ pub const App = struct {
         }
         if (self.mode == .rebase_plan) {
             try rebaseplan_mod.handleKey(self, key);
+            return;
+        }
+        if (self.mode == .commit_graph) {
+            try commitgraph_mod.handleKey(self, key);
             return;
         }
         if (self.mode == .text_prompt) {
@@ -2794,11 +2801,7 @@ pub const App = struct {
             .open_pull_request => try diffmode_mod.openPullRequest(self),
             .move_to_new_branch => try self.startMoveCommitsToNewBranch(),
             .interactive_rebase => try rebaseplan_mod.start(self),
-            .log_menu => {
-                self.mode = .menu;
-                self.active_menu = .{ .title = "Log display", .items = &log_options_menu, .index = 0 };
-                try self.setMessage("log display options", .{});
-            },
+            .log_menu => try commitgraph_mod.open(self),
             .copy_commit_attr => {
                 if (self.selectedCommit() == null) {
                     try self.setMessage("no commit selected", .{});
@@ -4102,6 +4105,7 @@ pub const App = struct {
         drills_mod.deactivateBranchCommits(self); // frees branch commits + files, clears branch tree
         drills_mod.deactivateCommitFiles(self); // frees commit files, clears commit tree
         rebaseplan_mod.free(self); // frees any in-progress interactive-rebase plan
+        commitgraph_mod.freeGraph(self); // frees any loaded commit graph
         a.free(self.branch_commits_ref);
         self.branch_commits_ref = &.{};
 
@@ -5903,14 +5907,6 @@ pub const App = struct {
             .delete_tag_both => return self.startRemoteTagDelete(true),
             .reset_commit_author => return commitops_mod.amendCommitAuthor(self, null),
             .set_commit_author => return self.startTextPrompt(.set_commit_author),
-            .toggle_log_dates => {
-                self.log_show_dates = !self.log_show_dates;
-                try self.setMessage("commit dates {s}", .{if (self.log_show_dates) "shown" else "hidden"});
-            },
-            .toggle_log_author => {
-                self.log_show_author = !self.log_show_author;
-                try self.setMessage("commit author {s}", .{if (self.log_show_author) "shown" else "hidden"});
-            },
             .sort_branches_date, .sort_branches_recency, .sort_branches_alpha => {
                 const order: model.BranchSortOrder = switch (action) {
                     .sort_branches_date => .date,

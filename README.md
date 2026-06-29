@@ -84,6 +84,10 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
   `ctrl+j`/`ctrl+k` — then run it as one rebase.
 - Reflog tab recovery: checkout (`space`), reset HEAD to an entry (`g`), or branch
   from an entry (`n`).
+- Commit graph viewer (`ctrl+l`): a large overlay rendering the real
+  `git log --graph` DAG in git's colours, loaded off-thread with a cancellable
+  spinner; toggle current-branch / all-branches (`a`), and `enter` jumps the
+  Commits-panel selection to the row under the cursor.
 - Rebase onto a marked base (`B` marks a commit; rebasing a branch then replays
   the marked commit through HEAD onto it via `git rebase --onto`).
 - Mid-rebase amend: when a rebase stops at an `edit` step, the `m` actions menu
@@ -246,7 +250,10 @@ Useful keys:
   the cherry-pick selection
 - `i` (Commits): interactive rebase editor (mark pick/drop/squash/fixup/edit,
   reorder, run)
-- `ctrl+l` (Commits): log display menu (toggle the date / author columns)
+- `ctrl+l` (Commits): commit graph viewer — a large overlay rendering
+  `git log --graph` (loaded off-thread with a cancellable spinner); `a` toggles
+  current-branch / all-branches, `enter` jumps the panel selection to the row,
+  `esc` closes
 - `G` (Commits): open the new pull/merge request page for the branch
 - `B`: mark the selected commit as the base for a `rebase --onto`
 - `W`: diff the selected commit/branch against another marked ref
