@@ -61,6 +61,7 @@ pub const KeyMap = struct {
     ignore_file: Binding = .{ .codepoint = 'i' },
     commit_no_verify: Binding = .{ .codepoint = 'w' },
     copy_file_info: Binding = .{ .codepoint = 'y' },
+    stash_rename: Binding = .{ .codepoint = 'r' },
     conflict_menu: Binding = .{ .codepoint = 'm' },
     stash_create: Binding = .{ .codepoint = 's' },
     new_branch: Binding = .{ .codepoint = 'n' },

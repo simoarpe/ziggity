@@ -38,6 +38,7 @@ pub const Action = enum {
     commit_no_verify,
     ignore_file,
     copy_file_info,
+    stash_rename,
     conflict_menu,
     command_log,
     help,
@@ -319,6 +320,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
             if (keymap.stash_apply.matches(key)) return .select;
             if (keymap.stash_pop.matches(key)) return .stash_pop;
             if (keymap.stash_drop.matches(key)) return .stash_drop;
+            if (keymap.stash_rename.matches(key)) return .stash_rename;
         },
         .status, .main => {},
     }

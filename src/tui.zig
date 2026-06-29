@@ -1030,6 +1030,7 @@ const help_lines = [_][]const u8{
     "",
     "Stash",
     "  space / g / d  apply / pop / drop",
+    "  r              rename the selected stash",
     "",
     "Operations",
     "  git actions    succeed silently (summary in the bottom bar); only",
@@ -2450,7 +2451,7 @@ fn footerHints(c: FooterCtx) []const u8 {
             "space checkout  g reset  n new-branch  c/v/^r copy/paste/clear  y copy  o browser  W diff  [/] tabs" ++ global
         else
             "enter files  space checkout  n/N branch/move  T tag  g reset  t revert  c/v/^r copy/paste/clear  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  G pr  W diff  / filter  b bisect  ^j/^k move" ++ global,
-        .stash => "space apply  g pop  d drop  enter view" ++ global,
+        .stash => "space apply  g pop  d drop  r rename  enter view" ++ global,
         .main => if (c.main_file)
             "j/k scroll  H/L pan  e edit  PgUp/PgDn page  drag select  ^o copy all  esc back" ++ global
         else

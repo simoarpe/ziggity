@@ -1305,6 +1305,18 @@ pub const Git = struct {
         return self.exec(&.{ "stash", "drop", selector });
     }
 
+    /// Rename a stash: drop the entry and re-store its commit `hash` under the new
+    /// `message` (git has no in-place rename). The renamed stash returns to the
+    /// top of the list.
+    pub fn renameStash(self: *Git, index: usize, hash: []const u8, message: []const u8) !ExecResult {
+        const selector = try std.fmt.allocPrint(self.allocator, "stash@{{{d}}}", .{index});
+        defer self.allocator.free(selector);
+        var r = try self.exec(&.{ "stash", "drop", selector });
+        if (!r.ok()) return r;
+        r.deinit(self.allocator);
+        return self.exec(&.{ "stash", "store", "-m", message, hash });
+    }
+
     pub fn stashAll(self: *Git) !ExecResult {
         return self.exec(&.{ "stash", "push" });
     }

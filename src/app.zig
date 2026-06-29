@@ -123,6 +123,7 @@ pub const TextPromptKind = enum {
     new_branch_from_commit,
     move_to_new_branch,
     set_commit_author,
+    rename_stash,
 
     pub fn title(self: TextPromptKind) []const u8 {
         return switch (self) {
@@ -150,6 +151,7 @@ pub const TextPromptKind = enum {
             .new_branch_from_commit => "New branch name (at the selected commit)",
             .move_to_new_branch => "New branch name (move commits onto it)",
             .set_commit_author => "Author as: Name <email>",
+            .rename_stash => "Rename stash",
         };
     }
 };
@@ -1144,6 +1146,7 @@ pub const Mutation = union(enum) {
     submodule_bulk: git_mod.Git.SubmoduleBulk,
     new_branch_from: struct { name: []const u8, start: []const u8 },
     move_to_new_branch: struct { name: []const u8, original: []const u8 },
+    rename_stash: struct { index: usize, hash: []const u8, message: []const u8 },
     undo,
     merge: []const u8,
     rebase: []const u8,
@@ -1205,6 +1208,7 @@ pub const Mutation = union(enum) {
             .submodule_bulk => |op| wgit.bulkSubmodule(op),
             .new_branch_from => |x| wgit.newBranchFrom(x.name, x.start),
             .move_to_new_branch => |x| wgit.moveCommitsToNewBranch(x.name, x.original),
+            .rename_stash => |x| wgit.renameStash(x.index, x.hash, x.message),
             .undo => wgit.undoLastOperation(),
             .merge => |b| wgit.mergeBranch(b),
             .rebase => |b| wgit.rebaseOnto(b),
@@ -1263,6 +1267,7 @@ pub const Mutation = union(enum) {
             .submodule_bulk => |op| .{ .submodule_bulk = op },
             .new_branch_from => |x| .{ .new_branch_from = .{ .name = try gpa.dupe(u8, x.name), .start = try gpa.dupe(u8, x.start) } },
             .move_to_new_branch => |x| .{ .move_to_new_branch = .{ .name = try gpa.dupe(u8, x.name), .original = try gpa.dupe(u8, x.original) } },
+            .rename_stash => |x| .{ .rename_stash = .{ .index = x.index, .hash = try gpa.dupe(u8, x.hash), .message = try gpa.dupe(u8, x.message) } },
             .undo => .undo,
             .merge => |b| .{ .merge = try gpa.dupe(u8, b) },
             .rebase => |b| .{ .rebase = try gpa.dupe(u8, b) },
@@ -1302,6 +1307,10 @@ pub const Mutation = union(enum) {
             .move_to_new_branch => |x| {
                 gpa.free(x.name);
                 gpa.free(x.original);
+            },
+            .rename_stash => |x| {
+                gpa.free(x.hash);
+                gpa.free(x.message);
             },
             .add_worktree => |x| {
                 gpa.free(x.path);
@@ -2838,6 +2847,13 @@ pub const App = struct {
             .bisect_menu => try self.startBisectMenu(),
             .stash_pop => try stash_mod.popSelectedStash(self),
             .stash_drop => try stash_mod.dropSelectedStash(self),
+            .stash_rename => {
+                if (self.selectedStash() == null) {
+                    try self.setMessage("no stash selected", .{});
+                } else {
+                    try self.startTextPrompt(.rename_stash);
+                }
+            },
             .confirm, .backspace => {},
         }
     }
@@ -5060,6 +5076,10 @@ pub const App = struct {
             .new_branch_from_commit => self.focus = .commits,
             .move_to_new_branch => self.focus = .commits,
             .set_commit_author => self.focus = .commits,
+            .rename_stash => {
+                self.focus = .stash;
+                if (self.selectedStash()) |s| prefill = s.message;
+            },
             // Prefill handled below (it needs to format remote + branch).
             .push_upstream => {},
             // Diff against a typed ref: no focus change or prefill.
@@ -5309,6 +5329,18 @@ pub const App = struct {
                 self.text_prompt_kind = null;
                 defer self.input_buffer.clearRetainingCapacity();
                 return commitops_mod.amendCommitAuthor(self, value);
+            },
+            .rename_stash => {
+                const entry = self.selectedStash() orelse {
+                    self.cancelTextPrompt("no stash selected");
+                    return;
+                };
+                defer {
+                    self.mode = .normal;
+                    self.text_prompt_kind = null;
+                    self.input_buffer.clearRetainingCapacity();
+                }
+                return self.requestMutation(.{ .rename_stash = .{ .index = entry.index, .hash = entry.hash, .message = value } }, .{ .gerund = "renaming stash", .command = "git stash store", .refresh = Refresh.stash }, "renamed stash", .{});
             },
             // Checkout by typed name: `git checkout <value>` resolves a local
             // branch, DWIM-tracks a remote branch, detaches onto a tag/commit,
