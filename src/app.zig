@@ -2476,12 +2476,12 @@ pub const App = struct {
             if (km.reset.matches(key)) return self.openTagResetMenu(); // g
             if (km.push.matches(key)) return self.pushSelectedTag(); // P
         }
-        // The Reflog tab is a recovery view: `n` creates a branch at the
-        // selected entry. (space checkout and g reset route through their
-        // shared handlers, which are reflog-aware.)
-        if (self.focus == .commits and self.commits_tab == .reflog and !self.commitsFilesActive()) {
+        // Both Commits-panel tabs offer `n` (create a branch at the selected
+        // commit). On the Reflog tab this doubles as recovery. (space checkout
+        // and g reset route through their shared, tab-aware handlers.)
+        if (self.focus == .commits and !self.commitsFilesActive()) {
             const km = self.config.keymap;
-            if (km.new_branch.matches(key)) return self.startNewBranchFromReflog(); // n
+            if (km.new_branch.matches(key)) return self.startNewBranchFromCommit(); // n
         }
 
         var action = actions.fromNormalKey(key, self.config.keymap, self.focus) orelse return;
@@ -2629,11 +2629,12 @@ pub const App = struct {
                     } else try branches_mod.checkoutSelectedBranch(self),
                     .stash => try stash_mod.applySelectedStash(self),
                     // In a commit's file list, space toggles the file into the
-                    // custom patch; on the Reflog tab it checks out the entry.
+                    // custom patch; on the commit/reflog list it checks out the
+                    // selected commit (detached).
                     .commits => if (self.commitsFilesActive())
                         try patch_mod.toggleFileInPatch(self)
-                    else if (self.commits_tab == .reflog)
-                        try self.checkoutReflogEntry(),
+                    else
+                        try self.checkoutSelectedCommit(),
                     .status, .main => {},
                 }
             },
@@ -4721,22 +4722,23 @@ pub const App = struct {
         self.copied_commits.clearRetainingCapacity();
     }
 
-    /// `space` on the Reflog tab: check out the selected entry's commit (a
-    /// detached HEAD), to inspect a previous state.
-    fn checkoutReflogEntry(self: *App) !void {
-        const entry = self.selectedCommit() orelse {
-            try self.setMessage("no reflog entry selected", .{});
+    /// `space` on the Commits/Reflog tab: check out the selected commit (a
+    /// detached HEAD), to inspect that state.
+    fn checkoutSelectedCommit(self: *App) !void {
+        const commit = self.selectedCommit() orelse {
+            try self.setMessage("no commit selected", .{});
             return;
         };
-        return self.requestMutation(.{ .checkout = entry.hash }, .{ .gerund = "checking out", .command = "git checkout", .refresh = Refresh.checkout }, "checked out {s} (detached)", .{entry.short_hash});
+        return self.requestMutation(.{ .checkout = commit.hash }, .{ .gerund = "checking out", .command = "git checkout", .refresh = Refresh.checkout }, "checked out {s} (detached)", .{commit.short_hash});
     }
 
-    /// `n` on the Reflog tab: create a branch at the selected entry's commit, to
-    /// recover work that is no longer on any branch. The prompt holds the list
-    /// selection fixed, so `selectedCommit()` still names the entry on confirm.
-    fn startNewBranchFromReflog(self: *App) !void {
+    /// `n` on the Commits/Reflog tab: create a branch at the selected commit. On
+    /// the Reflog tab this recovers work that is no longer on any branch. The
+    /// prompt holds the list selection fixed, so `selectedCommit()` still names
+    /// the commit on confirm.
+    fn startNewBranchFromCommit(self: *App) !void {
         if (self.selectedCommit() == null) {
-            try self.setMessage("no reflog entry selected", .{});
+            try self.setMessage("no commit selected", .{});
             return;
         }
         return self.startTextPrompt(.new_branch_from_commit);
@@ -9153,7 +9155,7 @@ test "reflog tab: space checks out the entry, n branches from it" {
     app.focus = .commits;
 
     // space -> detached checkout of the entry's commit.
-    try app.checkoutReflogEntry();
+    try app.checkoutSelectedCommit();
     try std.testing.expectEqualStrings("3333333333333333333333333333333333333333", app.mutation_requested.?.checkout);
     // The loop would consume the queued mutation; clear it so the next request
     // isn't rejected as "operation in progress".
@@ -9161,7 +9163,7 @@ test "reflog tab: space checks out the entry, n branches from it" {
     app.mutation_requested = null;
 
     // n -> prompt, then a branch created at the entry's commit.
-    try app.startNewBranchFromReflog();
+    try app.startNewBranchFromCommit();
     try std.testing.expectEqual(TextPromptKind.new_branch_from_commit, app.text_prompt_kind.?);
     try std.testing.expectEqual(model.Focus.commits, app.focus); // selection stays put
     try app.input_buffer.appendSlice(allocator, "recovered");

@@ -991,6 +991,7 @@ const help_lines = [_][]const u8{
     "",
     "Commits  (tabs: Commits / Reflog)",
     "  enter          view the commit's changed files",
+    "  space / n      checkout the commit (detached) / new branch at it",
     "  g / t          reset menu / revert",
     "  c / v          copy commit to clipboard / paste (cherry-pick) onto HEAD",
     "  d / s / f      drop / squash-down / fixup-down (interactive rebase)",
@@ -2383,7 +2384,7 @@ fn footerHints(c: FooterCtx) []const u8 {
         .commits => if (c.reflog)
             "space checkout  g reset  n new-branch  c/v copy/paste  o browser  W diff  [/] tabs" ++ global
         else
-            "enter files  g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  W diff  / filter  b bisect  ^j/^k move" ++ global,
+            "enter files  space checkout  n branch  g reset  t revert  c/v copy/paste  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  W diff  / filter  b bisect  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
         .main => if (c.main_file)
             "j/k scroll  H/L pan  e edit  PgUp/PgDn page  drag select  ^o copy all  esc back" ++ global
