@@ -453,6 +453,16 @@ pub const MenuAction = enum {
     delete_tag_local,
     delete_tag_remote,
     delete_tag_both,
+    copy_commit_hash,
+    copy_commit_subject,
+    copy_commit_author,
+};
+
+/// The `y` copy-attribute menu on the Commits/Reflog tabs.
+pub const copy_commit_menu = [_]MenuItem{
+    .{ .label = "Copy commit hash", .action = .copy_commit_hash },
+    .{ .label = "Copy commit subject", .action = .copy_commit_subject },
+    .{ .label = "Copy commit author", .action = .copy_commit_author },
 };
 
 /// The Tags `d` menu: delete the tag locally, on a remote, or both.
@@ -2693,6 +2703,15 @@ pub const App = struct {
             .tag_commit => try self.startTagAtCommit(),
             .open_pull_request => try diffmode_mod.openPullRequest(self),
             .move_to_new_branch => try self.startMoveCommitsToNewBranch(),
+            .copy_commit_attr => {
+                if (self.selectedCommit() == null) {
+                    try self.setMessage("no commit selected", .{});
+                } else {
+                    self.mode = .menu;
+                    self.active_menu = .{ .title = "Copy to clipboard", .items = &copy_commit_menu, .index = 0 };
+                    try self.setMessage("copy commit attribute", .{});
+                }
+            },
             .reset_cherry_pick => {
                 if (self.copied_commits.items.len == 0) {
                     try self.setMessage("no copied commits to clear", .{});
@@ -5704,6 +5723,21 @@ pub const App = struct {
             },
             .delete_tag_remote => return self.startRemoteTagDelete(false),
             .delete_tag_both => return self.startRemoteTagDelete(true),
+            .copy_commit_hash, .copy_commit_subject, .copy_commit_author => {
+                const commit = self.selectedCommit() orelse {
+                    try self.setMessage("no commit selected", .{});
+                    return;
+                };
+                const text = switch (action) {
+                    .copy_commit_hash => commit.hash,
+                    .copy_commit_subject => commit.subject,
+                    .copy_commit_author => commit.author,
+                    else => unreachable,
+                };
+                if (self.clipboard_request) |old| self.allocator.free(old);
+                self.clipboard_request = try self.allocator.dupe(u8, text);
+                try self.setMessage("copied to clipboard: {s}", .{text});
+            },
         }
     }
 
@@ -7512,6 +7546,31 @@ test "new-tag prompt chains to an optional message, then creates an annotated ta
     try std.testing.expectEqualStrings("first release", m.create_tag.message);
     try std.testing.expect(!m.create_tag.force);
     try std.testing.expectEqual(@as(usize, 0), m.create_tag.target.len); // HEAD
+}
+
+test "y copies the selected commit's attributes" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits = [_]model.Commit{.{
+        .hash = @constCast("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+        .short_hash = @constCast("deadbee"),
+        .author = @constCast("Ada Lovelace"),
+        .time = @constCast("now"),
+        .refs = @constCast(""),
+        .subject = @constCast("compute bernoulli numbers"),
+    }};
+    app.data.commits = &commits;
+    app.focus = .commits;
+
+    try app.runMenuAction(.copy_commit_subject);
+    try std.testing.expectEqualStrings("compute bernoulli numbers", app.clipboard_request.?);
+    try app.runMenuAction(.copy_commit_author);
+    try std.testing.expectEqualStrings("Ada Lovelace", app.clipboard_request.?);
+    try app.runMenuAction(.copy_commit_hash);
+    try std.testing.expectEqualStrings("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", app.clipboard_request.?);
 }
 
 test "N moves the current branch's commits onto a new branch" {

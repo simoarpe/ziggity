@@ -997,6 +997,7 @@ const help_lines = [_][]const u8{
     "  g / t          reset menu / revert",
     "  c / v          copy commit to clipboard / paste (cherry-pick) onto HEAD",
     "  ctrl+r         clear the cherry-pick copy selection",
+    "  y              copy menu: commit hash / subject / author",
     "  d / s / f      drop / squash-down / fixup-down (interactive rebase)",
     "  e / r          edit (stop here) / reword",
     "  F / S          create fixup! commit / autosquash fixups above",
@@ -2386,7 +2387,7 @@ fn footerHints(c: FooterCtx) []const u8 {
         .files => unreachable,
         .branches => unreachable,
         .commits => if (c.reflog)
-            "space checkout  g reset  n new-branch  c/v/^r copy/paste/clear  o browser  W diff  [/] tabs" ++ global
+            "space checkout  g reset  n new-branch  c/v/^r copy/paste/clear  y copy  o browser  W diff  [/] tabs" ++ global
         else
             "enter files  space checkout  n/N branch/move  T tag  g reset  t revert  c/v/^r copy/paste/clear  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  G pr  W diff  / filter  b bisect  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  enter view" ++ global,
