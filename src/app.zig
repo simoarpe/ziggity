@@ -1909,9 +1909,12 @@ pub const App = struct {
     filter_history_index: ?usize = null,
     input_buffer: std.ArrayList(u8) = .empty,
     text_prompt_kind: ?TextPromptKind = null,
-    // An unfinished new-branch name kept when the prompt is cancelled, so `n`
-    // restores it; cleared once a branch is actually created. Owned.
-    new_branch_draft: []u8 = &.{},
+    // Per-creation-flow drafts: an unfinished name/value kept when its prompt is
+    // cancelled, restored on reopen, and cleared once the thing is created.
+    // Indexed by TextPromptKind; only "draftable" creation kinds are populated.
+    // Each entry is owned.
+    prompt_drafts: [@typeInfo(TextPromptKind).@"enum".fields.len][]u8 =
+        [_][]u8{&.{}} ** @typeInfo(TextPromptKind).@"enum".fields.len,
     // Holds the remote name between the two-step add-remote prompt (name → URL)
     // and the remote acted on by edit/remove. No allocation needed.
     remote_name_buf: [128]u8 = undefined,
@@ -2117,7 +2120,7 @@ pub const App = struct {
         self.patch_line_sel.deinit(self.allocator);
         self.allocator.free(self.patch_work_included);
         self.input_buffer.deinit(self.allocator);
-        self.allocator.free(self.new_branch_draft);
+        for (self.prompt_drafts) |d| self.allocator.free(d);
         self.preview_cache.deinit(self.allocator);
         self.allocator.free(self.preview_desired_key);
         self.allocator.free(self.preview_inflight_key);
@@ -5082,7 +5085,6 @@ pub const App = struct {
             .new_branch => {
                 if (self.branches_tab != .local) self.branches_tab = .local;
                 self.focus = .branches;
-                prefill = self.new_branch_draft; // restore an unfinished name
             },
             // Checking out by name lands on a local branch (or creates a
             // detached HEAD for a tag/commit), so anchor the panel on Local.
@@ -5135,6 +5137,8 @@ pub const App = struct {
         self.mode = .text_prompt;
         self.text_prompt_kind = kind;
         self.input_buffer.clearRetainingCapacity();
+        // Restore a remembered draft when the flow has no other prefill.
+        if (prefill.len == 0 and draftableKind(kind)) prefill = self.promptDraft(kind);
         if (kind == .push_upstream) {
             // Prefill "<suggested remote> <current branch>" so confirming with
             // enter pushes to <remote>/<branch> and sets it as the upstream.
@@ -5277,24 +5281,47 @@ pub const App = struct {
     }
 
     fn cancelTextPrompt(self: *App, comptime reason: []const u8) void {
-        // Keep an unfinished new-branch name so reopening `n` restores it.
-        if (self.text_prompt_kind == .new_branch) self.saveNewBranchDraft();
+        // Keep an unfinished name/value so reopening the prompt restores it.
+        if (self.text_prompt_kind) |k| {
+            if (draftableKind(k)) self.savePromptDraft(k);
+        }
         self.mode = .normal;
         self.text_prompt_kind = null;
         self.input_buffer.clearRetainingCapacity();
         self.setMessage(reason, .{}) catch {};
     }
 
-    fn saveNewBranchDraft(self: *App) void {
-        const text = std.mem.trim(u8, self.input_buffer.items, " \t\r\n");
-        const dup = self.allocator.dupe(u8, text) catch return;
-        self.allocator.free(self.new_branch_draft);
-        self.new_branch_draft = dup;
+    /// Creation prompts whose unfinished input is worth remembering across a
+    /// cancel. Each is scoped to its own flow, keyed by the entry prompt kind.
+    fn draftableKind(kind: TextPromptKind) bool {
+        return switch (kind) {
+            .new_branch,
+            .new_tag,
+            .new_worktree,
+            .move_to_new_branch,
+            .new_local_from_remote,
+            .new_branch_from_commit,
+            .add_remote_name,
+            .add_submodule_url,
+            => true,
+            else => false,
+        };
     }
 
-    fn clearNewBranchDraft(self: *App) void {
-        self.allocator.free(self.new_branch_draft);
-        self.new_branch_draft = &.{};
+    fn promptDraft(self: *const App, kind: TextPromptKind) []const u8 {
+        return self.prompt_drafts[@intFromEnum(kind)];
+    }
+
+    fn savePromptDraft(self: *App, kind: TextPromptKind) void {
+        const text = std.mem.trim(u8, self.input_buffer.items, " \t\r\n");
+        const dup = self.allocator.dupe(u8, text) catch return;
+        self.allocator.free(self.prompt_drafts[@intFromEnum(kind)]);
+        self.prompt_drafts[@intFromEnum(kind)] = dup;
+    }
+
+    fn clearPromptDraft(self: *App, kind: TextPromptKind) void {
+        self.allocator.free(self.prompt_drafts[@intFromEnum(kind)]);
+        self.prompt_drafts[@intFromEnum(kind)] = &.{};
     }
 
     /// True once a username and password/token have been entered this session.
@@ -5341,6 +5368,7 @@ pub const App = struct {
                     self.text_prompt_kind = null;
                     self.input_buffer.clearRetainingCapacity();
                 }
+                self.clearPromptDraft(.new_tag); // created -> forget the draft
                 return self.requestMutation(.{ .create_tag = .{ .name = name, .message = value, .force = false, .target = self.tag_target_buf[0..self.tag_target_len] } }, .{ .gerund = "creating tag", .command = "git tag", .refresh = Refresh.tags }, "created tag {s}", .{name});
             },
             else => {},
@@ -5356,7 +5384,7 @@ pub const App = struct {
                 self.mode = .normal;
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
-                self.clearNewBranchDraft(); // created -> forget the draft
+                self.clearPromptDraft(.new_branch); // created -> forget the draft
                 return self.runMutationScoped(result, Refresh.branches, "created branch {s}", .{value});
             },
             // New branch at the selected reflog entry's commit (recovery).
@@ -5370,6 +5398,7 @@ pub const App = struct {
                     self.text_prompt_kind = null;
                     self.input_buffer.clearRetainingCapacity();
                 }
+                self.clearPromptDraft(.new_branch_from_commit);
                 return self.requestMutation(.{ .new_branch_from = .{ .name = value, .start = entry.hash } }, .{ .gerund = "creating branch", .command = "git checkout -b", .refresh = Refresh.branches }, "created branch {s}", .{value});
             },
             // Move the current branch's commits onto a new branch, resetting the
@@ -5381,6 +5410,7 @@ pub const App = struct {
                     self.text_prompt_kind = null;
                     self.input_buffer.clearRetainingCapacity();
                 }
+                self.clearPromptDraft(.move_to_new_branch);
                 return self.requestMutation(.{ .move_to_new_branch = .{ .name = value, .original = original } }, .{ .gerund = "moving commits", .command = "git checkout -b", .refresh = Refresh.all }, "moved commits onto {s}", .{value});
             },
             .set_commit_author => {
@@ -5433,7 +5463,9 @@ pub const App = struct {
                     self.cancelTextPrompt("enter a tag name");
                     return;
                 }
-                // Stash the name and ask for an optional annotation message.
+                // Remember the name (so a cancel at the message step keeps it),
+                // then ask for an optional annotation message.
+                self.savePromptDraft(.new_tag);
                 const n = @min(value.len, self.remote_name_buf.len);
                 @memcpy(self.remote_name_buf[0..n], value[0..n]);
                 self.remote_name_len = n;
@@ -5470,7 +5502,9 @@ pub const App = struct {
                 return self.requestMutation(.{ .delete_remote_tag = .{ .remote = value, .name = tag, .also_local = self.tag_delete_also_local } }, .{ .gerund = "deleting remote tag", .command = "git push --delete", .refresh = refresh }, "deleted remote tag {s}", .{tag});
             },
             .add_remote_name => {
-                // Stash the name and ask for the URL in a second prompt.
+                // Remember the name (keeps it if the URL step is cancelled), then
+                // ask for the URL in a second prompt.
+                self.savePromptDraft(.add_remote_name);
                 const n = @min(value.len, self.remote_name_buf.len);
                 @memcpy(self.remote_name_buf[0..n], value[0..n]);
                 self.remote_name_len = n;
@@ -5485,6 +5519,7 @@ pub const App = struct {
                 self.mode = .normal;
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
+                self.clearPromptDraft(.add_remote_name); // remote added -> forget
                 return self.runMutationScoped(result, Refresh.remotes, "added remote {s}", .{name});
             },
             .edit_remote_url => {
@@ -5518,10 +5553,13 @@ pub const App = struct {
                     self.text_prompt_kind = null;
                     self.input_buffer.clearRetainingCapacity();
                 }
+                self.clearPromptDraft(.new_worktree);
                 return self.requestMutation(.{ .add_worktree = .{ .path = value, .base = base } }, .{ .gerund = "creating worktree", .command = "git worktree add", .refresh = Refresh.worktree_add }, "created worktree {s}", .{value});
             },
             .add_submodule_url => {
-                // Stash the URL and ask for the path in a second prompt.
+                // Remember the URL (keeps it if the path step is cancelled), then
+                // ask for the path in a second prompt.
+                self.savePromptDraft(.add_submodule_url);
                 const n = @min(value.len, self.submodule_url_buf.len);
                 @memcpy(self.submodule_url_buf[0..n], value[0..n]);
                 self.submodule_url_len = n;
@@ -5537,6 +5575,7 @@ pub const App = struct {
                     self.text_prompt_kind = null;
                     self.input_buffer.clearRetainingCapacity();
                 }
+                self.clearPromptDraft(.add_submodule_url); // added -> forget
                 return self.requestMutation(.{ .add_submodule = .{ .url = url, .path = value } }, .{ .gerund = "adding submodule", .command = "git submodule add", .refresh = Refresh.submodules }, "added submodule {s}", .{value});
             },
             .set_submodule_url => {
@@ -5585,6 +5624,7 @@ pub const App = struct {
                     self.text_prompt_kind = null;
                     self.input_buffer.clearRetainingCapacity();
                 }
+                self.clearPromptDraft(.new_local_from_remote);
                 return self.requestMutation(.{ .new_branch_from = .{ .name = value, .start = start } }, .{ .gerund = "creating branch", .command = "git checkout -b", .refresh = Refresh.checkout }, "created {s}", .{value});
             },
             // Handled before the non-empty guard above.
@@ -6200,6 +6240,7 @@ pub const App = struct {
             .force_tag => {
                 const name = self.remote_name_buf[0..self.remote_name_len];
                 const message = self.tag_message_buf[0..self.tag_message_len];
+                self.clearPromptDraft(.new_tag); // created -> forget the draft
                 return self.requestMutation(.{ .create_tag = .{ .name = name, .message = message, .force = true, .target = self.tag_target_buf[0..self.tag_target_len] } }, .{ .gerund = "creating tag", .command = "git tag -f", .refresh = Refresh.tags }, "created tag {s}", .{name});
             },
             .force_checkout => {
@@ -7735,15 +7776,19 @@ test "new-branch prompt remembers a cancelled name and forgets it on create" {
     try app.startTextPrompt(.new_branch);
     try app.input_buffer.appendSlice(allocator, "feature/wip");
     app.cancelTextPrompt("cancelled");
-    try std.testing.expectEqualStrings("feature/wip", app.new_branch_draft);
+    try std.testing.expectEqualStrings("feature/wip", app.promptDraft(.new_branch));
 
     // Reopening restores it into the input buffer.
     try app.startTextPrompt(.new_branch);
     try std.testing.expectEqualStrings("feature/wip", app.input_buffer.items);
 
-    // On a successful create the confirm path calls clearNewBranchDraft.
-    app.clearNewBranchDraft();
-    try std.testing.expectEqual(@as(usize, 0), app.new_branch_draft.len);
+    // Drafts are scoped per flow: a different creation prompt is unaffected.
+    try app.startTextPrompt(.new_worktree);
+    try std.testing.expectEqual(@as(usize, 0), app.input_buffer.items.len);
+
+    // On a successful create the confirm path calls clearPromptDraft.
+    app.clearPromptDraft(.new_branch);
+    try std.testing.expectEqual(@as(usize, 0), app.promptDraft(.new_branch).len);
 }
 
 test "add-remote prompt stashes the name and asks for the URL" {
@@ -9557,7 +9602,7 @@ fn deinitTestApp(app: *App) void {
     if (app.fetch_remote_name) |r| app.allocator.free(r);
     app.clearLockRecovery();
     app.input_buffer.deinit(app.allocator);
-    app.allocator.free(app.new_branch_draft);
+    for (app.prompt_drafts) |d| app.allocator.free(d);
     if (app.staging) |*parsed| parsed.deinit(app.allocator);
     app.allocator.free(app.staging_diff);
     app.allocator.free(app.staging_other_diff);
