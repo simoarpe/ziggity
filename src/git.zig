@@ -1031,16 +1031,17 @@ pub const Git = struct {
         return self.exec(&.{ "branch", "-m", old_name, new_name });
     }
 
-    /// Create a tag at HEAD. A non-empty `message` makes it annotated
-    /// (`-a -m`); empty makes it lightweight. `force` (`-f`) overwrites an
-    /// existing tag of the same name.
-    pub fn createTag(self: *Git, name: []const u8, message: []const u8, force: bool) !ExecResult {
+    /// Create a tag. A non-empty `message` makes it annotated (`-a -m`); empty
+    /// makes it lightweight. `force` (`-f`) overwrites an existing tag. A
+    /// non-empty `target` (a commit-ish) tags that commit; empty tags HEAD.
+    pub fn createTag(self: *Git, name: []const u8, message: []const u8, force: bool, target: []const u8) !ExecResult {
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(self.allocator);
         try args.append(self.allocator, "tag");
         if (force) try args.append(self.allocator, "-f");
         if (message.len > 0) try args.appendSlice(self.allocator, &.{ "-a", "-m", message });
         try args.appendSlice(self.allocator, &.{ "--", name });
+        if (target.len > 0) try args.append(self.allocator, target);
         return self.exec(args.items);
     }
 

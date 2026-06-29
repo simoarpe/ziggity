@@ -11,7 +11,10 @@ const textmatch = @import("textmatch.zig");
 const App = app_mod.App;
 
 pub fn startNewForBranchTab(self: *App) !void {
-    if (self.branches_tab == .tags) return self.startTextPrompt(.new_tag);
+    if (self.branches_tab == .tags) {
+        self.tag_target_len = 0; // tag HEAD
+        return self.startTextPrompt(.new_tag);
+    }
     if (self.branches_tab == .remotes) return self.startTextPrompt(.add_remote_name);
     return self.startTextPrompt(.new_branch);
 }

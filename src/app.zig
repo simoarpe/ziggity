@@ -1088,7 +1088,7 @@ pub const Mutation = union(enum) {
     cherry_pick_many: []const []const u8,
     delete_branch: struct { name: []const u8, force: bool },
     delete_remote_branch: struct { remote: []const u8, ref: []const u8 },
-    create_tag: struct { name: []const u8, message: []const u8, force: bool },
+    create_tag: struct { name: []const u8, message: []const u8, force: bool, target: []const u8 },
     delete_tag: []const u8,
     delete_remote_tag: struct { remote: []const u8, name: []const u8, also_local: bool },
     remove_worktree: []const u8,
@@ -1139,7 +1139,7 @@ pub const Mutation = union(enum) {
             .cherry_pick_many => |hs| wgit.cherryPickMany(hs),
             .delete_branch => |x| wgit.deleteBranch(x.name, x.force),
             .delete_remote_branch => |x| wgit.deleteRemoteBranch(x.remote, x.ref),
-            .create_tag => |x| wgit.createTag(x.name, x.message, x.force),
+            .create_tag => |x| wgit.createTag(x.name, x.message, x.force, x.target),
             .delete_tag => |n| wgit.deleteTag(n),
             .delete_remote_tag => |x| blk: {
                 // "Delete both" removes the local tag first, then the remote one;
@@ -1205,7 +1205,7 @@ pub const Mutation = union(enum) {
             .cherry_pick_many => |hs| .{ .cherry_pick_many = try dupeStrList(gpa, hs) },
             .delete_branch => |x| .{ .delete_branch = .{ .name = try gpa.dupe(u8, x.name), .force = x.force } },
             .delete_remote_branch => |x| .{ .delete_remote_branch = .{ .remote = try gpa.dupe(u8, x.remote), .ref = try gpa.dupe(u8, x.ref) } },
-            .create_tag => |x| .{ .create_tag = .{ .name = try gpa.dupe(u8, x.name), .message = try gpa.dupe(u8, x.message), .force = x.force } },
+            .create_tag => |x| .{ .create_tag = .{ .name = try gpa.dupe(u8, x.name), .message = try gpa.dupe(u8, x.message), .force = x.force, .target = try gpa.dupe(u8, x.target) } },
             .delete_tag => |n| .{ .delete_tag = try gpa.dupe(u8, n) },
             .delete_remote_tag => |x| .{ .delete_remote_tag = .{ .remote = try gpa.dupe(u8, x.remote), .name = try gpa.dupe(u8, x.name), .also_local = x.also_local } },
             .remove_worktree => |p| .{ .remove_worktree = try gpa.dupe(u8, p) },
@@ -1241,6 +1241,7 @@ pub const Mutation = union(enum) {
             .create_tag => |x| {
                 gpa.free(x.name);
                 gpa.free(x.message);
+                gpa.free(x.target);
             },
             .delete_remote_tag => |x| {
                 gpa.free(x.remote);
@@ -1776,6 +1777,10 @@ pub const App = struct {
     // (The tag name itself is stashed in `remote_name_buf`.)
     tag_message_buf: [1024]u8 = undefined,
     tag_message_len: usize = 0,
+    // The commit-ish a new tag points at: a hash when tagging the selected
+    // commit (Commits tab `T`), or empty to tag HEAD (Tags tab `n`).
+    tag_target_buf: [64]u8 = undefined,
+    tag_target_len: usize = 0,
     // Whether the pending remote-tag delete should also drop the local tag
     // (the "Delete local and remote tag" menu choice).
     tag_delete_also_local: bool = false,
@@ -2676,6 +2681,7 @@ pub const App = struct {
             .start_commit => try commits_mod.startCommitPrompt(self),
             .amend_commit => try commits_mod.amendLastCommit(self),
             .cherry_pick => try self.toggleCommitCopy(),
+            .tag_commit => try self.startTagAtCommit(),
             .reset_cherry_pick => {
                 if (self.copied_commits.items.len == 0) {
                     try self.setMessage("no copied commits to clear", .{});
@@ -4741,6 +4747,20 @@ pub const App = struct {
         return self.requestMutation(.{ .checkout = commit.hash }, .{ .gerund = "checking out", .command = "git checkout", .refresh = Refresh.checkout }, "checked out {s} (detached)", .{commit.short_hash});
     }
 
+    /// `T` on the Commits/Reflog tab: create a tag at the selected commit (vs
+    /// the Tags tab's `n`, which tags HEAD). Reuses the tag-creation prompt
+    /// flow, with the commit's hash stashed as the tag target.
+    fn startTagAtCommit(self: *App) !void {
+        const commit = self.selectedCommit() orelse {
+            try self.setMessage("no commit selected", .{});
+            return;
+        };
+        const n = @min(commit.hash.len, self.tag_target_buf.len);
+        @memcpy(self.tag_target_buf[0..n], commit.hash[0..n]);
+        self.tag_target_len = n;
+        return self.startTextPrompt(.new_tag);
+    }
+
     /// `n` on the Commits/Reflog tab: create a branch at the selected commit. On
     /// the Reflog tab this recovers work that is no longer on any branch. The
     /// prompt holds the list selection fixed, so `selectedCommit()` still names
@@ -4840,8 +4860,14 @@ pub const App = struct {
                 prefill = branch.name;
             },
             .new_tag, .new_tag_message => {
-                if (self.branches_tab != .tags) self.branches_tab = .tags;
-                self.focus = .branches;
+                // Tagging the selected commit (`T`) keeps focus on the Commits
+                // panel; tagging HEAD (`n`) anchors on the Tags tab.
+                if (self.tag_target_len > 0) {
+                    self.focus = .commits;
+                } else {
+                    if (self.branches_tab != .tags) self.branches_tab = .tags;
+                    self.focus = .branches;
+                }
             },
             // The remote-selection prompts prefill with the suggested remote so
             // a single Enter targets it; the tag name is already stashed.
@@ -5061,7 +5087,7 @@ pub const App = struct {
                     self.text_prompt_kind = null;
                     self.input_buffer.clearRetainingCapacity();
                 }
-                return self.requestMutation(.{ .create_tag = .{ .name = name, .message = value, .force = false } }, .{ .gerund = "creating tag", .command = "git tag", .refresh = Refresh.tags }, "created tag {s}", .{name});
+                return self.requestMutation(.{ .create_tag = .{ .name = name, .message = value, .force = false, .target = self.tag_target_buf[0..self.tag_target_len] } }, .{ .gerund = "creating tag", .command = "git tag", .refresh = Refresh.tags }, "created tag {s}", .{name});
             },
             else => {},
         }
@@ -5853,7 +5879,7 @@ pub const App = struct {
             .force_tag => {
                 const name = self.remote_name_buf[0..self.remote_name_len];
                 const message = self.tag_message_buf[0..self.tag_message_len];
-                return self.requestMutation(.{ .create_tag = .{ .name = name, .message = message, .force = true } }, .{ .gerund = "creating tag", .command = "git tag -f", .refresh = Refresh.tags }, "created tag {s}", .{name});
+                return self.requestMutation(.{ .create_tag = .{ .name = name, .message = message, .force = true, .target = self.tag_target_buf[0..self.tag_target_len] } }, .{ .gerund = "creating tag", .command = "git tag -f", .refresh = Refresh.tags }, "created tag {s}", .{name});
             },
             .delete_remote_branch => {
                 const branch = self.selectedRemoteBranch() orelse {
@@ -7447,6 +7473,39 @@ test "new-tag prompt chains to an optional message, then creates an annotated ta
     try std.testing.expectEqualStrings("v1.0", m.create_tag.name);
     try std.testing.expectEqualStrings("first release", m.create_tag.message);
     try std.testing.expect(!m.create_tag.force);
+    try std.testing.expectEqual(@as(usize, 0), m.create_tag.target.len); // HEAD
+}
+
+test "T on the commits tab tags the selected commit, not HEAD" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = undefined };
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    var commits = [_]model.Commit{.{
+        .hash = @constCast("abcabcabcabcabcabcabcabcabcabcabcabcabca"),
+        .short_hash = @constCast("abcabca"),
+        .author = @constCast("Sam"),
+        .time = @constCast("now"),
+        .refs = @constCast(""),
+        .subject = @constCast("target commit"),
+    }};
+    app.data.commits = &commits;
+    app.focus = .commits;
+    app.commits_tab = .commits;
+
+    try app.startTagAtCommit();
+    try std.testing.expectEqual(TextPromptKind.new_tag, app.text_prompt_kind.?);
+    try std.testing.expectEqual(model.Focus.commits, app.focus); // stays on commits
+    try app.input_buffer.appendSlice(allocator, "v9.9");
+    try app.submitTextPrompt(); // -> message step
+    try app.submitTextPrompt(); // empty message -> lightweight, create
+    const m = app.mutation_requested.?;
+    try std.testing.expectEqualStrings("v9.9", m.create_tag.name);
+    try std.testing.expectEqualStrings("abcabcabcabcabcabcabcabcabcabcabcabcabca", m.create_tag.target);
 }
 
 test "creating a tag that already exists prompts to force-overwrite" {
