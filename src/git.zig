@@ -1080,6 +1080,18 @@ pub const Git = struct {
         return self.exec(&.{ "checkout", "-b", name, start });
     }
 
+    /// Move `original`'s commits onto a new branch `name`: create+switch to the
+    /// new branch at HEAD (carrying the commits), then reset `original` back to
+    /// its upstream. The caller guarantees `original` has an upstream.
+    pub fn moveCommitsToNewBranch(self: *Git, name: []const u8, original: []const u8) !ExecResult {
+        var r = try self.exec(&.{ "checkout", "-b", name });
+        if (!r.ok()) return r;
+        r.deinit(self.allocator);
+        const upstream = try std.fmt.allocPrint(self.allocator, "{s}@{{u}}", .{original});
+        defer self.allocator.free(upstream);
+        return self.exec(&.{ "branch", "-f", original, upstream });
+    }
+
     pub fn setRemoteUrl(self: *Git, name: []const u8, url: []const u8) !ExecResult {
         return self.exec(&.{ "remote", "set-url", name, url });
     }

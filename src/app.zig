@@ -119,6 +119,7 @@ pub const TextPromptKind = enum {
     rename_remote,
     new_local_from_remote,
     new_branch_from_commit,
+    move_to_new_branch,
 
     pub fn title(self: TextPromptKind) []const u8 {
         return switch (self) {
@@ -143,7 +144,8 @@ pub const TextPromptKind = enum {
             .set_submodule_url => "Submodule URL",
             .rename_remote => "Rename remote",
             .new_local_from_remote => "New local branch name",
-            .new_branch_from_commit => "New branch name (from reflog entry)",
+            .new_branch_from_commit => "New branch name (at the selected commit)",
+            .move_to_new_branch => "New branch name (move commits onto it)",
         };
     }
 };
@@ -1099,6 +1101,7 @@ pub const Mutation = union(enum) {
     remove_submodule: []const u8,
     submodule_bulk: git_mod.Git.SubmoduleBulk,
     new_branch_from: struct { name: []const u8, start: []const u8 },
+    move_to_new_branch: struct { name: []const u8, original: []const u8 },
     undo,
     merge: []const u8,
     rebase: []const u8,
@@ -1159,6 +1162,7 @@ pub const Mutation = union(enum) {
             .remove_submodule => |p| wgit.removeSubmodule(p),
             .submodule_bulk => |op| wgit.bulkSubmodule(op),
             .new_branch_from => |x| wgit.newBranchFrom(x.name, x.start),
+            .move_to_new_branch => |x| wgit.moveCommitsToNewBranch(x.name, x.original),
             .undo => wgit.undoLastOperation(),
             .merge => |b| wgit.mergeBranch(b),
             .rebase => |b| wgit.rebaseOnto(b),
@@ -1216,6 +1220,7 @@ pub const Mutation = union(enum) {
             .remove_submodule => |p| .{ .remove_submodule = try gpa.dupe(u8, p) },
             .submodule_bulk => |op| .{ .submodule_bulk = op },
             .new_branch_from => |x| .{ .new_branch_from = .{ .name = try gpa.dupe(u8, x.name), .start = try gpa.dupe(u8, x.start) } },
+            .move_to_new_branch => |x| .{ .move_to_new_branch = .{ .name = try gpa.dupe(u8, x.name), .original = try gpa.dupe(u8, x.original) } },
             .undo => .undo,
             .merge => |b| .{ .merge = try gpa.dupe(u8, b) },
             .rebase => |b| .{ .rebase = try gpa.dupe(u8, b) },
@@ -1250,6 +1255,10 @@ pub const Mutation = union(enum) {
             .new_branch_from => |x| {
                 gpa.free(x.name);
                 gpa.free(x.start);
+            },
+            .move_to_new_branch => |x| {
+                gpa.free(x.name);
+                gpa.free(x.original);
             },
             .add_worktree => |x| {
                 gpa.free(x.path);
@@ -2683,6 +2692,7 @@ pub const App = struct {
             .cherry_pick => try self.toggleCommitCopy(),
             .tag_commit => try self.startTagAtCommit(),
             .open_pull_request => try diffmode_mod.openPullRequest(self),
+            .move_to_new_branch => try self.startMoveCommitsToNewBranch(),
             .reset_cherry_pick => {
                 if (self.copied_commits.items.len == 0) {
                     try self.setMessage("no copied commits to clear", .{});
@@ -4748,6 +4758,21 @@ pub const App = struct {
         return self.requestMutation(.{ .checkout = commit.hash }, .{ .gerund = "checking out", .command = "git checkout", .refresh = Refresh.checkout }, "checked out {s} (detached)", .{commit.short_hash});
     }
 
+    /// `N` on the Commits tab: move the current branch's commits onto a new
+    /// branch and reset the current branch back to its upstream. Requires an
+    /// upstream (that's where the current branch is reset to).
+    fn startMoveCommitsToNewBranch(self: *App) !void {
+        if (self.data.current_branch.len == 0) {
+            try self.setMessage("not on a branch (detached HEAD)", .{});
+            return;
+        }
+        if (!self.currentBranchHasUpstream()) {
+            try self.setMessage("{s} needs an upstream to move its commits from", .{self.data.current_branch});
+            return;
+        }
+        return self.startTextPrompt(.move_to_new_branch);
+    }
+
     /// `T` on the Commits/Reflog tab: create a tag at the selected commit (vs
     /// the Tags tab's `n`, which tags HEAD). Reuses the tag-creation prompt
     /// flow, with the commit's hash stashed as the tag target.
@@ -4885,6 +4910,7 @@ pub const App = struct {
             // Keep focus on the Commits panel (Reflog tab) so the frozen list
             // selection still names the entry the branch is created from.
             .new_branch_from_commit => self.focus = .commits,
+            .move_to_new_branch => self.focus = .commits,
             // Prefill handled below (it needs to format remote + branch).
             .push_upstream => {},
             // Diff against a typed ref: no focus change or prefill.
@@ -5117,6 +5143,17 @@ pub const App = struct {
                     self.input_buffer.clearRetainingCapacity();
                 }
                 return self.requestMutation(.{ .new_branch_from = .{ .name = value, .start = entry.hash } }, .{ .gerund = "creating branch", .command = "git checkout -b", .refresh = Refresh.branches }, "created branch {s}", .{value});
+            },
+            // Move the current branch's commits onto a new branch, resetting the
+            // current branch back to its upstream.
+            .move_to_new_branch => {
+                const original = self.data.current_branch;
+                defer {
+                    self.mode = .normal;
+                    self.text_prompt_kind = null;
+                    self.input_buffer.clearRetainingCapacity();
+                }
+                return self.requestMutation(.{ .move_to_new_branch = .{ .name = value, .original = original } }, .{ .gerund = "moving commits", .command = "git checkout -b", .refresh = Refresh.all }, "moved commits onto {s}", .{value});
             },
             // Checkout by typed name: `git checkout <value>` resolves a local
             // branch, DWIM-tracks a remote branch, detaches onto a tag/commit,
@@ -7475,6 +7512,34 @@ test "new-tag prompt chains to an optional message, then creates an annotated ta
     try std.testing.expectEqualStrings("first release", m.create_tag.message);
     try std.testing.expect(!m.create_tag.force);
     try std.testing.expectEqual(@as(usize, 0), m.create_tag.target.len); // HEAD
+}
+
+test "N moves the current branch's commits onto a new branch" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = undefined };
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    app.data.current_branch = @constCast("main");
+    app.data.upstream = @constCast("origin/main"); // has an upstream
+    app.focus = .commits;
+
+    try app.startMoveCommitsToNewBranch();
+    try std.testing.expectEqual(TextPromptKind.move_to_new_branch, app.text_prompt_kind.?);
+    try app.input_buffer.appendSlice(allocator, "feature");
+    try app.submitTextPrompt();
+    const m = app.mutation_requested.?;
+    try std.testing.expectEqualStrings("feature", m.move_to_new_branch.name);
+    try std.testing.expectEqualStrings("main", m.move_to_new_branch.original);
+
+    // Without an upstream it refuses (nothing to reset the branch back to).
+    app.data.upstream = null;
+    app.mode = .normal;
+    try app.startMoveCommitsToNewBranch();
+    try std.testing.expectEqual(Mode.normal, app.mode); // no prompt opened
 }
 
 test "T on the commits tab tags the selected commit, not HEAD" {
