@@ -35,6 +35,9 @@ pub const Action = enum {
     amend_attribute,
     interactive_rebase,
     log_menu,
+    commit_no_verify,
+    ignore_file,
+    copy_file_info,
     conflict_menu,
     command_log,
     help,
@@ -145,11 +148,14 @@ pub fn isFilesContentAction(self: Action) bool {
         .discard_all,
         .stash_menu,
         .start_commit,
+        .commit_no_verify,
         .amend_commit,
         .conflict_menu,
         .open_status_filter,
         .start_file_filter,
         .toggle_tree,
+        .ignore_file,
+        .copy_file_info,
         => true,
         else => false,
     };
@@ -180,6 +186,7 @@ pub fn isMutating(self: Action) bool {
         .command_log,
         .help,
         .copy_to_clipboard,
+        .copy_file_info,
         .open_browser,
         .edit_file,
         .diff_mark,
@@ -269,8 +276,11 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
             if (keymap.discard_all.matches(key)) return .discard_all;
             if (keymap.stash_create.matches(key)) return .stash_menu;
             if (keymap.commit.matches(key)) return .start_commit;
+            if (keymap.commit_no_verify.matches(key)) return .commit_no_verify;
             if (keymap.amend.matches(key)) return .amend_commit;
             if (keymap.conflict_menu.matches(key)) return .conflict_menu;
+            if (keymap.ignore_file.matches(key)) return .ignore_file;
+            if (keymap.copy_file_info.matches(key)) return .copy_file_info;
         },
         .branches => {
             if (keymap.new_branch.matches(key)) return .new_branch;

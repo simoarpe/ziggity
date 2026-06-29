@@ -1009,8 +1009,30 @@ pub const Git = struct {
         return self.successResult();
     }
 
-    pub fn commit(self: *Git, message: []const u8) !ExecResult {
+    pub fn commit(self: *Git, message: []const u8, no_verify: bool) !ExecResult {
+        if (no_verify) return self.exec(&.{ "commit", "--no-verify", "-m", message });
         return self.exec(&.{ "commit", "-m", message });
+    }
+
+    /// Append `path` to the repo's `.gitignore`, creating it if absent.
+    pub fn ignoreFile(self: *Git, path: []const u8) !ExecResult {
+        const gi = try std.fmt.allocPrint(self.allocator, "{s}/.gitignore", .{self.root});
+        defer self.allocator.free(gi);
+        const existing = std.Io.Dir.readFileAlloc(.cwd(), self.io, gi, self.allocator, .limited(1 << 20)) catch |err| switch (err) {
+            error.FileNotFound => try self.allocator.dupe(u8, ""),
+            else => return err,
+        };
+        defer self.allocator.free(existing);
+        // Avoid duplicating an entry that's already there (line-exact match).
+        var it = std.mem.splitScalar(u8, existing, '\n');
+        while (it.next()) |line| {
+            if (std.mem.eql(u8, std.mem.trim(u8, line, " \t\r"), path)) return self.successResult();
+        }
+        const needs_nl = existing.len > 0 and existing[existing.len - 1] != '\n';
+        const updated = try std.fmt.allocPrint(self.allocator, "{s}{s}{s}\n", .{ existing, if (needs_nl) "\n" else "", path });
+        defer self.allocator.free(updated);
+        try std.Io.Dir.writeFile(.cwd(), self.io, .{ .sub_path = gi, .data = updated });
+        return self.successResult();
     }
 
     pub fn checkout(self: *Git, branch_name: []const u8) !ExecResult {

@@ -1124,7 +1124,7 @@ pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process
 /// stay synchronous so rapid input is never gated. Params are page-allocated
 /// copies so the job is self-contained across the thread boundary.
 pub const Mutation = union(enum) {
-    commit: []const u8,
+    commit: struct { message: []const u8, no_verify: bool },
     amend,
     checkout: []const u8,
     revert: []const u8,
@@ -1176,7 +1176,7 @@ pub const Mutation = union(enum) {
             wgit.command_log.deinit(gpa);
         }
         return switch (self) {
-            .commit => |msg| wgit.commit(msg),
+            .commit => |x| wgit.commit(x.message, x.no_verify),
             .amend => wgit.amendCommit(),
             .checkout => |b| wgit.checkout(b),
             .revert => |h| wgit.revertCommit(h),
@@ -1243,7 +1243,7 @@ pub const Mutation = union(enum) {
     /// borrowed selection slices it was built from.
     pub fn dupe(self: Mutation, gpa: std.mem.Allocator) !Mutation {
         return switch (self) {
-            .commit => |msg| .{ .commit = try gpa.dupe(u8, msg) },
+            .commit => |x| .{ .commit = .{ .message = try gpa.dupe(u8, x.message), .no_verify = x.no_verify } },
             .amend => .amend,
             .checkout => |b| .{ .checkout = try gpa.dupe(u8, b) },
             .revert => |h| .{ .revert = try gpa.dupe(u8, h) },
@@ -1284,7 +1284,8 @@ pub const Mutation = union(enum) {
 
     pub fn deinit(self: Mutation, gpa: std.mem.Allocator) void {
         switch (self) {
-            .commit, .checkout, .revert, .create_fixup, .delete_tag, .remove_worktree, .update_submodule, .remove_submodule, .merge, .rebase, .autosquash => |s| gpa.free(s),
+            .checkout, .revert, .create_fixup, .delete_tag, .remove_worktree, .update_submodule, .remove_submodule, .merge, .rebase, .autosquash => |s| gpa.free(s),
+            .commit => |x| gpa.free(x.message),
             .create_tag => |x| {
                 gpa.free(x.name);
                 gpa.free(x.message);
@@ -1802,6 +1803,8 @@ pub const App = struct {
     commit_body_scroll_y: usize = 0,
     file_filter_scroll: usize = 0,
     commit_action: CommitAction = .create,
+    // Skip pre-commit hooks for the commit being composed (the Files panel `w`).
+    commit_no_verify: bool = false,
     commit_reword_index: usize = 0,
     diff: []u8 = &.{},
     message: []u8 = &.{},
@@ -2464,7 +2467,7 @@ pub const App = struct {
         if (self.staging_active and !self.staging_patch_mode) {
             if (self.config.keymap.commit.matches(key)) {
                 if (self.foregroundBusy()) return self.setMessage("operation in progress...", .{});
-                return commits_mod.startCommitPrompt(self);
+                return commits_mod.startCommitPrompt(self, false);
             }
             if (self.config.keymap.amend.matches(key)) {
                 if (self.foregroundBusy()) return self.setMessage("operation in progress...", .{});
@@ -2756,7 +2759,24 @@ pub const App = struct {
             .start_file_filter => try self.startFileFilterPrompt(),
             .start_commit_filter => try self.startCommitFilterMenu(),
             .open_status_filter => try self.startStatusFilterMenu(),
-            .start_commit => try commits_mod.startCommitPrompt(self),
+            .start_commit => try commits_mod.startCommitPrompt(self, false),
+            .commit_no_verify => try commits_mod.startCommitPrompt(self, true),
+            .ignore_file => {
+                const file = self.selectedFile() orelse {
+                    try self.setMessage("no file selected", .{});
+                    return;
+                };
+                return self.runMutationFiles(try self.git.ignoreFile(file.path), "added {s} to .gitignore", .{file.path});
+            },
+            .copy_file_info => {
+                const file = self.selectedFile() orelse {
+                    try self.setMessage("no file selected", .{});
+                    return;
+                };
+                if (self.clipboard_request) |old| self.allocator.free(old);
+                self.clipboard_request = try self.allocator.dupe(u8, file.path);
+                try self.setMessage("copied to clipboard: {s}", .{file.path});
+            },
             .amend_commit => try commits_mod.amendLastCommit(self),
             .cherry_pick => try self.toggleCommitCopy(),
             .tag_commit => try self.startTagAtCommit(),
@@ -8601,7 +8621,7 @@ test "an unfinalized commit message is preserved on cancel and restored on reope
     const esc = vaxis.Key{ .codepoint = vaxis.Key.escape };
 
     // Type a subject + multi-line body, then cancel with <esc>.
-    try commits_mod.startCommitPrompt(&app);
+    try commits_mod.startCommitPrompt(&app, false);
     try app.commit_buffer.appendSlice(allocator, "wip subject");
     try app.commit_body_buffer.appendSlice(allocator, "line one\nline two");
     try app.handleKey(esc);
@@ -8611,7 +8631,7 @@ test "an unfinalized commit message is preserved on cancel and restored on reope
     try std.testing.expectEqualStrings("line one\nline two", app.commit_preserved_body);
 
     // Reopening restores the draft into the editor, caret at the end.
-    try commits_mod.startCommitPrompt(&app);
+    try commits_mod.startCommitPrompt(&app, false);
     try std.testing.expectEqualStrings("wip subject", app.commit_buffer.items);
     try std.testing.expectEqualStrings("line one\nline two", app.commit_body_buffer.items);
     try std.testing.expectEqual(app.commit_buffer.items.len, app.commit_cursor);
@@ -8621,18 +8641,18 @@ test "an unfinalized commit message is preserved on cancel and restored on reope
     try std.testing.expectEqual(@as(usize, 0), app.commit_preserved_subject.len);
 
     // Emptying the editor and cancelling drops the preserved draft too.
-    try commits_mod.startCommitPrompt(&app);
+    try commits_mod.startCommitPrompt(&app, false);
     try app.commit_buffer.appendSlice(allocator, "draft");
     try app.handleKey(esc);
     try std.testing.expect(app.commit_preserved_subject.len > 0);
-    try commits_mod.startCommitPrompt(&app); // restores "draft"
+    try commits_mod.startCommitPrompt(&app, false); // restores "draft"
     app.commit_buffer.clearRetainingCapacity();
     app.commit_body_buffer.clearRetainingCapacity();
     try app.handleKey(esc);
     try std.testing.expectEqual(@as(usize, 0), app.commit_preserved_subject.len);
 
     // A reword's text is NOT preserved (it belongs to its commit).
-    try commits_mod.startCommitPrompt(&app);
+    try commits_mod.startCommitPrompt(&app, false);
     app.commit_action = .reword;
     try app.commit_buffer.appendSlice(allocator, "reworded");
     try app.handleKey(esc);

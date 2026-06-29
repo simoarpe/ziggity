@@ -11,13 +11,14 @@ const commitops_mod = @import("commitops.zig");
 
 const App = app_mod.App;
 
-pub fn startCommitPrompt(app: *App) !void {
+pub fn startCommitPrompt(app: *App, no_verify: bool) !void {
     if (app.data.stagedCount() == 0) {
         try app.setMessage("stage files before committing", .{});
         return;
     }
     app.mode = .commit_prompt;
     app.commit_action = .create;
+    app.commit_no_verify = no_verify;
     app.commit_field = .subject;
     app.commit_buffer.clearRetainingCapacity();
     app.commit_body_buffer.clearRetainingCapacity();
@@ -203,7 +204,7 @@ pub fn submitCommit(app: *App) !void {
         // waiting status): the dialog disappears at once and pre-commit hooks /
         // signing / a slow `git status` no longer block it. The refresh is
         // scoped to the views a commit changes.
-        .create => return app.requestMutation(.{ .commit = message }, .{ .gerund = "committing", .command = "git commit", .refresh = App.Refresh.commit }, "commit created", .{}),
+        .create => return app.requestMutation(.{ .commit = .{ .message = message, .no_verify = app.commit_no_verify } }, .{ .gerund = "committing", .command = if (app.commit_no_verify) "git commit --no-verify" else "git commit", .refresh = App.Refresh.commit }, "commit created", .{}),
         .reword => return commitops_mod.runRebase(app, .reword, reword_index, message),
     }
 }
