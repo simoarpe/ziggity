@@ -143,7 +143,9 @@ fn graphWorker(gr: *GraphRun) void {
     defer argv.deinit(async_allocator);
     // Rich one-line-per-commit format: hash, decorations, author, relative date,
     // then subject — colourised by git so printAnsi renders it directly.
-    const base = [_][]const u8{ "git", "--no-optional-locks", "log", "--graph", "--color=always", "-n", "5000", "--format=format:%C(yellow)%h%C(auto)%d%C(reset) %C(blue)%an%C(reset) %C(green)%ar%C(reset)  %s" };
+    // Branch/tag names (%d) get a fixed bold magenta so they stand out rather
+    // than relying on git's theme-dependent auto decoration colours.
+    const base = [_][]const u8{ "git", "--no-optional-locks", "log", "--graph", "--color=always", "--decorate", "-n", "5000", "--format=format:%C(yellow)%h%C(bold magenta)%d%C(reset) %C(blue)%an%C(reset) %C(green)%ar%C(reset)  %s" };
     argv.appendSlice(async_allocator, &base) catch return postGraph(gr);
     if (gr.all) argv.append(async_allocator, "--all") catch return postGraph(gr);
     const r = git_mod.runWithLockRetry(async_allocator, gr.io, .{
