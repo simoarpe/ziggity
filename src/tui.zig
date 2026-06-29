@@ -141,7 +141,9 @@ const GraphRun = struct {
 fn graphWorker(gr: *GraphRun) void {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(async_allocator);
-    const base = [_][]const u8{ "git", "--no-optional-locks", "log", "--graph", "--oneline", "--decorate", "--color=always", "-n", "5000" };
+    // Rich one-line-per-commit format: hash, decorations, author, relative date,
+    // then subject — colourised by git so printAnsi renders it directly.
+    const base = [_][]const u8{ "git", "--no-optional-locks", "log", "--graph", "--color=always", "-n", "5000", "--format=format:%C(yellow)%h%C(auto)%d%C(reset) %C(blue)%an%C(reset) %C(green)%ar%C(reset)  %s" };
     argv.appendSlice(async_allocator, &base) catch return postGraph(gr);
     if (gr.all) argv.append(async_allocator, "--all") catch return postGraph(gr);
     const r = git_mod.runWithLockRetry(async_allocator, gr.io, .{
@@ -1006,7 +1008,7 @@ fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
     const win = popup(root, w, h, title, null);
 
     const footer_row: u16 = win.height -| 1;
-    print(win, footer_row, 0, "j/k move  a all/current  enter jump  esc close", st.bottom_accent);
+    print(win, footer_row, 0, "j/k move  a all/current  ^o copy hash  enter jump  esc close", st.bottom_accent);
 
     if (app.commit_graph_loading or app.commit_graph == null) {
         var sbuf: [48]u8 = undefined;
@@ -1016,6 +1018,7 @@ fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
     }
 
     const graph = app.commit_graph.?;
+    const plain = app.commit_graph_plain orelse graph;
     const avail: usize = footer_row; // content rows above the footer
     if (avail == 0) return;
 
@@ -1026,10 +1029,17 @@ fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
         app.commit_graph_scroll = app.commit_graph_sel - avail + 1;
     }
 
+    // Register the visible rows (ANSI-stripped) for mouse selection/copy.
+    const px0: u16 = (root.width - w) / 2;
+    const py0: u16 = (root.height - h) / 2;
+    app.beginDialogGrid(px0 + 1, py0 + 1, footer_row);
+
     var it = std.mem.splitScalar(u8, graph, '\n');
+    var pit = std.mem.splitScalar(u8, plain, '\n');
     var idx: usize = 0;
     var row: u16 = 0;
     while (it.next()) |line| : (idx += 1) {
+        const pline = pit.next() orelse "";
         if (idx < app.commit_graph_scroll) continue;
         if (row >= footer_row) break;
         const selected = idx == app.commit_graph_sel;
@@ -1038,12 +1048,16 @@ fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
             applySel(&base, .active);
             fillRow(win, row, base);
         }
+        app.setDialogRow(row, pline);
+        const sel = app.dialogRowSelection(row);
+        const lo: u16 = if (sel) |s| s.lo else 0;
+        const hi: u16 = if (sel) |s| s.hi else 0;
         // The graph carries git's own ANSI colours; printAnsi renders them over
-        // the (possibly selected) background.
-        printAnsi(win, row, line, base, 0, 0, 0);
+        // the (possibly selected) background, with the drag-selection span lit.
+        printAnsi(win, row, line, base, lo, hi, 0);
         row += 1;
     }
-    drawScrollbarRange(root, (root.width - w) / 2 + w - 1, (root.height - h) / 2 + 1, avail, app.commit_graph_lines, app.commit_graph_scroll, true);
+    drawScrollbarRange(root, px0 + w - 1, py0 + 1, avail, app.commit_graph_lines, app.commit_graph_scroll, true);
 }
 
 const help_lines = [_][]const u8{

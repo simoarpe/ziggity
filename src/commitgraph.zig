@@ -35,10 +35,25 @@ pub fn open(app: *App) !void {
     try app.setMessage("loading commit graph...", .{});
 }
 
-/// Toggle between the current branch and all branches, reloading.
+/// Toggle between the current branch and all branches, reloading. The commit
+/// currently under the cursor stays selected across the reload.
 pub fn toggleScope(app: *App) void {
+    captureCursorTarget(app);
     app.commit_graph_all = !app.commit_graph_all;
     requestLoad(app);
+}
+
+/// Remember the commit on the cursor row so the next load re-highlights it.
+fn captureCursorTarget(app: *App) void {
+    const graph = app.commit_graph orelse return;
+    const line = nthLine(graph, app.commit_graph_sel) orelse return;
+    var buf: [64]u8 = undefined;
+    if (firstHash(line, &buf)) |h| {
+        if (app.allocator.dupe(u8, h)) |dup| {
+            app.allocator.free(app.commit_graph_target);
+            app.commit_graph_target = dup;
+        } else |_| {}
+    }
 }
 
 fn requestLoad(app: *App) void {
@@ -68,8 +83,10 @@ pub fn complete(app: *App, text: ?[]u8, generation: u64, gpa: std.mem.Allocator)
         defer gpa.free(t);
         freeGraph(app);
         app.commit_graph = app.allocator.dupe(u8, t) catch null;
+        app.commit_graph_plain = stripAnsi(app.allocator, t) catch null;
         app.commit_graph_lines = countLines(app.commit_graph orelse "");
-        // Highlight the row for the commit that was selected on open.
+        // Highlight the row for the commit that was selected (on open, or kept
+        // across a scope toggle).
         app.commit_graph_sel = findTargetRow(app);
         app.commit_graph_scroll = 0;
     }
@@ -98,8 +115,61 @@ pub fn handleKey(app: *App, key: anytype) !void {
     }
     // `a` toggles the all-branches / current-branch scope.
     if (km.stage_all.matches(key)) return toggleScope(app);
+    // ctrl+o copies the cursor row's commit hash to the clipboard.
+    if (km.copy_clipboard.matches(key)) return copyCursorHash(app);
     // enter jumps the Commits-panel selection to the row under the cursor.
     if (app.isEnterKey(key)) return jumpToSelected(app);
+}
+
+/// ctrl+o: copy the full hash of the commit on the cursor row.
+fn copyCursorHash(app: *App) !void {
+    const short = cursorHash(app) orelse {
+        try app.setMessage("no commit on that row", .{});
+        return;
+    };
+    // Resolve the abbreviated hash to the full one from the loaded log.
+    const full = for (app.data.commits) |c| {
+        if (std.mem.startsWith(u8, c.short_hash, short) or std.mem.startsWith(u8, c.hash, short)) break c.hash;
+    } else short;
+    if (app.clipboard_request) |old| app.allocator.free(old);
+    app.clipboard_request = try app.allocator.dupe(u8, full);
+    try app.setMessage("copied to clipboard: {s}", .{full});
+}
+
+/// The abbreviated hash on the cursor row (into a static-lifetime view of the
+/// owned graph), or null on a connector row. The returned slice points into a
+/// caller-independent scratch; callers must use it before re-entrancy.
+fn cursorHash(app: *App) ?[]const u8 {
+    const graph = app.commit_graph orelse return null;
+    const line = nthLine(graph, app.commit_graph_sel) orelse return null;
+    return firstHash(line, &app.commit_graph_hash_buf);
+}
+
+/// Mouse: move the cursor to an absolute line index (clamped).
+pub fn selectRow(app: *App, line_index: usize) void {
+    if (app.commit_graph_lines == 0) return;
+    app.commit_graph_sel = @min(line_index, app.commit_graph_lines - 1);
+}
+
+/// Strip ANSI escape sequences from `s`, preserving visible characters and
+/// newlines so the result is line-aligned with the coloured graph.
+fn stripAnsi(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    var out = try allocator.alloc(u8, s.len);
+    var n: usize = 0;
+    var in_esc = false;
+    for (s) |c| {
+        if (in_esc) {
+            if (c == 'm') in_esc = false;
+            continue;
+        }
+        if (c == 0x1b) {
+            in_esc = true;
+            continue;
+        }
+        out[n] = c;
+        n += 1;
+    }
+    return allocator.realloc(out, n);
 }
 
 /// enter: resolve the commit on the cursor row and select it in the Commits panel.
@@ -136,6 +206,10 @@ pub fn freeGraph(app: *App) void {
     if (app.commit_graph) |g| {
         app.allocator.free(g);
         app.commit_graph = null;
+    }
+    if (app.commit_graph_plain) |p| {
+        app.allocator.free(p);
+        app.commit_graph_plain = null;
     }
     app.commit_graph_lines = 0;
 }

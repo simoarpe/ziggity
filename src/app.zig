@@ -1849,6 +1849,9 @@ pub const App = struct {
     // (owned), the scope toggle, the cursor/scroll, an off-thread load with a
     // generation guard, and the short hash to highlight on open.
     commit_graph: ?[]u8 = null,
+    // The same graph with ANSI stripped, line-aligned with `commit_graph`, so
+    // dialog mouse selection/copy works on the visible text.
+    commit_graph_plain: ?[]u8 = null,
     commit_graph_all: bool = false,
     commit_graph_loading: bool = false,
     commit_graph_wanted: bool = false,
@@ -1857,6 +1860,7 @@ pub const App = struct {
     commit_graph_sel: usize = 0,
     commit_graph_scroll: usize = 0,
     commit_graph_lines: usize = 0,
+    commit_graph_hash_buf: [64]u8 = undefined,
     // Whether the pending remote-tag delete should also drop the local tag
     // (the "Delete local and remote tag" menu choice).
     tag_delete_also_local: bool = false,
@@ -2904,6 +2908,9 @@ pub const App = struct {
                 .release => if (self.dialog_sel_active) {
                     if (self.dialog_sel_dragged) {
                         try self.copyDialogSelection();
+                    } else if (self.mode == .commit_graph) {
+                        // A plain click moves the graph cursor to that row.
+                        commitgraph_mod.selectRow(self, self.commit_graph_scroll + self.dialog_sel_anchor_row);
                     }
                     self.clearDialogSelection();
                     return true;
@@ -3285,6 +3292,15 @@ pub const App = struct {
             },
             .command_log => {
                 self.command_log_scroll = if (down) @min(self.command_log_scroll +| lines, self.command_log_max_scroll) else self.command_log_scroll -| lines;
+                return true;
+            },
+            .commit_graph => {
+                // Move the cursor (the view scrolls to follow it in the renderer).
+                if (down) {
+                    if (self.commit_graph_lines > 0) self.commit_graph_sel = @min(self.commit_graph_sel + lines, self.commit_graph_lines - 1);
+                } else {
+                    self.commit_graph_sel -|= lines;
+                }
                 return true;
             },
             else => return false,

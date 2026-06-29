@@ -251,9 +251,11 @@ Useful keys:
 - `i` (Commits): interactive rebase editor (mark pick/drop/squash/fixup/edit,
   reorder, run)
 - `ctrl+l` (Commits): commit graph viewer — a large overlay rendering
-  `git log --graph` (loaded off-thread with a cancellable spinner); `a` toggles
-  current-branch / all-branches, `enter` jumps the panel selection to the row,
-  `esc` closes
+  `git log --graph` (hash, refs, author, relative date, subject) off-thread with
+  a cancellable spinner; `a` toggles current-branch / all-branches (keeping the
+  cursor on the same commit), `ctrl+o` copies the cursor commit's hash, `enter`
+  jumps the panel selection to the row, `esc` closes. Mouse wheel scrolls, drag
+  selects/copies text, and a click moves the cursor
 - `G` (Commits): open the new pull/merge request page for the branch
 - `B`: mark the selected commit as the base for a `rebase --onto`
 - `W`: diff the selected commit/branch against another marked ref
