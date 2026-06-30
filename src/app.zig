@@ -3678,6 +3678,20 @@ pub const App = struct {
         return self.files_tree.selectedRow();
     }
 
+    /// Collect the visible working-tree files covered by the active range
+    /// (in visible-ordinal space). Appended FileStatus values borrow their
+    /// strings from self.data.files, so they are only valid for the lifetime
+    /// of that slice.
+    fn collectRangeFiles(self: *const App, list: *std.ArrayList(model.FileStatus)) !void {
+        const b = self.rangeBounds() orelse return;
+        var ord: usize = 0;
+        for (self.data.files) |file| {
+            if (!self.fileMatchesFilter(file)) continue;
+            defer ord += 1;
+            if (ord >= b.lo and ord <= b.hi) try list.append(self.allocator, file);
+        }
+    }
+
     /// Capture the currently-selected tree row's path (owned) so the cursor can
     /// be restored after a rebuild that replaces the underlying file data.
     fn captureTreePath(self: *App) !?[]u8 {
@@ -5978,6 +5992,19 @@ pub const App = struct {
     fn runMenuAction(self: *App, action: MenuAction) !void {
         switch (action) {
             .discard_file_all => {
+                if (self.rangeActive()) {
+                    var files: std.ArrayList(model.FileStatus) = .empty;
+                    defer files.deinit(self.allocator);
+                    try self.collectRangeFiles(&files);
+                    if (files.items.len == 0) {
+                        try self.setMessage("no file selected", .{});
+                        return;
+                    }
+                    const n = files.items.len;
+                    const res = try self.git.discardFiles(files.items);
+                    self.clearRange();
+                    return self.runMutationFiles(res, "discarded {d} file(s)", .{n});
+                }
                 const file = self.selectedFile() orelse {
                     try self.setMessage("no file selected", .{});
                     return;
@@ -5985,6 +6012,19 @@ pub const App = struct {
                 return self.runMutationFiles(try self.git.discardFile(file), "discarded {s}", .{file.path});
             },
             .discard_file_unstaged => {
+                if (self.rangeActive()) {
+                    var files: std.ArrayList(model.FileStatus) = .empty;
+                    defer files.deinit(self.allocator);
+                    try self.collectRangeFiles(&files);
+                    if (files.items.len == 0) {
+                        try self.setMessage("no file selected", .{});
+                        return;
+                    }
+                    const n = files.items.len;
+                    const res = try self.git.discardUnstagedFiles(files.items);
+                    self.clearRange();
+                    return self.runMutationFiles(res, "discarded unstaged changes in {d} file(s)", .{n});
+                }
                 const file = self.selectedFile() orelse {
                     try self.setMessage("no file selected", .{});
                     return;
@@ -5992,11 +6032,31 @@ pub const App = struct {
                 return self.runMutationFiles(try self.git.discardUnstaged(file), "discarded unstaged changes in {s}", .{file.path});
             },
             .delete_branch, .force_delete_branch => {
+                const force = action == .force_delete_branch;
+                if (self.rangeActive() and self.focus == .branches and self.branches_tab == .local and !self.branchFilesActive() and !self.branch_commits_active) {
+                    const bnd = self.rangeBounds().?;
+                    var names: std.ArrayList([]const u8) = .empty;
+                    defer names.deinit(self.allocator);
+                    var i = bnd.lo;
+                    while (i <= bnd.hi and i < self.data.branches.len) : (i += 1) {
+                        // The checked-out branch can't be deleted; skip it so the
+                        // rest of the selection still goes through.
+                        if (self.data.branches[i].current) continue;
+                        try names.append(self.allocator, self.data.branches[i].name);
+                    }
+                    if (names.items.len == 0) {
+                        try self.setMessage("no deletable branch in selection", .{});
+                        return;
+                    }
+                    const n = names.items.len;
+                    const res = try self.git.deleteBranches(names.items, force);
+                    self.clearRange();
+                    return self.runMutationScoped(res, Refresh.branches, "deleted {d} branch(es)", .{n});
+                }
                 const branch = self.selectedBranch() orelse {
                     try self.setMessage("no branch selected", .{});
                     return;
                 };
-                const force = action == .force_delete_branch;
                 return self.requestMutation(.{ .delete_branch = .{ .name = branch.name, .force = force } }, .{ .gerund = "deleting", .command = "git branch -d", .refresh = Refresh.branches }, "deleted {s}", .{branch.name});
             },
             .reset_soft, .reset_mixed, .reset_hard => {
@@ -6408,6 +6468,29 @@ pub const App = struct {
                 return self.requestMutation(.{ .checkout = ref }, .{ .gerund = "checking out", .command = "git checkout", .refresh = Refresh.checkout }, "checked out {s}", .{ref});
             },
             .delete_remote_branch => {
+                if (self.rangeActive() and self.remoteDrillActive() and self.contentFocus() == .branches) {
+                    if (self.drilledRemoteRange()) |r| {
+                        const bnd = self.rangeBounds().?;
+                        const remote = self.remote_drill.?;
+                        var refs: std.ArrayList([]const u8) = .empty;
+                        defer refs.deinit(self.allocator);
+                        var i = bnd.lo;
+                        while (i <= bnd.hi) : (i += 1) {
+                            const abs = r.start + i;
+                            if (abs >= r.end) break;
+                            const name = self.data.remote_branches[abs].name;
+                            // Drop the `remote/` prefix to get the ref to push --delete.
+                            const slash = std.mem.indexOfScalar(u8, name, '/') orelse continue;
+                            try refs.append(self.allocator, name[slash + 1 ..]);
+                        }
+                        if (refs.items.len > 0) {
+                            const n = refs.items.len;
+                            const res = try self.git.deleteRemoteBranches(remote, refs.items);
+                            self.clearRange();
+                            return self.runMutationScoped(res, Refresh.remotes, "deleted {d} remote branch(es)", .{n});
+                        }
+                    }
+                }
                 const branch = self.selectedRemoteBranch() orelse {
                     try self.setMessage("no remote branch selected", .{});
                     return;

@@ -1095,6 +1095,15 @@ pub const Git = struct {
         return self.exec(&.{ "branch", flag, "--", name });
     }
 
+    /// Delete several local branches in one `git branch -d/-D -- <names...>`.
+    pub fn deleteBranches(self: *Git, names: []const []const u8, force: bool) !ExecResult {
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(self.allocator);
+        try args.appendSlice(self.allocator, &.{ "branch", if (force) "-D" else "-d", "--" });
+        try args.appendSlice(self.allocator, names);
+        return self.exec(args.items);
+    }
+
     pub fn renameBranch(self: *Git, old_name: []const u8, new_name: []const u8) !ExecResult {
         return self.exec(&.{ "branch", "-m", old_name, new_name });
     }
@@ -1127,6 +1136,15 @@ pub const Git = struct {
 
     pub fn deleteRemoteBranch(self: *Git, remote: []const u8, branch: []const u8) !ExecResult {
         return self.exec(&.{ "push", remote, "--delete", branch });
+    }
+
+    /// Delete several branches on one `remote` in a single push.
+    pub fn deleteRemoteBranches(self: *Git, remote: []const u8, refs: []const []const u8) !ExecResult {
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(self.allocator);
+        try args.appendSlice(self.allocator, &.{ "push", remote, "--delete" });
+        try args.appendSlice(self.allocator, refs);
+        return self.exec(args.items);
     }
 
     /// The configured fetch URL of `remote` (e.g. `git@github.com:owner/repo`).
@@ -1346,6 +1364,20 @@ pub const Git = struct {
         return self.exec(&.{ "stash", "drop", selector });
     }
 
+    /// Drop several stash entries. Entries are dropped highest-index-first so the
+    /// lower indices stay valid as the list shifts.
+    pub fn stashDropMany(self: *Git, indices: []const usize) !ExecResult {
+        const sorted = try self.allocator.dupe(usize, indices);
+        defer self.allocator.free(sorted);
+        std.mem.sort(usize, sorted, {}, std.sort.desc(usize));
+        for (sorted) |idx| {
+            var r = try self.stashDrop(idx);
+            if (!r.ok()) return r;
+            r.deinit(self.allocator);
+        }
+        return self.successResult();
+    }
+
     /// Rename a stash: drop the entry and re-store its commit `hash` under the new
     /// `message` (git has no in-place rename). The renamed stash returns to the
     /// top of the list.
@@ -1389,6 +1421,24 @@ pub const Git = struct {
         if (!result.ok()) return result;
         result.deinit(self.allocator);
         return null;
+    }
+
+    pub fn discardFiles(self: *Git, files: []const model.FileStatus) !ExecResult {
+        for (files) |file| {
+            var r = try self.discardFile(file);
+            if (!r.ok()) return r;
+            r.deinit(self.allocator);
+        }
+        return self.successResult();
+    }
+
+    pub fn discardUnstagedFiles(self: *Git, files: []const model.FileStatus) !ExecResult {
+        for (files) |file| {
+            var r = try self.discardUnstaged(file);
+            if (!r.ok()) return r;
+            r.deinit(self.allocator);
+        }
+        return self.successResult();
     }
 
     pub fn successResult(self: *Git) !ExecResult {

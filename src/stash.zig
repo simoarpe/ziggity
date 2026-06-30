@@ -1,6 +1,7 @@
 //! Stash-panel actions: opening the Stash menu (save variants) and the
 //! apply/pop/drop operations on the selected stash entry. Free functions over
 //! `*App`; they route through the shared scoped-mutation machinery.
+const std = @import("std");
 const app_mod = @import("app.zig");
 
 const App = app_mod.App;
@@ -33,6 +34,22 @@ pub fn popSelectedStash(self: *App) !void {
 }
 
 pub fn dropSelectedStash(self: *App) !void {
+    if (self.rangeActive() and self.focus == .stash) {
+        if (self.rangeBounds()) |bnd| {
+            var indices: std.ArrayList(usize) = .empty;
+            defer indices.deinit(self.allocator);
+            var i = bnd.lo;
+            while (i <= bnd.hi and i < self.data.stash.len) : (i += 1) {
+                try indices.append(self.allocator, self.data.stash[i].index);
+            }
+            if (indices.items.len > 0) {
+                const n = indices.items.len;
+                const res = try self.git.stashDropMany(indices.items);
+                self.clearRange();
+                return self.runMutationScoped(res, App.Refresh.stash, "dropped {d} stash entries", .{n});
+            }
+        }
+    }
     const entry = self.selectedStash() orelse {
         try self.setMessage("no stash entry selected", .{});
         return;
