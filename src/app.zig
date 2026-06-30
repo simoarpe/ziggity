@@ -3099,6 +3099,10 @@ pub const App = struct {
 
     /// Number of items in the panel's currently-shown list (tab/mode aware).
     pub fn activeListLen(self: *const App, focus: model.Focus) usize {
+        // The interactive-rebase editor takes over the Commits panel: its list
+        // is the plan, not the commit log, so scroll/scrollbar track it.
+        if (self.mode == .rebase_plan and focus == .commits)
+            return if (self.rebase_plan) |p| p.len else 0;
         return switch (focus) {
             .files => switch (self.files_tab) {
                 .files => if (self.tree_view) self.files_tree.rows.len else self.visibleFileCount(),
@@ -3127,6 +3131,8 @@ pub const App = struct {
 
     /// Selected item index in the panel's currently-shown list (tab/mode aware).
     fn activeListSelected(self: *const App, focus: model.Focus) usize {
+        // In the interactive-rebase editor the cursor is the plan index.
+        if (self.mode == .rebase_plan and focus == .commits) return self.rebase_plan_index;
         return switch (focus) {
             .files => switch (self.files_tab) {
                 .files => if (self.tree_view) self.files_tree.cursor else self.selectedFileVisibleOrdinal(),
@@ -8281,6 +8287,38 @@ test "rebase plan range-marks and block-moves multiple commits" {
     const b2 = rebaseplan_mod.bounds(&app);
     try std.testing.expectEqual(@as(usize, 1), b2.lo);
     try std.testing.expectEqual(@as(usize, 2), b2.hi);
+
+    rebaseplan_mod.cancel(&app);
+}
+
+test "rebase plan drives the Commits panel scroll and scrollbar, not the log" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits: [16]model.Commit = undefined;
+    for (&commits) |*c| {
+        c.* = .{ .hash = @constCast("hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh"), .short_hash = @constCast("hhhhhhh"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("c") };
+    }
+    app.data.commits = &commits;
+    app.commits_tab = .commits;
+    app.focus = .commits;
+    app.commit_index = 15; // plan spans all 16 commits
+
+    try rebaseplan_mod.start(&app);
+    // The Commits panel's active list is now the 16-entry plan, not the log.
+    try std.testing.expectEqual(@as(usize, 16), app.activeListLen(.commits));
+
+    // Cursor at the top: a 10-row view shows from the top, no scroll.
+    app.syncListView(.commits, 10);
+    try std.testing.expectEqual(@as(usize, 0), app.listScroll(.commits));
+
+    // Moving the plan cursor down past the window scrolls the view to follow it
+    // (rows 4..13), so the cursor never gets stuck off-screen.
+    app.rebase_plan_index = 13;
+    app.syncListView(.commits, 10);
+    try std.testing.expectEqual(@as(usize, 4), app.listScroll(.commits));
 
     rebaseplan_mod.cancel(&app);
 }
