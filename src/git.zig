@@ -1061,6 +1061,30 @@ pub const Git = struct {
         return self.exec(&.{ "checkout", "-f", branch_name });
     }
 
+    /// How many commits HEAD is ahead of the nearest main branch (main/master)
+    /// — the current branch's own, not-yet-on-main commits. 0 when none / no
+    /// main branch exists (e.g. you're on main itself).
+    pub fn branchCommitsCount(self: *Git) !usize {
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(self.allocator);
+        try args.appendSlice(self.allocator, &.{ "rev-list", "--count", "HEAD", "--not" });
+        var any = false;
+        for ([_][]const u8{ "main", "master" }) |m| {
+            var r = self.exec(&.{ "rev-parse", "--verify", "--quiet", m }) catch continue;
+            const exists = r.ok();
+            r.deinit(self.allocator);
+            if (exists) {
+                try args.append(self.allocator, m);
+                any = true;
+            }
+        }
+        if (!any) return 0;
+        var res = try self.exec(args.items);
+        defer res.deinit(self.allocator);
+        if (!res.ok()) return 0;
+        return std.fmt.parseInt(usize, std.mem.trim(u8, res.stdout, " \t\r\n"), 10) catch 0;
+    }
+
     /// Create a new branch from HEAD and switch to it.
     pub fn createBranch(self: *Git, name: []const u8) !ExecResult {
         return self.exec(&.{ "checkout", "-b", name });

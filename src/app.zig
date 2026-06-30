@@ -1640,6 +1640,15 @@ pub const App = struct {
     commit_index: usize = 0,
     reflog_index: usize = 0,
     stash_index: usize = 0,
+    // Range (multi) selection over the focused list. `range_anchor` is the fixed
+    // endpoint (null = no range); the live cursor is the other endpoint, so the
+    // range is [min,max] of the two. `range_sticky` distinguishes `v` (sticky:
+    // moving keeps the range) from shift+arrow (non-sticky: a plain move cancels
+    // it). `range_key` snapshots which list the range belongs to so it auto-
+    // clears when the focused list/tab/drill changes.
+    range_anchor: ?usize = null,
+    range_sticky: bool = false,
+    range_key: u64 = 0,
     /// Cherry-pick clipboard: full SHAs of copied commits, applied on paste.
     copied_commits: std.ArrayList([]u8) = .empty,
     /// A commit marked as the base for a `rebase --onto` (full SHA), or null.
@@ -2612,6 +2621,10 @@ pub const App = struct {
             if (km.new_branch.matches(key)) return self.startNewBranchFromCommit(); // n
         }
 
+        // shift+arrow extends a non-sticky range selection in a list panel.
+        if (key.matches(vaxis.Key.down, .{ .shift = true })) return self.rangeMove(true);
+        if (key.matches(vaxis.Key.up, .{ .shift = true })) return self.rangeMove(false);
+
         var action = actions.fromNormalKey(key, self.config.keymap, self.focus) orelse return;
         // A panel drilled into a commit's files shows files, not its list, so
         // the list-level bindings don't apply: the Branches sub-commits drill
@@ -2646,6 +2659,10 @@ pub const App = struct {
             .cancel => {
                 if (self.diff_sel_active) {
                     self.diff_sel_active = false; // first: drop a diff text selection
+                    return;
+                }
+                if (self.rangeActive()) {
+                    self.clearRange(); // esc cancels a multi-range selection
                     return;
                 }
                 if (self.diff_base != null) {
@@ -2708,12 +2725,12 @@ pub const App = struct {
             .move_up => if (self.staging_active) staging_mod.moveStagingCursor(self, -1) else try self.moveUp(),
             .move_down => if (self.staging_active) staging_mod.moveStagingCursor(self, 1) else try self.moveDown(),
             .range_select => {
-                if (self.staging_active) {
-                    staging_mod.toggleStagingRange(self);
-                } else if (self.focus == .commits) {
-                    try self.pasteCopiedCommits();
-                }
+                // In the staging view `v` toggles a line range; elsewhere it
+                // toggles a list (multi) range selection.
+                if (self.staging_active) staging_mod.toggleStagingRange(self) else self.toggleListRange();
             },
+            .paste_commits => if (self.focus == .commits and !self.staging_active) try self.pasteCopiedCommits(),
+            .select_branch_commits => try self.selectBranchCommits(),
             .focus_left => if (self.staging_active) try staging_mod.closeStaging(self) else try self.focusPrevious(),
             .focus_right => if (!self.staging_active) try self.focusNext(),
             // H/L pan the focused panel horizontally (main diff or a side list)
@@ -3112,6 +3129,101 @@ pub const App = struct {
             .stash => self.stash_index,
             .status, .main => 0,
         };
+    }
+
+    /// A signature of which list is currently active (focus + tab + drill +
+    /// tree), so a range selection can detect when it no longer applies.
+    fn activeListKey(self: *const App) u64 {
+        var k: u64 = @intFromEnum(self.focus);
+        k = k * 8 + @intFromEnum(self.files_tab);
+        k = k * 8 + @intFromEnum(self.branches_tab);
+        k = k * 4 + @intFromEnum(self.commits_tab);
+        k = k * 2 + @intFromBool(self.branch_commits_active);
+        k = k * 2 + @intFromBool(self.branchFilesActive());
+        k = k * 2 + @intFromBool(self.commitsFilesActive());
+        k = k * 2 + @intFromBool(self.remoteDrillActive());
+        k = k * 2 + @intFromBool(self.tree_view);
+        return k;
+    }
+
+    /// True while a range selection is active and still belongs to the focused
+    /// list (it auto-expires when the context changes).
+    pub fn rangeActive(self: *const App) bool {
+        return self.range_anchor != null and self.range_key == self.activeListKey() and self.activeListLen(self.focus) > 0;
+    }
+
+    /// The inclusive `[lo, hi]` index span of the active range, or null.
+    pub fn rangeBounds(self: *const App) ?struct { lo: usize, hi: usize } {
+        if (!self.rangeActive()) return null;
+        const len = self.activeListLen(self.focus);
+        if (len == 0) return null;
+        const anchor = @min(self.range_anchor.?, len - 1); // clamp if the list shrank
+        const sel = @min(self.activeListSelected(self.focus), len - 1);
+        return .{ .lo = @min(anchor, sel), .hi = @max(anchor, sel) };
+    }
+
+    /// Number of items in the active range (1 when no range — the cursor alone).
+    pub fn rangeCount(self: *const App) usize {
+        if (self.rangeBounds()) |b| return b.hi - b.lo + 1;
+        return 1;
+    }
+
+    /// Render hook: is row `idx` of the panel `render_focus` within the active
+    /// range? Only the focused panel's active list ever has a range.
+    pub fn rowInRange(self: *const App, render_focus: model.Focus, idx: usize) bool {
+        if (self.focus != render_focus) return false;
+        const b = self.rangeBounds() orelse return false;
+        return idx >= b.lo and idx <= b.hi;
+    }
+
+    fn clearRange(self: *App) void {
+        self.range_anchor = null;
+    }
+
+    fn startRange(self: *App, sticky: bool) void {
+        if (self.focus == .status or self.focus == .main) return;
+        if (self.activeListLen(self.focus) == 0) return;
+        self.range_anchor = self.activeListSelected(self.focus);
+        self.range_sticky = sticky;
+        self.range_key = self.activeListKey();
+    }
+
+    /// `v`: toggle sticky range select.
+    fn toggleListRange(self: *App) void {
+        if (self.rangeActive() and self.range_sticky) self.clearRange() else self.startRange(true);
+    }
+
+    /// `*`: range-select the current branch's own commits (HEAD down to, but not
+    /// including, the first commit already on a main branch).
+    fn selectBranchCommits(self: *App) !void {
+        if (self.focus != .commits or self.commits_tab != .commits or self.commitsFilesActive()) {
+            try self.setMessage("select branch commits applies to the Commits tab", .{});
+            return;
+        }
+        const n = self.git.branchCommitsCount() catch 0;
+        if (n == 0) {
+            try self.setMessage("no branch commits to select", .{});
+            return;
+        }
+        const count = @min(n, self.data.commits.len);
+        if (count == 0) return;
+        // Cursor at HEAD (0), anchor at the oldest own commit (count-1).
+        self.commit_index = 0;
+        self.range_anchor = count - 1;
+        self.range_sticky = false;
+        self.range_key = self.activeListKey();
+        self.resetMainView();
+        try self.updatePreview();
+        try self.setMessage("selected {d} commit(s) of this branch", .{count});
+    }
+
+    /// shift+arrow: ensure a non-sticky range, then move the cursor (extending it).
+    fn rangeMove(self: *App, down: bool) !void {
+        if (self.focus == .status or self.focus == .main) return;
+        if (!self.rangeActive()) self.startRange(false);
+        self.moveSelection(self.focus, down);
+        self.resetMainView();
+        try self.updatePreview();
     }
 
     /// Render-time sync for a list panel's view scroll. Records the visible
@@ -4642,6 +4754,8 @@ pub const App = struct {
 
     fn moveUp(self: *App) !void {
         if (self.focus == .main) return self.scrollMain(-1);
+        // A plain move cancels a non-sticky range; a sticky range expands.
+        if (self.rangeActive() and !self.range_sticky) self.clearRange();
         self.moveSelection(self.focus, false);
         // A different item is now selected, so show its diff from the top-left
         // (otherwise a scroll left from the previous, longer diff persists).
@@ -4651,6 +4765,7 @@ pub const App = struct {
 
     fn moveDown(self: *App) !void {
         if (self.focus == .main) return self.scrollMain(1);
+        if (self.rangeActive() and !self.range_sticky) self.clearRange();
         self.moveSelection(self.focus, true);
         self.resetMainView();
         try self.updatePreview();
@@ -9204,6 +9319,38 @@ test "mouse wheel scrolls the operation and help dialogs" {
     try std.testing.expectEqual(@as(usize, 2), app.command_log_scroll); // clamped
     _ = try app.handleMouse(.{ .col = 10, .row = 10, .button = .wheel_up, .mods = .{}, .type = .press });
     try std.testing.expectEqual(@as(usize, 0), app.command_log_scroll);
+}
+
+test "range select tracks bounds and membership in the commits list" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("a"), .short_hash = @constCast("a"), .author = @constCast("s"), .time = @constCast("n"), .refs = @constCast(""), .subject = @constCast("c0") },
+        .{ .hash = @constCast("b"), .short_hash = @constCast("b"), .author = @constCast("s"), .time = @constCast("n"), .refs = @constCast(""), .subject = @constCast("c1") },
+        .{ .hash = @constCast("c"), .short_hash = @constCast("c"), .author = @constCast("s"), .time = @constCast("n"), .refs = @constCast(""), .subject = @constCast("c2") },
+        .{ .hash = @constCast("d"), .short_hash = @constCast("d"), .author = @constCast("s"), .time = @constCast("n"), .refs = @constCast(""), .subject = @constCast("c3") },
+    };
+    app.data.commits = &commits;
+    app.focus = .commits;
+    app.commits_tab = .commits;
+    app.commit_index = 0;
+
+    try std.testing.expect(!app.rangeActive());
+    app.toggleListRange(); // v: anchor at 0
+    try std.testing.expect(app.rangeActive());
+    app.commit_index = 2; // cursor moved down 2 (sticky keeps the range)
+    const b = app.rangeBounds().?;
+    try std.testing.expectEqual(@as(usize, 0), b.lo);
+    try std.testing.expectEqual(@as(usize, 2), b.hi);
+    try std.testing.expect(app.rowInRange(.commits, 0));
+    try std.testing.expect(app.rowInRange(.commits, 1));
+    try std.testing.expect(app.rowInRange(.commits, 2));
+    try std.testing.expect(!app.rowInRange(.commits, 3));
+    try std.testing.expect(!app.rowInRange(.branches, 0)); // wrong panel
+    try std.testing.expectEqual(@as(usize, 3), app.rangeCount());
 }
 
 test "q closes non-text dialogs but is a typed character in text prompts" {

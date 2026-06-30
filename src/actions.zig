@@ -73,6 +73,8 @@ pub const Action = enum {
     mark_base,
     bisect_menu,
     range_select,
+    paste_commits,
+    select_branch_commits,
     fetch,
     pull,
     push,
@@ -230,6 +232,8 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     if (focus == .commits and keymap.commit_fixup.matches(key)) return .rebase_fixup;
 
     if (keymap.range_select.matches(key)) return .range_select;
+    if (keymap.paste_commits.matches(key)) return .paste_commits;
+    if (keymap.select_branch_commits.matches(key)) return .select_branch_commits;
 
     // In the Commits panel, `/` filters the log instead of the file list.
     if (focus == .commits and keymap.file_filter.matches(key)) return .start_commit_filter;

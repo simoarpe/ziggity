@@ -1812,7 +1812,9 @@ fn drawFiles(win: vaxis.Window, app: *const app_mod.App) void {
         }
         if (row >= win.height) break;
         var base = styles().normal;
-        const sel = selOf(idx == app.file_index, app.focus == .files);
+        // Cursor is tracked by data index (file_index); the range is in visible-
+        // ordinal space (what activeListSelected uses), so range-check `ordinal`.
+        const sel = rowSel(app, .files, ordinal, idx == app.file_index, app.focus == .files);
         applySel(&base, sel);
         if (sel != .none) fillRow(win, row, base);
         // The two short-status columns are colored independently:
@@ -1880,7 +1882,7 @@ fn drawFileTree(win: vaxis.Window, app: *const app_mod.App) void {
     }) {
         const tr = app.files_tree.rows[i];
         var base = styles().normal;
-        const sel = selOf(i == app.files_tree.cursor, app.focus == .files);
+        const sel = rowSel(app, .files, i, i == app.files_tree.cursor, app.focus == .files);
         applySel(&base, sel);
         if (sel != .none) fillRow(win, row, base);
 
@@ -1944,7 +1946,7 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
 
         const base = blk: {
             var s = if (branch.current) styles().staged else styles().normal;
-            const sel = selOf(idx == selected, app.focus == .branches);
+            const sel = rowSel(app, .branches, idx, idx == selected, app.focus == .branches);
             applySel(&s, sel);
             if (sel != .none) fillRow(win, row, s);
             break :blk s;
@@ -2039,7 +2041,7 @@ fn drawRemotesList(win: vaxis.Window, app: *const app_mod.App) void {
     }) {
         const remote = app.data.remotes[idx];
         var base = styles().normal;
-        const sel = selOf(idx == app.remotes_index, app.focus == .branches);
+        const sel = rowSel(app, .branches, idx, idx == app.remotes_index, app.focus == .branches);
         applySel(&base, sel);
         if (sel != .none) fillRow(win, row, base);
         const col = printSpan(win, row, 0, remote.name, base);
@@ -2071,7 +2073,7 @@ fn drawTags(win: vaxis.Window, app: *const app_mod.App) void {
         // Tag name in the default colour, its annotation/subject dimmed so the
         // name stands out (the row's selection background still spans both).
         var base = styles().normal;
-        const sel = selOf(idx == app.tag_index, app.focus == .branches);
+        const sel = rowSel(app, .branches, idx, idx == app.tag_index, app.focus == .branches);
         applySel(&base, sel);
         if (sel != .none) fillRow(win, row, base);
         _ = printSpan(win, row, 0, tag.name, base);
@@ -2098,7 +2100,7 @@ fn drawWorktrees(win: vaxis.Window, app: *const app_mod.App) void {
         const marker: u8 = if (wt.is_current) '*' else ' ';
         const name = std.fs.path.basename(wt.path);
         const line = std.fmt.bufPrint(&buf, "{c} {s} [{s}]", .{ marker, name, wt.branch }) catch wt.path;
-        drawSelectable(win, row, line, if (wt.is_current) styles().staged else styles().normal, selOf(idx == app.worktree_index, app.focus == .files));
+        drawSelectable(win, row, line, if (wt.is_current) styles().staged else styles().normal, rowSel(app, .files, idx, idx == app.worktree_index, app.focus == .files));
     }
 }
 
@@ -2122,7 +2124,7 @@ fn drawSubmodules(win: vaxis.Window, app: *const app_mod.App) void {
             '+', 'U' => styles().warning,
             else => styles().normal,
         };
-        drawSelectable(win, row, line, style, selOf(idx == app.submodule_index, app.focus == .files));
+        drawSelectable(win, row, line, style, rowSel(app, .files, idx, idx == app.submodule_index, app.focus == .files));
     }
 }
 
@@ -2155,7 +2157,7 @@ fn drawCommitFiles(win: vaxis.Window, app: *const app_mod.App, files: []const mo
             'D' => styles().removed,
             else => styles().normal,
         };
-        drawSelectable(win, row, line, style, selOf(idx == selected, focused));
+        drawSelectable(win, row, line, style, rowSel(app, panel_focus, idx, idx == selected, focused));
     }
 }
 
@@ -2187,7 +2189,7 @@ fn drawCommitFileTree(win: vaxis.Window, app: *const app_mod.App, files: []const
     }) {
         const tr = tree.rows[i];
         var base = styles().normal;
-        const sel = selOf(i == tree.cursor, focused);
+        const sel = rowSel(app, panel_focus, i, i == tree.cursor, focused);
         applySel(&base, sel);
         if (sel != .none) fillRow(win, row, base);
 
@@ -2227,7 +2229,7 @@ fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const m
         // coloured on its own (yellow, or the marker's colour) while the subject
         // keeps the default text colour — the familiar `git log --oneline` look.
         var base = styles().normal;
-        const sel = selOf(idx == selected, focused);
+        const sel = rowSel(app, panel_focus, idx, idx == selected, focused);
         applySel(&base, sel);
         if (sel != .none) fillRow(win, row, base);
 
@@ -2304,7 +2306,7 @@ fn drawStash(win: vaxis.Window, app: *const app_mod.App) void {
         const entry = app.data.stash[idx];
         var buf: [512]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, "{s} {s}", .{ entry.selector, entry.message }) catch entry.message;
-        drawSelectable(win, row, line, styles().normal, selOf(idx == app.stash_index, app.focus == .stash));
+        drawSelectable(win, row, line, styles().normal, rowSel(app, .stash, idx, idx == app.stash_index, app.focus == .stash));
     }
 }
 
@@ -2636,6 +2638,15 @@ const Sel = enum { none, inactive, active };
 fn selOf(selected: bool, focused: bool) Sel {
     if (!selected) return .none;
     return if (focused) .active else .inactive;
+}
+
+/// Selection style for a list row that may be inside a multi-range: the cursor
+/// row keeps the full highlight; other in-range rows get the dimmer one.
+/// `ord` is the row's index in the panel's range space (= its cursor index).
+fn rowSel(app: *const app_mod.App, render_focus: model.Focus, ord: usize, is_cursor: bool, focused: bool) Sel {
+    if (is_cursor) return selOf(true, focused);
+    if (app.rowInRange(render_focus, ord)) return .inactive;
+    return .none;
 }
 
 /// Apply the selection highlight (background, and bold when focused) to `base`.

@@ -78,6 +78,8 @@ pub const KeyMap = struct {
     reset: Binding = .{ .codepoint = 'g' },
     revert: Binding = .{ .codepoint = 't' },
     range_select: Binding = .{ .codepoint = 'v' },
+    paste_commits: Binding = .{ .codepoint = 'V' },
+    select_branch_commits: Binding = .{ .codepoint = '*' },
     commit_drop: Binding = .{ .codepoint = 'd' },
     commit_squash: Binding = .{ .codepoint = 's' },
     commit_fixup: Binding = .{ .codepoint = 'f' },
