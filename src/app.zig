@@ -762,6 +762,9 @@ const PreviewKind = union(enum) {
     commit_file: struct { hash: []const u8, path: []const u8 },
     /// The diff a single commit introduced under a directory pathspec.
     commit_dir: struct { hash: []const u8, path: []const u8 },
+    /// Combined diff across a selected range of commits (oldest `from` to newest
+    /// `to`): `git diff <from>^ <to>`.
+    commit_range: struct { from: []const u8, to: []const u8 },
     stash: usize,
     diff_refs: struct { base: []const u8, target: []const u8 },
 };
@@ -2663,6 +2666,7 @@ pub const App = struct {
                 }
                 if (self.rangeActive()) {
                     self.clearRange(); // esc cancels a multi-range selection
+                    try self.updatePreview();
                     return;
                 }
                 if (self.diff_base != null) {
@@ -2727,7 +2731,12 @@ pub const App = struct {
             .range_select => {
                 // In the staging view `v` toggles a line range; elsewhere it
                 // toggles a list (multi) range selection.
-                if (self.staging_active) staging_mod.toggleStagingRange(self) else self.toggleListRange();
+                if (self.staging_active) {
+                    staging_mod.toggleStagingRange(self);
+                } else {
+                    self.toggleListRange();
+                    try self.updatePreview(); // show/clear the combined range diff
+                }
             },
             .paste_commits => if (self.focus == .commits and !self.staging_active) try self.pasteCopiedCommits(),
             .select_branch_commits => try self.selectBranchCommits(),
@@ -6528,6 +6537,7 @@ pub const App = struct {
                         if (self.selectedCommitFile()) |file| return self.requestGitPreview(.{ .commit_file = .{ .hash = commit.hash, .path = file.path } });
                         return self.setCheapPreview(try self.allocator.dupe(u8, "This commit changed no files.\n"));
                     }
+                    if (self.commitRangeEndpoints()) |r| return self.requestGitPreview(.{ .commit_range = .{ .from = r.from, .to = r.to } });
                     return self.requestGitPreview(.{ .commit = commit.hash });
                 }
                 // The remotes list shows the selected remote's URL.
@@ -6549,6 +6559,7 @@ pub const App = struct {
                     if (self.selectedCommitFile()) |file| return self.requestGitPreview(.{ .commit_file = .{ .hash = commit.hash, .path = file.path } });
                     return self.setCheapPreview(try self.allocator.dupe(u8, "This commit changed no files.\n"));
                 }
+                if (self.commitRangeEndpoints()) |r| return self.requestGitPreview(.{ .commit_range = .{ .from = r.from, .to = r.to } });
                 return self.requestGitPreview(.{ .commit = commit.hash });
             },
             .stash => {
@@ -6556,6 +6567,19 @@ pub const App = struct {
                 return self.setCheapPreview(try self.allocator.dupe(u8, "No stash entries.\n"));
             },
         }
+    }
+
+    /// When a range of commits is selected (and we're on the commit list, not a
+    /// commit's file drill), the oldest/newest endpoints for a combined range
+    /// diff. Null for a single selection or a non-commit list.
+    fn commitRangeEndpoints(self: *const App) ?struct { from: []const u8, to: []const u8 } {
+        if (self.commitsFilesActive() or self.branchFilesActive()) return null;
+        const b = self.rangeBounds() orelse return null;
+        if (b.lo == b.hi) return null;
+        const list = if (self.inBranchCommitContext()) self.branch_commits else self.activeCommits();
+        if (b.hi >= list.len) return null;
+        // Newest-first list: lo is the newer commit, hi the older.
+        return .{ .from = list[b.hi].hash, .to = list[b.lo].hash };
     }
 
     /// Show `text` (gpa-owned; ownership transferred) right away. Used for
@@ -6624,6 +6648,7 @@ pub const App = struct {
             .commit => |hash| std.fmt.allocPrint(gpa, "c:{d}:{s}", .{ ctx, hash }),
             .commit_file => |cf| std.fmt.allocPrint(gpa, "cf:{d}:{s}:{s}", .{ ctx, cf.hash, cf.path }),
             .commit_dir => |cd| std.fmt.allocPrint(gpa, "cd:{d}:{s}:{s}", .{ ctx, cd.hash, cd.path }),
+            .commit_range => |r| std.fmt.allocPrint(gpa, "crg:{d}:{s}:{s}", .{ ctx, r.from, r.to }),
             .stash => |idx| std.fmt.allocPrint(gpa, "s:{d}:{d}", .{ ctx, idx }),
             .diff_refs => |dr| std.fmt.allocPrint(gpa, "dr:{d}:{s}:{s}", .{ ctx, dr.base, dr.target }),
         };
@@ -6721,6 +6746,14 @@ pub const App = struct {
                 empty_msg = "Could not load commit.\n";
                 try sections.append(page_alloc, .{
                     .argv = try dupArgv(&.{ "show", "--no-ext-diff", "--color=always", "--stat", "--patch", ctx_arg, hash }),
+                });
+            },
+            .commit_range => |r| {
+                empty_msg = "No changes across the selected commits.\n";
+                const from_parent = try std.fmt.allocPrint(page_alloc, "{s}^", .{r.from});
+                defer page_alloc.free(from_parent);
+                try sections.append(page_alloc, .{
+                    .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--color=always", "--stat", "--patch", ctx_arg, from_parent, r.to }),
                 });
             },
             .commit_file => |cf| {
