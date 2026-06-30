@@ -88,7 +88,6 @@ pub fn start(app: *App) !void {
     app.rebase_plan = entries;
     app.rebase_plan_index = 0;
     app.rebase_plan_anchor = null;
-    app.rebase_plan_sticky = false;
     app.mode = .rebase_plan;
     try app.setMessage("interactive rebase: p/d/s/f/e mark, v/shift+arrows select, ^j/^k move, enter run, esc cancel", .{});
 }
@@ -129,41 +128,36 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     }
     if (app.isEnterKey(key)) return execute(app);
 
-    // `v` toggles a sticky multi-commit selection anchored at the cursor.
+    // `v` toggles a multi-commit selection anchored at the cursor. The plan
+    // editor is a composition surface, so once a selection exists every
+    // navigation key keeps it and extends it (anchor fixed, cursor moves) —
+    // only `v` or `esc` clears it. shift+arrows additionally *start* one.
     if (matchesChar(key, 'v')) {
         if (app.rebase_plan_anchor != null) {
             app.rebase_plan_anchor = null;
         } else {
             app.rebase_plan_anchor = app.rebase_plan_index;
-            app.rebase_plan_sticky = true;
         }
         return;
     }
-    // shift+arrows start/extend a non-sticky selection.
+    // shift+arrows start a selection if none is active, then move the cursor.
     if (key.matches(vaxis.Key.down, .{ .shift = true })) {
-        if (app.rebase_plan_anchor == null) {
-            app.rebase_plan_anchor = app.rebase_plan_index;
-            app.rebase_plan_sticky = false;
-        }
+        if (app.rebase_plan_anchor == null) app.rebase_plan_anchor = app.rebase_plan_index;
         if (app.rebase_plan_index + 1 < plan.len) app.rebase_plan_index += 1;
         return;
     }
     if (key.matches(vaxis.Key.up, .{ .shift = true })) {
-        if (app.rebase_plan_anchor == null) {
-            app.rebase_plan_anchor = app.rebase_plan_index;
-            app.rebase_plan_sticky = false;
-        }
+        if (app.rebase_plan_anchor == null) app.rebase_plan_anchor = app.rebase_plan_index;
         app.rebase_plan_index -|= 1;
         return;
     }
-
+    // Plain arrows move the cursor; an active selection follows it (it does not
+    // get cleared), so a user can keep extending without holding shift.
     if (km.up.matches(key) or key.matches(vaxis.Key.up, .{})) {
-        if (app.rebase_plan_anchor != null and !app.rebase_plan_sticky) app.rebase_plan_anchor = null;
         app.rebase_plan_index -|= 1;
         return;
     }
     if (km.down.matches(key) or key.matches(vaxis.Key.down, .{})) {
-        if (app.rebase_plan_anchor != null and !app.rebase_plan_sticky) app.rebase_plan_anchor = null;
         if (app.rebase_plan_index + 1 < plan.len) app.rebase_plan_index += 1;
         return;
     }
@@ -276,7 +270,6 @@ pub fn free(app: *App) void {
     }
     app.rebase_plan_index = 0;
     app.rebase_plan_anchor = null;
-    app.rebase_plan_sticky = false;
 }
 
 fn freeEntry(allocator: std.mem.Allocator, e: Entry) void {

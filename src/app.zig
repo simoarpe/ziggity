@@ -1864,10 +1864,9 @@ pub const App = struct {
     rebase_plan_base: []u8 = &.{},
     rebase_plan_index: usize = 0,
     // Range-select within the plan editor: the anchor of a multi-commit
-    // selection (null = none), and whether `v` made it sticky (kept across
-    // plain j/k) versus a shift-arrow range (cleared by plain navigation).
+    // selection (null = none). The cursor is `rebase_plan_index`; the selection
+    // spans anchor..cursor and is kept across navigation until `v`/`esc`.
     rebase_plan_anchor: ?usize = null,
-    rebase_plan_sticky: bool = false,
     // The commit-graph viewer (`ctrl+l`): git's coloured `log --graph` output
     // (owned), the scope toggle, the cursor/scroll, an off-thread load with a
     // generation guard, and the short hash to highlight on open.
@@ -8246,12 +8245,22 @@ test "rebase plan range-marks and block-moves multiple commits" {
     try rebaseplan_mod.start(&app);
     try std.testing.expectEqual(@as(usize, 3), app.rebase_plan.?.len);
 
-    // v anchors a sticky range at row 0, shift+down extends it to row 1.
+    // v anchors a range at row 0, shift+down extends it to row 1.
     try rebaseplan_mod.handleKey(&app, vaxis.Key{ .codepoint = 'v' });
     try rebaseplan_mod.handleKey(&app, vaxis.Key{ .codepoint = vaxis.Key.down, .mods = .{ .shift = true } });
     const b = rebaseplan_mod.bounds(&app);
     try std.testing.expectEqual(@as(usize, 0), b.lo);
     try std.testing.expectEqual(@as(usize, 1), b.hi);
+
+    // A plain (no-shift) move keeps the selection and extends it — it must NOT
+    // be cleared, so the user can keep selecting without holding shift.
+    try rebaseplan_mod.handleKey(&app, vaxis.Key{ .codepoint = 'j' });
+    try std.testing.expect(app.rebase_plan_anchor != null);
+    const b_after_plain = rebaseplan_mod.bounds(&app);
+    try std.testing.expectEqual(@as(usize, 0), b_after_plain.lo);
+    try std.testing.expectEqual(@as(usize, 2), b_after_plain.hi);
+    // Bring the cursor back so the rest of the test sees rows 0..1 selected.
+    try rebaseplan_mod.handleKey(&app, vaxis.Key{ .codepoint = 'k' });
 
     // `d` drops both selected commits; the third stays pick.
     try rebaseplan_mod.handleKey(&app, vaxis.Key{ .codepoint = 'd' });
