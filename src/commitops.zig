@@ -25,6 +25,25 @@ pub fn startCommitResetMenu(app: *App) !void {
 }
 
 pub fn revertSelectedCommit(app: *App) !void {
+    if (app.commits_tab != .commits) {
+        try app.setMessage("commit actions apply to the Commits tab", .{});
+        return;
+    }
+    // A contiguous range reverts every selected commit in one git revert,
+    // newest-first (matching git revert's argument order).
+    if (app.rangeActive() and !app.commitsFilesActive()) {
+        if (app.rangeBounds()) |b| {
+            if (b.lo != b.hi and b.hi < app.data.commits.len) {
+                var hashes: std.ArrayList([]const u8) = .empty;
+                defer hashes.deinit(app.allocator);
+                var k = b.lo;
+                while (k <= b.hi) : (k += 1) try hashes.append(app.allocator, app.data.commits[k].hash);
+                const count = b.hi - b.lo + 1;
+                app.clearRange();
+                return app.requestMutation(.{ .revert_many = hashes.items }, .{ .gerund = "reverting", .command = "git revert", .refresh = App.Refresh.commits_files }, "reverted {d} commits", .{count});
+            }
+        }
+    }
     const commit = try commitForAction(app) orelse return;
     return app.requestMutation(.{ .revert = commit.hash }, .{ .gerund = "reverting", .command = "git revert", .refresh = App.Refresh.commits_files }, "reverted {s}", .{commit.short_hash});
 }
@@ -42,8 +61,119 @@ pub fn rebaseSelectedCommit(app: *App, action: RebaseAction) !void {
         try app.setMessage("no commit selected", .{});
         return;
     }
+    // A contiguous multi-selection applies the action to the whole range.
+    // Reword is single-commit only (each commit needs its own message), so it
+    // always falls through to the cursor commit.
+    if (action != .reword and app.rangeActive() and !app.commitsFilesActive()) {
+        if (app.rangeBounds()) |b| {
+            if (b.lo != b.hi) return runRebaseRange(app, action, b.lo, b.hi);
+        }
+    }
     const i = @min(app.commit_index, app.data.commits.len - 1);
     return runRebase(app, action, i, null);
+}
+
+/// Build and run the rebase todo for `action` applied to the contiguous commit
+/// range [lo, hi] (newest-first indices, lo ≤ hi; lo is nearest HEAD). Every
+/// selected commit gets the verb, and for squash/fixup the commit just below
+/// the range is the pick anchor.
+pub fn runRebaseRange(app: *App, action: RebaseAction, lo: usize, hi: usize) !void {
+    const commits = app.data.commits;
+    if (hi >= commits.len) return;
+    switch (action) {
+        .squash, .fixup, .move_down => if (hi + 1 >= commits.len) {
+            try app.setMessage("no commit below the selection to combine with", .{});
+            return;
+        },
+        .move_up => if (lo == 0) {
+            try app.setMessage("selection is already at the top", .{});
+            return;
+        },
+        else => {},
+    }
+
+    const base_index: usize = switch (action) {
+        .drop, .edit, .reword, .move_up => hi,
+        .squash, .fixup, .move_down => hi + 1,
+    };
+    const base_ref = try std.fmt.allocPrint(app.allocator, "{s}^", .{commits[base_index].hash});
+    defer app.allocator.free(base_ref);
+
+    var aw: std.Io.Writer.Allocating = .init(app.allocator);
+    defer aw.deinit();
+    try writeRebaseTodoRange(&aw.writer, commits, lo, hi, action);
+    const todo = try aw.toOwnedSlice();
+    defer app.allocator.free(todo);
+
+    app.clearRange();
+    const count = hi - lo + 1;
+    var run_buf: [96]u8 = undefined;
+    const shown = std.fmt.bufPrint(&run_buf, "git rebase -i {s}", .{base_ref}) catch "git rebase -i";
+    return app.requestMutation(
+        .{ .rebase_todo = .{ .base_ref = base_ref, .todo = todo, .message = null } },
+        .{ .gerund = "rebasing", .command = shown },
+        "{s} ({d} commits)",
+        .{ action.label(), count },
+    );
+}
+
+/// Emit a git-rebase-todo (oldest-first) for `action` over the contiguous
+/// newest-first range [lo, hi].
+pub fn writeRebaseTodoRange(w: *std.Io.Writer, commits: []const model.Commit, lo: usize, hi: usize, action: RebaseAction) !void {
+    switch (action) {
+        .drop, .edit, .reword => {
+            var k = hi;
+            while (true) : (k -= 1) {
+                const word = if (k >= lo and k <= hi) action.word() else "pick";
+                try w.print("{s} {s}\n", .{ word, commits[k].hash });
+                if (k == 0) break;
+            }
+        },
+        .squash, .fixup => {
+            // The commit just below the range (commits[hi+1]) stays "pick" and
+            // is the anchor every selected commit melds into.
+            var k = hi + 1;
+            while (true) : (k -= 1) {
+                const word = if (k >= lo and k <= hi) action.word() else "pick";
+                try w.print("{s} {s}\n", .{ word, commits[k].hash });
+                if (k == 0) break;
+            }
+        },
+        .move_up => {
+            // The block [lo, hi] moves one step newer, swapping with commits[lo-1].
+            // Oldest-first: commits[lo-1], the block (hi..lo), then commits[lo-2..0].
+            try w.print("pick {s}\n", .{commits[lo - 1].hash});
+            var k = hi;
+            while (k >= lo) : (k -= 1) {
+                try w.print("pick {s}\n", .{commits[k].hash});
+                if (k == lo) break;
+            }
+            if (lo >= 2) {
+                k = lo - 2;
+                while (true) : (k -= 1) {
+                    try w.print("pick {s}\n", .{commits[k].hash});
+                    if (k == 0) break;
+                }
+            }
+        },
+        .move_down => {
+            // The block [lo, hi] moves one step older, swapping with commits[hi+1].
+            // Oldest-first: the block (hi..lo), commits[hi+1], then commits[lo-1..0].
+            var k = hi;
+            while (k >= lo) : (k -= 1) {
+                try w.print("pick {s}\n", .{commits[k].hash});
+                if (k == lo) break;
+            }
+            try w.print("pick {s}\n", .{commits[hi + 1].hash});
+            if (lo > 0) {
+                k = lo - 1;
+                while (true) : (k -= 1) {
+                    try w.print("pick {s}\n", .{commits[k].hash});
+                    if (k == 0) break;
+                }
+            }
+        },
+    }
 }
 
 /// `a`: change the selected commit's author. With `author` null, reset it to the

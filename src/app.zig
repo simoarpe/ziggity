@@ -1130,6 +1130,7 @@ pub const Mutation = union(enum) {
     amend,
     checkout: []const u8,
     revert: []const u8,
+    revert_many: []const []const u8,
     create_fixup: []const u8,
     cherry_pick_many: []const []const u8,
     delete_branch: struct { name: []const u8, force: bool },
@@ -1183,6 +1184,7 @@ pub const Mutation = union(enum) {
             .amend => wgit.amendCommit(),
             .checkout => |b| wgit.checkout(b),
             .revert => |h| wgit.revertCommit(h),
+            .revert_many => |hs| wgit.revertCommits(hs),
             .create_fixup => |h| wgit.createFixup(h),
             .cherry_pick_many => |hs| wgit.cherryPickMany(hs),
             .delete_branch => |x| wgit.deleteBranch(x.name, x.force),
@@ -1252,6 +1254,7 @@ pub const Mutation = union(enum) {
             .checkout => |b| .{ .checkout = try gpa.dupe(u8, b) },
             .revert => |h| .{ .revert = try gpa.dupe(u8, h) },
             .create_fixup => |h| .{ .create_fixup = try gpa.dupe(u8, h) },
+            .revert_many => |hs| .{ .revert_many = try dupeStrList(gpa, hs) },
             .cherry_pick_many => |hs| .{ .cherry_pick_many = try dupeStrList(gpa, hs) },
             .delete_branch => |x| .{ .delete_branch = .{ .name = try gpa.dupe(u8, x.name), .force = x.force } },
             .delete_remote_branch => |x| .{ .delete_remote_branch = .{ .remote = try gpa.dupe(u8, x.remote), .ref = try gpa.dupe(u8, x.ref) } },
@@ -1324,6 +1327,7 @@ pub const Mutation = union(enum) {
                 gpa.free(x.path);
                 gpa.free(x.url);
             },
+            .revert_many => |hs| freeStrList(gpa, hs),
             .cherry_pick_many => |hs| freeStrList(gpa, hs),
             .delete_branch => |x| gpa.free(x.name),
             .delete_remote_branch => |x| {
@@ -10193,6 +10197,47 @@ test "rebase todo ordering for drop, squash, and move" {
     for (cases) |case| {
         var aw: std.Io.Writer.Allocating = .init(allocator);
         try commitops_mod.writeRebaseTodo(&aw.writer, &commits, case.i, case.action);
+        const got = try aw.toOwnedSlice();
+        defer allocator.free(got);
+        try std.testing.expectEqualStrings(case.want, got);
+    }
+}
+
+test "rebase todo ordering for contiguous commit ranges" {
+    const allocator = std.testing.allocator;
+    const mk = struct {
+        fn c(hash: []const u8) model.Commit {
+            return .{
+                .hash = @constCast(hash),
+                .short_hash = @constCast(hash[0..3]),
+                .author = @constCast("Sam"),
+                .time = @constCast("now"),
+                .refs = @constCast(""),
+                .subject = @constCast("s"),
+            };
+        }
+    }.c;
+    // Newest-first: A(0), B(1), C(2), D(3), E(4).
+    var commits = [_]model.Commit{ mk("aaa"), mk("bbb"), mk("ccc"), mk("ddd"), mk("eee") };
+
+    const Case = struct { lo: usize, hi: usize, action: RebaseAction, want: []const u8 };
+    const cases = [_]Case{
+        // Drop the middle two (B, C): both drop, A picked above, base is C^.
+        .{ .lo = 1, .hi = 2, .action = .drop, .want = "drop ccc\ndrop bbb\npick aaa\n" },
+        // Edit B and C.
+        .{ .lo = 1, .hi = 2, .action = .edit, .want = "edit ccc\nedit bbb\npick aaa\n" },
+        // Squash A and B into the commit below the range (C), which stays pick.
+        .{ .lo = 0, .hi = 1, .action = .squash, .want = "pick ccc\nsquash bbb\nsquash aaa\n" },
+        // Fixup B and C into D (the anchor below the range).
+        .{ .lo = 1, .hi = 2, .action = .fixup, .want = "pick ddd\nfixup ccc\nfixup bbb\npick aaa\n" },
+        // Move the block {B,C} one step newer, swapping with A.
+        .{ .lo = 1, .hi = 2, .action = .move_up, .want = "pick aaa\npick ccc\npick bbb\n" },
+        // Move the block {A,B} one step older, swapping with C.
+        .{ .lo = 0, .hi = 1, .action = .move_down, .want = "pick bbb\npick aaa\npick ccc\n" },
+    };
+    for (cases) |case| {
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        try commitops_mod.writeRebaseTodoRange(&aw.writer, &commits, case.lo, case.hi, case.action);
         const got = try aw.toOwnedSlice();
         defer allocator.free(got);
         try std.testing.expectEqualStrings(case.want, got);

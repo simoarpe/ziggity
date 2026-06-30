@@ -1258,6 +1258,16 @@ pub const Git = struct {
         return self.exec(&.{ "revert", "--no-edit", hash });
     }
 
+    /// Revert several commits in one `git revert --no-edit <hashes...>`. The
+    /// hashes are applied in the order given (newest-first).
+    pub fn revertCommits(self: *Git, hashes: []const []const u8) !ExecResult {
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(self.allocator);
+        try args.appendSlice(self.allocator, &.{ "revert", "--no-edit" });
+        try args.appendSlice(self.allocator, hashes);
+        return self.exec(args.items);
+    }
+
     /// Amend the last commit with the currently-staged changes, keeping its
     /// message.
     pub fn amendCommit(self: *Git) !ExecResult {
