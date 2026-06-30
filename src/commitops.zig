@@ -230,6 +230,91 @@ pub fn amendCommitAuthor(app: *App, author: ?[]const u8) !void {
     );
 }
 
+/// `d` in a commit's file list: drop the selected file(s)' changes from that
+/// commit, rewriting history. Runs a non-interactive rebase whose `exec` line
+/// (after picking the target) restores each file to its parent version — or
+/// removes it if the commit introduced it — then `git commit --amend`s the
+/// target. Commits-panel drill only (the file list must belong to a commit on
+/// the current branch's history).
+pub fn discardFilesFromCommit(app: *App) !void {
+    if (!app.commitsFilesActive() or app.commits_tab != .commits) {
+        try app.setMessage("discard-from-commit works in a commit's file list", .{});
+        return;
+    }
+    if (app.data.state != .clean) {
+        try app.setMessage("finish the in-progress operation first (m)", .{});
+        return;
+    }
+    const commits = app.data.commits;
+    if (commits.len == 0) {
+        try app.setMessage("no commit selected", .{});
+        return;
+    }
+    const i = @min(app.commit_index, commits.len - 1);
+
+    // Collect the target file paths: a multi-file range, else the cursor file.
+    var paths: std.ArrayList([]const u8) = .empty;
+    defer paths.deinit(app.allocator);
+    if (app.rangeActive() and !app.tree_view) {
+        if (app.rangeBounds()) |b| {
+            if (b.lo != b.hi) {
+                var k = b.lo;
+                while (k <= b.hi and k < app.commit_files.len) : (k += 1) {
+                    try paths.append(app.allocator, app.commit_files[k].path);
+                }
+            }
+        }
+    }
+    if (paths.items.len == 0) {
+        const cf = app.selectedCommitFile() orelse {
+            try app.setMessage("no file selected", .{});
+            return;
+        };
+        try paths.append(app.allocator, cf.path);
+    }
+
+    // The amend command the rebase's `exec` line runs (sh -c). For each file:
+    // restore the parent's version if it existed there, otherwise remove it.
+    var cmd: std.ArrayList(u8) = .empty;
+    defer cmd.deinit(app.allocator);
+    for (paths.items) |p| {
+        const spec = try std.fmt.allocPrint(app.allocator, "HEAD^:{s}", .{p});
+        defer app.allocator.free(spec);
+        try cmd.appendSlice(app.allocator, "if git cat-file -e ");
+        try shellQuote(&cmd, app.allocator, spec);
+        try cmd.appendSlice(app.allocator, " 2>/dev/null; then git checkout HEAD^ -- ");
+        try shellQuote(&cmd, app.allocator, p);
+        try cmd.appendSlice(app.allocator, "; else git rm -f -- ");
+        try shellQuote(&cmd, app.allocator, p);
+        try cmd.appendSlice(app.allocator, "; fi; ");
+    }
+    try cmd.appendSlice(app.allocator, "git commit --amend --no-edit");
+
+    const base_ref = try std.fmt.allocPrint(app.allocator, "{s}^", .{commits[i].hash});
+    defer app.allocator.free(base_ref);
+
+    // Oldest-first todo: pick the target, exec the discard+amend, then pick newer.
+    var aw: std.Io.Writer.Allocating = .init(app.allocator);
+    defer aw.deinit();
+    var k = i;
+    while (true) : (k -= 1) {
+        try aw.writer.print("pick {s}\n", .{commits[k].hash});
+        if (k == i) try aw.writer.print("exec {s}\n", .{cmd.items});
+        if (k == 0) break;
+    }
+    const todo = try aw.toOwnedSlice();
+    defer app.allocator.free(todo);
+
+    const count = paths.items.len;
+    app.clearRange();
+    return app.requestMutation(
+        .{ .rebase_todo = .{ .base_ref = base_ref, .todo = todo, .message = null } },
+        .{ .gerund = "discarding from commit", .command = "git rebase -i", .refresh = App.Refresh.commits_files },
+        "discarded {d} file(s) from {s}",
+        .{ count, commits[i].short_hash },
+    );
+}
+
 /// POSIX single-quote `s` into `out` for safe inclusion in an `sh -c` line.
 fn shellQuote(out: *std.ArrayList(u8), allocator: std.mem.Allocator, s: []const u8) !void {
     try out.append(allocator, '\'');

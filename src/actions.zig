@@ -120,11 +120,12 @@ pub fn isBranchManagement(self: Action) bool {
 /// Commit-list actions: they act on the selected commit in the Commits panel's
 /// log. While that panel is drilled into a commit's files, the panel shows
 /// files rather than the log, so these don't apply and are suppressed.
+/// `rebase_drop` (`d`) is deliberately excluded: in the commit-files view it is
+/// repurposed to discard the selected file(s) from the commit.
 pub fn isCommitListAction(self: Action) bool {
     return switch (self) {
         .reset_commit,
         .revert_commit,
-        .rebase_drop,
         .rebase_squash,
         .rebase_edit,
         .rebase_reword,

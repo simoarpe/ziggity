@@ -2894,7 +2894,12 @@ pub const App = struct {
             .set_upstream => try branches_mod.setUpstreamToSelected(self),
             .reset_commit => try commitops_mod.startCommitResetMenu(self),
             .revert_commit => try commitops_mod.revertSelectedCommit(self),
-            .rebase_drop => try commitops_mod.rebaseSelectedCommit(self, .drop),
+            // In a commit's file list `d` discards the file(s) from the commit;
+            // on the commit list itself it drops the commit(s).
+            .rebase_drop => if (self.commitsFilesActive())
+                try commitops_mod.discardFilesFromCommit(self)
+            else
+                try commitops_mod.rebaseSelectedCommit(self, .drop),
             .rebase_squash => try commitops_mod.rebaseSelectedCommit(self, .squash),
             .rebase_fixup => try commitops_mod.rebaseSelectedCommit(self, .fixup),
             .rebase_edit => try commitops_mod.rebaseSelectedCommit(self, .edit),
