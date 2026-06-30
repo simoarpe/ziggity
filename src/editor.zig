@@ -78,6 +78,34 @@ pub fn resolve(
     suspend_override: ?bool,
     filename: []const u8,
 ) !Resolved {
+    const picked = pickTemplate(explicit_cmd, preset_name, detected, suspend_override);
+    const command = try substituteFilename(alloc, picked.template, filename);
+    return .{ .command = command, .suspend_tui = picked.suspend_tui };
+}
+
+/// Like `resolve`, but opens several files in one editor invocation. The
+/// `{{filename}}` placeholder is replaced with the space-joined, individually
+/// shell-quoted list (or the list is appended when the template has none).
+pub fn resolveMany(
+    alloc: std.mem.Allocator,
+    explicit_cmd: []const u8,
+    preset_name: []const u8,
+    detected: []const u8,
+    suspend_override: ?bool,
+    filenames: []const []const u8,
+) !Resolved {
+    if (filenames.len == 1) return resolve(alloc, explicit_cmd, preset_name, detected, suspend_override, filenames[0]);
+    const picked = pickTemplate(explicit_cmd, preset_name, detected, suspend_override);
+    const command = try substituteFilenames(alloc, picked.template, filenames);
+    return .{ .command = command, .suspend_tui = picked.suspend_tui };
+}
+
+fn pickTemplate(
+    explicit_cmd: []const u8,
+    preset_name: []const u8,
+    detected: []const u8,
+    suspend_override: ?bool,
+) struct { template: []const u8, suspend_tui: bool } {
     var template: []const u8 = undefined;
     var suspend_tui: bool = true;
 
@@ -107,9 +135,35 @@ pub fn resolve(
     }
 
     if (suspend_override) |s| suspend_tui = s;
+    return .{ .template = template, .suspend_tui = suspend_tui };
+}
 
-    const command = try substituteFilename(alloc, template, filename);
-    return .{ .command = command, .suspend_tui = suspend_tui };
+/// Replace `{{filename}}` with the space-joined, individually shell-quoted
+/// `filenames` (appended when the template has no placeholder).
+fn substituteFilenames(alloc: std.mem.Allocator, template: []const u8, filenames: []const []const u8) ![]u8 {
+    var joined: std.ArrayList(u8) = .empty;
+    defer joined.deinit(alloc);
+    for (filenames, 0..) |f, idx| {
+        if (idx > 0) try joined.append(alloc, ' ');
+        const q = try shellQuote(alloc, f);
+        defer alloc.free(q);
+        try joined.appendSlice(alloc, q);
+    }
+
+    const placeholder = "{{filename}}";
+    if (std.mem.indexOf(u8, template, placeholder) == null) {
+        return std.fmt.allocPrint(alloc, "{s} {s}", .{ template, joined.items });
+    }
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var rest = template;
+    while (std.mem.indexOf(u8, rest, placeholder)) |i| {
+        try out.appendSlice(alloc, rest[0..i]);
+        try out.appendSlice(alloc, joined.items);
+        rest = rest[i + placeholder.len ..];
+    }
+    try out.appendSlice(alloc, rest);
+    return out.toOwnedSlice(alloc);
 }
 
 /// Replace every `{{filename}}` in `template` with a shell-quoted `filename`.
@@ -166,6 +220,18 @@ test "resolve: explicit command overrides everything, suspends by default" {
     defer a.free(r.command);
     try std.testing.expectEqualStrings("myed 'a b.txt'", r.command);
     try std.testing.expect(r.suspend_tui);
+}
+
+test "resolveMany: each file is quoted and joined into one command" {
+    const a = std.testing.allocator;
+    const r = try resolveMany(a, "myed {{filename}}", "", "", null, &.{ "a b.txt", "c.zig" });
+    defer a.free(r.command);
+    try std.testing.expectEqualStrings("myed 'a b.txt' 'c.zig'", r.command);
+
+    // A single-element list behaves exactly like resolve().
+    const one = try resolveMany(a, "myed {{filename}}", "", "", null, &.{"only.txt"});
+    defer a.free(one.command);
+    try std.testing.expectEqualStrings("myed 'only.txt'", one.command);
 }
 
 test "resolve: preset selects template + suspend flag" {

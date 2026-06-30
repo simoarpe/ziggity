@@ -8,6 +8,7 @@ const std = @import("std");
 const app_mod = @import("app.zig");
 const diff_mod = @import("diff.zig");
 const filetree = @import("filetree.zig");
+const model = @import("model.zig");
 const staging_mod = @import("staging.zig");
 
 const App = app_mod.App;
@@ -76,13 +77,79 @@ pub fn toggleFileInPatch(app: *App) !void {
         try app.setMessage("open a commit's files (enter) to build a patch", .{});
         return;
     }
+    // A multi-file range toggles every file in the range at once.
+    const ranged = app.rangeActive() and !app.tree_view and blk: {
+        const b = app.rangeBounds() orelse break :blk false;
+        break :blk b.lo != b.hi;
+    };
     if (app.patch_source) |source| {
         if (!std.mem.eql(u8, source, commit.hash)) {
-            app.patch_reset_resume = .toggle_file;
+            app.patch_reset_resume = if (ranged) .toggle_file_range else .toggle_file;
             return app.requestConfirmation(.reset_patch, "confirm discard patch", .{});
         }
     }
-    return applyPatchToggle(app);
+    return if (ranged) applyPatchRangeToggle(app) else applyPatchToggle(app);
+}
+
+/// The flat commit-file list backing the active drill, or null in tree view /
+/// when no commit-file list is focused.
+fn rangeCommitFiles(app: *App) ?[]const model.CommitFile {
+    if (app.tree_view) return null;
+    if (app.branchFilesActive() and app.contentFocus() == .branches) return app.branch_files;
+    if (app.commitsFilesActive() and app.contentFocus() == .commits) return app.commit_files;
+    return null;
+}
+
+fn patchPathIndex(app: *App, path: []const u8) ?usize {
+    for (app.patch_paths.items, 0..) |p, idx| {
+        if (std.mem.eql(u8, p, path)) return idx;
+    }
+    return null;
+}
+
+/// Add or remove every file in the active range to/from the custom patch. If
+/// every file in the range is already included the whole range is removed;
+/// otherwise the missing ones are added.
+pub fn applyPatchRangeToggle(app: *App) !void {
+    const commit = app.selectedCommit() orelse return;
+    const files = rangeCommitFiles(app) orelse return applyPatchToggle(app);
+    const bnd = app.rangeBounds() orelse return applyPatchToggle(app);
+    if (bnd.hi >= files.len) return applyPatchToggle(app);
+    if (app.patch_source == null) app.patch_source = try app.allocator.dupe(u8, commit.hash);
+
+    var all_present = true;
+    var i = bnd.lo;
+    while (i <= bnd.hi) : (i += 1) {
+        if (patchPathIndex(app, files[i].path) == null) {
+            all_present = false;
+            break;
+        }
+    }
+    const add = !all_present;
+
+    i = bnd.lo;
+    while (i <= bnd.hi) : (i += 1) {
+        const path = files[i].path;
+        const at = patchPathIndex(app, path);
+        if (add) {
+            if (at == null) {
+                try app.patch_paths.append(app.allocator, try app.allocator.dupe(u8, path));
+                try app.patch_line_sel.append(app.allocator, null); // whole file
+            }
+        } else if (at) |idx| {
+            app.allocator.free(app.patch_paths.orderedRemove(idx));
+            if (app.patch_line_sel.orderedRemove(idx)) |sel| app.allocator.free(sel);
+        }
+    }
+
+    const count = bnd.hi - bnd.lo + 1;
+    if (app.patch_paths.items.len == 0) clearPatch(app);
+    app.clearRange();
+    if (add) {
+        try app.setMessage("added {d} file(s) to patch ({d} files)", .{ count, app.patch_paths.items.len });
+    } else {
+        try app.setMessage("removed {d} file(s) from patch ({d} files)", .{ count, app.patch_paths.items.len });
+    }
 }
 
 /// Add/remove the current selection (a single file, or — for a directory row in

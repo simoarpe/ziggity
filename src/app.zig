@@ -1914,7 +1914,7 @@ pub const App = struct {
     patch_work_included: []bool = &.{},
     // Which action to resume after the "discard patch?" confirm: re-toggle the
     // file, or re-open the line view — so the original intent is honored.
-    patch_reset_resume: enum { toggle_file, line_view } = .toggle_file,
+    patch_reset_resume: enum { toggle_file, toggle_file_range, line_view } = .toggle_file,
     commit_buffer: std.ArrayList(u8) = .empty,
     file_filter_buffer: std.ArrayList(u8) = .empty,
     filter_history: std.ArrayList([]u8) = .empty,
@@ -4946,6 +4946,29 @@ pub const App = struct {
     }
 
     fn requestEditFile(self: *App) !void {
+        // A multi-file range opens every selected file in one editor session.
+        if (self.rangeActive() and !self.tree_view and !self.staging_active) {
+            if (self.rangeBounds()) |bnd| {
+                if (bnd.lo != bnd.hi) {
+                    var paths: std.ArrayList([]const u8) = .empty;
+                    defer paths.deinit(self.allocator);
+                    if (self.inCommitFilesView()) {
+                        const files: []const model.CommitFile = if (self.branchFilesActive())
+                            self.branch_files
+                        else
+                            self.commit_files;
+                        var i = bnd.lo;
+                        while (i <= bnd.hi and i < files.len) : (i += 1) try paths.append(self.allocator, files[i].path);
+                    } else if (self.focus == .files and self.files_tab == .files) {
+                        var ranged: std.ArrayList(model.FileStatus) = .empty;
+                        defer ranged.deinit(self.allocator);
+                        try self.collectRangeFiles(&ranged);
+                        for (ranged.items) |f| try paths.append(self.allocator, f.path);
+                    }
+                    if (paths.items.len > 1) return self.requestEditPaths(paths.items);
+                }
+            }
+        }
         const path = blk: {
             // Staging / patch view: the file being staged or patched.
             if (self.staging_active) {
@@ -4993,6 +5016,26 @@ pub const App = struct {
         };
         if (self.editor_request) |old| self.allocator.free(old.command);
         self.editor_request = .{ .command = r.command, .suspend_tui = r.suspend_tui };
+    }
+
+    /// Open several files in one editor invocation (a multi-file range edit).
+    fn requestEditPaths(self: *App, paths: []const []const u8) !void {
+        var det_buf: [128]u8 = undefined;
+        const detected = self.detectEditor(&det_buf);
+        const r = editor_mod.resolveMany(
+            self.allocator,
+            self.config.editor.command.get(),
+            self.config.editor.preset.get(),
+            detected,
+            self.config.editor.in_terminal,
+            paths,
+        ) catch {
+            try self.setMessage("could not build the editor command", .{});
+            return;
+        };
+        if (self.editor_request) |old| self.allocator.free(old.command);
+        self.editor_request = .{ .command = r.command, .suspend_tui = r.suspend_tui };
+        self.clearRange();
     }
 
     /// The editor to open files with, as the first word of (in order) git's
@@ -6553,6 +6596,7 @@ pub const App = struct {
                 patch_mod.clearPatch(self);
                 return switch (self.patch_reset_resume) {
                     .toggle_file => patch_mod.applyPatchToggle(self),
+                    .toggle_file_range => patch_mod.applyPatchRangeToggle(self),
                     .line_view => patch_mod.doOpenPatchLineView(self),
                 };
             },
