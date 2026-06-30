@@ -2,313 +2,319 @@
   <img src="docs/assets/ziggity-icon.svg" alt="Ziggity icon" width="128" height="128">
 </p>
 
-# ziggity
+<h1 align="center">ziggity</h1>
 
-`ziggity` is a small Zig terminal UI Git client inspired by
-[lazygit](https://github.com/jesseduffield/lazygit). It is not a line-by-line
-port. The goal is to keep lazygit's core workflow shape while using idiomatic
-Zig, explicit ownership, simple subprocess-based Git integration, and
-[libvaxis](https://github.com/rockorager/libvaxis) for the terminal UI.
+<p align="center">
+  A fast, keyboard-driven terminal UI for Git — a <a href="https://github.com/jesseduffield/lazygit">lazygit</a>-style workflow, written in Zig.
+</p>
 
-## Implemented
+<p align="center">
+  <img alt="Zig 0.16" src="https://img.shields.io/badge/Zig-0.16.0-f7a41d">
+  <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey">
+</p>
 
-- Lazygit-style status panel: `<repo> → <branch>` with push/pull status
-  (`↑ahead`/`↓behind`, `✓` in sync, `?` no upstream) and a working-tree summary.
-  The current branch shows the same push/pull status in the Branches panel.
-- Files panel from `git status --porcelain -z`.
-- Branches panel from `git branch --format`: each local branch shows a "time
-  ago" recency column, its name, and per-branch tracking status (`✓` in sync,
-  `↑`/`↓` ahead/behind, `(gone)`); the upstream ref is shown only when it isn't
-  the obvious `origin/<same-name>`.
-- Recent commits panel from `git log`.
-- Stash panel from `git stash list`.
-- Diff preview for selected files, commits, branches, and stash entries.
-- Keyboard navigation across side panels and the diff panel.
-- Directory-tree view (toggle with `` ` ``) for the working-tree files **and** a
-  commit's / branch's file lists: a root row (`/`) plus collapsible directories
-  (`enter`), with single-child chains compressed into one `a/b/c` row. Selecting
-  a directory shows the combined diff of everything beneath it, and the root
-  shows every change. In the Files panel `space` stages/unstages a whole
-  directory; in a commit's files it adds/removes the directory in the custom
-  patch.
-- Files-panel live fuzzy path filtering (smart-case subsequence matching) with
-  recall of recent filters (`up`/`down` in the filter prompt).
-- Files-panel status filtering for staged, unstaged, tracked, and untracked files.
-- Scoped periodic auto-refresh for external working tree changes.
-- Full refresh when the terminal reports focus regain.
-- Stage/unstage selected file.
-- Stage/unstage all files.
-- Hunk- and line-level staging: `enter` on a file opens a staging view to
-  stage/unstage individual lines (`v` for a range) or whole hunks (`tab`
-  switches between the unstaged and staged sides).
-- Files panel tabs (Files/Worktrees/Submodules), Branches panel tabs
-  (Local/Remotes/Tags), and Commits panel tabs (Commits/Reflog), switched with
-  `[`/`]`. Each panel's title shows the full tab strip with the active view
-  highlighted (as does the single-pane staging view's Unstaged/Staged tabs).
-- Worktrees tab (Files panel): list worktrees (current marked), switch into one
-  (`space`/`enter` — see "Switching repos" below), create a new one (`n`, or `w`
-  on a Branches ref to check it out there), open one in your editor (`o`), and
-  remove one (`d`, confirmed).
-- Submodules tab (Files panel): list submodules with state; enter one (`enter` —
-  see "Switching repos"), update (`space`), add (`n`), edit URL (`e`), remove
-  (`d`, confirmed), and a bulk-actions menu (`b`: init-all / update-all /
-  update-recursive / deinit-all).
-- Switching repos in place: `space`/`enter` on a worktree, or `enter` on an
-  initialized submodule, re-roots the whole app onto that repository; the Status
-  panel shows a `parent / current` breadcrumb and `esc` walks back out to the
-  parent repo.
-- Branch workflows (local tab): new, rename, delete, merge, rebase,
-  fast-forward, remote/tag checkout, checkout-by-name (`c`), reset to a branch
-  (`g`), force-checkout (`F`), tag a branch (`T`), move its commits onto a new
-  branch (`N`), open the pull request page (`G`), and a sort-order menu (`s`).
-- Tag actions (Tags tab): checkout (`space`, detached), create (`n` — then an
-  optional message: empty makes a lightweight tag, a message makes an annotated
-  one; an existing name prompts to overwrite with `--force`), push to a remote
-  (`P`), reset onto the tag (`g`, soft/mixed/hard), and delete (`d`) via a
-  local / remote / both menu. The tag's annotation shows beside its name. The
-  push and remote-delete skip the remote prompt when there's only one remote.
-  Remote-branch delete is `d` on the Remotes tab.
-- Merge/rebase conflict resolution: take ours/theirs on conflicted files and
-  continue/abort (`m`); MERGING/REBASING shown in the status panel.
-- Commit workflows: commit, amend (`A`), reset (soft/mixed/hard), revert,
-  checkout a commit (`space`, detached), branch from a commit (`n`), move the
-  branch's commits onto a new branch (`N`), tag a commit (`T`), change a commit's
-  author (`a`), cherry-pick copy/paste/clear (`c` copies commits to a clipboard,
-  `V` pastes them onto HEAD, `ctrl+r` clears), a copy-attribute menu (`y`), open
-  the new pull/merge request page (`G`), a navigable changed-file list per commit
-  (`d` there discards a file's changes from the commit), and per-commit
-  interactive rebase actions (drop `d`, squash `s`, fixup `f`, edit `e`, reword
-  `r`, move `ctrl+j`/`ctrl+k`, create `fixup!` commit `F`, autosquash `S`).
-- Range select (multi-selection): `v` toggles a sticky range and `shift+arrows`
-  extend one in any list panel; `*` in Commits selects every commit unique to the
-  branch. The action key then applies to the whole range — stage/discard/edit
-  files, drop/squash/fixup/edit/move/revert or copy commits, delete branches or
-  tags, drop stashes, toggle commit files into the patch, or discard files from a
-  commit.
-- Interactive rebase editor (`i`): compose a plan for the commits down to the
-  selected one — mark each pick/drop/squash/fixup/edit (`v`/`shift+arrows` select
-  a range to mark or reorder at once), reorder with `ctrl+j`/`ctrl+k` — then run
+`ziggity` brings the core lazygit workflow — stage, commit, branch, rebase, and
+inspect history without leaving the terminal — to a small, dependency-light Zig
+binary. It is **not** a line-by-line port: it keeps lazygit's feel while leaning
+on idiomatic Zig, explicit memory ownership, plain `git` subprocesses (no
+libgit2), and [libvaxis](https://github.com/rockorager/libvaxis) for the UI.
+
+```text
+┌─[1] Status ─────────────┐┌─ Diff ───────────────────────────────┐
+│ repo → main ✓           ││ diff --git a/src/app.zig …            │
+├─[2] Files ──────────────┤│ @@ -10,7 +10,9 @@                      │
+│  M src/app.zig          ││ -    old line                         │
+│  A README.md            ││ +    new line                         │
+├─[3] Branches ───────────┤│ +    another new line                 │
+│  * main                 ││                                       │
+│    feature/range-select ││   (preview, staging, and ref-to-ref   │
+├─[4] Commits ────────────┤│    diffs render here)                 │
+│  ●  Add range select    ││                                       │
+│  ●  Fix plan scroll      ││                                       │
+├─[5] Stash ──────────────┤│                                       │
+│  stash@{0} wip           ││                                       │
+└─────────────────────────┘└───────────────────────────────────────┘
+ space stage · c commit · ? help · q quit
+```
+
+> 📸 *A real screenshot/GIF belongs here — drop one at
+> `docs/assets/screenshot.png` and swap the diagram above for it.*
+
+---
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Highlights](#highlights)
+- [Features](#features)
+- [Keybindings](#keybindings)
+- [Configuration](#configuration)
+- [Status & roadmap](#status--roadmap)
+- [Development](#development)
+- [License](#license)
+
+## Quick start
+
+**Requirements:** [Zig `0.16.0`](https://ziglang.org/download/) and `git` on your `PATH`.
+
+```sh
+git clone https://github.com/simoarpe/ziggity
+cd ziggity
+zig build                 # binary at ./zig-out/bin/ziggity
+zig build test            # run the test suite
+
+./zig-out/bin/ziggity     # run inside any Git repository
+```
+
+Press `?` at any time for the in-app keybindings overlay (it opens scrolled to
+the section for the panel you're on). Press `q` to quit.
+
+## Highlights
+
+- **Whole lazygit workflow** — status, files, branches, commits, and stash
+  panels with diff previews and a context-sensitive footer.
+- **Hunk- and line-level staging** — `enter` a file to stage individual lines or
+  hunks, with an optional side-by-side unstaged/staged split.
+- **Full interactive rebase** — drop/squash/fixup/edit/reword/move per commit, a
+  plan editor (`i`), cherry-pick, custom patch building, autosquash, and
+  `rebase --onto` from a marked base.
+- **Multi-selection** — `v` / `shift+arrows` select a range in any list to act on
+  many files, commits, branches, or stashes at once; `*` selects a branch's own
+  commits.
+- **Responsive by design** — slow and network operations run off the UI thread
+  with a spinner; navigation stays live while they work.
+- **Lightweight & explicit** — one small binary, plain `git` subprocesses, no
+  libgit2, fully remappable keys, themeable colours, and custom commands.
+
+## Features
+
+<details open>
+<summary><b>Working tree &amp; staging</b></summary>
+
+- Files panel from `git status --porcelain -z`; stage/unstage a file (`space`)
+  or everything (`a`).
+- Hunk- and line-level staging: `enter` opens a staging view to stage/unstage
+  individual lines (`v` for a range) or whole hunks (`tab` switches the
+  unstaged/staged side; `\` toggles a side-by-side split — see
+  [Staging layout](#staging-layout-staging_split)).
+- Directory-tree view (`` ` ``) for working-tree files **and** a commit's /
+  branch's file list: a `/` root, collapsible folders (`enter`), single-child
+  chains compressed to `a/b/c`. Selecting a folder shows the combined diff
+  beneath it; in the Files panel `space` stages the whole folder.
+- Live fuzzy path filtering (smart-case subsequence) with recent-filter recall,
+  plus a status filter (staged / unstaged / tracked / untracked).
+- Discard a file via a menu (all / unstaged only), or discard everything (`D`,
+  confirmed). Add to `.gitignore` (`i`), copy a path (`y`).
+- Scoped periodic auto-refresh for external changes, plus a full refresh when
+  the terminal regains focus.
+
+</details>
+
+<details>
+<summary><b>Branches, tags &amp; remotes</b></summary>
+
+- Branches panel from `git branch --format`: a "time ago" column, per-branch
+  tracking status (`✓` in sync, `↑`/`↓` ahead/behind, `(gone)`), and the
+  upstream ref shown only when it isn't the obvious `origin/<same-name>`.
+- Branch actions (Local tab): new (`n`), rename (`R`), delete (`d`), merge (`M`),
+  rebase (`r`), fast-forward (`f`), checkout-by-name (`c`), reset (`g`),
+  force-checkout (`F`), tag (`T`), move commits to a new branch (`N`), open the
+  pull-request page (`G`), sort menu (`s`).
+- Tags tab: checkout (`space`, detached), create (`n`, lightweight or annotated;
+  overwrite prompts for `--force`), push to a remote (`P`), reset onto it (`g`),
+  delete (`d`, local / remote / both). One remote skips the remote prompt.
+- Remotes tab: list remotes, drill into a remote's branches, add (`n`), edit URL
+  (`e`), remove (`x`), set the current branch's upstream (`u`), delete a remote
+  branch (`d`).
+- Worktrees & Submodules tabs (Files panel): list, create/add, open, update,
+  remove, a submodule bulk menu (`b`), and **switching repos in place** —
+  `space`/`enter` on a worktree (or `enter` on a submodule) re-roots the app onto
+  it, with a `parent / current` breadcrumb and `esc` to walk back out.
+
+</details>
+
+<details>
+<summary><b>Commits &amp; history</b></summary>
+
+- Recent commits from `git log`, and a Reflog tab for recovery (checkout `space`,
+  reset HEAD `g`, branch `n`).
+- Commit (`c`), commit `--no-verify` (`w`), amend (`A`) in a centered editor with
+  a summary line and optional multi-line body (`tab` switches fields).
+- Per-commit: reset (`g`, soft/mixed/hard), revert (`t`), checkout (`space`,
+  detached), branch from it (`n`), move commits to a new branch (`N`), tag (`T`),
+  change author (`a`), and a copy-attribute menu (`y`: hash/subject/author).
+- A navigable changed-file list per commit (`enter`); `d` there discards a file's
+  changes from that commit (rebase + amend).
+- Commit graph viewer (`ctrl+l`): the real `git log --graph` DAG in git's colours,
+  loaded off-thread; toggle current/all branches (`a`), `enter` jumps the
+  selection, mouse scroll/drag/click supported.
+- Log filtering (`/`): by message (`--grep`), author, or path; persists across
+  refreshes and shows in the panel title.
+- Bisect (`b`): mark the selected commit good/bad, then mark good/bad/skip until
+  the first bad commit is found.
+
+</details>
+
+<details>
+<summary><b>Interactive rebase &amp; patches</b></summary>
+
+- Per-commit interactive rebase: drop (`d`), squash (`s`), fixup (`f`), edit (`e`),
+  reword (`r`), move (`ctrl+j`/`ctrl+k`), create `fixup!` (`F`), autosquash (`S`).
+- Rebase plan editor (`i`): compose a plan for the commits down to the selected
+  one, mark each action (with range-select to mark/reorder many at once), then run
   it as one rebase.
-- Reflog tab recovery: checkout (`space`), reset HEAD to an entry (`g`), or branch
-  from an entry (`n`).
-- Commit graph viewer (`ctrl+l`): a large overlay rendering the real
-  `git log --graph` DAG in git's colours, loaded off-thread with a cancellable
-  spinner; toggle current-branch / all-branches (`a`), and `enter` jumps the
-  Commits-panel selection to the row under the cursor.
-- Rebase onto a marked base (`B` marks a commit; rebasing a branch then replays
-  the marked commit through HEAD onto it via `git rebase --onto`).
-- Mid-rebase amend: when a rebase stops at an `edit` step, the `m` actions menu
-  can amend the stopped commit with the staged changes and continue.
+- Cherry-pick: copy commits to a clipboard (`c`), paste onto HEAD (`V`), clear
+  (`ctrl+r`).
+- Custom patch building (`ctrl+p`): toggle files into a patch (`space` in a
+  commit's file list), then apply it to the working tree (forward/reverse),
+  remove it from its source commit, or reset it.
+- `rebase --onto` from a marked base (`B`), and mid-rebase amend (`m`'s menu can
+  amend the stopped `edit` commit and continue).
+- Conflict resolution: take ours/theirs on conflicted files, continue/abort (`m`);
+  `MERGING`/`REBASING` shown in the Status panel.
+
+</details>
+
+<details>
+<summary><b>Multi-selection, diffing &amp; stash</b></summary>
+
+- **Range select** in any list: `v` toggles a sticky range, `shift+arrows` extend
+  one, `*` (Commits) selects every commit unique to the branch. The action key
+  then applies to the whole range — stage/discard/edit files,
+  drop/squash/fixup/edit/move/revert or copy commits, delete branches/tags, drop
+  stashes, toggle commit files into a patch, or discard files from a commit.
+- Diffing mode (`W`): mark a commit/branch, select another, see `git diff` between
+  the two refs in the main panel (reversible).
+- Stash menu (`s`): stash all / +untracked / staged-only / just the selected file;
+  apply / pop / drop / rename (`r`) on the Stash panel.
+
+</details>
+
+<details>
+<summary><b>UX &amp; quality-of-life</b></summary>
+
+- **Action feedback (lazygit-style):** fast actions succeed silently with a
+  one-line summary; only failures pop a dialog. Slow / multi-step actions (merge,
+  rebase, autosquash, patch apply, fast-forward, bisect) and network ops
+  (fetch/pull/push) run off the UI loop with a spinner — navigation stays live.
+  Tunable via `result_dialog` / `command_output`.
+- **Non-blocking fetch/pull/push** (`f`/`p`/`P`) with an in-status indicator.
+- **In-app credential entry:** on an HTTPS auth failure, a username + masked
+  password/token prompt feeds git for the session (no external helper needed).
 - Safe undo of the last operation (`z`, reflog hard-reset after confirmation).
-- Diffing mode (`W`): mark a commit/branch, then select another to view
-  `git diff` between the two refs in the main panel.
-- Commit log filtering (`/` in the Commits panel): filter by message (`--grep`),
-  author, or path; the filter persists across refreshes and is shown in the
-  panel title (`esc` clears it).
-- Git bisect (`b` in the Commits panel): start by marking the selected commit
-  good/bad, then mark the current checkout good/bad/skip until the first bad
-  commit is found; reset when done.
-- Custom patch building (`ctrl+p`): in a commit's file list, `space` toggles
-  files into a patch; then apply it to the working tree (forward/reverse),
-  remove it from its source commit (rebase + amend), or reset it.
-- Copy the selected commit hash / branch / tag to the system clipboard
-  (`ctrl+o`, via OSC 52) and open the selected commit or branch on its remote
-  host in a browser (`o`).
-- Remote management (Branches panel, Remotes tab): add (`n`), edit URL (`e`),
-  remove (`x`), and set the current branch's upstream (`u`).
-- Stash menu (`s` in the Files panel): stash all, including untracked,
-  staged-only, or just the selected file — plus apply/pop/drop/rename (`r`) on the
-  Stash panel.
-- More Files-panel actions: add a file to `.gitignore` (`i`), commit skipping
-  hooks (`w`, `--no-verify`), copy a file's path (`y`), and find the base commit
-  for the staged change and make a `fixup!` for it (`ctrl+f`, via blame).
-- lazygit-style action feedback: fast actions (stage, checkout, commit, reset,
-  stash apply/pop/drop, …) succeed silently with a one-line summary in the
-  bottom bar; only failures pop a dialog. Slow / multi-step actions (merge,
-  rebase, autosquash, interactive-rebase edits, custom-patch apply, fast-forward,
-  bisect) run off the UI loop with a spinner in the Status panel — navigation
-  stays live while they run, and other actions wait until they finish. Network
-  ops (fetch/pull/push) likewise run off the loop. See `result_dialog` /
-  `command_output` under Config to tune dialog behavior.
-- Discard selected file via a lazygit-style menu (all changes / unstaged only).
-- Discard all working tree changes with a confirmation popup.
-- Commit staged changes in a centered editor with a summary line and an optional
-  multi-line description (`tab` switches fields). Reword reuses the same editor,
-  prefilled from the commit.
-- Lazygit-style panel numbering (`1`-`5`), `enter`/`esc` to inspect the main
-  panel, a context-sensitive bottom bar, and centered popups for menus and
-  confirmations.
-- Checkout selected branch.
-- Non-blocking fetch, pull, and push: they run off the UI loop (the status
-  panel shows a "fetching…/pulling…/pushing…" indicator) so the UI stays
-  responsive.
-- In-app credential entry: when an HTTPS push/pull/fetch fails to authenticate,
-  a username prompt and a masked password/token prompt appear (no external
-  credential helper required); the values are fed to git for the rest of the
-  session. See `docs/ENHANCEMENTS_OVER_LAZYGIT.md`.
-- Command-log overlay (`@`), configurable theme colors, fully remappable keys,
-  and user-defined custom commands.
-- Repo-local and environment-selected config file support.
+- Find the fixup base for a staged change and make a `fixup!` (`ctrl+f`, via
+  blame).
+- Copy a hash/branch/tag to the clipboard (`ctrl+o`, OSC 52); open a commit/branch
+  on its remote host (`o`).
+- Command-log overlay (`@`), themeable colours, fully remappable keys, and
+  user-defined custom commands.
 
-## Missing
+</details>
 
-The lazygit-parity feature roadmap is complete. Smaller gaps that remain:
+## Keybindings
 
-- Redo (undo is implemented; redo of an undo is not).
-- Moving a custom patch to a *different* commit (only apply / remove-from-commit
-  are implemented).
-- Editing the live rebase todo *mid-rebase* (lazygit's `pick`/`drop`/… while a
-  rebase is paused): ziggity composes the whole plan up front in its `i` editor
-  (which supports range-select) and has no paused-rebase todo view, so the
-  mid-rebase `pick` has no applicable context.
-- Rewording a commit in your external `$EDITOR`: ziggity rewords in its own
-  in-app message editor (`r`) instead, which serves the same purpose.
-- Full lazygit config compatibility.
-- Score-based fuzzy ranking (current fuzzy filter matches but preserves order).
+Press **`?`** in the app for the full, always-current overlay. The essentials:
 
-## Build
+| Key | Action |
+|---|---|
+| `1`–`5` | Focus Status / Files / Branches / Commits / Stash |
+| `h` `l` / arrows | Move focus between side panels |
+| `j` `k` / arrows | Move selection |
+| `tab` | Focus the Diff panel (and back) |
+| `[` `]` | Switch the focused panel's tabs (or staging side) |
+| `enter` / `esc` | Inspect in the main panel / step back |
+| `space` | Stage file · checkout branch · apply stash (by focus) |
+| `c` · `a` · `d` · `D` | Commit · stage-all · discard menu · discard all |
+| `v` · `shift+arrows` · `*` | Start range · extend range · select branch commits |
+| `i` · `ctrl+p` · `ctrl+l` | Rebase plan · custom patch · commit graph |
+| `f` · `p` · `P` | Fetch · pull · push |
+| `z` · `@` · `?` · `q` | Undo · command log · help · quit |
 
-Requires Zig `0.16.0`.
+<details>
+<summary><b>Full keybinding reference</b></summary>
 
-```sh
-zig build
-zig build test
-```
-
-The binary is written to:
-
-```sh
-./zig-out/bin/ziggity
-```
-
-## Run
-
-Run inside a Git repository:
-
-```sh
-./zig-out/bin/ziggity
-```
-
-Useful keys:
-
-- `q` or `ctrl+c`: quit
+- `q` / `ctrl+c`: quit
 - `R`: refresh
-- `?`: keybindings help overlay (`j`/`k` to scroll). Opens scrolled to — and
-  highlighting — the section that matches where you pressed it (e.g. the
-  Branches panel jumps to the Branches section).
+- `?`: keybindings help overlay (`j`/`k` to scroll), opened to the section for the
+  current panel
 - `z`: undo the last operation (reflog reset, after confirmation)
-- `@`: show the command log (recent git commands ziggity ran)
+- `@`: command log (recent git commands ziggity ran)
 - `ctrl+o`: copy the selected hash / branch / tag to the system clipboard
 - `o`: open the selected commit or branch on its remote host
 - `W`: diffing mode — mark a ref, then select another to diff (esc exits)
-- mouse: click a panel to focus it; scroll wheel to navigate/scroll
+- mouse: click a panel to focus; wheel to navigate/scroll
 - `/`: filter files by path live; enter accepts; esc clears
-- `` ` ``: toggle the directory-tree view — in the Files panel **and** a commit's
-  / branch's file list. In tree view, `enter` collapses/expands the folder under
-  the cursor (and `tab` still switches to the Diff panel); `space` stages a whole
-  directory (Files) or adds it to the custom patch (commit files). A `/` root row
-  nests everything and, when selected, diffs all changes
-- `ctrl+b`: open files status filter menu
-- `j`/`k` or arrows: move selection
-- `h`/`l` or arrows: cycle focus between side panels
-- `H`/`L`: scroll the focused panel left/right (the diff, or a list with rows
-  wider than the panel)
-- `tab`: focus the Diff panel from any side panel — including a file tree, where
-  `enter` collapses/expands folders but `tab` always goes to the diff (press
-  `tab` again to return to the side panel)
-- `1`/`2`/`3`/`4`/`5`: focus status, files, branches, commits, stash
-- `[`/`]`: switch panel tabs — files: Files/Worktrees/Submodules; branches:
-  Local/Remotes/Tags; commits: Commits/Reflog; or the staging view's
-  unstaged/staged side. The panel title shows the tab strip with the active view
-  highlighted
-- `enter`: inspect the selected item in the main panel; `esc`/`h` returns. On a
-  directory row in tree view it collapses/expands that folder instead
-- `enter` on a commit: drill into its changed-file list (`j`/`k` to pick a file,
-  `enter` to scroll its diff, `esc` to go back)
-- `enter` on a file: open the staging view (`j`/`k` move by line, `v` toggles a
-  range, `space` stages/unstages the line(s) — or the whole hunk on a `@@`
-  header, `[`/`]` switch unstaged/staged side, `\` toggles a split view showing
-  unstaged and staged side by side, `c`/`A` commit/amend the staged changes,
-  `esc` goes back)
-- `space`: stage/unstage file, checkout branch, or apply stash depending on focus
-- `e`: open the file under view in your editor — from the Files panel, a
-  commit's file list, the staging/patch view, or a working-tree file's Diff
-  panel (configurable — see "Editor" below)
-- `n`: create a new branch from HEAD (branches panel, Local tab)
-- `c`: checkout a branch/ref by typing its name (branches panel); resolves a
-  local branch, DWIM-tracks a remote branch, detaches onto a tag/commit, or
-  switches to the previous branch with `-`
-- `R`: rename the selected local branch (branches panel; refresh elsewhere)
-- `f`: fast-forward the selected local branch to its upstream (branches panel;
-  fetch elsewhere)
+- `` ` ``: toggle the directory-tree view — Files panel **and** a commit's /
+  branch's file list. `enter` collapses/expands the folder under the cursor;
+  `space` stages a whole directory (Files) or adds it to the custom patch (commit
+  files); the `/` root nests everything and diffs all changes when selected
+- `ctrl+b`: files status filter menu
+- `j`/`k` or arrows: move selection · `h`/`l` or arrows: cycle side panels
+- `H`/`L`: scroll the focused panel left/right (diff, or a list wider than the panel)
+- `tab`: focus the Diff panel from any side panel (press again to return)
+- `1`–`5`: focus status / files / branches / commits / stash
+- `[`/`]`: switch panel tabs (Files/Worktrees/Submodules · Local/Remotes/Tags ·
+  Commits/Reflog) or the staging unstaged/staged side
+- `enter`: inspect in the main panel; on a commit, drill into its changed files;
+  on a file, open the staging view
+- `enter` on a file → staging view: `j`/`k` by line, `v` range, `space` stage
+  line(s)/hunk, `[`/`]` switch side, `\` split view, `c`/`A` commit/amend, `esc` back
+- `space`: stage/unstage file · checkout branch · apply stash (by focus)
+- `e`: open the file under view in your editor (Files, a commit's files, the
+  staging/patch view, or a working-tree file's diff — see [Editor](#editor-e))
+- `n`: new branch from HEAD (Branches, Local)
+- `c`: checkout a branch/ref by name (resolves local, DWIM-tracks remote, detaches
+  onto a tag/commit, or `-` for previous)
+- `R`: rename the selected local branch (refresh elsewhere)
+- `f`: fast-forward the selected local branch (fetch elsewhere)
 - `d`: delete the selected local branch (menu: delete / force delete)
-- `M`: merge the selected branch into the current branch (after confirmation)
-- `r`: rebase the current branch onto the selected branch (after confirmation)
-- `g`/`F` (Branches Local): reset to the branch / force-checkout (discards changes)
-- `T`/`N` (Branches Local): tag the branch / move its commits onto a new branch
-- `G`/`s` (Branches Local): open the pull request page / branch sort-order menu
-- `space` on the Remotes/Tags tab: check out the remote branch or tag
-- `n`/`P`/`g`/`d` (Tags tab): new tag (with optional message) / push the tag to a
-  remote / reset onto the tag / delete (local / remote / both menu)
-- `g`: reset to the selected commit (menu: soft / mixed / hard)
-- `t`: revert the selected commit
-- `space`/`n`/`N` (Commits/Reflog): checkout the commit (detached) / branch from
-  it / move the branch's commits onto a new branch (needs an upstream)
-- `T`/`a` (Commits): tag the selected commit / change its author (reset or set)
-- `y`/`ctrl+r` (Commits/Reflog): copy-attribute menu (hash/subject/author) / clear
-  the cherry-pick selection
-- `i` (Commits): interactive rebase editor (mark pick/drop/squash/fixup/edit,
-  reorder, run)
-- `ctrl+l` (Commits): commit graph viewer — a large overlay rendering
-  `git log --graph` (hash, refs, author, relative date, subject) off-thread with
-  a cancellable spinner; `j`/`k` move the cursor, `H`/`L` pan a wide graph,
-  `a` toggles current-branch / all-branches (keeping the cursor on the same
-  commit and naming the branch in the title), `ctrl+o` copies the cursor commit's
-  hash, `enter` goes to the commit (moves the Commits-panel selection if it's on
-  the current branch, otherwise asks to check out the branch — or the commit,
-  detached), `esc` closes. The mouse wheel scrolls the view, drag selects/copies
-  text, and a click moves the cursor
-- `G` (Commits): open the new pull/merge request page for the branch
-- `B`: mark the selected commit as the base for a `rebase --onto`
+- `M` / `r`: merge the selected branch / rebase the current branch onto it
+- `g` / `F` (Branches Local): reset to the branch / force-checkout
+- `T` / `N` (Branches Local): tag the branch / move its commits to a new branch
+- `G` / `s` (Branches Local): open the PR page / branch sort menu
+- `space` (Remotes/Tags): check out the remote branch or tag
+- `n`/`P`/`g`/`d` (Tags): new tag / push to a remote / reset onto it / delete
+- `g` / `t` (Commits): reset menu / revert
+- `space`/`n`/`N` (Commits/Reflog): checkout (detached) / branch from it / move
+  commits to a new branch
+- `T` / `a` (Commits): tag the commit / change its author
+- `y` / `ctrl+r`: copy-attribute menu / clear the cherry-pick selection
+- `i` (Commits): interactive rebase plan editor
+- `ctrl+l` (Commits): commit graph viewer (`j`/`k` move, `H`/`L` pan, `a` toggle
+  all-branches, `ctrl+o` copy, `enter` jump, `esc` close; mouse scroll/drag/click)
+- `G` (Commits): open the PR page · `B`: mark a `rebase --onto` base
 - `W`: diff the selected commit/branch against another marked ref
-- `/` (Commits panel): filter the log by message / author / path
-- `b` (Commits panel): bisect menu (start, then mark good/bad/skip/reset)
-- `ctrl+p`: custom patch menu (apply / remove from commit / reset); in a
-  commit's file list, `space` adds the selected file to the patch
-- `a`: stage all if there are unstaged files, otherwise unstage all
-- `s` (Files panel): stash menu (all / +untracked / staged / selected file)
-- `d`: open the discard menu for the selected file (all changes, or unstaged only)
-- `D`: discard all working tree changes after confirmation
-- `c`: commit staged changes
-- `w`/`i`/`y`/`ctrl+f` (Files): commit `--no-verify` / add to `.gitignore` / copy
-  the file path / find the fixup base commit and make a `fixup!`
-- `r` (Stash panel): rename the selected stash
-- `e`/`x`/`u` (Remotes tab): edit remote URL / remove remote / set upstream
+- `/` (Commits): filter the log · `b` (Commits): bisect menu
+- `ctrl+p`: custom patch menu; `space` in a commit's files adds it to the patch
+- `a`: stage all (or unstage all) · `s` (Files): stash menu
+- `d` / `D`: discard menu for the file / discard all (confirmed)
+- `c` · `w` (Files): commit · commit `--no-verify`
+- `i` / `y` / `ctrl+f` (Files): add to `.gitignore` / copy path / make a `fixup!`
+- `r` (Stash): rename the selected stash
+- `e` / `x` / `u` (Remotes): edit URL / remove remote / set upstream
 - `m`: merge/rebase actions (continue, amend+continue, abort) while in progress
-- `f`: fetch
-- `p`: pull
-- `P`: push
-- `esc`: step back one level — deselect diff text, clear an active filter, exit
-  diffing mode, cancel a prompt, leave the staging/diff panel. It never quits
-  (only `q` does); at the top level it does nothing.
+- `f` / `p` / `P`: fetch / pull / push
+- `esc`: step back one level (deselect, clear filter, exit diffing, cancel a
+  prompt, leave a panel); never quits — only `q` does
 
-## Config
+</details>
 
-`ziggity` loads defaults, then optionally reads (each overriding the previous):
+## Configuration
 
-1. The path in `ZIGGITY_CONFIG`
+`ziggity` loads its defaults, then reads (each overriding the previous):
+
+1. the path in `ZIGGITY_CONFIG`
 2. `<repo>/.ziggity.ini`
 
-There is **no** auto-loaded global file: ziggity does not read
-`~/.config/ziggity/` (or any XDG path) on its own. To apply settings to every
-repo, point `ZIGGITY_CONFIG` at a file from your shell profile, e.g.
-`export ZIGGITY_CONFIG="$HOME/.config/ziggity/config.ini"`; a repo's
-`.ziggity.ini` then overrides those globals per-repo. Without any of these,
-settings fall back to per-repo auto-detection (notably the editor — see below),
-which can differ between repos depending on each one's git config and
-environment.
+There is **no** auto-loaded global file (no `~/.config/ziggity/`, no XDG path). To
+apply settings everywhere, point `ZIGGITY_CONFIG` at a file from your shell
+profile — e.g. `export ZIGGITY_CONFIG="$HOME/.config/ziggity/config.ini"` — and a
+repo's `.ziggity.ini` overrides those per-repo. Without any file, settings fall
+back to per-repo auto-detection (notably the editor).
 
-Supported settings:
+<details>
+<summary><b>All settings (annotated <code>.ini</code>)</b></summary>
 
 ```ini
 side_panel_width_percent = 34
@@ -325,23 +331,22 @@ refresh_interval_secs = 10
 # unless it's focused. Enable the "accordion" to grow the focused list panel.
 expand_focused_side_panel = false  # focused list panel expands, others shrink
 expanded_side_panel_weight = 2     # how much bigger the focused panel gets
-staging_split = auto               # staging layout: off | on | auto (default). See "Staging layout" below.
+staging_split = auto               # staging layout: off | on | auto (default)
 
-# Editor for `e` in the Files panel. With nothing set, the editor is
-# auto-detected from git core.editor, then $GIT_EDITOR / $VISUAL / $EDITOR,
-# falling back to vim. See "Editor" below.
-editor_preset =                    # vim | nvim | nano | emacs | micro | helix | kakoune | vscode | sublime | zed | ...
-editor_command =                   # explicit override template, e.g. "code --reuse-window -- {{filename}}"
-editor_in_terminal =               # true = suspend the TUI and resume on exit (terminal editors); false = just launch (GUI)
+# Editor for `e`. With nothing set, auto-detected from git core.editor, then
+# $GIT_EDITOR / $VISUAL / $EDITOR, falling back to vim. See "Editor" below.
+editor_preset =                    # vim | nvim | nano | emacs | micro | helix | vscode | sublime | zed | ...
+editor_command =                   # explicit template, e.g. "code --reuse-window -- {{filename}}"
+editor_in_terminal =               # true = suspend the TUI (terminal editors); false = just launch (GUI)
 
-# Action feedback (lazygit-style). Default: actions succeed silently with a
-# one-line summary in the bottom bar, and only failures pop a dialog.
+# Action feedback (lazygit-style). Default: silent success + bottom-bar summary,
+# dialogs only on failure.
 result_dialog = on_error    # on_error (default) | always | never
 command_output = show       # show (default) custom-command output in a dialog,
                             # or `silent` to follow result_dialog instead
 
-# Skip the confirm-before prompt for individual destructive actions (all
-# default false, i.e. confirmations stay on). Names match the action:
+# Skip the confirm-before prompt for individual destructive actions (all default
+# false, i.e. confirmations stay on). Names match the action:
 skip_confirm.discard_all = false
 skip_confirm.merge_branch = false
 skip_confirm.rebase_branch = false
@@ -391,12 +396,12 @@ color.tag = 3                    # a tag's annotation/subject in the Tags list
 ```
 
 Key values may be a single character or one of `space`, `enter`, `tab`, `esc`,
-`backspace`, `ctrl+x`, or `alt+x`. Every binding in the keymap is remappable
-via `key.<name>`, and every theme color via `color.<name>`.
+`backspace`, `ctrl+x`, or `alt+x`. Every binding is remappable via `key.<name>`,
+every color via `color.<name>`.
 
-Custom commands bind a key to a shell command run in the repo root (output
-shown in a dialog by default, or in the message line when `command_output =
-silent`; the view refreshes afterward):
+**Custom commands** bind a key to a shell command run in the repo root (output in
+a dialog by default, or the message line with `command_output = silent`; the view
+refreshes afterward):
 
 ```ini
 command.C = git commit --amend --no-edit
@@ -406,100 +411,103 @@ command.ctrl+t = ctags -R .
 Custom commands take precedence over built-in bindings and only run when you
 press their key, so a repo-local `.ziggity.ini` cannot run anything on its own.
 
+</details>
+
 ### Staging layout (`staging_split`)
 
-The staging view (`enter`/`tab` on a file) can show one pane (the active side)
-or two panes side by side (Unstaged | Staged). `\` toggles between them. The
-`staging_split` config value sets the policy:
+The staging view (`enter`/`tab` on a file) shows one pane (the active side) or two
+side by side (Unstaged | Staged); `\` toggles between them. `staging_split` sets
+the policy:
 
-| `staging_split` | One-sided file (all-staged *or* all-unstaged) | Mixed file (staged **and** unstaged) | `\` choice remembered for the next file? |
+| `staging_split` | One-sided file | Mixed file (staged **and** unstaged) | `\` remembered for the next file? |
 |---|---|---|---|
-| `off` | single | single | yes — one preference, applied to every file |
-| `on` | split (empty side shows "No changes") | split | yes — one preference, applied to every file |
-| **`auto`** *(default)* | single | **split** | one-sided: **yes** · mixed: **no** (mixed always reopens split) |
+| `off` | single | single | yes — one preference, every file |
+| `on` | split | split | yes — one preference, every file |
+| **`auto`** *(default)* | single | **split** | one-sided: **yes** · mixed: **no** |
 
-How to read it:
-
-- `off` / `on` keep a single remembered preference; `\` flips it and it sticks
-  for every file you open afterwards.
-- `auto` is `off`'s behavior **plus** "open split when a file has changes on
-  both sides." For one-sided files the `\` choice is remembered (so once you
-  press `\`, later one-sided files use it too); for mixed files `\` only changes
-  the current view and is forgotten — the next mixed file opens split again.
-- The remembered preference lives only for the running session (it resets to the
-  config value on restart). `true`/`false` are still accepted as aliases for
-  `on`/`off`.
-- The layout is decided when a file is opened; it is not re-decided mid-edit if
-  staging changes the file from mixed to one-sided (or vice versa). Separately,
-  the active side auto-switches to the staged side when the unstaged side is
-  empty.
+`auto` is `off`'s behaviour **plus** "open split when a file has changes on both
+sides." The remembered preference lives only for the session (it resets to the
+config value on restart). The layout is decided when a file is opened, not
+re-decided mid-edit. `true`/`false` are accepted as aliases for `on`/`off`.
 
 ### Editor (`e`)
 
-`e` opens the file under view in an editor — from the Files panel, a commit's
-file list (Commits/Branches drills), the staging/patch view, or a working-tree
-file's Diff panel. The command is chosen in this order:
+`e` opens the file under view in an editor. The command is chosen in order:
 
-1. `editor_command` — an explicit template you set. Use `{{filename}}` for the
-   path (it's quoted for you); if omitted, the path is appended.
-2. `editor_preset` — a named built-in: `vi`, `vim`, `nvim`, `lvim`, `nano`,
+1. **`editor_command`** — your explicit template. Use `{{filename}}` for the path
+   (quoted for you); if omitted, the path is appended.
+2. **`editor_preset`** — a named built-in: `vi`, `vim`, `nvim`, `lvim`, `nano`,
    `emacs`, `micro`, `helix`, `kakoune`, `vscode`, `sublime`, `zed`, `bbedit`,
    `xcode`.
-3. Auto-detection — the first of git `core.editor`, `$GIT_EDITOR`, `$VISUAL`,
-   `$EDITOR` (matched to a preset by name, or run as a terminal editor).
-4. Fallback — `vim`.
+3. **Auto-detection** — the first of git `core.editor`, `$GIT_EDITOR`, `$VISUAL`,
+   `$EDITOR` (matched to a preset, or run as a terminal editor).
+4. **Fallback** — `vim`.
 
-Terminal editors (vim, nano, emacs, micro, helix, kakoune, …) **suspend**
-Ziggity: it leaves the alt screen, runs the editor on the terminal, and resumes
-when you quit it. GUI editors (VS Code, Sublime, Zed, …) just **launch** and
-Ziggity keeps running. `editor_in_terminal = true|false` forces which behavior
-to use (handy for an unusual `editor_command`, or a GUI editor invoked with a
-`--wait` flag).
+Terminal editors (vim, nano, emacs, micro, helix, kakoune, …) **suspend** ziggity
+and resume when you quit them; GUI editors (VS Code, Sublime, Zed, …) just
+**launch**. `editor_in_terminal = true|false` forces which behaviour to use.
 
-## libvaxis Usage
+## Status & roadmap
 
-The TUI layer uses libvaxis' low-level API:
+The lazygit-parity feature roadmap is **complete**. Known smaller gaps:
 
-- `vaxis.Tty` for terminal raw mode and writing.
-- `vaxis.Loop(Event)` for keyboard, resize, focus, and refresh tick events.
-- `vaxis.Window.child` for panel layout and borders.
-- `Window.printSegment` and cell styles for text rendering.
-- Alternate screen rendering with explicit redraws after each event.
+- **Redo** — undo (`z`) is implemented; redoing an undo is not.
+- **Move a custom patch to a *different* commit** — only apply / remove-from-commit
+  are implemented.
+- **Editing the live rebase todo *mid-rebase*** — ziggity composes the whole plan
+  up front in its `i` editor (with range-select), so there's no paused-rebase todo
+  view to edit.
+- **Reword in your external `$EDITOR`** — ziggity rewords in its own in-app editor
+  (`r`), which serves the same purpose.
+- **Full lazygit config compatibility** and **score-based fuzzy ranking** (the
+  current fuzzy filter matches but preserves order).
 
-### Gotcha: cell graphemes are stored by reference
+See [`docs/ENHANCEMENTS_OVER_LAZYGIT.md`](docs/ENHANCEMENTS_OVER_LAZYGIT.md) for
+where ziggity deliberately diverges.
+
+## Development
+
+```sh
+zig build                                  # debug build
+zig build test --summary all               # run all tests
+zig build -Doptimize=ReleaseFast           # optimized build
+```
+
+### Source layout
+
+| File | Responsibility |
+|---|---|
+| `src/main.zig` | Process entry point and startup error reporting |
+| `src/app.zig` | App state, focus, selections, actions, refreshes |
+| `src/git.zig` | Git subprocess wrapper and parsers |
+| `src/tui.zig` | libvaxis event loop, layout, and rendering |
+| `src/model.zig` | Owned domain models and status derivation |
+| `src/config.zig` | Defaults and the keybinding/INI parser |
+| `src/actions.zig` | Action names shared by the app and key layers |
+
+Supporting modules split cohesive areas out of `app.zig`: `staging.zig`,
+`patch.zig`, `commitops.zig`, `rebaseplan.zig`, `drills.zig`, `diffmode.zig`,
+`stash.zig`, `branches.zig`, `commits.zig`, `filetree.zig`, `commitgraph.zig`,
+`editor.zig`, `diff.zig`, `credentials.zig`. All Git data is loaded through `git`
+commands rather than reimplementing Git internals.
+
+### libvaxis gotcha: cells store graphemes by reference
 
 libvaxis stores each screen cell's grapheme as a **slice into the source text**
 (`Window.print` does `.grapheme = grapheme.bytes(segment.text)` — it does not copy
-the bytes). The frame is flushed in `renderAndFlush` via `vx.render(writer)`
-**after** the `render()` function has returned. So any text drawn through vaxis'
-`printSegment`/`print` must be backed by memory that outlives `render()` — a
-string literal or App-owned buffer, **never a stack-local buffer**. A stack
-buffer dangles and renders as garbage / `U+FFFD`, and because it depends on what
-later overwrites that stack region it fails intermittently (works by luck, then
-breaks). This bit us with the dynamically-formatted panel titles (e.g. the
-diff-mode "Diff [base …]" title rendered as "�og").
+the bytes), and the frame is flushed **after** `render()` returns. So any text
+drawn via vaxis' `printSegment`/`print` must be backed by memory that outlives
+`render()` — a string literal or App-owned buffer, **never a stack-local buffer**
+(which dangles and renders as garbage / `U+FFFD`, intermittently).
 
-Rules of thumb in `src/tui.zig`:
+In `src/tui.zig`:
 
 - The local `print` / `printSpan` / `printAnsi` helpers are **safe** with any
-  buffer lifetime: they map each byte through the static `glyph()`/`ascii_table`,
-  so the cell grapheme points at static memory. Use them for list rows, popup
-  bodies, the footer, etc. — formatting into a stack buffer is fine.
-- Only vaxis `printSegment` is by-reference, and it is used only for panel/popup
-  titles. Dynamic titles must live in an App-owned buffer (`app.*_title_buf`);
-  `popup()` self-copies its title into a module-owned buffer for the same reason.
+  buffer lifetime (they map bytes through a static glyph table), so formatting
+  into a stack buffer is fine for list rows, popups, the footer, etc.
+- Only vaxis `printSegment` is by-reference, and it's used only for panel/popup
+  titles — dynamic titles must live in an App-owned buffer (`app.*_title_buf`).
 
-## Architecture
+## License
 
-- `src/main.zig`: process entry point and startup error reporting.
-- `src/app.zig`: application state, focus, selections, actions, full/scoped
-  refreshes, and commit prompt handling.
-- `src/git.zig`: Git subprocess wrapper and parsers.
-- `src/tui.zig`: libvaxis event loop, layout, and rendering.
-- `src/model.zig`: owned domain models and status derivation.
-- `src/config.zig`: default config and simple keybinding parser.
-- `src/actions.zig`: action names used by the app layer.
-- `src/log.zig`: placeholder logger hook for future diagnostics.
-
-All Git data is loaded through `git` commands rather than reimplementing Git
-internals.
+[MIT](LICENSE) © 2026 Simone Arpe.
