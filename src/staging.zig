@@ -247,12 +247,36 @@ pub fn clearStaging(app: *App) void {
 /// Space in the Files panel: stage/unstage a whole directory in tree view when
 /// the cursor is on one, otherwise the selected file.
 pub fn toggleSelectedFileStaged(app: *App) !void {
+    // A multi-range (flat list) stages/unstages every selected file at once.
+    if (app.rangeActive() and !app.tree_view) return toggleRangeStaged(app);
     if (app.tree_view) {
         if (app.treeSelectedRow()) |row| {
             if (row.is_dir) return app.toggleDirStaged(row.path);
         }
     }
     return toggleFileStaged(app);
+}
+
+/// Stage/unstage every file in the active range. If any is unstaged the whole
+/// range is staged; otherwise it's unstaged (mirrors the single-file toggle).
+fn toggleRangeStaged(app: *App) !void {
+    const b = app.rangeBounds() orelse return toggleFileStaged(app);
+    // Collect the range's paths up front (staging mutates the model, which would
+    // otherwise shift the visible ordinals mid-loop). queueStageOp dupes paths.
+    var paths: std.ArrayList([]const u8) = .empty;
+    defer paths.deinit(app.allocator);
+    var any_unstaged = false;
+    var ord: usize = 0;
+    for (app.data.files) |file| {
+        if (!app.fileMatchesFilter(file)) continue;
+        defer ord += 1;
+        if (ord >= b.lo and ord <= b.hi and !file.conflict) {
+            try paths.append(app.allocator, file.path);
+            if (file.has_unstaged) any_unstaged = true;
+        }
+    }
+    for (paths.items) |p| try queueStageOp(app, p, any_unstaged);
+    app.clearRange();
 }
 
 /// Optimistically flip the staged/unstaged state of the matching files in the

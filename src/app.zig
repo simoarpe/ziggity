@@ -3185,7 +3185,7 @@ pub const App = struct {
         return idx >= b.lo and idx <= b.hi;
     }
 
-    fn clearRange(self: *App) void {
+    pub fn clearRange(self: *App) void {
         self.range_anchor = null;
     }
 
@@ -5063,7 +5063,35 @@ pub const App = struct {
     /// The ref the focused panel contributes to a diff: a commit hash in the
     /// Commits panel or a branch/tag ref in the Branches panel; null otherwise.
     /// Toggle the selected commit in the cherry-pick clipboard.
+    /// The commit slice backing the active commit list (Commits/Reflog tab or a
+    /// branch's sub-commits), for range operations. Null when not a commit list.
+    fn rangeCommitList(self: *const App) ?[]const model.Commit {
+        if (self.commitsFilesActive() or self.branchFilesActive()) return null;
+        if (self.inBranchCommitContext()) return self.branch_commits;
+        if (self.focus == .commits) return self.activeCommits();
+        return null;
+    }
+
     fn toggleCommitCopy(self: *App) !void {
+        // A range copies all its commits to the cherry-pick clipboard at once.
+        if (self.rangeBounds()) |b| {
+            if (b.lo != b.hi) {
+                if (self.rangeCommitList()) |list| {
+                    var added: usize = 0;
+                    var i = b.lo;
+                    while (i <= b.hi and i < list.len) : (i += 1) {
+                        if (!self.isCommitCopied(list[i].hash)) {
+                            try self.copied_commits.append(self.allocator, try self.allocator.dupe(u8, list[i].hash));
+                            added += 1;
+                        }
+                    }
+                    self.clearRange();
+                    try self.updatePreview();
+                    try self.setMessage("copied {d} commit(s) ({d} total)", .{ added, self.copied_commits.items.len });
+                    return;
+                }
+            }
+        }
         const commit = self.selectedCommit() orelse {
             try self.setMessage("no commit selected", .{});
             return;
