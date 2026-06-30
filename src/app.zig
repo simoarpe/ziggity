@@ -850,15 +850,16 @@ pub const WorktreeSnapshot = struct {
     /// Worker-thread entry point. `gpa` is the page allocator; everything
     /// returned is owned by it. Borrows `root`/`environ` read-only from the
     /// app's Git (never mutated by these read-only commands).
-    pub fn load(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, untracked: git_mod.Git.UntrackedFiles) !WorktreeSnapshot {
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, git_dir: []const u8, untracked: git_mod.Git.UntrackedFiles) !WorktreeSnapshot {
         // A throwaway Git bound to the page allocator. The commands it runs
         // (branch/rev-parse/rev-list/status) are all read-only, so its command
-        // log stays empty and `root` is only ever read — no deinit needed.
+        // log stays empty and `root`/`git_dir` are only ever read — no deinit.
         var wgit = git_mod.Git{
             .allocator = gpa,
             .io = io,
             .environ = environ,
             .root = root,
+            .git_dir = @constCast(git_dir),
             .untracked_files = untracked,
         };
         var status = try wgit.loadStatusSummary();
@@ -883,6 +884,7 @@ const RepoLoadCtx = struct {
     io: std.Io,
     environ: *std.process.Environ.Map,
     root: []u8,
+    git_dir: []const u8,
     branch_sort: model.BranchSortOrder,
     untracked: git_mod.Git.UntrackedFiles,
 
@@ -901,7 +903,7 @@ const RepoLoadCtx = struct {
     stash: ?[]model.StashEntry = null,
 
     fn git(self: *const RepoLoadCtx) git_mod.Git {
-        return .{ .allocator = self.gpa, .io = self.io, .environ = self.environ, .root = self.root, .branch_sort = self.branch_sort, .untracked_files = self.untracked };
+        return .{ .allocator = self.gpa, .io = self.io, .environ = self.environ, .root = self.root, .git_dir = @constCast(self.git_dir), .branch_sort = self.branch_sort, .untracked_files = self.untracked };
     }
 };
 
@@ -958,8 +960,8 @@ fn loadStashW(ctx: *RepoLoadCtx) void {
 /// instead of the sum of them all. The result is page-owned; the UI thread
 /// deep-copies it into the gpa (see `App.applyRepoLoad`). `root`/`environ` are
 /// borrowed read-only.
-pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, branch_sort: model.BranchSortOrder, untracked: git_mod.Git.UntrackedFiles) ?model.RepoData {
-    var ctx = RepoLoadCtx{ .gpa = gpa, .io = io, .environ = environ, .root = root, .branch_sort = branch_sort, .untracked = untracked };
+pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, git_dir: []const u8, branch_sort: model.BranchSortOrder, untracked: git_mod.Git.UntrackedFiles) ?model.RepoData {
+    var ctx = RepoLoadCtx{ .gpa = gpa, .io = io, .environ = environ, .root = root, .git_dir = git_dir, .branch_sort = branch_sort, .untracked = untracked };
 
     // Ordered slowest-first (status/files/commits/branches are the heavy ones on
     // a big repo) so that when the concurrency limit is reached, it's the cheap
@@ -1031,8 +1033,8 @@ pub const ScopedData = struct {
 /// Worker-thread entry: load just the requested views on a throwaway
 /// page-allocator `Git`. `filters` are applied to the commits load so an active
 /// Commits filter is preserved. Borrows `root`/`environ`/filter strings.
-pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, scopes: ScopeSet, filters: LogFilters, branch_sort: model.BranchSortOrder, untracked: git_mod.Git.UntrackedFiles) ScopedData {
-    var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root, .branch_sort = branch_sort, .untracked_files = untracked };
+pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, git_dir: []const u8, scopes: ScopeSet, filters: LogFilters, branch_sort: model.BranchSortOrder, untracked: git_mod.Git.UntrackedFiles) ScopedData {
+    var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root, .git_dir = @constCast(git_dir), .branch_sort = branch_sort, .untracked_files = untracked };
     // Borrowed filter strings (owned by the caller's run struct); wgit only
     // reads them and we never call clearLogFilters, so nothing is freed here.
     wgit.log_grep = @constCast(filters.grep);
@@ -1173,8 +1175,8 @@ pub const Mutation = union(enum) {
     /// Worker-thread entry point: run the mutation on a throwaway page-allocator
     /// `Git`. The wgit's command log (mutations are recorded) is page-allocated
     /// and freed here since the real app log is updated separately on request.
-    pub fn run(self: Mutation, gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8) !git_mod.ExecResult {
-        var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root };
+    pub fn run(self: Mutation, gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, git_dir: []const u8) !git_mod.ExecResult {
+        var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root, .git_dir = @constCast(git_dir) };
         defer {
             for (wgit.command_log.items) |e| gpa.free(e);
             wgit.command_log.deinit(gpa);
@@ -8773,6 +8775,11 @@ test "diffing mode marks a ref base and clears cleanly" {
     try std.testing.expectEqualStrings("v1.0", app.diff_base.?);
     try std.testing.expect(!app.diff_reverse); // reset when the base was replaced
     try app.runMenuAction(.diff_exit);
+    try std.testing.expect(app.diff_base == null);
+
+    // A ref starting with '-' is rejected (it would be parsed as a git option
+    // when interpolated into `git diff <base> <target>`).
+    try diffmode_mod.diffAgainstRef(&app, "--output=/tmp/x");
     try std.testing.expect(app.diff_base == null);
 }
 

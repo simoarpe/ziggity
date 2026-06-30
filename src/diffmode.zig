@@ -46,6 +46,14 @@ pub fn diffAgainstSelected(app: *App) !void {
 
 /// Set the diff base to an arbitrary, typed ref name.
 pub fn diffAgainstRef(app: *App, ref: []const u8) !void {
+    // The ref is interpolated into `git diff <base> <target>` positionally, so a
+    // value beginning with `-` would be parsed by git as an option (e.g.
+    // `--output=FILE` could clobber a file). Reject it — no valid ref starts
+    // with a dash.
+    if (ref.len == 0 or ref[0] == '-') {
+        try app.setMessage("invalid ref (cannot start with '-')", .{});
+        return;
+    }
     const owned = try app.allocator.dupe(u8, ref);
     clearDiffBase(app);
     app.diff_base = owned;

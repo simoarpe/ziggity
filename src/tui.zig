@@ -116,6 +116,7 @@ const WorktreeRun = struct {
     io: std.Io,
     loop: *vaxis.Loop(Event),
     root: []u8,
+    git_dir: []const u8,
     environ: *std.process.Environ.Map,
     untracked: git_mod.Git.UntrackedFiles = .all,
     generation: u64,
@@ -123,7 +124,7 @@ const WorktreeRun = struct {
 };
 
 fn worktreeWorker(wr: *WorktreeRun) void {
-    wr.result = app_mod.WorktreeSnapshot.load(async_allocator, wr.io, wr.environ, wr.root, wr.untracked) catch null;
+    wr.result = app_mod.WorktreeSnapshot.load(async_allocator, wr.io, wr.environ, wr.root, wr.git_dir, wr.untracked) catch null;
     _ = wr.loop.tryPostEvent(.worktree_done) catch false;
 }
 
@@ -172,13 +173,14 @@ const MutationRun = struct {
     io: std.Io,
     loop: *vaxis.Loop(Event),
     root: []u8,
+    git_dir: []const u8,
     environ: *std.process.Environ.Map,
     mutation: app_mod.Mutation,
     result: ?git_mod.ExecResult = null,
 };
 
 fn mutationWorker(mr: *MutationRun) void {
-    mr.result = mr.mutation.run(async_allocator, mr.io, mr.environ, mr.root) catch null;
+    mr.result = mr.mutation.run(async_allocator, mr.io, mr.environ, mr.root, mr.git_dir) catch null;
     _ = mr.loop.tryPostEvent(.mutation_done) catch false;
 }
 
@@ -189,6 +191,7 @@ const RepoLoadRun = struct {
     io: std.Io,
     loop: *vaxis.Loop(Event),
     root: []u8,
+    git_dir: []const u8,
     environ: *std.process.Environ.Map,
     branch_sort: model.BranchSortOrder = .date,
     untracked: git_mod.Git.UntrackedFiles = .all,
@@ -196,7 +199,7 @@ const RepoLoadRun = struct {
 };
 
 fn repoLoadWorker(rl: *RepoLoadRun) void {
-    rl.result = app_mod.loadRepoDataAsync(async_allocator, rl.io, rl.environ, rl.root, rl.branch_sort, rl.untracked);
+    rl.result = app_mod.loadRepoDataAsync(async_allocator, rl.io, rl.environ, rl.root, rl.git_dir, rl.branch_sort, rl.untracked);
     _ = rl.loop.tryPostEvent(.repo_load_done) catch false;
 }
 
@@ -208,6 +211,7 @@ const ScopedLoadRun = struct {
     io: std.Io,
     loop: *vaxis.Loop(Event),
     root: []u8,
+    git_dir: []const u8,
     environ: *std.process.Environ.Map,
     scopes: app_mod.ScopeSet,
     grep: ?[]u8 = null,
@@ -228,7 +232,7 @@ const ScopedLoadRun = struct {
 };
 
 fn scopedLoadWorker(sr: *ScopedLoadRun) void {
-    sr.result = app_mod.loadScopesAsync(async_allocator, sr.io, sr.environ, sr.root, sr.scopes, .{
+    sr.result = app_mod.loadScopesAsync(async_allocator, sr.io, sr.environ, sr.root, sr.git_dir, sr.scopes, .{
         .grep = sr.grep,
         .author = sr.author,
         .path = sr.path,
@@ -342,7 +346,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     // Load the repo off-thread: the loop's initial winsize event
     // paints the skeleton with "Loading…" placeholders right away, and the
     // panels fill in when `repo_load_done` lands — no startup freeze, no flash.
-    var repo_load_run: RepoLoadRun = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ, .branch_sort = app.git.branch_sort, .untracked = app.git.untracked_files };
+    var repo_load_run: RepoLoadRun = .{ .io = io, .loop = &loop, .root = app.git.root, .git_dir = app.git.git_dir, .environ = app.git.environ, .branch_sort = app.git.branch_sort, .untracked = app.git.untracked_files };
     var repo_load_future: ?std.Io.Future(void) = null;
     defer if (repo_load_future) |*f| {
         f.cancel(io);
@@ -499,7 +503,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             // On a successful switch the app marks an initial load pending; start
             // it against the new root. (A failed switch leaves the app unchanged.)
             if (app.initial_load_pending) {
-                repo_load_run = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ, .branch_sort = app.git.branch_sort, .untracked = app.git.untracked_files };
+                repo_load_run = .{ .io = io, .loop = &loop, .root = app.git.root, .git_dir = app.git.git_dir, .environ = app.git.environ, .branch_sort = app.git.branch_sort, .untracked = app.git.untracked_files };
                 repo_load_future = io.concurrent(repoLoadWorker, .{&repo_load_run}) catch blk: {
                     app.applyRepoLoad(null, async_allocator);
                     break :blk null;
@@ -561,6 +565,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     .io = io,
                     .loop = &loop,
                     .root = app.git.root,
+                    .git_dir = app.git.git_dir,
                     .environ = app.git.environ,
                     .untracked = app.git.untracked_files,
                     .generation = generation,
@@ -602,7 +607,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
         // input gate keeps another mutation from being requested meanwhile.
         if (mutation_future == null) {
             if (app.takeMutation()) |mutation| {
-                mutation_run = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ, .mutation = mutation, .result = null };
+                mutation_run = .{ .io = io, .loop = &loop, .root = app.git.root, .git_dir = app.git.git_dir, .environ = app.git.environ, .mutation = mutation, .result = null };
                 mutation_future = io.concurrent(mutationWorker, .{&mutation_run}) catch blk: {
                     try app.completeMutation(mutation, null, async_allocator);
                     break :blk null;
@@ -621,6 +626,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     .io = io,
                     .loop = &loop,
                     .root = app.git.root,
+                    .git_dir = app.git.git_dir,
                     .environ = app.git.environ,
                     .scopes = scopes,
                     .grep = if (filters.grep) |g| async_allocator.dupe(u8, g) catch null else null,

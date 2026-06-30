@@ -545,19 +545,6 @@ pub fn dupeFiles(a: std.mem.Allocator, src: []const FileStatus) std.mem.Allocato
 pub fn dupeBranches(a: std.mem.Allocator, src: []const Branch) std.mem.Allocator.Error![]Branch {
     return dupeList(Branch, a, src, dupeBranch);
 }
-pub fn dupeStringList(a: std.mem.Allocator, src: []const []const u8) std.mem.Allocator.Error![][]u8 {
-    const out = try a.alloc([]u8, src.len);
-    var n: usize = 0;
-    errdefer {
-        for (out[0..n]) |s| a.free(s);
-        a.free(out);
-    }
-    for (src) |s| {
-        out[n] = try a.dupe(u8, s);
-        n += 1;
-    }
-    return out;
-}
 pub fn dupeTags(a: std.mem.Allocator, src: []const Tag) std.mem.Allocator.Error![]Tag {
     return dupeList(Tag, a, src, dupeTag);
 }

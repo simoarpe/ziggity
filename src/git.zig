@@ -344,11 +344,21 @@ pub const Git = struct {
         return self.exec(&.{ "blame", "-L", range, "--porcelain", "HEAD", "--", file });
     }
 
+    /// Build `<git-dir>/<rel>` (owned). Uses the resolved git directory when
+    /// known — correct inside a linked worktree, where `<root>/.git` is a
+    /// gitlink *file* and the real git dir lives elsewhere — and otherwise
+    /// falls back to `<root>/.git/<rel>`.
+    fn gitDirPath(self: *Git, rel: []const u8) ![]u8 {
+        if (self.git_dir.len > 0)
+            return std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.git_dir, rel });
+        return std.fmt.allocPrint(self.allocator, "{s}/.git/{s}", .{ self.root, rel });
+    }
+
     /// Apply a patch to the index. `reverse` unstages (used on the staged
-    /// side). The patch is written to a temp file under .git since
+    /// side). The patch is written to a temp file under the git dir since
     /// `std.process.run` cannot feed stdin.
     pub fn applyPatch(self: *Git, patch: []const u8, reverse: bool) !ExecResult {
-        const patch_path = try std.fmt.allocPrint(self.allocator, "{s}/.git/ziggity-stage.patch", .{self.root});
+        const patch_path = try self.gitDirPath("ziggity-stage.patch");
         defer self.allocator.free(patch_path);
         try std.Io.Dir.writeFile(.cwd(), self.io, .{ .sub_path = patch_path, .data = patch });
         defer std.Io.Dir.deleteFile(.cwd(), self.io, patch_path) catch {};
@@ -358,10 +368,10 @@ pub const Git = struct {
         return self.exec(&.{ "apply", "--cached", "--whitespace=nowarn", "--", patch_path });
     }
 
-    /// Write `patch` to a temp file under .git and return its path; the caller
-    /// must delete the file and free the path.
+    /// Write `patch` to a temp file under the git dir and return its path; the
+    /// caller must delete the file and free the path.
     fn writeTempPatch(self: *Git, patch: []const u8) ![]u8 {
-        const p = try std.fmt.allocPrint(self.allocator, "{s}/.git/ziggity-custom.patch", .{self.root});
+        const p = try self.gitDirPath("ziggity-custom.patch");
         errdefer self.allocator.free(p);
         try std.Io.Dir.writeFile(.cwd(), self.io, .{ .sub_path = p, .data = patch });
         return p;
@@ -421,7 +431,7 @@ pub const Git = struct {
     /// accepted as-is (`core.editor=true`) unless `message` is given, in which
     /// case it replaces the message git would have opened (used for reword).
     pub fn rebaseTodo(self: *Git, base_ref: []const u8, todo: []const u8, message: ?[]const u8) !ExecResult {
-        const todo_path = try std.fmt.allocPrint(self.allocator, "{s}/.git/ziggity-rebase-todo", .{self.root});
+        const todo_path = try self.gitDirPath("ziggity-rebase-todo");
         defer self.allocator.free(todo_path);
         try std.Io.Dir.writeFile(.cwd(), self.io, .{ .sub_path = todo_path, .data = todo });
         defer std.Io.Dir.deleteFile(.cwd(), self.io, todo_path) catch {};
@@ -439,11 +449,16 @@ pub const Git = struct {
             self.allocator.free(p);
         };
         const msg_editor = if (message) |msg| blk: {
-            const mp = try std.fmt.allocPrint(self.allocator, "{s}/.git/ziggity-rebase-msg", .{self.root});
+            const mp = try self.gitDirPath("ziggity-rebase-msg");
             errdefer self.allocator.free(mp);
             try std.Io.Dir.writeFile(.cwd(), self.io, .{ .sub_path = mp, .data = msg });
+            // Build the editor command first; only then hand `mp` to the outer
+            // `defer` by setting `msg_path`. Doing it the other way round would
+            // let both this `errdefer` and the outer `defer` free `mp` if the
+            // allocPrint below failed (double-free).
+            const editor = try std.fmt.allocPrint(self.allocator, "cp '{s}'", .{mp});
             msg_path = mp;
-            break :blk try std.fmt.allocPrint(self.allocator, "cp '{s}'", .{mp});
+            break :blk editor;
         } else try self.allocator.dupe(u8, "true");
         defer self.allocator.free(msg_editor);
 
@@ -465,7 +480,7 @@ pub const Git = struct {
     }
 
     fn gitPathExists(self: *Git, rel: []const u8) bool {
-        const path = std.fmt.allocPrint(self.allocator, "{s}/.git/{s}", .{ self.root, rel }) catch return false;
+        const path = self.gitDirPath(rel) catch return false;
         defer self.allocator.free(path);
         std.Io.Dir.access(.cwd(), self.io, path, .{}) catch return false;
         return true;
@@ -505,10 +520,6 @@ pub const Git = struct {
 
     pub fn rebaseAbort(self: *Git) !ExecResult {
         return self.exec(&.{ "rebase", "--abort" });
-    }
-
-    pub fn bisectStart(self: *Git) !ExecResult {
-        return self.exec(&.{ "bisect", "start" });
     }
 
     /// Begin a bisect and mark `rev` as the first good/bad endpoint.
@@ -863,89 +874,6 @@ pub const Git = struct {
         return result.stdout;
     }
 
-    pub fn diffForFile(self: *Git, file: model.FileStatus, diff_context: u8) ![]u8 {
-        var output_buf: std.ArrayList(u8) = .empty;
-        errdefer output_buf.deinit(self.allocator);
-
-        const context_arg = try std.fmt.allocPrint(self.allocator, "--unified={d}", .{diff_context});
-        defer self.allocator.free(context_arg);
-
-        if (file.has_unstaged) {
-            if (!file.tracked and !file.has_staged) {
-                var result = try self.exec(&.{ "diff", "--no-index", "--no-color", "--", "/dev/null", file.path });
-                defer result.deinit(self.allocator);
-                if (result.stdout.len > 0) {
-                    try output_buf.appendSlice(self.allocator, "Untracked\n\n");
-                    try output_buf.appendSlice(self.allocator, result.stdout);
-                }
-            } else {
-                var result = try self.exec(&.{ "diff", "--no-ext-diff", "--no-color", context_arg, "--", file.path });
-                defer result.deinit(self.allocator);
-                if (result.ok() and result.stdout.len > 0) {
-                    try output_buf.appendSlice(self.allocator, "Unstaged\n\n");
-                    try output_buf.appendSlice(self.allocator, result.stdout);
-                }
-            }
-        }
-
-        if (file.has_staged) {
-            var result = try self.exec(&.{ "diff", "--staged", "--no-ext-diff", "--no-color", context_arg, "--", file.path });
-            defer result.deinit(self.allocator);
-            if (result.ok() and result.stdout.len > 0) {
-                if (output_buf.items.len > 0) try output_buf.appendSlice(self.allocator, "\n");
-                try output_buf.appendSlice(self.allocator, "Staged\n\n");
-                try output_buf.appendSlice(self.allocator, result.stdout);
-            }
-        }
-
-        if (output_buf.items.len == 0) {
-            try output_buf.appendSlice(self.allocator, "No diff for selected file.\n");
-        }
-        return output_buf.toOwnedSlice(self.allocator);
-    }
-
-    pub fn showCommit(self: *Git, hash: []const u8, diff_context: u8) ![]u8 {
-        const context_arg = try std.fmt.allocPrint(self.allocator, "--unified={d}", .{diff_context});
-        defer self.allocator.free(context_arg);
-        var result = try self.exec(&.{ "show", "--no-ext-diff", "--no-color", "--stat", "--patch", context_arg, hash });
-        errdefer result.deinit(self.allocator);
-        if (!result.ok()) return GitError.CommandFailed;
-        self.allocator.free(result.stderr);
-        return result.stdout;
-    }
-
-    /// Unified diff between two refs (two-dot: the literal difference, base →
-    /// target), with a `--stat` header. Drives the diffing-mode preview.
-    pub fn diffRefs(self: *Git, base: []const u8, target: []const u8, diff_context: u8) ![]u8 {
-        const context_arg = try std.fmt.allocPrint(self.allocator, "--unified={d}", .{diff_context});
-        defer self.allocator.free(context_arg);
-        var result = try self.exec(&.{ "diff", "--no-ext-diff", "--no-color", "--stat", "--patch", context_arg, base, target });
-        errdefer result.deinit(self.allocator);
-        if (!result.ok()) return GitError.CommandFailed;
-        self.allocator.free(result.stderr);
-        return result.stdout;
-    }
-
-    pub fn showBranch(self: *Git, name: []const u8) ![]u8 {
-        var result = try self.exec(&.{ "log", "--oneline", "--decorate", "-30", name });
-        errdefer result.deinit(self.allocator);
-        if (!result.ok()) return GitError.CommandFailed;
-        self.allocator.free(result.stderr);
-        return result.stdout;
-    }
-
-    pub fn showStash(self: *Git, index: usize, diff_context: u8) ![]u8 {
-        const selector = try std.fmt.allocPrint(self.allocator, "stash@{{{d}}}", .{index});
-        defer self.allocator.free(selector);
-        const context_arg = try std.fmt.allocPrint(self.allocator, "--unified={d}", .{diff_context});
-        defer self.allocator.free(context_arg);
-        var result = try self.exec(&.{ "stash", "show", "-p", "--stat", "-u", "--no-ext-diff", "--no-color", context_arg, selector });
-        errdefer result.deinit(self.allocator);
-        if (!result.ok()) return GitError.CommandFailed;
-        self.allocator.free(result.stderr);
-        return result.stdout;
-    }
-
     /// The configured `core.editor` (or null if unset), allocated by the Git's
     /// allocator — caller frees. Used to auto-detect the file editor.
     pub fn coreEditor(self: *Git) ?[]u8 {
@@ -957,10 +885,6 @@ pub const Git = struct {
         return self.allocator.dupe(u8, trimmed) catch null;
     }
 
-    pub fn stageFile(self: *Git, path: []const u8) !ExecResult {
-        return self.stagePaths(&.{path});
-    }
-
     pub fn stagePaths(self: *Git, paths: []const []const u8) !ExecResult {
         if (paths.len == 0) return self.successResult();
         var args: std.ArrayList([]const u8) = .empty;
@@ -968,11 +892,6 @@ pub const Git = struct {
         try args.appendSlice(self.allocator, &.{ "add", "--" });
         try args.appendSlice(self.allocator, paths);
         return self.exec(args.items);
-    }
-
-    pub fn unstageFile(self: *Git, file: model.FileStatus) !ExecResult {
-        if (file.tracked) return self.exec(&.{ "reset", "HEAD", "--", file.path });
-        return self.exec(&.{ "rm", "--cached", "--force", "--", file.path });
     }
 
     pub fn unstagePaths(self: *Git, paths: []const []const u8) !ExecResult {
@@ -1272,10 +1191,6 @@ pub const Git = struct {
     /// message.
     pub fn amendCommit(self: *Git) !ExecResult {
         return self.exec(&.{ "commit", "--amend", "--no-edit" });
-    }
-
-    pub fn cherryPick(self: *Git, hash: []const u8) !ExecResult {
-        return self.exec(&.{ "cherry-pick", hash });
     }
 
     /// Commit the staged changes as a `fixup! <subject of hash>` commit.
