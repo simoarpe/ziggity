@@ -1863,6 +1863,11 @@ pub const App = struct {
     rebase_plan: ?[]rebaseplan_mod.Entry = null,
     rebase_plan_base: []u8 = &.{},
     rebase_plan_index: usize = 0,
+    // Range-select within the plan editor: the anchor of a multi-commit
+    // selection (null = none), and whether `v` made it sticky (kept across
+    // plain j/k) versus a shift-arrow range (cleared by plain navigation).
+    rebase_plan_anchor: ?usize = null,
+    rebase_plan_sticky: bool = false,
     // The commit-graph viewer (`ctrl+l`): git's coloured `log --graph` output
     // (owned), the scope toggle, the cursor/scroll, an off-thread load with a
     // generation guard, and the short hash to highlight on open.
@@ -8221,6 +8226,50 @@ test "i builds an interactive-rebase plan from HEAD down to the selected commit"
     rebaseplan_mod.cancel(&app);
     try std.testing.expectEqual(Mode.normal, app.mode);
     try std.testing.expect(app.rebase_plan == null);
+}
+
+test "rebase plan range-marks and block-moves multiple commits" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), .short_hash = @constCast("aaaaaaa"), .author = @constCast("S"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("a") },
+        .{ .hash = @constCast("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), .short_hash = @constCast("bbbbbbb"), .author = @constCast("S"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("b") },
+        .{ .hash = @constCast("cccccccccccccccccccccccccccccccccccccccc"), .short_hash = @constCast("ccccccc"), .author = @constCast("S"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("c") },
+    };
+    app.data.commits = &commits;
+    app.commits_tab = .commits;
+    app.commit_index = 2; // plan covers all three commits
+
+    try rebaseplan_mod.start(&app);
+    try std.testing.expectEqual(@as(usize, 3), app.rebase_plan.?.len);
+
+    // v anchors a sticky range at row 0, shift+down extends it to row 1.
+    try rebaseplan_mod.handleKey(&app, vaxis.Key{ .codepoint = 'v' });
+    try rebaseplan_mod.handleKey(&app, vaxis.Key{ .codepoint = vaxis.Key.down, .mods = .{ .shift = true } });
+    const b = rebaseplan_mod.bounds(&app);
+    try std.testing.expectEqual(@as(usize, 0), b.lo);
+    try std.testing.expectEqual(@as(usize, 1), b.hi);
+
+    // `d` drops both selected commits; the third stays pick.
+    try rebaseplan_mod.handleKey(&app, vaxis.Key{ .codepoint = 'd' });
+    try std.testing.expectEqual(rebaseplan_mod.Action.drop, app.rebase_plan.?[0].action);
+    try std.testing.expectEqual(rebaseplan_mod.Action.drop, app.rebase_plan.?[1].action);
+    try std.testing.expectEqual(rebaseplan_mod.Action.pick, app.rebase_plan.?[2].action);
+
+    // ctrl+j (move_down) slides the {a,b} block below c; c rises to the top.
+    try rebaseplan_mod.handleKey(&app, vaxis.Key{ .codepoint = 'j', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqualStrings("ccccccc", app.rebase_plan.?[0].short_hash);
+    try std.testing.expectEqualStrings("aaaaaaa", app.rebase_plan.?[1].short_hash);
+    try std.testing.expectEqualStrings("bbbbbbb", app.rebase_plan.?[2].short_hash);
+    // The selection followed the block down to rows 1..2.
+    const b2 = rebaseplan_mod.bounds(&app);
+    try std.testing.expectEqual(@as(usize, 1), b2.lo);
+    try std.testing.expectEqual(@as(usize, 2), b2.hi);
+
+    rebaseplan_mod.cancel(&app);
 }
 
 test "a amends the selected commit's author via a rebase exec todo" {

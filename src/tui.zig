@@ -8,6 +8,7 @@ const git_mod = @import("git.zig");
 const filetree = @import("filetree.zig");
 const model = @import("model.zig");
 const patch_mod = @import("patch.zig");
+const rebaseplan_mod = @import("rebaseplan.zig");
 const staging_mod = @import("staging.zig");
 const commitgraph_mod = @import("commitgraph.zig");
 
@@ -1095,6 +1096,16 @@ const help_lines = [_][]const u8{
     "  f / p / P      fetch / pull / push (async)",
     "  mouse drag     select text in the Diff panel (auto-copies on release)",
     "",
+    "Range select  (multi-selection in list panels)",
+    "  v              toggle a sticky range anchored at the cursor",
+    "  shift+up/down  extend a range (cleared by a plain move)",
+    "  *              in Commits, select every commit unique to the branch",
+    "  esc            cancel the range",
+    "                 then the action key acts on every selected row: stage/",
+    "                 discard/edit files, drop/squash/fixup/edit/move/revert or",
+    "                 copy commits, delete branches/tags, drop stashes, toggle",
+    "                 commit files into the patch, discard files from a commit.",
+    "",
     "Files  (tabs: Files / Worktrees / Submodules - [ / ] to switch)",
     "  space          stage/unstage (whole dir in tree view)",
     "  a              stage/unstage all",
@@ -1155,7 +1166,7 @@ const help_lines = [_][]const u8{
     "  a              change the commit's author (reset to you, or set one)",
     "  T              create a tag at the selected commit (name, then message)",
     "  g / t          reset menu / revert",
-    "  c / v          copy commit to clipboard / paste (cherry-pick) onto HEAD",
+    "  c / V          copy commit to clipboard / paste (cherry-pick) onto HEAD",
     "  ctrl+r         clear the cherry-pick copy selection",
     "  y              copy menu: commit hash / subject / author",
     "  d / s / f      drop / squash-down / fixup-down (interactive rebase)",
@@ -1168,17 +1179,19 @@ const help_lines = [_][]const u8{
     "  b              bisect menu (start, then mark good/bad/skip/reset)",
     "  in a commit's files: space toggles a whole file into the patch,",
     "                 enter opens that file to pick individual lines,",
-    "                 e opens the file in your editor",
+    "                 e opens the file in your editor,",
+    "                 d discards the file's changes from the commit (rewrites it)",
     "  ctrl+p         custom patch menu (apply / remove from commit / reset)",
     "  ctrl+l         commit graph viewer (j/k move, H/L pan, a scope, ^o copy,",
     "                 enter jump, esc close; wheel scrolls, drag selects)",
     "  ctrl+j/ctrl+k  move commit down / up",
     "  i              interactive rebase: a plan editor for the commits down to",
-    "                 the selected one. p/d/s/f/e mark pick/drop/squash/fixup/edit,",
+    "                 the selected one. p/d/s/f/e mark pick/drop/squash/fixup/edit",
+    "                 (v/shift+arrows select a range to mark or reorder at once),",
     "                 ctrl+j/ctrl+k reorder, enter runs it, esc cancels.",
     "  Reflog tab     a recovery view of where HEAD has been:",
     "                 space checkout the entry (detached), g reset HEAD to it,",
-    "                 n new branch at it, c/v copy/paste, o browser, W diff.",
+    "                 n new branch at it, c/V copy/paste, o browser, W diff.",
     "                 The history-rewriting keys (revert/rebase/fixup/…) do not",
     "                 apply to reflog entries.",
     "",
@@ -2252,7 +2265,12 @@ fn drawRebasePlan(win: vaxis.Window, app: *const app_mod.App) void {
     }) {
         const e = plan[idx];
         var base = styles().normal;
-        const sel = selOf(idx == app.rebase_plan_index, app.focus == .commits);
+        const sel: Sel = if (idx == app.rebase_plan_index)
+            selOf(true, app.focus == .commits)
+        else if (rebaseplan_mod.inRange(app, idx))
+            .inactive
+        else
+            .none;
         applySel(&base, sel);
         if (sel != .none) fillRow(win, row, base);
         // The action label is coloured by kind: drop dim, squash/fixup warning,

@@ -74,14 +74,21 @@ Zig, explicit ownership, simple subprocess-based Git integration, and
   checkout a commit (`space`, detached), branch from a commit (`n`), move the
   branch's commits onto a new branch (`N`), tag a commit (`T`), change a commit's
   author (`a`), cherry-pick copy/paste/clear (`c` copies commits to a clipboard,
-  `v` pastes them onto HEAD, `ctrl+r` clears), a copy-attribute menu (`y`), open
-  the new pull/merge request page (`G`), a navigable changed-file list per commit,
-  and per-commit interactive rebase actions (drop `d`, squash `s`, fixup `f`,
-  edit `e`, reword `r`, move `ctrl+j`/`ctrl+k`, create `fixup!` commit `F`,
-  autosquash `S`).
+  `V` pastes them onto HEAD, `ctrl+r` clears), a copy-attribute menu (`y`), open
+  the new pull/merge request page (`G`), a navigable changed-file list per commit
+  (`d` there discards a file's changes from the commit), and per-commit
+  interactive rebase actions (drop `d`, squash `s`, fixup `f`, edit `e`, reword
+  `r`, move `ctrl+j`/`ctrl+k`, create `fixup!` commit `F`, autosquash `S`).
+- Range select (multi-selection): `v` toggles a sticky range and `shift+arrows`
+  extend one in any list panel; `*` in Commits selects every commit unique to the
+  branch. The action key then applies to the whole range — stage/discard/edit
+  files, drop/squash/fixup/edit/move/revert or copy commits, delete branches or
+  tags, drop stashes, toggle commit files into the patch, or discard files from a
+  commit.
 - Interactive rebase editor (`i`): compose a plan for the commits down to the
-  selected one — mark each pick/drop/squash/fixup/edit, reorder with
-  `ctrl+j`/`ctrl+k` — then run it as one rebase.
+  selected one — mark each pick/drop/squash/fixup/edit (`v`/`shift+arrows` select
+  a range to mark or reorder at once), reorder with `ctrl+j`/`ctrl+k` — then run
+  it as one rebase.
 - Reflog tab recovery: checkout (`space`), reset HEAD to an entry (`g`), or branch
   from an entry (`n`).
 - Commit graph viewer (`ctrl+l`): a large overlay rendering the real
@@ -150,8 +157,10 @@ The lazygit-parity feature roadmap is complete. Smaller gaps that remain:
 - Redo (undo is implemented; redo of an undo is not).
 - Moving a custom patch to a *different* commit (only apply / remove-from-commit
   are implemented).
-- Selecting a *range* of commits (e.g. "select commits of the current branch")
-  for a bulk action — ziggity's commit list is single-select today.
+- Editing the live rebase todo *mid-rebase* (lazygit's `pick`/`drop`/… while a
+  rebase is paused): ziggity composes the whole plan up front in its `i` editor
+  (which supports range-select) and has no paused-rebase todo view, so the
+  mid-rebase `pick` has no applicable context.
 - Rewording a commit in your external `$EDITOR`: ziggity rewords in its own
   in-app message editor (`r`) instead, which serves the same purpose.
 - Full lazygit config compatibility.
@@ -358,6 +367,8 @@ key.fast_forward = f
 key.reset = g
 key.revert = t
 key.range_select = v
+key.paste_commits = V
+key.select_branch_commits = *
 key.toggle_tree = `
 key.conflict_menu = m
 key.command_log = @
