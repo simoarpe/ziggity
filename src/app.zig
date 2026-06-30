@@ -3249,14 +3249,18 @@ pub const App = struct {
     }
 
     /// Render-time sync for a list panel's view scroll. Records the visible
-    /// height, re-anchors the view to keep the selection visible *only when the
-    /// selection changed* (so wheel scrolling, which never moves the selection,
-    /// scrolls freely), and clamps the offset to the content.
+    /// height, re-anchors the view to keep the selection visible when the
+    /// selection changed *or the panel was resized* (so an accordion panel that
+    /// shrinks back on losing focus jumps straight to a position showing the
+    /// selected row, rather than leaving it scrolled out of sight). A view that
+    /// only changed via wheel scrolling — same selection, same height — is left
+    /// alone. The offset is finally clamped to the content.
     pub fn syncListView(self: *App, focus: model.Focus, inner_height: u16) void {
         const lv = self.listView(focus) orelse return;
+        const resized = inner_height != lv.view_h;
         lv.view_h = inner_height;
         const sel = self.activeListSelected(focus);
-        if (sel != lv.last_sel) {
+        if (sel != lv.last_sel or resized) {
             if (sel < lv.scroll) {
                 lv.scroll = sel;
             } else if (inner_height > 0 and sel >= lv.scroll + inner_height) {
@@ -9272,6 +9276,33 @@ test "list view scrolls with the wheel but follows the selection on move" {
     app.commit_index = 5;
     app.syncListView(.commits, 3);
     try std.testing.expectEqual(@as(usize, 3), app.listScroll(.commits)); // shows 3,4,5
+}
+
+test "shrinking a panel re-anchors so the selected row stays visible" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits: [10]model.Commit = undefined;
+    for (&commits) |*c| {
+        c.* = .{ .hash = @constCast("h"), .short_hash = @constCast("h"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("c") };
+    }
+    app.data.commits = &commits;
+    app.focus = .commits;
+    app.commit_index = 8;
+
+    // Expanded (focused) panel shows all ten rows from the top.
+    app.syncListView(.commits, 10);
+    try std.testing.expectEqual(@as(usize, 0), app.listScroll(.commits));
+
+    // The panel shrinks (focus moved elsewhere) without the selection changing.
+    // Even so, the view must jump so the selected row 8 is on screen — here the
+    // 3-row window snaps to rows 6,7,8.
+    app.syncListView(.commits, 3);
+    const scroll = app.listScroll(.commits);
+    try std.testing.expectEqual(@as(usize, 6), scroll);
+    try std.testing.expect(app.commit_index >= scroll and app.commit_index < scroll + 3);
 }
 
 test "mouse wheel scrolls the panel under the cursor without changing focus" {
