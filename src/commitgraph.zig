@@ -96,7 +96,7 @@ pub fn complete(app: *App, text: ?[]u8, generation: u64, gpa: std.mem.Allocator)
 }
 
 pub fn handleKey(app: *App, key: anytype) !void {
-    if (app.isEscapeKey(key)) return close(app);
+    if (app.isDialogCloseKey(key)) return close(app);
 
     const km = app.config.keymap;
     const lines = app.commit_graph_lines;

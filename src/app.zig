@@ -2460,7 +2460,7 @@ pub const App = struct {
             } else if (self.config.keymap.up.matches(key) or key.matches(vaxis.Key.up, .{})) {
                 self.op_scroll -|= 1;
                 self.clearDialogSelection();
-            } else if (self.isEnterKey(key) or self.isEscapeKey(key)) {
+            } else if (self.isEnterKey(key) or self.isDialogCloseKey(key)) {
                 self.mode = .normal;
                 self.clearDialogSelection();
             }
@@ -2475,7 +2475,7 @@ pub const App = struct {
             } else if (self.config.keymap.up.matches(key) or key.matches(vaxis.Key.up, .{})) {
                 self.command_log_scroll -|= 1;
                 self.clearDialogSelection();
-            } else if (self.isEnterKey(key) or self.isEscapeKey(key)) {
+            } else if (self.isEnterKey(key) or self.isDialogCloseKey(key)) {
                 self.mode = .normal;
                 self.clearDialogSelection();
             }
@@ -5797,7 +5797,7 @@ pub const App = struct {
             self.mode = .normal;
             return;
         });
-        if (self.isEscapeKey(key)) {
+        if (self.isDialogCloseKey(key)) {
             self.closeMenu();
             try self.setMessage("cancelled", .{});
             return;
@@ -6155,7 +6155,7 @@ pub const App = struct {
     }
 
     fn handleStatusFilterMenuKey(self: *App, key: vaxis.Key) !void {
-        if (self.isEscapeKey(key)) {
+        if (self.isDialogCloseKey(key)) {
             self.mode = .normal;
             try self.setMessage("status filter cancelled", .{});
             return;
@@ -6185,7 +6185,7 @@ pub const App = struct {
             try self.confirmPendingAction();
             return;
         }
-        if (self.isEscapeKey(key) or key.matches('n', .{})) {
+        if (self.isDialogCloseKey(key) or key.matches('n', .{})) {
             self.mode = .normal;
             self.pending_confirmation = null;
             // Drop any lock-recovery state if this was the lock prompt.
@@ -7407,6 +7407,12 @@ pub const App = struct {
 
     pub fn isEnterKey(self: *const App, key: vaxis.Key) bool {
         return self.config.keymap.enter.matches(key) or key.matches(vaxis.Key.enter, .{});
+    }
+
+    /// In a non-text dialog, both `esc` and `q` dismiss it — a text-input dialog
+    /// keeps `q` as a typed character and uses `isEscapeKey` alone.
+    pub fn isDialogCloseKey(self: *const App, key: vaxis.Key) bool {
+        return self.isEscapeKey(key) or self.config.keymap.quit.matches(key);
     }
 
     fn isBackspaceKey(self: *const App, key: vaxis.Key) bool {
@@ -9200,7 +9206,34 @@ test "mouse wheel scrolls the operation and help dialogs" {
     try std.testing.expectEqual(@as(usize, 0), app.command_log_scroll);
 }
 
-test "command log closes only on esc/enter, not on other keys" {
+test "q closes non-text dialogs but is a typed character in text prompts" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // Menu closes on q.
+    app.mode = .menu;
+    app.active_menu = .{ .title = "x", .items = &branch_delete_menu, .index = 0 };
+    try app.handleKey(.{ .codepoint = 'q' });
+    try std.testing.expectEqual(Mode.normal, app.mode);
+
+    // Confirmation closes (cancels) on q.
+    app.mode = .confirmation;
+    app.pending_confirmation = .discard_all;
+    try app.handleKey(.{ .codepoint = 'q' });
+    try std.testing.expectEqual(Mode.normal, app.mode);
+    try std.testing.expect(app.pending_confirmation == null);
+
+    // A text prompt keeps q as a typed character (only esc cancels).
+    app.mode = .text_prompt;
+    app.text_prompt_kind = .new_branch;
+    try app.handleKey(.{ .codepoint = 'q', .text = "q" });
+    try std.testing.expectEqual(Mode.text_prompt, app.mode);
+    try std.testing.expectEqualStrings("q", app.input_buffer.items);
+}
+
+test "command log closes on esc/enter/q, scrolls on j/k, ignores other keys" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
     var app = try testApp(allocator, &no_files);
@@ -9215,8 +9248,6 @@ test "command log closes only on esc/enter, not on other keys" {
     try std.testing.expectEqual(Mode.command_log, app.mode);
     try app.handleKey(.{ .codepoint = 'x' });
     try std.testing.expectEqual(Mode.command_log, app.mode);
-    try app.handleKey(.{ .codepoint = 'q' });
-    try std.testing.expectEqual(Mode.command_log, app.mode);
 
     // j/k scroll, still open.
     try app.handleKey(.{ .codepoint = 'j' });
@@ -9224,9 +9255,12 @@ test "command log closes only on esc/enter, not on other keys" {
     try app.handleKey(.{ .codepoint = 'k' });
     try std.testing.expectEqual(Mode.command_log, app.mode);
 
-    // esc closes.
-    try app.handleKey(.{ .codepoint = 0x1b });
-    try std.testing.expectEqual(Mode.normal, app.mode);
+    // esc, enter and q all close the dialog.
+    for ([_]u21{ 0x1b, '\r', 'q' }) |c| {
+        app.mode = .command_log;
+        try app.handleKey(.{ .codepoint = c });
+        try std.testing.expectEqual(Mode.normal, app.mode);
+    }
 }
 
 test "command log scroll-down does not overflow the open-at-bottom sentinel" {

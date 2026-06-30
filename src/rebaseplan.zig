@@ -98,7 +98,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     };
     const km = app.config.keymap;
 
-    if (app.isEscapeKey(key)) return cancel(app);
+    if (app.isDialogCloseKey(key)) return cancel(app);
     if (app.isEnterKey(key)) return execute(app);
 
     if (km.up.matches(key) or key.matches(vaxis.Key.up, .{})) {
