@@ -142,8 +142,8 @@ the section for the panel you're on). Press `q` to quit.
 - Commit (`c`), commit `--no-verify` (`w`), amend (`A`) in a centered editor with
   a summary line and optional multi-line body (`tab` switches fields). The summary
   shows a live character count (yellow, turning red once it exceeds
-  `commit_summary_limit` — default 50), and the description has a soft vertical
-  guide at the 72-character git body-wrap column.
+  `commit_summary_limit` — default 50), and the description shows a soft vertical
+  guide at the git body-wrap column (`commit_body_guide` — default 72, `0` off).
 - Per-commit: reset (`g`, soft/mixed/hard), revert (`t`), checkout (`space`,
   detached), branch from it (`n`), move commits to a new branch (`N`), tag (`T`),
   change author (`a`), and a copy-attribute menu (`y`: hash/subject/author).
@@ -328,6 +328,10 @@ diff_context = 3
 # 50 (the git subject-length convention). Set to 0 to disable the red threshold
 # so the count always stays yellow.
 commit_summary_limit = 50
+
+# Column of the soft vertical guide drawn in the commit/reword message body,
+# marking the git body-wrap width. Default 72. Set to 0 to disable the guide.
+commit_body_guide = 72
 
 # Seconds between idle background working-tree refreshes (git status, run off the
 # UI thread). On a big repo a tight interval makes git status thrash; default 10.

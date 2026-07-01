@@ -1457,6 +1457,9 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     const title = if (app.commit_action == .reword) "Reword commit" else "Commit message";
     const win = popup(root, w, 12, title, null);
 
+    // The description's soft body-wrap guide column (config; 0 disables it).
+    const body_guide_col: usize = app.config.commit_body_guide;
+
     // Field labels indicate which has focus.
     print(win, 0, 0, "Summary", if (subject_focused) st.active_title else st.muted);
     print(win, 3, 0, "Description (optional)", if (subject_focused) st.muted else st.active_title);
@@ -1500,13 +1503,12 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     app.commit_body_scroll_y = scy.origin;
     app.commit_body_scroll_x = scx.origin;
 
-    // A soft vertical guide at the git body-wrap column (72), drawn *under* the
-    // description text: where a line reaches column 72 the text renders over it,
-    // shorter and empty rows keep the marker. It only appears when the popup is
-    // wide enough to show column 72 (auto-hidden on a narrow terminal), and it
-    // tracks horizontal scroll.
-    const body_guide_col: usize = 72;
-    if (body_guide_col >= scx.origin) {
+    // A soft vertical guide at the configured body-wrap column, drawn *under*
+    // the description text: where a line reaches it the text renders over it,
+    // shorter and empty rows keep the marker. Disabled when the column is 0,
+    // and auto-hidden when the popup is too narrow to show it; tracks
+    // horizontal scroll.
+    if (body_guide_col > 0 and body_guide_col >= scx.origin) {
         const guide_screen_col = body_guide_col - scx.origin;
         if (guide_screen_col < win.width) {
             const gx: u16 = @intCast(guide_screen_col);

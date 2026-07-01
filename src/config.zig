@@ -229,6 +229,9 @@ pub const Config = struct {
     /// (the git subject-length convention). 0 disables it — the count then
     /// stays the warning colour at any length.
     commit_summary_limit: u16 = 50,
+    /// Column of the soft vertical guide drawn in the commit / reword message
+    /// body. Default 72 (the git body-wrap convention). 0 disables the guide.
+    commit_body_guide: u16 = 72,
     /// Accordion mode: when true, the focused side-panel list grows to
     /// `expanded_side_panel_weight` while the others shrink. Default off.
     expand_focused_side_panel: bool = false,
@@ -307,6 +310,10 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "commit_summary_limit")) {
             self.commit_summary_limit = std.fmt.parseInt(u16, value, 10) catch self.commit_summary_limit;
+            return;
+        }
+        if (std.mem.eql(u8, key, "commit_body_guide")) {
+            self.commit_body_guide = std.fmt.parseInt(u16, value, 10) catch self.commit_body_guide;
             return;
         }
         if (std.mem.eql(u8, key, "refresh_interval_secs")) {
@@ -452,6 +459,19 @@ test "commit_summary_limit parses and defaults to 50" {
     var off: Config = .{};
     off.applyBytes("commit_summary_limit = 0");
     try std.testing.expectEqual(@as(u16, 0), off.commit_summary_limit);
+}
+
+test "commit_body_guide parses and defaults to 72" {
+    const def: Config = .{};
+    try std.testing.expectEqual(@as(u16, 72), def.commit_body_guide);
+
+    var cfg: Config = .{};
+    cfg.applyBytes("commit_body_guide = 80");
+    try std.testing.expectEqual(@as(u16, 80), cfg.commit_body_guide);
+
+    var off: Config = .{};
+    off.applyBytes("commit_body_guide = 0");
+    try std.testing.expectEqual(@as(u16, 0), off.commit_body_guide);
 }
 
 test "config parser applies theme colors and newer keybindings" {
