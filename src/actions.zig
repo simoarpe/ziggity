@@ -218,9 +218,11 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     if (keymap.commits_panel.matches(key)) return .focus_commits;
     if (keymap.stash_panel.matches(key)) return .focus_stash;
 
-    // <enter> on a side panel descends into the main panel to inspect
-    // the selected item. The main panel is left with <esc>/<h>.
-    if (focus.isSidePanel() and keymap.enter.matches(key)) return .focus_main;
+    // <enter> on a side panel descends into the main panel to inspect the
+    // selected item (left with <esc>/<h>). In the main panel itself, <enter>
+    // over a working-tree file drills into its staging view (handled by the
+    // action); over other content it does nothing.
+    if ((focus.isSidePanel() or focus == .main) and keymap.enter.matches(key)) return .focus_main;
 
     if (keymap.prev_tab.matches(key)) return .prev_tab;
     if (keymap.next_tab.matches(key)) return .next_tab;
@@ -378,12 +380,13 @@ test "normal key mapping handles global and focused actions" {
     try std.testing.expectEqual(Action.focus_left, fromNormalKey(testKey('h'), keymap, .files).?);
     try std.testing.expectEqual(Action.focus_right, fromNormalKey(testKey('l'), keymap, .files).?);
 
-    // <enter> descends into the main panel from any side panel, but does
-    // nothing once the main panel already has focus.
+    // <enter> descends into the main panel from any side panel, and in the main
+    // panel itself resolves to `focus_main` too (the action then drills a
+    // working-tree file into its staging view, or does nothing).
     const enter = testKey(0x0d);
     try std.testing.expectEqual(Action.focus_main, fromNormalKey(enter, keymap, .files).?);
     try std.testing.expectEqual(Action.focus_main, fromNormalKey(enter, keymap, .commits).?);
-    try std.testing.expect(fromNormalKey(enter, keymap, .main) == null);
+    try std.testing.expectEqual(Action.focus_main, fromNormalKey(enter, keymap, .main).?);
 
     // <space> is the primary action (select) in every focus — including the
     // main/staging focus (stage a line) and commits (toggle a patch file),

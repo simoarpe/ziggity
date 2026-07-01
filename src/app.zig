@@ -4547,6 +4547,21 @@ pub const App = struct {
     /// commit's file list; on the Files panel it opens the hunk-staging view;
     /// elsewhere it descends into the main panel to scroll.
     fn descendOrOpenCommitFiles(self: *App) !void {
+        // From the Diff panel (focused via tab): <enter> over a working-tree file
+        // drills into its hunk-staging view, just as it would from the Files
+        // panel — so you can tab to read the diff, then stage from there. Over
+        // anything else it does nothing (the diff is already shown).
+        if (self.focus == .main) {
+            if (!self.staging_active and self.main_origin == .files and self.files_tab == .files) {
+                if (self.tree_view) {
+                    if (self.treeSelectedRow()) |row| {
+                        if (row.is_dir) return; // a folder's combined diff has nothing to stage
+                    }
+                }
+                if (self.selectedFile() != null) return staging_mod.openStaging(self);
+            }
+            return;
+        }
         if (self.focus == .commits and self.commits_tab == .commits and !self.commit_files_active) {
             return drills_mod.openCommitFiles(self);
         }
