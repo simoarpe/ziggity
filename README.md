@@ -141,7 +141,8 @@ the section for the panel you're on). Press `q` to quit.
   reset HEAD `g`, branch `n`).
 - Commit (`c`), commit `--no-verify` (`w`), amend (`A`) in a centered editor with
   a summary line and optional multi-line body (`tab` switches fields). The summary
-  shows a live character count that warns past the 50/72-char git conventions.
+  shows a live character count (yellow, turning red once it exceeds
+  `commit_summary_limit` — default 50).
 - Per-commit: reset (`g`, soft/mixed/hard), revert (`t`), checkout (`space`,
   detached), branch from it (`n`), move commits to a new branch (`N`), tag (`T`),
   change author (`a`), and a copy-attribute menu (`y`: hash/subject/author).
@@ -320,6 +321,12 @@ back to per-repo auto-detection (notably the editor).
 ```ini
 side_panel_width_percent = 34
 diff_context = 3
+
+# The commit-summary character count (shown in the commit/reword dialog) turns
+# red once it goes over this many characters; below it, it stays yellow. Default
+# 50 (the git subject-length convention). Set to 0 to disable the red threshold
+# so the count always stays yellow.
+commit_summary_limit = 50
 
 # Seconds between idle background working-tree refreshes (git status, run off the
 # UI thread). On a big repo a tight interval makes git status thrash; default 10.

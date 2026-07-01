@@ -224,6 +224,11 @@ pub const ConfirmSkips = struct {
 pub const Config = struct {
     side_panel_width_percent: u8 = 34,
     diff_context: u8 = 3,
+    /// The commit-summary character count at which the counter in the commit /
+    /// reword dialog turns red (it is otherwise the warning colour). Default 50
+    /// (the git subject-length convention). 0 disables it — the count then
+    /// stays the warning colour at any length.
+    commit_summary_limit: u16 = 50,
     /// Accordion mode: when true, the focused side-panel list grows to
     /// `expanded_side_panel_weight` while the others shrink. Default off.
     expand_focused_side_panel: bool = false,
@@ -298,6 +303,10 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "diff_context")) {
             self.diff_context = std.fmt.parseInt(u8, value, 10) catch self.diff_context;
+            return;
+        }
+        if (std.mem.eql(u8, key, "commit_summary_limit")) {
+            self.commit_summary_limit = std.fmt.parseInt(u16, value, 10) catch self.commit_summary_limit;
             return;
         }
         if (std.mem.eql(u8, key, "refresh_interval_secs")) {
@@ -430,6 +439,19 @@ test "config parser applies key overrides and bounded layout" {
     try std.testing.expectEqual(@as(u21, 'x'), cfg.keymap.quit.codepoint);
     try std.testing.expectEqual(@as(u21, 'p'), cfg.keymap.push.codepoint);
     try std.testing.expect(cfg.keymap.push.ctrl);
+}
+
+test "commit_summary_limit parses and defaults to 50" {
+    const def: Config = .{};
+    try std.testing.expectEqual(@as(u16, 50), def.commit_summary_limit);
+
+    var cfg: Config = .{};
+    cfg.applyBytes("commit_summary_limit = 72");
+    try std.testing.expectEqual(@as(u16, 72), cfg.commit_summary_limit);
+
+    var off: Config = .{};
+    off.applyBytes("commit_summary_limit = 0");
+    try std.testing.expectEqual(@as(u16, 0), off.commit_summary_limit);
 }
 
 test "config parser applies theme colors and newer keybindings" {
