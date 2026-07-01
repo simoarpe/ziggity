@@ -7454,8 +7454,15 @@ pub const App = struct {
         }
         self.refreshViews(self.mutation_refresh);
         // If the staging view is open (e.g. a commit/amend was started from it),
-        // reload its diff so it reflects what's left after the mutation.
-        if (self.staging_active) staging_mod.loadStaging(self, true) catch {};
+        // reload its diff so it reflects what's left after the mutation. When
+        // that leaves the file fully clean (nothing on either side — `loadStaging`
+        // collapses both, so an empty diff means both are empty), close the view
+        // instead of stranding the user on an empty "No changes" pane. A file
+        // that still has unstaged changes keeps the view open (flipped to them).
+        if (self.staging_active) {
+            staging_mod.loadStaging(self, true) catch {};
+            if (self.staging_diff.len == 0) try staging_mod.closeStaging(self);
+        }
     }
 
     fn runCustomCommand(self: *App, command: []const u8) !void {
