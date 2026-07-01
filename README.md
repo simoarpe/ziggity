@@ -142,7 +142,8 @@ the section for the panel you're on). Press `q` to quit.
 - Commit (`c`), commit `--no-verify` (`w`), amend (`A`) in a centered editor with
   a summary line and optional multi-line body (`tab` switches fields). The summary
   shows a live character count (yellow, turning red once it exceeds
-  `commit_summary_limit` — default 50).
+  `commit_summary_limit` — default 50), and the description has a soft vertical
+  guide at the 72-character git body-wrap column.
 - Per-commit: reset (`g`, soft/mixed/hard), revert (`t`), checkout (`space`,
   detached), branch from it (`n`), move commits to a new branch (`N`), tag (`T`),
   change author (`a`), and a copy-attribute menu (`y`: hash/subject/author).

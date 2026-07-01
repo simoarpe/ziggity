@@ -1451,7 +1451,9 @@ fn drawCredentialPopup(root: vaxis.Window, app: *app_mod.App) void {
 fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
     const subject_focused = app.commit_field == .subject;
-    const w: u16 = @min(@as(u16, 72), root.width -| 4);
+    // Wide enough to show the 72-column body-wrap guide (see below) with a small
+    // margin, but never wider than the terminal.
+    const w: u16 = @min(@as(u16, 80), root.width -| 4);
     const title = if (app.commit_action == .reword) "Reword commit" else "Commit message";
     const win = popup(root, w, 12, title, null);
 
@@ -1497,6 +1499,23 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     const scx = app_mod.viewScroll(app.commit_body_scroll_x, win.width, caret_col);
     app.commit_body_scroll_y = scy.origin;
     app.commit_body_scroll_x = scx.origin;
+
+    // A soft vertical guide at the git body-wrap column (72), drawn *under* the
+    // description text: where a line reaches column 72 the text renders over it,
+    // shorter and empty rows keep the marker. It only appears when the popup is
+    // wide enough to show column 72 (auto-hidden on a narrow terminal), and it
+    // tracks horizontal scroll.
+    const body_guide_col: usize = 72;
+    if (body_guide_col >= scx.origin) {
+        const guide_screen_col = body_guide_col - scx.origin;
+        if (guide_screen_col < win.width) {
+            const gx: u16 = @intCast(guide_screen_col);
+            var gr: u16 = body_top;
+            while (gr < footer_row) : (gr += 1) {
+                win.writeCell(gx, gr, .{ .char = .{ .grapheme = "\u{2502}", .width = 1 }, .style = st.muted });
+            }
+        }
+    }
 
     var lines = std.mem.splitScalar(u8, body, '\n');
     var idx: usize = 0;
