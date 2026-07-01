@@ -1699,14 +1699,9 @@ pub const App = struct {
     staging_anchor: ?usize = null,
     // Split staging view: when on, the unstaged and staged diffs show side by
     // side. The active side (`staging_staged_view`) is interactive; the other is
-    // a read-only preview. Toggled by a command; its default comes from config.
+    // a read-only preview. Each file opens with the config-decided layout
+    // (`stagingLayoutForOpen`); `\` overrides it for that file only.
     staging_split: bool = false,
-    // Remembered split preference (the `\` choice), reused when opening the next
-    // file. For `auto` it applies to one-sided files only; mixed files always
-    // open split and their `\` toggle is not remembered. `staging_opened_mixed`
-    // records whether the open file was mixed, to drive that rule.
-    staging_split_pref: bool = false,
-    staging_opened_mixed: bool = false,
     staging_other_diff: []u8 = &.{},
     main_view_height: u16 = 0,
     /// Panel hit-boxes captured by the renderer for mouse handling.
@@ -2064,15 +2059,10 @@ pub const App = struct {
 
         const cfg = try config_mod.Config.load(allocator, io, env_map, git.root);
         git.branch_sort = cfg.branch_sort_order;
-        // Seed the remembered split preference from config (`on` => split,
-        // `off`/`auto` => single). `openStaging` recomputes the per-file layout.
-        const split_default = cfg.staging_split == .on;
         var app = App{
             .allocator = allocator,
             .git = git,
             .config = cfg,
-            .staging_split = split_default,
-            .staging_split_pref = split_default,
         };
         app.files_tree = .{ .collapsed = std.BufSet.init(allocator) };
         app.commit_tree = .{ .collapsed = std.BufSet.init(allocator) };
@@ -9274,25 +9264,16 @@ test "tab closes the staging view back to the files panel" {
     try std.testing.expectEqual(model.Focus.files, app.focus);
 }
 
-test "staging split layout + remember rules per off/on/auto" {
-    // off: layout follows the remembered preference; mixed isn't special.
-    try std.testing.expect(!staging_mod.stagingLayoutForOpen(.off, false, false));
-    try std.testing.expect(!staging_mod.stagingLayoutForOpen(.off, false, true));
-    try std.testing.expect(staging_mod.stagingLayoutForOpen(.off, true, false));
-    // on: same, just with a split-by-default preference.
-    try std.testing.expect(staging_mod.stagingLayoutForOpen(.on, true, true));
-    try std.testing.expect(!staging_mod.stagingLayoutForOpen(.on, false, false));
-    // auto: one-sided follows the preference; mixed is always split.
-    try std.testing.expect(!staging_mod.stagingLayoutForOpen(.auto, false, false)); // one-sided default single
-    try std.testing.expect(staging_mod.stagingLayoutForOpen(.auto, true, false)); // one-sided remembered split
-    try std.testing.expect(staging_mod.stagingLayoutForOpen(.auto, false, true)); // mixed -> split regardless
-    try std.testing.expect(staging_mod.stagingLayoutForOpen(.auto, true, true));
-
-    // The `\` toggle persists everywhere except a mixed file in auto.
-    try std.testing.expect(staging_mod.stagingTogglePersists(.off, true));
-    try std.testing.expect(staging_mod.stagingTogglePersists(.on, false));
-    try std.testing.expect(staging_mod.stagingTogglePersists(.auto, false)); // one-sided remembers
-    try std.testing.expect(!staging_mod.stagingTogglePersists(.auto, true)); // mixed is transient
+test "staging split layout is decided entirely by the config mode" {
+    // off: always single, even for a mixed file.
+    try std.testing.expect(!staging_mod.stagingLayoutForOpen(.off, false));
+    try std.testing.expect(!staging_mod.stagingLayoutForOpen(.off, true));
+    // on: always split.
+    try std.testing.expect(staging_mod.stagingLayoutForOpen(.on, false));
+    try std.testing.expect(staging_mod.stagingLayoutForOpen(.on, true));
+    // auto: split for a mixed file only.
+    try std.testing.expect(!staging_mod.stagingLayoutForOpen(.auto, false));
+    try std.testing.expect(staging_mod.stagingLayoutForOpen(.auto, true));
 }
 
 test "tab switches the files panel to the diff, never into staging" {

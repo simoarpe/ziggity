@@ -327,9 +327,10 @@ pub const Config = struct {
         if (std.mem.eql(u8, key, "staging_split")) {
             if (std.ascii.eqlIgnoreCase(value, "auto")) {
                 self.staging_split = .auto;
-            } else if (parseBool(value)) |on| {
-                // `true`/`false` (and yes/no/1/0) still work, mapping to on/off.
-                self.staging_split = if (on) .on else .off;
+            } else if (std.ascii.eqlIgnoreCase(value, "on")) {
+                self.staging_split = .on;
+            } else if (std.ascii.eqlIgnoreCase(value, "off")) {
+                self.staging_split = .off;
             }
             return;
         }
@@ -509,9 +510,9 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
         \\branch_sort_order = recency
         \\expand_focused_side_panel = true
         \\expanded_side_panel_weight = 3
-        \\staging_split = true
+        \\staging_split = on
     );
-    try std.testing.expectEqual(StagingSplitMode.on, cfg.staging_split); // "true" maps to on
+    try std.testing.expectEqual(StagingSplitMode.on, cfg.staging_split);
     try std.testing.expectEqual(ResultDialog.always, cfg.result_dialog); // valid set; bad value ignored
     try std.testing.expectEqual(CommandOutput.silent, cfg.command_output);
     try std.testing.expectEqual(model.BranchSortOrder.recency, cfg.branch_sort_order);

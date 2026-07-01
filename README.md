@@ -429,19 +429,17 @@ press their key, so a repo-local `.ziggity.ini` cannot run anything on its own.
 ### Staging layout (`staging_split`)
 
 The staging view (`enter`/`tab` on a file) shows one pane (the active side) or two
-side by side (Unstaged | Staged); `\` toggles between them. `staging_split` sets
-the policy:
+side by side (Unstaged | Staged). `staging_split` decides how each file opens:
 
-| `staging_split` | One-sided file | Mixed file (staged **and** unstaged) | `\` remembered for the next file? |
-|---|---|---|---|
-| `off` | single | single | yes — one preference, every file |
-| `on` | split | split | yes — one preference, every file |
-| **`auto`** *(default)* | single | **split** | one-sided: **yes** · mixed: **no** |
+| `staging_split` | One-sided file | Mixed file (staged **and** unstaged) |
+|---|---|---|
+| `off` | single | single |
+| `on` | split | split |
+| **`auto`** *(default)* | single | **split** |
 
-`auto` is `off`'s behaviour **plus** "open split when a file has changes on both
-sides." The remembered preference lives only for the session (it resets to the
-config value on restart). The layout is decided when a file is opened, not
-re-decided mid-edit. `true`/`false` are accepted as aliases for `on`/`off`.
+`\` toggles split/single for the **current file only** — it isn't remembered, so
+the next file always opens with the layout above. The layout is chosen when a
+file opens and isn't re-decided mid-edit.
 
 ### Editor (`e`)
 

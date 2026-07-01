@@ -28,11 +28,9 @@ pub fn openStaging(app: *App) !void {
     app.main_origin = .files;
     app.focus = .main;
     app.staging_active = true;
-    // Decide the layout for this file (recomputed only on (re)open):
-    //   off/on -> the remembered preference; auto -> split for a file with both
-    //   staged and unstaged changes, else the remembered preference.
-    app.staging_opened_mixed = file.has_staged and file.has_unstaged;
-    app.staging_split = stagingLayoutForOpen(app.config.staging_split, app.staging_split_pref, app.staging_opened_mixed);
+    // The layout is fully decided by the config each time a file opens; `\`
+    // overrides it for the current file only (not remembered across files).
+    app.staging_split = stagingLayoutForOpen(app.config.staging_split, file.has_staged and file.has_unstaged);
     try loadStaging(app, false);
     try app.setMessage("staging {s}", .{file.path});
 }
@@ -90,27 +88,20 @@ pub fn toggleStagingSide(app: *App) !void {
     try app.setMessage("{s} changes", .{if (app.staging_staged_view) "staged" else "unstaged"});
 }
 
-/// The staging layout to use when a file opens, per the config mode, the
-/// remembered `\` preference, and whether the file has both staged and unstaged
-/// changes ("mixed").
-pub fn stagingLayoutForOpen(mode: config_mod.StagingSplitMode, pref: bool, mixed: bool) bool {
+/// The staging layout a file opens with, decided entirely by the config mode
+/// and whether the file has both staged and unstaged changes ("mixed"):
+/// `off` always single, `on` always split, `auto` splits a mixed file only.
+/// `\` overrides the result for the current file (see `toggleStagingSplit`).
+pub fn stagingLayoutForOpen(mode: config_mod.StagingSplitMode, mixed: bool) bool {
     return switch (mode) {
-        .off, .on => pref,
-        .auto => if (mixed) true else pref,
+        .off => false,
+        .on => true,
+        .auto => mixed,
     };
-}
-
-/// Whether toggling `\` should be remembered for the next file. In `auto`, a
-/// mixed file always reopens split, so its toggle is transient.
-pub fn stagingTogglePersists(mode: config_mod.StagingSplitMode, mixed: bool) bool {
-    return !(mode == .auto and mixed);
 }
 
 pub fn toggleStagingSplit(app: *App) !void {
     app.staging_split = !app.staging_split;
-    if (stagingTogglePersists(app.config.staging_split, app.staging_opened_mixed)) {
-        app.staging_split_pref = app.staging_split;
-    }
     try loadStaging(app, true); // (re)load or drop the other side's diff
     try app.setMessage("{s} staging view", .{if (app.staging_split) "split" else "single"});
 }
