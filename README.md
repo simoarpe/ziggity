@@ -140,7 +140,8 @@ the section for the panel you're on). Press `q` to quit.
 - Recent commits from `git log`, and a Reflog tab for recovery (checkout `space`,
   reset HEAD `g`, branch `n`).
 - Commit (`c`), commit `--no-verify` (`w`), amend (`A`) in a centered editor with
-  a summary line and optional multi-line body (`tab` switches fields).
+  a summary line and optional multi-line body (`tab` switches fields). The summary
+  shows a live character count that warns past the 50/72-char git conventions.
 - Per-commit: reset (`g`, soft/mixed/hard), revert (`t`), checkout (`space`,
   detached), branch from it (`n`), move commits to a new branch (`N`), tag (`T`),
   change author (`a`), and a copy-attribute menu (`y`: hash/subject/author).

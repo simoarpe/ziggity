@@ -1459,6 +1459,17 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     print(win, 0, 0, "Summary", if (subject_focused) st.active_title else st.muted);
     print(win, 3, 0, "Description (optional)", if (subject_focused) st.muted else st.active_title);
 
+    // Character counter for the summary, right-aligned on its label row. Git
+    // convention is a subject of <= 50 chars, hard-wrapped by 72, so the count
+    // warms to a warning past 50 and to the removed colour past 72.
+    const subj_len = std.unicode.utf8CountCodepoints(app.commit_buffer.items) catch app.commit_buffer.items.len;
+    var count_buf: [16]u8 = undefined;
+    const count_text = std.fmt.bufPrint(&count_buf, "{d}", .{subj_len}) catch "";
+    const count_style = if (subj_len > 72) st.removed else if (subj_len > 50) st.warning else st.muted;
+    const count_col = win.width -| @as(u16, @intCast(count_text.len));
+    // Keep it clear of the "Summary" label (7 cols) on a very narrow popup.
+    if (count_col > 8) print(win, 0, count_col, count_text, count_style);
+
     // Summary: single line at row 1, scrolled horizontally to keep the caret in.
     const subj = app.commit_buffer.items;
     const subj_caret = @min(app.commit_cursor, subj.len);
