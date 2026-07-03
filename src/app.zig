@@ -5624,6 +5624,10 @@ pub const App = struct {
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
                 self.clearPromptDraft(.new_branch); // created -> forget the draft
+                // `createBranch` checks out the new branch: select it (now the
+                // current branch) once the refreshed branch list lands, so the
+                // Branches panel highlights it and the other panels follow.
+                self.select_current_branch_pending = true;
                 return self.runMutationScoped(result, Refresh.branches, "created branch {s}", .{value});
             },
             // New branch at the selected reflog entry's commit (recovery).
@@ -7425,9 +7429,13 @@ pub const App = struct {
                 }
                 const line = if (self.mutation_echo) firstLine(mutable.stdout) else "";
                 try self.reportSuccess(if (line.len > 0) line else self.mutation_msg, mutable.stdout);
-                // A checkout changed the current branch — move the Branches
-                // selection onto it once the refreshed branch list lands.
-                if (std.meta.activeTag(job) == .checkout) self.select_current_branch_pending = true;
+                // A checkout — or creating a branch, which checks it out —
+                // changed the current branch, so move the Branches selection
+                // onto it once the refreshed branch list lands.
+                switch (std.meta.activeTag(job)) {
+                    .checkout, .new_branch_from, .move_to_new_branch => self.select_current_branch_pending = true,
+                    else => {},
+                }
             } else {
                 const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
                 const raw = if (stderr.len > 0) mutable.stderr else mutable.stdout;
