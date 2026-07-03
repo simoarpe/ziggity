@@ -9,6 +9,12 @@ const app_mod = @import("app.zig");
 const App = app_mod.App;
 
 pub fn selectedRefForDiff(app: *const App) ?[]const u8 {
+    // While drilled into a branch's commits the cursor is on a sub-commit, not a
+    // branch (`branch_index` stays frozen on the drilled branch), so the ref to
+    // diff is that commit's hash — `selectedCommit` already resolves the drill.
+    if (app.branch_commits_active and app.contentFocus() == .branches) {
+        return if (app.selectedCommit()) |commit| commit.hash else null;
+    }
     return switch (app.contentFocus()) {
         .commits => if (app.selectedCommit()) |commit| commit.hash else null,
         .branches => app.selectedBranchRefName(),
