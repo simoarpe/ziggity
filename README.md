@@ -164,8 +164,9 @@ the section for the panel you're on). Press `q` to quit.
 - A navigable changed-file list per commit (`enter`); `d` there discards a file's
   changes from that commit (rebase + amend).
 - Commit graph viewer (`ctrl+l`): the real `git log --graph` DAG in git's colours,
-  loaded off-thread; toggle current/all branches (`a`), `enter` jumps the
-  selection, mouse scroll/drag/click supported.
+  loaded off-thread; toggle current/all branches (`a`), `p` jumps to the current
+  commit's first parent, `enter` jumps the selection, mouse scroll/drag/click
+  supported.
 - Log filtering (`/`): by message (`--grep`), author, or path; persists across
   refreshes and shows in the panel title.
 - Bisect (`b`): mark the selected commit good/bad, then mark good/bad/skip until
@@ -311,8 +312,9 @@ Press **`?`** in the app for the full, always-current overlay. The essentials:
 - `T` / `a` (Commits): tag the commit / change its author
 - `y` / `ctrl+r`: copy-attribute menu / clear the cherry-pick selection
 - `i` (Commits): interactive rebase plan editor
-- `ctrl+l` (Commits): commit graph viewer (`j`/`k` move, `H`/`L` pan, `a` toggle
-  all-branches, `ctrl+o` copy, `enter` jump, `esc` close; mouse scroll/drag/click)
+- `ctrl+l` (Commits): commit graph viewer (`j`/`k` move, `p` first-parent, `H`/`L`
+  pan, `a` toggle all-branches, `ctrl+o` copy, `enter` jump, `esc` close; mouse
+  scroll/drag/click)
 - `G` (Commits): open the PR page · `B`: mark a `rebase --onto` base
 - `W`: diff the selected commit/branch against another marked ref
 - `/` (Commits): filter the log · `b` (Commits): bisect menu

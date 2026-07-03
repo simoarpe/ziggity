@@ -73,17 +73,20 @@ pub fn takeLoad(app: *App) ?LoadReq {
 
 /// TUI loop hook: a graph load finished. `text` is owned by `gpa`. Stale results
 /// (a newer load was requested, or the viewer was closed) are discarded.
-pub fn complete(app: *App, text: ?[]u8, generation: u64, gpa: std.mem.Allocator) void {
+pub fn complete(app: *App, text: ?[]u8, parents: ?[]u8, generation: u64, gpa: std.mem.Allocator) void {
     if (generation != app.commit_graph_generation or app.mode != .commit_graph) {
         if (text) |t| gpa.free(t);
+        if (parents) |p| gpa.free(p);
         return;
     }
     app.commit_graph_loading = false;
     if (text) |t| {
         defer gpa.free(t);
-        freeGraph(app);
+        defer if (parents) |p| gpa.free(p);
+        freeGraph(app); // clears the old graph and its parent map
         app.commit_graph = app.allocator.dupe(u8, t) catch null;
         app.commit_graph_plain = stripAnsi(app.allocator, t) catch null;
+        if (parents) |p| app.commit_graph_parents = app.allocator.dupe(u8, p) catch &.{};
         app.commit_graph_lines = countLines(app.commit_graph orelse "");
         app.commit_graph_max_width = widestLine(app.commit_graph_plain orelse "");
         app.commit_graph_hscroll = 0;
@@ -92,6 +95,8 @@ pub fn complete(app: *App, text: ?[]u8, generation: u64, gpa: std.mem.Allocator)
         app.commit_graph_sel = findTargetRow(app);
         app.commit_graph_scroll = 0;
         app.commit_graph_recenter = true;
+    } else if (parents) |p| {
+        gpa.free(p); // no graph stored, so drop the parent map too
     }
 }
 
@@ -130,6 +135,8 @@ pub fn handleKey(app: *App, key: anytype) !void {
     if (km.stage_all.matches(key)) return toggleScope(app);
     // ctrl+o copies the cursor row's commit hash to the clipboard.
     if (km.copy_clipboard.matches(key)) return copyCursorHash(app);
+    // `p` jumps the cursor to the current commit's first parent.
+    if (km.graph_first_parent.matches(key)) return goToFirstParent(app);
     // enter jumps the Commits-panel selection to the row under the cursor.
     if (app.isEnterKey(key)) return jumpToSelected(app);
 }
@@ -269,6 +276,10 @@ pub fn freeGraph(app: *App) void {
         app.allocator.free(p);
         app.commit_graph_plain = null;
     }
+    if (app.commit_graph_parents.len > 0) {
+        app.allocator.free(app.commit_graph_parents);
+        app.commit_graph_parents = &.{};
+    }
     app.commit_graph_lines = 0;
 }
 
@@ -282,18 +293,72 @@ pub fn deinit(app: *App) void {
 }
 
 fn findTargetRow(app: *App) usize {
-    const graph = app.commit_graph orelse return 0;
-    const target = app.commit_graph_target;
-    if (target.len == 0) return 0;
+    if (app.commit_graph_target.len == 0) return 0;
+    return rowForHash(app, app.commit_graph_target) orelse 0;
+}
+
+/// True when two abbreviated hashes name the same commit (one is a prefix of the
+/// other) — git may abbreviate to different lengths in different places.
+fn hashMatch(a: []const u8, b: []const u8) bool {
+    return std.mem.startsWith(u8, a, b) or std.mem.startsWith(u8, b, a);
+}
+
+/// The graph row index whose commit hash matches `hash`, or null if no visible
+/// row shows it (e.g. the commit is outside the loaded window).
+fn rowForHash(app: *App, hash: []const u8) ?usize {
+    const graph = app.commit_graph orelse return null;
     var it = std.mem.splitScalar(u8, graph, '\n');
     var i: usize = 0;
     var buf: [64]u8 = undefined;
     while (it.next()) |line| : (i += 1) {
         if (firstHash(line, &buf)) |h| {
-            if (std.mem.startsWith(u8, target, h) or std.mem.startsWith(u8, h, target)) return i;
+            if (hashMatch(h, hash)) return i;
         }
     }
-    return 0;
+    return null;
+}
+
+/// The first-parent hash of `hash` from the loaded `%h %p` map, or null when the
+/// commit is a root (no parents) or isn't in the map. Copies into `buf`.
+fn firstParentOf(parents: []const u8, hash: []const u8, buf: []u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, parents, '\n');
+    while (lines.next()) |line| {
+        var toks = std.mem.tokenizeScalar(u8, line, ' ');
+        const h = toks.next() orelse continue;
+        if (!hashMatch(h, hash)) continue;
+        const parent = toks.next() orelse return null; // root commit: no parents
+        const n = @min(parent.len, buf.len);
+        @memcpy(buf[0..n], parent[0..n]);
+        return buf[0..n];
+    }
+    return null;
+}
+
+/// `p`: move the cursor to the current commit's first parent, centering it.
+fn goToFirstParent(app: *App) !void {
+    // Copy the cursor hash out of the shared scratch buffer before the helpers
+    // below reuse it.
+    var cur_buf: [64]u8 = undefined;
+    const cur = if (cursorHash(app)) |h| blk: {
+        const n = @min(h.len, cur_buf.len);
+        @memcpy(cur_buf[0..n], h[0..n]);
+        break :blk cur_buf[0..n];
+    } else {
+        try app.setMessage("no commit on that row", .{});
+        return;
+    };
+    var parent_buf: [64]u8 = undefined;
+    const parent = firstParentOf(app.commit_graph_parents, cur, &parent_buf) orelse {
+        try app.setMessage("no parent (root commit, or parents not loaded)", .{});
+        return;
+    };
+    const row = rowForHash(app, parent) orelse {
+        try app.setMessage("first parent {s} is outside the loaded graph", .{parent});
+        return;
+    };
+    app.commit_graph_sel = row;
+    ensureCursorVisible(app);
+    try app.setMessage("jumped to first parent {s}", .{parent});
 }
 
 fn widestLine(s: []const u8) usize {
@@ -404,4 +469,30 @@ test "countLines counts rows with and without a trailing newline" {
     try std.testing.expectEqual(@as(usize, 0), countLines(""));
     try std.testing.expectEqual(@as(usize, 2), countLines("a\nb\n"));
     try std.testing.expectEqual(@as(usize, 2), countLines("a\nb"));
+}
+
+test "firstParentOf reads the first parent from a %h %p map" {
+    // Merge (f93eef1) then linear history down to a root (43b4136, no parents).
+    const map =
+        "f93eef1 1183dd8 44f8e7d\n" ++
+        "1183dd8 5281457\n" ++
+        "44f8e7d 1183dd8\n" ++
+        "5281457 43b4136\n" ++
+        "43b4136\n";
+    var buf: [64]u8 = undefined;
+
+    // A merge commit's first parent is the mainline one.
+    try std.testing.expectEqualStrings("1183dd8", firstParentOf(map, "f93eef1", &buf).?);
+    // A regular commit.
+    try std.testing.expectEqualStrings("43b4136", firstParentOf(map, "5281457", &buf).?);
+    // The root commit has no parents.
+    try std.testing.expect(firstParentOf(map, "43b4136", &buf) == null);
+    // An unknown hash isn't in the map.
+    try std.testing.expect(firstParentOf(map, "deadbee", &buf) == null);
+}
+
+test "hashMatch treats a prefix as the same commit" {
+    try std.testing.expect(hashMatch("1183dd8", "1183dd8"));
+    try std.testing.expect(hashMatch("1183dd8", "1183dd8abcd")); // longer disambiguation
+    try std.testing.expect(!hashMatch("1183dd8", "44f8e7d"));
 }

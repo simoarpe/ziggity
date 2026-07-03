@@ -1900,6 +1900,10 @@ pub const App = struct {
     // The same graph with ANSI stripped, line-aligned with `commit_graph`, so
     // dialog mouse selection/copy works on the visible text.
     commit_graph_plain: ?[]u8 = null,
+    // Loaded alongside the graph (same scope): one `%h %p` line per commit so the
+    // viewer can jump to a commit's first parent without touching git on the UI
+    // thread. Empty when parents could not be loaded.
+    commit_graph_parents: []u8 = &.{},
     commit_graph_all: bool = false,
     commit_graph_loading: bool = false,
     commit_graph_wanted: bool = false,

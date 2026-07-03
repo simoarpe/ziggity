@@ -139,6 +139,7 @@ const GraphRun = struct {
     all: bool,
     generation: u64,
     result: ?[]u8 = null,
+    parents: ?[]u8 = null,
 };
 
 fn graphWorker(gr: *GraphRun) void {
@@ -160,6 +161,26 @@ fn graphWorker(gr: *GraphRun) void {
     }) catch return postGraph(gr);
     gr.result = r.stdout; // owned by async_allocator; freed in completeGraph
     async_allocator.free(r.stderr);
+
+    // Second, scope-matched pass: one `%h %p` line per commit (no graph, no
+    // colour) so the viewer can resolve first-parents. Best-effort — if it
+    // fails, parent-jump is simply unavailable this load.
+    var pargv: std.ArrayList([]const u8) = .empty;
+    defer pargv.deinit(async_allocator);
+    const pbase = [_][]const u8{ "git", "--no-optional-locks", "log", "-n", "5000", "--format=%h %p" };
+    pargv.appendSlice(async_allocator, &pbase) catch return postGraph(gr);
+    if (gr.all) pargv.append(async_allocator, "--all") catch return postGraph(gr);
+    if (git_mod.runWithLockRetry(async_allocator, gr.io, .{
+        .argv = pargv.items,
+        .cwd = .{ .path = gr.root },
+        .environ_map = gr.environ,
+        .stdout_limit = .limited(16 * 1024 * 1024),
+        .stderr_limit = .limited(1 * 1024 * 1024),
+    })) |pr| {
+        gr.parents = pr.stdout; // owned by async_allocator; freed in completeGraph
+        async_allocator.free(pr.stderr);
+    } else |_| {}
+
     postGraph(gr);
 }
 
@@ -443,8 +464,9 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 if (graph_future) |*f| {
                     f.await(io);
                     graph_future = null;
-                    commitgraph_mod.complete(app, graph_run.result, graph_run.generation, async_allocator);
+                    commitgraph_mod.complete(app, graph_run.result, graph_run.parents, graph_run.generation, async_allocator);
                     graph_run.result = null;
+                    graph_run.parents = null;
                 }
             },
         }
@@ -594,7 +616,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     .result = null,
                 };
                 graph_future = io.concurrent(graphWorker, .{&graph_run}) catch blk: {
-                    commitgraph_mod.complete(app, null, req.generation, async_allocator);
+                    commitgraph_mod.complete(app, null, null, req.generation, async_allocator);
                     break :blk null;
                 };
                 render_needed = true;
@@ -1035,7 +1057,7 @@ fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
     const win = popup(root, w, h, title, null);
 
     const footer_row: u16 = win.height -| 1;
-    print(win, footer_row, 0, "j/k move  H/L pan  a all/current  ^o copy hash  enter go-to  esc close", st.bottom_accent);
+    print(win, footer_row, 0, "j/k move  p parent  H/L pan  a all/current  ^o copy hash  enter go-to  esc close", st.bottom_accent);
 
     if (app.commit_graph_loading or app.commit_graph == null) {
         var sbuf: [48]u8 = undefined;
@@ -1313,8 +1335,9 @@ const help_lines = [_][]const u8{
     "                 e opens the file in your editor,",
     "                 d discards the file's changes from the commit (rewrites it)",
     "  ctrl+p         custom patch menu (apply / remove from commit / reset)",
-    "  ctrl+l         commit graph viewer (j/k move, H/L pan, a scope, ^o copy,",
-    "                 enter jump, esc close; wheel scrolls, drag selects)",
+    "  ctrl+l         commit graph viewer (j/k move, p first-parent, H/L pan,",
+    "                 a scope, ^o copy, enter jump, esc close; wheel scrolls,",
+    "                 drag selects)",
     "  ctrl+j/ctrl+k  move commit down / up",
     "  i              interactive rebase: a plan editor for the commits down to",
     "                 the selected one. p/d/s/f/e mark pick/drop/squash/fixup/edit",
