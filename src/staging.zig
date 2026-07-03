@@ -40,6 +40,15 @@ pub fn openStaging(app: *App) !void {
 /// after staging/unstaging a line so the cursor stays put and repeated space
 /// keeps applying the lines that shift up into it.
 pub fn loadStaging(app: *App, keep_cursor: bool) !void {
+    return loadStagingSide(app, keep_cursor, true);
+}
+
+/// Reload the staging diff. `allow_flip` auto-switches to the other side when
+/// the active one is empty — wanted on open / after staging (so a fully-staged
+/// file shows the staged side rather than a blank pane), but NOT when the user
+/// deliberately switches with `[`/`]`, where they should be able to land on an
+/// empty side and see the "no changes" message.
+pub fn loadStagingSide(app: *App, keep_cursor: bool, allow_flip: bool) !void {
     if (app.staging) |*parsed| parsed.deinit(app.allocator);
     app.staging = null;
     app.allocator.free(app.staging_diff);
@@ -51,7 +60,7 @@ pub fn loadStaging(app: *App, keep_cursor: bool) !void {
     // If the active side has no diff but the other side does, switch to it — e.g.
     // opening a fully-staged file shows the staged changes rather than a blank
     // unstaged pane (and after staging the last change, flip to staged).
-    if (app.staging_diff.len == 0) {
+    if (allow_flip and app.staging_diff.len == 0) {
         const other = app.git.rawFileDiff(app.staging_path, !app.staging_staged_view, app.config.diff_context) catch
             try app.allocator.dupe(u8, "");
         if (other.len > 0) {
@@ -84,7 +93,9 @@ pub fn loadStaging(app: *App, keep_cursor: bool) !void {
 
 pub fn toggleStagingSide(app: *App) !void {
     app.staging_staged_view = !app.staging_staged_view;
-    try loadStaging(app, false);
+    // Don't auto-flip back: an explicit switch may land on an empty side, which
+    // then shows the "no changes on this side" message.
+    try loadStagingSide(app, false, false);
     try app.setMessage("{s} changes", .{if (app.staging_staged_view) "staged" else "unstaged"});
 }
 
