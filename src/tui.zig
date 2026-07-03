@@ -2260,6 +2260,84 @@ fn drawCommitFileTree(win: vaxis.Window, app: *const app_mod.App, files: []const
     }
 }
 
+/// A stable truecolor for an author name: an HSL colour seeded by the md5 of
+/// the name (hue from the name, medium saturation and lightness) so each author
+/// always renders in the same distinct colour.
+fn authorColor(name: []const u8) vaxis.Color {
+    var digest: [16]u8 = undefined;
+    std.crypto.hash.Md5.hash(name, &digest, .{});
+    const h = authorHashFloat(digest[0..4]) * 360.0;
+    const s = 0.6 + 0.4 * authorHashFloat(digest[4..8]);
+    const l = 0.4 + authorHashFloat(digest[8..12]) * 0.2;
+    return .{ .rgb = hslToRgb(h, s, l) };
+}
+
+/// Map a 4-byte hash slice → [0,1): a running `(sum + byte) % 100`, then /100.
+fn authorHashFloat(bytes: []const u8) f64 {
+    var sum: usize = 0;
+    for (bytes) |b| sum = (sum + b) % 100;
+    return @as(f64, @floatFromInt(sum)) / 100.0;
+}
+
+fn hslToRgb(h: f64, s: f64, l: f64) [3]u8 {
+    const c = (1.0 - @abs(2.0 * l - 1.0)) * s;
+    const hp = h / 60.0;
+    const x = c * (1.0 - @abs(@mod(hp, 2.0) - 1.0));
+    var r: f64 = 0;
+    var g: f64 = 0;
+    var b: f64 = 0;
+    if (hp < 1.0) {
+        r = c;
+        g = x;
+    } else if (hp < 2.0) {
+        r = x;
+        g = c;
+    } else if (hp < 3.0) {
+        g = c;
+        b = x;
+    } else if (hp < 4.0) {
+        g = x;
+        b = c;
+    } else if (hp < 5.0) {
+        r = x;
+        b = c;
+    } else {
+        r = c;
+        b = x;
+    }
+    const m = l - c / 2.0;
+    return .{
+        @intFromFloat(@round((r + m) * 255.0)),
+        @intFromFloat(@round((g + m) * 255.0)),
+        @intFromFloat(@round((b + m) * 255.0)),
+    };
+}
+
+/// The compact author tag: two words → one leading char each; one word → its
+/// first two chars (codepoint-aware). Written into `buf`; empty for a blank name.
+fn authorInitials(name: []const u8, buf: *[8]u8) []const u8 {
+    const trimmed = std.mem.trim(u8, name, " \t");
+    if (trimmed.len == 0) return "";
+    var it = std.mem.tokenizeScalar(u8, trimmed, ' ');
+    const first = it.next() orelse return "";
+    const a = firstCodepoint(first);
+    @memcpy(buf[0..a.len], a);
+    var n = a.len;
+    const rest = if (it.next()) |second| second else first[a.len..];
+    const b = firstCodepoint(rest);
+    @memcpy(buf[n .. n + b.len], b);
+    n += b.len;
+    return buf[0..n];
+}
+
+/// The first UTF-8 codepoint of `s` as a byte slice (or `s` if it is short /
+/// malformed).
+fn firstCodepoint(s: []const u8) []const u8 {
+    if (s.len == 0) return s;
+    const len = std.unicode.utf8ByteSequenceLength(s[0]) catch 1;
+    return s[0..@min(len, s.len)];
+}
+
 /// Render a commit list (`commits`, `selected` index) into `panel` — shared by
 /// the Commits panel and the Branches-panel sub-commits drill.
 fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const model.Commit, selected: usize, panel_focus: model.Focus) void {
@@ -2289,7 +2367,22 @@ fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const m
         const hash_fg = if (marked) ui_theme.warning else if (copied) ui_theme.staged else ui_theme.hash;
         var buf: [80]u8 = undefined;
         const head = std.fmt.bufPrint(&buf, "{c}{s} ", .{ marker, commit.short_hash }) catch "";
-        const col = printSpan(win, row, 0, head, withFg(base, hash_fg));
+        var col = printSpan(win, row, 0, head, withFg(base, hash_fg));
+
+        // The author's initials in a stable per-author colour, padded to a
+        // two-cell column so the subjects still line up.
+        var ini_buf: [8]u8 = undefined;
+        const initials = authorInitials(commit.author, &ini_buf);
+        if (initials.len > 0) {
+            var author_style = base;
+            author_style.fg = authorColor(commit.author);
+            const author_start = col;
+            // `printSpan` (static glyph table) — not `printGlyph` with a slice
+            // into the stack `ini_buf`, whose grapheme would dangle by flush.
+            col = printSpan(win, row, col, initials, author_style);
+            while (col < author_start + 2) col = printSpan(win, row, col, " ", base);
+            col = printSpan(win, row, col, " ", base);
+        }
         _ = printSpan(win, row, col, commit.subject, base);
     }
 }
@@ -3391,4 +3484,34 @@ test "applySgr parses ANSI color codes" {
     s = base;
     applySgr(&s, base, "92");
     try std.testing.expectEqual(@as(u8, 10), s.fg.index);
+}
+
+test "author initials: two words -> initials, one word -> first two chars" {
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("AL", authorInitials("Ada Lovelace", &buf));
+    try std.testing.expectEqualStrings("AT", authorInitials("Alan Turing", &buf));
+    try std.testing.expectEqualStrings("gr", authorInitials("grace", &buf));
+    try std.testing.expectEqualStrings("x", authorInitials("x", &buf));
+    try std.testing.expectEqualStrings("", authorInitials("", &buf));
+    try std.testing.expectEqualStrings("", authorInitials("   ", &buf));
+}
+
+test "author colour is a stable per-author truecolor" {
+    const a1 = authorColor("Ada Lovelace");
+    const a2 = authorColor("Ada Lovelace");
+    const b = authorColor("Alan Turing");
+    // Always an RGB (truecolor) value.
+    try std.testing.expect(std.meta.activeTag(a1) == .rgb);
+    // Deterministic: the same author yields the same colour.
+    try std.testing.expectEqual(a1.rgb, a2.rgb);
+    // Different authors (almost always) differ — these two do.
+    try std.testing.expect(!std.mem.eql(u8, &a1.rgb, &b.rgb));
+}
+
+test "hslToRgb hits the primary corners" {
+    try std.testing.expectEqual([3]u8{ 255, 0, 0 }, hslToRgb(0.0, 1.0, 0.5)); // red
+    try std.testing.expectEqual([3]u8{ 0, 255, 0 }, hslToRgb(120.0, 1.0, 0.5)); // green
+    try std.testing.expectEqual([3]u8{ 0, 0, 255 }, hslToRgb(240.0, 1.0, 0.5)); // blue
+    try std.testing.expectEqual([3]u8{ 0, 0, 0 }, hslToRgb(0.0, 0.0, 0.0)); // black
+    try std.testing.expectEqual([3]u8{ 255, 255, 255 }, hslToRgb(0.0, 0.0, 1.0)); // white
 }

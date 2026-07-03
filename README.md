@@ -137,7 +137,8 @@ the section for the panel you're on). Press `q` to quit.
 <details>
 <summary><b>Commits &amp; history</b></summary>
 
-- Recent commits from `git log`, and a Reflog tab for recovery (checkout `space`,
+- Recent commits from `git log`, each row showing the author's initials in a
+  stable per-author colour, and a Reflog tab for recovery (checkout `space`,
   reset HEAD `g`, branch `n`).
 - Commit (`c`), commit `--no-verify` (`w`), amend (`A`) in a centered editor with
   a summary line and optional multi-line body (`tab` switches fields). The summary
