@@ -2347,6 +2347,47 @@ fn firstCodepoint(s: []const u8) []const u8 {
     return s[0..@min(len, s.len)];
 }
 
+/// The byte ranges of a leading Conventional-Commits prefix `type(scope)!: ` in
+/// `s`, or null when it doesn't match. `scope` spans `[type_end, scope_end)`
+/// (empty when absent); the breaking `!` (when present) sits at `scope_end`; the
+/// `: ` separator spans `[colon_start, colon_end)`; the description follows.
+fn conventionalPrefix(s: []const u8) ?struct { type_end: usize, scope_end: usize, bang: bool, colon_start: usize, colon_end: usize } {
+    var i: usize = 0;
+    while (i < s.len and std.ascii.isAlphabetic(s[i])) : (i += 1) {}
+    if (i == 0) return null; // no type
+    const type_end = i;
+    var scope_end = i;
+    if (i < s.len and s[i] == '(') {
+        const close = std.mem.indexOfScalarPos(u8, s, i + 1, ')') orelse return null;
+        scope_end = close + 1; // include the parentheses
+        i = scope_end;
+    }
+    var bang = false;
+    if (i < s.len and s[i] == '!') {
+        bang = true;
+        i += 1;
+    }
+    // Conventional Commits requires the ": " separator.
+    if (i + 1 >= s.len or s[i] != ':' or s[i + 1] != ' ') return null;
+    return .{ .type_end = type_end, .scope_end = scope_end, .bang = bang, .colon_start = i, .colon_end = i + 2 };
+}
+
+/// Draw a commit subject, colouring a leading Conventional-Commits prefix when
+/// enabled: type in accent, scope muted, breaking `!` red, the description in
+/// the base colour. Plain draw otherwise (including non-conventional subjects).
+fn printCommitSubject(win: vaxis.Window, row: u16, col: u16, subject: []const u8, base: vaxis.Style, highlight: bool) void {
+    const p = if (highlight) conventionalPrefix(subject) else null;
+    const cc = p orelse {
+        _ = printSpan(win, row, col, subject, base);
+        return;
+    };
+    var c = printSpan(win, row, col, subject[0..cc.type_end], withFg(base, ui_theme.accent));
+    if (cc.scope_end > cc.type_end) c = printSpan(win, row, c, subject[cc.type_end..cc.scope_end], withFg(base, ui_theme.muted));
+    if (cc.bang) c = printSpan(win, row, c, "!", withFg(base, ui_theme.removed));
+    c = printSpan(win, row, c, subject[cc.colon_start..cc.colon_end], withFg(base, ui_theme.muted));
+    _ = printSpan(win, row, c, subject[cc.colon_end..], base);
+}
+
 /// Render a commit list (`commits`, `selected` index) into `panel` — shared by
 /// the Commits panel and the Branches-panel sub-commits drill.
 fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const model.Commit, selected: usize, panel_focus: model.Focus) void {
@@ -2392,7 +2433,7 @@ fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const m
             while (col < author_start + 2) col = printSpan(win, row, col, " ", base);
             col = printSpan(win, row, col, " ", base);
         }
-        _ = printSpan(win, row, col, commit.subject, base);
+        printCommitSubject(win, row, col, commit.subject, base, app.config.highlight_conventional_commits);
     }
 }
 
@@ -3540,4 +3581,34 @@ test "hslToRgb hits the primary corners" {
     try std.testing.expectEqual([3]u8{ 0, 0, 255 }, hslToRgb(240.0, 1.0, 0.5)); // blue
     try std.testing.expectEqual([3]u8{ 0, 0, 0 }, hslToRgb(0.0, 0.0, 0.0)); // black
     try std.testing.expectEqual([3]u8{ 255, 255, 255 }, hslToRgb(0.0, 0.0, 1.0)); // white
+}
+
+test "conventionalPrefix parses type/scope/breaking and rejects non-conventional" {
+    // type + scope + breaking + ": "
+    const a = conventionalPrefix("feat(auth)!: add SSO").?;
+    try std.testing.expectEqual(@as(usize, 4), a.type_end); // "feat"
+    try std.testing.expectEqual(@as(usize, 10), a.scope_end); // "(auth)"
+    try std.testing.expect(a.bang);
+    try std.testing.expectEqual(@as(usize, 11), a.colon_start); // ':'
+    try std.testing.expectEqual(@as(usize, 13), a.colon_end); // after ": "
+
+    // type + ": " only
+    const b = conventionalPrefix("fix: a bug").?;
+    try std.testing.expectEqual(@as(usize, 3), b.type_end);
+    try std.testing.expectEqual(@as(usize, 3), b.scope_end); // no scope
+    try std.testing.expect(!b.bang);
+
+    // scope, no breaking
+    const c = conventionalPrefix("docs(readme): tweak").?;
+    try std.testing.expectEqual(@as(usize, 4), c.type_end);
+    try std.testing.expectEqual(@as(usize, 12), c.scope_end);
+    try std.testing.expect(!c.bang);
+
+    // Non-conventional subjects return null.
+    try std.testing.expect(conventionalPrefix("just a normal message") == null);
+    try std.testing.expect(conventionalPrefix("Merge branch 'x'") == null);
+    try std.testing.expect(conventionalPrefix("fix the thing") == null); // no ": "
+    try std.testing.expect(conventionalPrefix("feat(unclosed: x") == null); // scope not closed
+    try std.testing.expect(conventionalPrefix(": no type") == null);
+    try std.testing.expect(conventionalPrefix("") == null);
 }

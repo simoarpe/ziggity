@@ -139,7 +139,9 @@ the section for the panel you're on). Press `q` to quit.
 <summary><b>Commits &amp; history</b></summary>
 
 - Recent commits from `git log`, each row showing the author's initials in a
-  stable per-author colour, and a Reflog tab for recovery (checkout `space`,
+  stable per-author colour and a highlighted [Conventional Commits](https://www.conventionalcommits.org/)
+  prefix (type in accent, scope muted, breaking `!` in red;
+  `highlight_conventional_commits`), and a Reflog tab for recovery (checkout `space`,
   reset HEAD `g`, branch `n`).
 - Commit (`c`), commit `--no-verify` (`w`), amend (`A`) in a centered editor with
   a summary line and optional multi-line body (`tab` switches fields). The summary
@@ -339,6 +341,10 @@ commit_summary_limit = 50
 # Column of the soft vertical guide drawn in the commit/reword message body,
 # marking the git body-wrap width. Default 72. Set to 0 to disable the guide.
 commit_body_guide = 72
+
+# Colour the Conventional-Commits prefix (`type(scope)!:`) in the commit list:
+# type in accent, scope muted, breaking `!` in red. Default on.
+highlight_conventional_commits = true
 
 # Seconds between idle background working-tree refreshes (git status, run off the
 # UI thread). On a big repo a tight interval makes git status thrash; default 10.

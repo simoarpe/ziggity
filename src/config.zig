@@ -233,6 +233,9 @@ pub const Config = struct {
     /// Column of the soft vertical guide drawn in the commit / reword message
     /// body. Default 72 (the git body-wrap convention). 0 disables the guide.
     commit_body_guide: u16 = 72,
+    /// Colour the Conventional-Commits prefix (`type(scope)!:`) in the commit
+    /// list — type in accent, scope muted, breaking `!` in the removed colour.
+    highlight_conventional_commits: bool = true,
     /// Accordion mode: when true, the focused side-panel list grows to
     /// `expanded_side_panel_weight` while the others shrink. Default off.
     expand_focused_side_panel: bool = false,
@@ -319,6 +322,10 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "refresh_interval_secs")) {
             self.refresh_interval_secs = std.fmt.parseInt(u16, value, 10) catch self.refresh_interval_secs;
+            return;
+        }
+        if (std.mem.eql(u8, key, "highlight_conventional_commits")) {
+            if (parseBool(value)) |on| self.highlight_conventional_commits = on;
             return;
         }
         if (std.mem.eql(u8, key, "expand_focused_side_panel")) {
