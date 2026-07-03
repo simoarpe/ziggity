@@ -20,6 +20,7 @@ pub fn clearDiffBase(app: *App) void {
     if (app.diff_base) |b| app.allocator.free(b);
     app.diff_base = null;
     app.diff_reverse = false;
+    app.diff_three_dot = false;
 }
 
 /// The Diffing menu (W): diff against the selected ref, enter an arbitrary ref,

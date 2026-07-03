@@ -465,6 +465,7 @@ pub const MenuAction = enum {
     diff_against_selected,
     diff_enter_ref,
     diff_reverse_direction,
+    diff_toggle_three_dot,
     diff_exit,
     submodule_init_all,
     submodule_update_all,
@@ -570,6 +571,7 @@ pub const diffing_menu_active = [_]MenuItem{
     .{ .label = "Diff the selected ref", .action = .diff_against_selected },
     .{ .label = "Enter a ref to diff against...", .action = .diff_enter_ref },
     .{ .label = "Reverse diff direction", .action = .diff_reverse_direction },
+    .{ .label = "Toggle merge-base diff (three-dot: only the target's own changes)", .action = .diff_toggle_three_dot },
     .{ .label = "Exit diff mode", .action = .diff_exit },
 };
 
@@ -773,7 +775,7 @@ const PreviewKind = union(enum) {
     /// `to`): `git diff <from>^ <to>`.
     commit_range: struct { from: []const u8, to: []const u8 },
     stash: usize,
-    diff_refs: struct { base: []const u8, target: []const u8 },
+    diff_refs: struct { base: []const u8, target: []const u8, three_dot: bool = false },
 };
 
 /// Bounded, insertion-ordered cache of rendered preview text keyed by a
@@ -1932,6 +1934,11 @@ pub const App = struct {
     diff_base: ?[]u8 = null,
     // Whether the diff direction is reversed (target..base instead of base..target).
     diff_reverse: bool = false,
+    // Whether to use three-dot (merge-base) semantics: `git diff base...target`
+    // shows only the target's changes since it diverged from base — the
+    // GitHub-style "just this branch's work" diff — rather than the full
+    // two-endpoint difference.
+    diff_three_dot: bool = false,
     // Custom patch: paths added from a single source commit. The patch bytes
     // are rebuilt on demand from `patch_source` and these paths.
     patch_source: ?[]u8 = null,
@@ -6430,6 +6437,14 @@ pub const App = struct {
                 try self.setMessage("reversed diff direction", .{});
                 try self.updatePreview();
             },
+            .diff_toggle_three_dot => {
+                self.diff_three_dot = !self.diff_three_dot;
+                if (self.diff_three_dot)
+                    try self.setMessage("three-dot (merge-base) diff on", .{})
+                else
+                    try self.setMessage("three-dot diff off", .{});
+                try self.updatePreview();
+            },
             .diff_exit => {
                 diffmode_mod.clearDiffBase(self);
                 try self.setMessage("exited diffing mode", .{});
@@ -6845,6 +6860,7 @@ pub const App = struct {
             return self.requestGitPreview(.{ .diff_refs = .{
                 .base = if (self.diff_reverse) target.? else base,
                 .target = if (self.diff_reverse) base else target.?,
+                .three_dot = self.diff_three_dot,
             } });
         }
 
@@ -7000,7 +7016,7 @@ pub const App = struct {
             .commit_dir => |cd| std.fmt.allocPrint(gpa, "cd:{d}:{s}:{s}", .{ ctx, cd.hash, cd.path }),
             .commit_range => |r| std.fmt.allocPrint(gpa, "crg:{d}:{s}:{s}", .{ ctx, r.from, r.to }),
             .stash => |idx| std.fmt.allocPrint(gpa, "s:{d}:{d}", .{ ctx, idx }),
-            .diff_refs => |dr| std.fmt.allocPrint(gpa, "dr:{d}:{s}:{s}", .{ ctx, dr.base, dr.target }),
+            .diff_refs => |dr| std.fmt.allocPrint(gpa, "dr:{d}:{c}:{s}:{s}", .{ ctx, @as(u8, if (dr.three_dot) '3' else '2'), dr.base, dr.target }),
         };
     }
 
@@ -7131,9 +7147,20 @@ pub const App = struct {
             },
             .diff_refs => |dr| {
                 empty_msg = "No differences.\n";
-                try sections.append(page_alloc, .{
-                    .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--color=always", "--stat", "--patch", ctx_arg, dr.base, dr.target }),
-                });
+                if (dr.three_dot) {
+                    // Three-dot `base...target` diffs from the merge-base of the
+                    // two refs — only the target's own changes since it diverged
+                    // (the GitHub-PR view). Passed as one ref-spec arg.
+                    const spec = try std.fmt.allocPrint(page_alloc, "{s}...{s}", .{ dr.base, dr.target });
+                    defer page_alloc.free(spec);
+                    try sections.append(page_alloc, .{
+                        .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--color=always", "--stat", "--patch", ctx_arg, spec }),
+                    });
+                } else {
+                    try sections.append(page_alloc, .{
+                        .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--color=always", "--stat", "--patch", ctx_arg, dr.base, dr.target }),
+                    });
+                }
             },
         }
 

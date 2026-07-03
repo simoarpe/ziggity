@@ -966,7 +966,8 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     else if (app.staging_active)
         (if (app.staging_staged_view) "Staging - staged" else "Staging - unstaged")
     else if (app.diff_base) |diff_ref|
-        (std.fmt.bufPrint(&app.main_title_buf, "Diff [base {s}]", .{diff_ref[0..@min(diff_ref.len, 16)]}) catch "Diff [diffing]")
+        // The " ..." suffix marks three-dot (merge-base) mode.
+        (std.fmt.bufPrint(&app.main_title_buf, "Diff [base {s}{s}]", .{ diff_ref[0..@min(diff_ref.len, 16)], if (app.diff_three_dot) " ..." else "" }) catch "Diff [diffing]")
     else if (app.contentFocus() == .branches and app.selectedBranchRefName() != null)
         // A selected branch/tag shows its commit graph, titled "Log".
         "Log"
@@ -1218,7 +1219,8 @@ const help_lines = [_][]const u8{
     "  o              open the selected commit / branch on its remote host",
     "  W              diffing menu: mark a base ref, select another to see the",
     "                 git diff between them; re-open it to reverse the direction",
-    "                 (swap which ref is \"from\") or exit",
+    "                 (swap which ref is \"from\"), toggle a three-dot merge-base",
+    "                 diff (only the target's own changes, GitHub-PR style), or exit",
     "  f / p / P      fetch / pull / push (async)",
     "  mouse drag     select text in the Diff panel (auto-copies on release)",
     "",

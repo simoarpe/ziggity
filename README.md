@@ -206,7 +206,9 @@ the section for the panel you're on). Press `q` to quit.
   stashes, toggle commit files into a patch, or discard files from a commit.
 - Diffing mode (`W`): mark a commit/branch, select another, see `git diff` between
   the two refs in the main panel. Re-open the menu to reverse the direction (swap
-  which ref is the diff's "from") or exit.
+  which ref is the diff's "from"), toggle a three-dot merge-base diff
+  (`base...target` — only the target's own changes since it diverged, the
+  GitHub-PR view; the title shows `[base X ...]`), or exit.
 - Stash menu (`s`): stash all / +untracked / staged-only / just the selected file;
   apply / pop / drop / rename (`r`) on the Stash panel.
 
@@ -265,7 +267,7 @@ Press **`?`** in the app for the full, always-current overlay. The essentials:
 - `ctrl+o`: copy the selected hash / branch / tag to the system clipboard
 - `o`: open the selected commit or branch on its remote host
 - `W`: diffing mode — mark a ref, then select another to diff; re-open the menu to
-  reverse the direction or exit (esc also exits)
+  reverse the direction, toggle a three-dot merge-base diff, or exit (esc also exits)
 - mouse: click a panel to focus; wheel to navigate/scroll
 - `/`: filter files by path live; enter accepts; esc clears
 - `` ` ``: toggle the directory-tree view — Files panel **and** a commit's /
