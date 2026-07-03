@@ -1728,6 +1728,10 @@ pub const App = struct {
     // current end; `dragged` distinguishes a real drag from a plain click.
     diff_sel_active: bool = false,
     diff_sel_dragged: bool = false,
+    // Full-screen the Diff/main panel: the side panels are hidden and the main
+    // panel fills the terminal. Toggled by `toggle_fullscreen` (default `z`);
+    // `esc` also exits it.
+    diff_fullscreen: bool = false,
     // Whether a non-empty selection was visible when the current click began —
     // so clicking to deselect just clears it, without also focusing the panel.
     diff_sel_had_span: bool = false,
@@ -2664,6 +2668,10 @@ pub const App = struct {
                     self.diff_sel_active = false; // first: drop a diff text selection
                     return;
                 }
+                if (self.diff_fullscreen) {
+                    self.diff_fullscreen = false; // esc shrinks the maximised diff back
+                    return;
+                }
                 if (self.rangeActive()) {
                     self.clearRange(); // esc cancels a multi-range selection
                     try self.updatePreview();
@@ -2760,6 +2768,7 @@ pub const App = struct {
                     try self.enterMain();
                 }
             },
+            .toggle_fullscreen => try self.toggleDiffFullscreen(),
             // Toggle the staging view between single and split layouts.
             .toggle_staging_split => if (self.staging_active and !self.staging_patch_mode) try staging_mod.toggleStagingSplit(self),
             .select => {
@@ -4799,6 +4808,18 @@ pub const App = struct {
         self.focus = self.main_origin;
         self.resetMainView();
         try self.updatePreview();
+    }
+
+    /// Toggle the Diff/main panel between full-screen (side panels hidden, main
+    /// fills the terminal) and the normal layout. Entering it focuses the main
+    /// panel so there's something to read/scroll.
+    fn toggleDiffFullscreen(self: *App) !void {
+        if (self.diff_fullscreen) {
+            self.diff_fullscreen = false;
+        } else {
+            if (self.focus != .main) try self.enterMain();
+            self.diff_fullscreen = true;
+        }
     }
 
     fn focusNext(self: *App) !void {

@@ -850,7 +850,9 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
 
     const bottom_h: u16 = 1;
     const body_h = root.height - bottom_h;
-    const side_w = sidePanelWidth(root.width, app.config.side_panel_width_percent);
+    // Full-screen mode hides the side column so the Diff/main panel fills the
+    // terminal (side_w = 0 → the main panel is drawn at x=0, full width).
+    const side_w = if (app.diff_fullscreen) 0 else sidePanelWidth(root.width, app.config.side_panel_width_percent);
     const main_w = root.width - side_w;
 
     var y: u16 = 0;
@@ -885,72 +887,74 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     };
     app.panel_rect_count = 6;
 
-    drawStatus(panel(root, 0, y, side_w, status_h, "[1] Status", app.focus == .status, null), app);
-    y += status_h;
-    {
-        const files_tabs = [_][]const u8{ "Files", "Worktrees", "Submodules" };
-        const w = tabbedPanel(root, 0, y, side_w, files_h, 2, &files_tabs, @intFromEnum(app.files_tab), "", app.focus == .files, listScrollInfo(app, .files));
-        beginListPan(app, .files);
-        switch (app.files_tab) {
-            .files => drawFiles(w, app),
-            .worktrees => drawWorktrees(w, app),
-            .submodules => drawSubmodules(w, app),
+    if (!app.diff_fullscreen) {
+        drawStatus(panel(root, 0, y, side_w, status_h, "[1] Status", app.focus == .status, null), app);
+        y += status_h;
+        {
+            const files_tabs = [_][]const u8{ "Files", "Worktrees", "Submodules" };
+            const w = tabbedPanel(root, 0, y, side_w, files_h, 2, &files_tabs, @intFromEnum(app.files_tab), "", app.focus == .files, listScrollInfo(app, .files));
+            beginListPan(app, .files);
+            switch (app.files_tab) {
+                .files => drawFiles(w, app),
+                .worktrees => drawWorktrees(w, app),
+                .submodules => drawSubmodules(w, app),
+            }
+            endListPan(app, .files, w.width);
         }
-        endListPan(app, .files, w.width);
-    }
-    y += files_h;
-    {
-        // Drilled into a branch's sub-commits / files: a plain descriptive title.
-        // Otherwise the title is the tab strip (Local / Remotes / Tags / …).
-        const branches_tabs = [_][]const u8{ "Local", "Remotes", "Tags" };
-        const w = if (app.branch_commits_active) blk: {
-            const t = if (app.branchFilesActive())
-                (if (patch_mod.branchFilesPatchCount(app) > 0)
-                    (std.fmt.bufPrint(&app.branches_title_buf, "[3] Commit files (patch: {d}) (esc back)", .{patch_mod.branchFilesPatchCount(app)}) catch "[3] Commit files (esc back)")
+        y += files_h;
+        {
+            // Drilled into a branch's sub-commits / files: a plain descriptive title.
+            // Otherwise the title is the tab strip (Local / Remotes / Tags / …).
+            const branches_tabs = [_][]const u8{ "Local", "Remotes", "Tags" };
+            const w = if (app.branch_commits_active) blk: {
+                const t = if (app.branchFilesActive())
+                    (if (patch_mod.branchFilesPatchCount(app) > 0)
+                        (std.fmt.bufPrint(&app.branches_title_buf, "[3] Commit files (patch: {d}) (esc back)", .{patch_mod.branchFilesPatchCount(app)}) catch "[3] Commit files (esc back)")
+                    else
+                        "[3] Commit files  (space: add to patch) (esc back)")
                 else
-                    "[3] Commit files  (space: add to patch) (esc back)")
-            else
-                (std.fmt.bufPrint(&app.branches_title_buf, "[3] Commits ({s}) (esc back)", .{app.branch_commits_ref}) catch "[3] Commits (esc back)");
-            break :blk panel(root, 0, y, side_w, branches_h, t, app.focus == .branches, listScrollInfo(app, .branches));
-        } else if (app.remoteDrillActive()) blk: {
-            // Drilled into a remote's branches.
-            const t = std.fmt.bufPrint(&app.branches_title_buf, "[3] {s} (esc back)", .{app.remote_drill.?}) catch "[3] Remote (esc back)";
-            break :blk panel(root, 0, y, side_w, branches_h, t, app.focus == .branches, listScrollInfo(app, .branches));
-        } else tabbedPanel(root, 0, y, side_w, branches_h, 3, &branches_tabs, @intFromEnum(app.branches_tab), "", app.focus == .branches, listScrollInfo(app, .branches));
-        beginListPan(app, .branches);
-        drawBranches(w, app);
-        endListPan(app, .branches, w.width);
-    }
-    y += branches_h;
-    {
-        const commits_tabs = [_][]const u8{ "Commits", "Reflog" };
-        const w = if (app.mode == .rebase_plan) blk: {
-            break :blk panel(root, 0, y, side_w, commits_h, "[4] Interactive rebase (enter run, esc cancel)", app.focus == .commits, listScrollInfo(app, .commits));
-        } else if (app.commitsFilesActive()) blk: {
-            const t = if (patch_mod.commitFilesPatchCount(app) > 0)
-                (std.fmt.bufPrint(&app.commits_title_buf, "[4] Commit files (patch: {d}) (esc back)", .{patch_mod.commitFilesPatchCount(app)}) catch "[4] Commit files (esc back)")
-            else
-                "[4] Commit files  (space: add to patch) (esc back)";
-            break :blk panel(root, 0, y, side_w, commits_h, t, app.focus == .commits, listScrollInfo(app, .commits));
-        } else blk: {
-            // Show an active commit-log filter (Commits tab only) after the tabs.
-            var sbuf: [128]u8 = undefined;
-            const suffix = if (app.commits_tab == .commits)
-                (if (app.commitFilterLabel(&app.commit_filter_label_buf)) |label| (std.fmt.bufPrint(&sbuf, "({s})", .{label}) catch label) else "")
-            else
-                "";
-            break :blk tabbedPanel(root, 0, y, side_w, commits_h, 4, &commits_tabs, @intFromEnum(app.commits_tab), suffix, app.focus == .commits, listScrollInfo(app, .commits));
-        };
-        beginListPan(app, .commits);
-        drawCommits(w, app);
-        endListPan(app, .commits, w.width);
-    }
-    y += commits_h;
-    {
-        const w = panel(root, 0, y, side_w, stash_h, "[5] Stash", app.focus == .stash, listScrollInfo(app, .stash));
-        beginListPan(app, .stash);
-        drawStash(w, app);
-        endListPan(app, .stash, w.width);
+                    (std.fmt.bufPrint(&app.branches_title_buf, "[3] Commits ({s}) (esc back)", .{app.branch_commits_ref}) catch "[3] Commits (esc back)");
+                break :blk panel(root, 0, y, side_w, branches_h, t, app.focus == .branches, listScrollInfo(app, .branches));
+            } else if (app.remoteDrillActive()) blk: {
+                // Drilled into a remote's branches.
+                const t = std.fmt.bufPrint(&app.branches_title_buf, "[3] {s} (esc back)", .{app.remote_drill.?}) catch "[3] Remote (esc back)";
+                break :blk panel(root, 0, y, side_w, branches_h, t, app.focus == .branches, listScrollInfo(app, .branches));
+            } else tabbedPanel(root, 0, y, side_w, branches_h, 3, &branches_tabs, @intFromEnum(app.branches_tab), "", app.focus == .branches, listScrollInfo(app, .branches));
+            beginListPan(app, .branches);
+            drawBranches(w, app);
+            endListPan(app, .branches, w.width);
+        }
+        y += branches_h;
+        {
+            const commits_tabs = [_][]const u8{ "Commits", "Reflog" };
+            const w = if (app.mode == .rebase_plan) blk: {
+                break :blk panel(root, 0, y, side_w, commits_h, "[4] Interactive rebase (enter run, esc cancel)", app.focus == .commits, listScrollInfo(app, .commits));
+            } else if (app.commitsFilesActive()) blk: {
+                const t = if (patch_mod.commitFilesPatchCount(app) > 0)
+                    (std.fmt.bufPrint(&app.commits_title_buf, "[4] Commit files (patch: {d}) (esc back)", .{patch_mod.commitFilesPatchCount(app)}) catch "[4] Commit files (esc back)")
+                else
+                    "[4] Commit files  (space: add to patch) (esc back)";
+                break :blk panel(root, 0, y, side_w, commits_h, t, app.focus == .commits, listScrollInfo(app, .commits));
+            } else blk: {
+                // Show an active commit-log filter (Commits tab only) after the tabs.
+                var sbuf: [128]u8 = undefined;
+                const suffix = if (app.commits_tab == .commits)
+                    (if (app.commitFilterLabel(&app.commit_filter_label_buf)) |label| (std.fmt.bufPrint(&sbuf, "({s})", .{label}) catch label) else "")
+                else
+                    "";
+                break :blk tabbedPanel(root, 0, y, side_w, commits_h, 4, &commits_tabs, @intFromEnum(app.commits_tab), suffix, app.focus == .commits, listScrollInfo(app, .commits));
+            };
+            beginListPan(app, .commits);
+            drawCommits(w, app);
+            endListPan(app, .commits, w.width);
+        }
+        y += commits_h;
+        {
+            const w = panel(root, 0, y, side_w, stash_h, "[5] Stash", app.focus == .stash, listScrollInfo(app, .stash));
+            beginListPan(app, .stash);
+            drawStash(w, app);
+            endListPan(app, .stash, w.width);
+        }
     }
 
     const main_title = if (app.staging_patch_mode)
@@ -1094,8 +1098,9 @@ const help_lines = [_][]const u8{
     "  H / L          scroll the focused panel left / right (long rows)",
     "  [ / ]          switch panel tabs / staging side",
     "  enter / esc    inspect in main panel / go back",
+    "  z              maximize the Diff panel to full screen (z or esc to exit)",
     "  @ / ?          command log / this help",
-    "  z              undo the last operation (reflog reset)",
+    "  ctrl+z         undo the last operation (reflog reset)",
     "  ctrl+o         copy selected hash / branch / tag to the clipboard",
     "  o              open the selected commit / branch on its remote host",
     "  W              open the diffing menu (compare/reverse against a ref)",
@@ -2688,14 +2693,16 @@ const FooterCtx = struct {
     conflict: bool = false,
     /// The Diff panel is showing a working-tree file (so `e` can edit it).
     main_file: bool = false,
+    /// The Diff/main panel is maximised to full screen.
+    fullscreen: bool = false,
 };
 
 /// Keybinding hints for the current stage. A global suffix is appended since
 /// those keys apply everywhere — except in the Branches list, where `R` renames
 /// rather than refreshes, so that footer uses a suffix without "R refresh".
 fn footerHints(c: FooterCtx) []const u8 {
-    const global = "  @ log  ? help  z undo  R refresh  q quit";
-    const global_branches = "  @ log  ? help  z undo  q quit";
+    const global = "  @ log  ? help  ^z undo  R refresh  q quit";
+    const global_branches = "  @ log  ? help  ^z undo  q quit";
     if (c.rebase_plan) {
         return "j/k move  p pick  d drop  s squash  f fixup  e edit  ^j/^k reorder  enter run  esc cancel";
     }
@@ -2751,10 +2758,15 @@ fn footerHints(c: FooterCtx) []const u8 {
         else
             "enter files  space checkout  n/N branch/move  T tag  g reset  t revert  c/v/^r copy/paste/clear  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  G pr  ^l graph  W diff  / filter  b bisect  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  r rename  enter view" ++ global,
-        .main => if (c.main_file)
-            "j/k scroll  H/L pan  e edit  PgUp/PgDn page  drag select  ^o copy all  esc back" ++ global
+        .main => if (c.fullscreen)
+            (if (c.main_file)
+                "j/k scroll  H/L pan  e edit  PgUp/PgDn page  drag select  ^o copy all  z exit full  esc back" ++ global
+            else
+                "j/k scroll  H/L pan  PgUp/PgDn page  drag select  ^o copy all  z exit full  esc back" ++ global)
+        else if (c.main_file)
+            "j/k scroll  H/L pan  e edit  PgUp/PgDn page  drag select  ^o copy all  z full  esc back" ++ global
         else
-            "j/k scroll  H/L pan  PgUp/PgDn page  drag select  ^o copy all  esc back" ++ global,
+            "j/k scroll  H/L pan  PgUp/PgDn page  drag select  ^o copy all  z full  esc back" ++ global,
     };
 }
 
@@ -2776,6 +2788,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
         // `e` edits the file when the Diff panel shows a working-tree file.
         .main_file = app.focus == .main and !app.staging_active and
             app.contentFocus() == .files and app.selectedFile() != null,
+        .fullscreen = app.diff_fullscreen,
     });
 }
 
@@ -3322,6 +3335,10 @@ test "footer hints have no key contradictions per stage" {
     try std.testing.expect(has(footerHints(.{ .focus = .commits, .commits_files = true }), "e edit"));
     try std.testing.expect(has(footerHints(.{ .focus = .main, .main_file = true }), "e edit"));
     try std.testing.expect(!has(footerHints(.{ .focus = .main }), "e edit"));
+
+    // The Diff panel advertises the fullscreen toggle, reflecting its state.
+    try std.testing.expect(has(footerHints(.{ .focus = .main }), "z full"));
+    try std.testing.expect(has(footerHints(.{ .focus = .main, .fullscreen = true }), "z exit full"));
 
     // Conflict state (Files panel): advertises the resolve/continue keys, and
     // must NOT promise "esc back" — the panel is top-level during a conflict,

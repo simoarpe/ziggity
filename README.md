@@ -207,7 +207,7 @@ the section for the panel you're on). Press `q` to quit.
 - **Non-blocking fetch/pull/push** (`f`/`p`/`P`) with an in-status indicator.
 - **In-app credential entry:** on an HTTPS auth failure, a username + masked
   password/token prompt feeds git for the session (no external helper needed).
-- Safe undo of the last operation (`z`, reflog hard-reset after confirmation).
+- Safe undo of the last operation (`ctrl+z`, reflog hard-reset after confirmation).
 - Find the fixup base for a staged change and make a `fixup!` (`ctrl+f`, via
   blame).
 - Copy a hash/branch/tag to the clipboard (`ctrl+o`, OSC 52); open a commit/branch
@@ -227,6 +227,7 @@ Press **`?`** in the app for the full, always-current overlay. The essentials:
 | `h` `l` / arrows | Move focus between side panels |
 | `j` `k` / arrows | Move selection |
 | `tab` | Focus the Diff panel (and back) |
+| `z` | Maximize the Diff panel to full screen (`z`/`esc` to exit) |
 | `[` `]` | Switch the focused panel's tabs (or staging side) |
 | `enter` / `esc` | Inspect in the main panel / step back |
 | `space` | Stage file · checkout branch · apply stash (by focus) |
@@ -243,7 +244,7 @@ Press **`?`** in the app for the full, always-current overlay. The essentials:
 - `R`: refresh
 - `?`: keybindings help overlay (`j`/`k` to scroll), opened to the section for the
   current panel
-- `z`: undo the last operation (reflog reset, after confirmation)
+- `ctrl+z`: undo the last operation (reflog reset, after confirmation)
 - `@`: command log (recent git commands ziggity ran)
 - `ctrl+o`: copy the selected hash / branch / tag to the system clipboard
 - `o`: open the selected commit or branch on its remote host
@@ -258,6 +259,8 @@ Press **`?`** in the app for the full, always-current overlay. The essentials:
 - `j`/`k` or arrows: move selection · `h`/`l` or arrows: cycle side panels
 - `H`/`L`: scroll the focused panel left/right (diff, or a list wider than the panel)
 - `tab`: focus the Diff panel from any side panel (press again to return)
+- `z`: maximize the Diff panel to full screen — the side panels hide and the diff
+  fills the terminal; press `z` again or `esc` to restore the normal layout
 - `1`–`5`: focus status / files / branches / commits / stash
 - `[`/`]`: switch panel tabs (Files/Worktrees/Submodules · Local/Remotes/Tags ·
   Commits/Reflog) or the staging unstaged/staged side
@@ -390,6 +393,7 @@ key.range_select = v
 key.paste_commits = V
 key.select_branch_commits = *
 key.toggle_tree = `
+key.toggle_fullscreen = z
 key.conflict_menu = m
 key.command_log = @
 
@@ -464,7 +468,7 @@ and resume when you quit them; GUI editors (VS Code, Sublime, Zed, …) just
 
 The lazygit-parity feature roadmap is **complete**. Known smaller gaps:
 
-- **Redo** — undo (`z`) is implemented; redoing an undo is not.
+- **Redo** — undo (`ctrl+z`) is implemented; redoing an undo is not.
 - **Move a custom patch to a *different* commit** — only apply / remove-from-commit
   are implemented.
 - **Editing the live rebase todo *mid-rebase*** — ziggity composes the whole plan

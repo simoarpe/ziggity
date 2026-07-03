@@ -14,6 +14,7 @@ pub const Action = enum {
     scroll_left,
     scroll_right,
     toggle_main,
+    toggle_fullscreen,
     toggle_staging_split,
     select,
     stage_all,
@@ -241,6 +242,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     // In the Commits panel, `/` filters the log instead of the file list.
     if (focus == .commits and keymap.file_filter.matches(key)) return .start_commit_filter;
 
+    if (keymap.toggle_fullscreen.matches(key)) return .toggle_fullscreen;
     if (keymap.command_log.matches(key)) return .command_log;
     if (keymap.help.matches(key)) return .help;
     if (keymap.undo.matches(key)) return .undo;
