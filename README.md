@@ -205,7 +205,8 @@ the section for the panel you're on). Press `q` to quit.
   drop/squash/fixup/edit/move/revert or copy commits, delete branches/tags, drop
   stashes, toggle commit files into a patch, or discard files from a commit.
 - Diffing mode (`W`): mark a commit/branch, select another, see `git diff` between
-  the two refs in the main panel (reversible).
+  the two refs in the main panel. Re-open the menu to reverse the direction (swap
+  which ref is the diff's "from") or exit.
 - Stash menu (`s`): stash all / +untracked / staged-only / just the selected file;
   apply / pop / drop / rename (`r`) on the Stash panel.
 
@@ -263,7 +264,8 @@ Press **`?`** in the app for the full, always-current overlay. The essentials:
 - `@`: command log (recent git commands ziggity ran)
 - `ctrl+o`: copy the selected hash / branch / tag to the system clipboard
 - `o`: open the selected commit or branch on its remote host
-- `W`: diffing mode — mark a ref, then select another to diff (esc exits)
+- `W`: diffing mode — mark a ref, then select another to diff; re-open the menu to
+  reverse the direction or exit (esc also exits)
 - mouse: click a panel to focus; wheel to navigate/scroll
 - `/`: filter files by path live; enter accepts; esc clears
 - `` ` ``: toggle the directory-tree view — Files panel **and** a commit's /
