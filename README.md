@@ -154,6 +154,9 @@ the section for the panel you're on). Press `q` to quit.
 - Per-commit: reset (`g`, soft/mixed/hard), revert (`t`), checkout (`space`,
   detached), branch from it (`n`), move commits to a new branch (`N`), tag (`T`),
   change author (`a`), and a copy-attribute menu (`y`: hash/subject/author).
+- GPG signatures: a signed commit's diff shows git's verification block
+  (`--show-signature`), and `x` verifies the selected commit's signature on
+  demand (result in a dialog) — no per-row cost.
 - A navigable changed-file list per commit (`enter`); `d` there discards a file's
   changes from that commit (rebase + amend).
 - Commit graph viewer (`ctrl+l`): the real `git log --graph` DAG in git's colours,
@@ -291,6 +294,7 @@ Press **`?`** in the app for the full, always-current overlay. The essentials:
 - `space` (Remotes/Tags): check out the remote branch or tag
 - `n`/`P`/`g`/`d` (Tags): new tag / push to a remote / reset onto it / delete
 - `g` / `t` (Commits): reset menu / revert
+- `x` (Commits): verify the selected commit's GPG signature (result in a dialog)
 - `space`/`n`/`N` (Commits/Reflog): checkout (detached) / branch from it / move
   commits to a new branch
 - `T` / `a` (Commits): tag the commit / change its author

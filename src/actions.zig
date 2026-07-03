@@ -62,6 +62,7 @@ pub const Action = enum {
     set_upstream,
     reset_commit,
     revert_commit,
+    verify_commit,
     rebase_drop,
     rebase_squash,
     rebase_fixup,
@@ -308,6 +309,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
         .commits => {
             if (keymap.reset.matches(key)) return .reset_commit;
             if (keymap.revert.matches(key)) return .revert_commit;
+            if (keymap.verify_commit.matches(key)) return .verify_commit;
             if (keymap.commit_drop.matches(key)) return .rebase_drop;
             if (keymap.commit_squash.matches(key)) return .rebase_squash;
             if (keymap.commit_edit.matches(key)) return .rebase_edit;

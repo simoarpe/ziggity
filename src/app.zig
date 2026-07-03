@@ -2916,6 +2916,7 @@ pub const App = struct {
             .set_upstream => try branches_mod.setUpstreamToSelected(self),
             .reset_commit => try commitops_mod.startCommitResetMenu(self),
             .revert_commit => try commitops_mod.revertSelectedCommit(self),
+            .verify_commit => try self.verifySelectedCommit(),
             // In a commit's file list `d` discards the file(s) from the commit;
             // on the commit list itself it drops the commit(s).
             .rebase_drop => if (self.commitsFilesActive())
@@ -7073,7 +7074,10 @@ pub const App = struct {
             .commit => |hash| {
                 empty_msg = "Could not load commit.\n";
                 try sections.append(page_alloc, .{
-                    .argv = try dupArgv(&.{ "show", "--no-ext-diff", "--color=always", "--stat", "--patch", ctx_arg, hash }),
+                    // `--show-signature` prepends git's GPG verification block for
+                    // a signed commit (nothing extra for unsigned ones). Runs in
+                    // this off-thread preview worker, so it never blocks the UI.
+                    .argv = try dupArgv(&.{ "show", "--no-ext-diff", "--color=always", "--show-signature", "--stat", "--patch", ctx_arg, hash }),
                 });
             },
             .commit_range => |r| {
@@ -7290,6 +7294,27 @@ pub const App = struct {
     /// Paint the operation dialog's "running" frame for a slow op before it
     /// blocks the loop. `command` is shown verbatim (e.g. "git rebase main").
     /// Fast ops skip this; their command is recovered from the log on finish.
+    /// `x` on a commit: check its GPG signature on demand (no per-row cost) and
+    /// show git's verification output in the operation dialog. Runs a quick
+    /// `git verify-commit` behind a "Running…" frame; the result is the gpg
+    /// block for a signed commit, or "no signature" for an unsigned one.
+    fn verifySelectedCommit(self: *App) !void {
+        const commit = self.selectedCommit() orelse {
+            try self.setMessage("no commit selected", .{});
+            return;
+        };
+        try self.beginOpFmt("git verify-commit {s}", .{commit.short_hash});
+        var result = try self.git.verifyCommit(commit.hash);
+        defer result.deinit(self.allocator);
+        // gpg writes the verification to stderr; fall back to stdout if empty.
+        const out = if (result.stderr.len > 0) result.stderr else result.stdout;
+        if (result.ok()) {
+            try self.finishOp(true, "signature verified", out);
+        } else {
+            try self.finishOp(false, "signature check failed", out);
+        }
+    }
+
     fn beginOp(self: *App, command: []const u8) !void {
         self.allocator.free(self.op_command);
         self.op_command = try self.allocator.dupe(u8, command);

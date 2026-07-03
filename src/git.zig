@@ -1177,6 +1177,13 @@ pub const Git = struct {
         return self.exec(&.{ "revert", "--no-edit", hash });
     }
 
+    /// Verify a commit's GPG signature. gpg writes its human-readable result
+    /// (Good/Bad signature, key, signer) to stderr; exit is non-zero for a bad
+    /// or missing signature. The caller shows the output in a dialog.
+    pub fn verifyCommit(self: *Git, hash: []const u8) !ExecResult {
+        return self.exec(&.{ "verify-commit", "-v", hash });
+    }
+
     /// Revert several commits in one `git revert --no-edit <hashes...>`. The
     /// hashes are applied in the order given (newest-first).
     pub fn revertCommits(self: *Git, hashes: []const []const u8) !ExecResult {

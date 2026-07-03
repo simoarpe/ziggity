@@ -1184,6 +1184,7 @@ const help_lines = [_][]const u8{
     "  a              change the commit's author (reset to you, or set one)",
     "  T              create a tag at the selected commit (name, then message)",
     "  g / t          reset menu / revert",
+    "  x              verify the commit's GPG signature (result in a dialog)",
     "  c / V          copy commit to clipboard / paste (cherry-pick) onto HEAD",
     "  ctrl+r         clear the cherry-pick copy selection",
     "  y              copy menu: commit hash / subject / author",
@@ -2804,7 +2805,7 @@ fn footerHints(c: FooterCtx) []const u8 {
         .commits => if (c.reflog)
             "space checkout  g reset  n new-branch  c/v/^r copy/paste/clear  y copy  o browser  W diff  [/] tabs" ++ global
         else
-            "enter files  space checkout  n/N branch/move  T tag  g reset  t revert  c/v/^r copy/paste/clear  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  G pr  ^l graph  W diff  / filter  b bisect  ^j/^k move" ++ global,
+            "enter files  space checkout  n/N branch/move  T tag  g reset  t revert  x verify-sig  c/v/^r copy/paste/clear  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  G pr  ^l graph  W diff  / filter  b bisect  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  r rename  enter view" ++ global,
         .main => if (c.fullscreen)
             (if (c.main_file)
