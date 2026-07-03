@@ -104,8 +104,9 @@ the section for the panel you're on). Press `q` to quit.
   beneath it; in the Files panel `space` stages the whole folder.
 - Live fuzzy path filtering (smart-case subsequence) with recent-filter recall,
   plus a status filter (staged / unstaged / tracked / untracked).
-- Discard a file via a menu (all / unstaged only), or discard everything (`D`,
-  confirmed). Add to `.gitignore` (`i`), copy a path (`y`).
+- Discard a file — or a whole folder in tree view (`d` on a directory) — via a
+  menu (all / unstaged only), or discard everything (`D`, confirmed). Add to
+  `.gitignore` (`i`), copy a path (`y`).
 - Scoped periodic auto-refresh for external changes, plus a full refresh when
   the terminal regains focus.
 

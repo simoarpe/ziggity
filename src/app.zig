@@ -3707,6 +3707,30 @@ pub const App = struct {
         }
     }
 
+    /// The working-tree directory a discard would act on: the selected tree row
+    /// when the Files-panel Files tab is in tree view and a directory is under
+    /// the cursor (the `/` root has an empty path — everything). Else null.
+    fn selectedDiscardDir(self: *const App) ?[]const u8 {
+        if (self.focus != .files or self.files_tab != .files or !self.tree_view) return null;
+        const row = self.treeSelectedRow() orelse return null;
+        if (!row.is_dir) return null;
+        return row.path;
+    }
+
+    /// Collect the (unfiltered-out, non-conflicted) working-tree files beneath
+    /// `dir` for a discard. `unstaged_only` keeps only files with unstaged
+    /// changes (the "unstaged only" variant); otherwise every changed file
+    /// under the directory is included. Borrows strings from self.data.files.
+    fn collectDirFiles(self: *const App, dir: []const u8, unstaged_only: bool, list: *std.ArrayList(model.FileStatus)) !void {
+        for (self.data.files) |file| {
+            if (!self.fileMatchesFilter(file)) continue;
+            if (!filetree.underDir(file.path, dir)) continue;
+            if (file.conflict) continue; // resolve conflicts individually
+            if (unstaged_only and !file.has_unstaged) continue;
+            try list.append(self.allocator, file);
+        }
+    }
+
     /// Capture the currently-selected tree row's path (owned) so the cursor can
     /// be restored after a rebuild that replaces the underlying file data.
     fn captureTreePath(self: *App) !?[]u8 {
@@ -5943,6 +5967,21 @@ pub const App = struct {
     }
 
     fn startDiscardMenu(self: *App) !void {
+        // A directory row (tree view): discard every changed file beneath it.
+        // Offer both variants since a folder usually mixes staged and unstaged.
+        if (self.selectedDiscardDir()) |dir| {
+            var files: std.ArrayList(model.FileStatus) = .empty;
+            defer files.deinit(self.allocator);
+            try self.collectDirFiles(dir, false, &files);
+            if (files.items.len == 0) {
+                try self.setMessage("no changes to discard under {s}/", .{dir});
+                return;
+            }
+            self.mode = .menu;
+            self.active_menu = .{ .title = "Discard changes in folder", .items = &discard_menu_staged_and_unstaged, .index = 0 };
+            try self.setMessage("discard changes under {s}/", .{dir});
+            return;
+        }
         const file = self.selectedFile() orelse {
             try self.setMessage("no file selected", .{});
             return;
@@ -6082,6 +6121,18 @@ pub const App = struct {
                     self.clearRange();
                     return self.runMutationFiles(res, "discarded {d} file(s)", .{n});
                 }
+                if (self.selectedDiscardDir()) |dir| {
+                    var files: std.ArrayList(model.FileStatus) = .empty;
+                    defer files.deinit(self.allocator);
+                    try self.collectDirFiles(dir, false, &files);
+                    if (files.items.len == 0) {
+                        try self.setMessage("no changes to discard under {s}/", .{dir});
+                        return;
+                    }
+                    const n = files.items.len;
+                    const res = try self.git.discardFiles(files.items);
+                    return self.runMutationFiles(res, "discarded {d} file(s) under {s}/", .{ n, dir });
+                }
                 const file = self.selectedFile() orelse {
                     try self.setMessage("no file selected", .{});
                     return;
@@ -6101,6 +6152,18 @@ pub const App = struct {
                     const res = try self.git.discardUnstagedFiles(files.items);
                     self.clearRange();
                     return self.runMutationFiles(res, "discarded unstaged changes in {d} file(s)", .{n});
+                }
+                if (self.selectedDiscardDir()) |dir| {
+                    var files: std.ArrayList(model.FileStatus) = .empty;
+                    defer files.deinit(self.allocator);
+                    try self.collectDirFiles(dir, true, &files);
+                    if (files.items.len == 0) {
+                        try self.setMessage("no unstaged changes under {s}/", .{dir});
+                        return;
+                    }
+                    const n = files.items.len;
+                    const res = try self.git.discardUnstagedFiles(files.items);
+                    return self.runMutationFiles(res, "discarded unstaged changes in {d} file(s) under {s}/", .{ n, dir });
                 }
                 const file = self.selectedFile() orelse {
                     try self.setMessage("no file selected", .{});
@@ -10632,4 +10695,39 @@ test "new branch prompt opens on the local branches tab" {
     try std.testing.expectEqual(TextPromptKind.new_branch, app.text_prompt_kind.?);
     try std.testing.expectEqual(model.Focus.branches, app.focus);
     try std.testing.expectEqual(BranchesTab.local, app.branches_tab);
+}
+
+test "collectDirFiles scopes a folder discard to files under it" {
+    const allocator = std.testing.allocator;
+    var files = [_]model.FileStatus{
+        .{ .path = @constCast("sub/a.txt"), .short_status = .{ ' ', 'M' }, .has_staged = false, .has_unstaged = true, .tracked = true, .added = false, .deleted = false, .conflict = false },
+        .{ .path = @constCast("sub/b.txt"), .short_status = .{ 'M', ' ' }, .has_staged = true, .has_unstaged = false, .tracked = true, .added = false, .deleted = false, .conflict = false },
+        .{ .path = @constCast("sub/c.txt"), .short_status = .{ 'U', 'U' }, .has_staged = true, .has_unstaged = true, .tracked = true, .added = false, .deleted = false, .conflict = true },
+        .{ .path = @constCast("subterranean.txt"), .short_status = .{ ' ', 'M' }, .has_staged = false, .has_unstaged = true, .tracked = true, .added = false, .deleted = false, .conflict = false },
+        .{ .path = @constCast("top.txt"), .short_status = .{ ' ', 'M' }, .has_staged = false, .has_unstaged = true, .tracked = true, .added = false, .deleted = false, .conflict = false },
+    };
+    var app = try testApp(allocator, &files);
+    defer deinitTestApp(&app);
+
+    // "all": every changed file directly under sub/ — not the conflicted one
+    // (resolved individually), not the sibling "subterranean.txt", not top.txt.
+    var all: std.ArrayList(model.FileStatus) = .empty;
+    defer all.deinit(allocator);
+    try app.collectDirFiles("sub", false, &all);
+    try std.testing.expectEqual(@as(usize, 2), all.items.len);
+    try std.testing.expectEqualStrings("sub/a.txt", all.items[0].path);
+    try std.testing.expectEqualStrings("sub/b.txt", all.items[1].path);
+
+    // "unstaged only": drops sub/b.txt (staged only).
+    var unstaged: std.ArrayList(model.FileStatus) = .empty;
+    defer unstaged.deinit(allocator);
+    try app.collectDirFiles("sub", true, &unstaged);
+    try std.testing.expectEqual(@as(usize, 1), unstaged.items.len);
+    try std.testing.expectEqualStrings("sub/a.txt", unstaged.items[0].path);
+
+    // The root ("") covers everything changed (minus the conflict).
+    var root: std.ArrayList(model.FileStatus) = .empty;
+    defer root.deinit(allocator);
+    try app.collectDirFiles("", false, &root);
+    try std.testing.expectEqual(@as(usize, 4), root.items.len);
 }
