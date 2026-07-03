@@ -34,6 +34,24 @@ pub fn startCommitPrompt(app: *App, no_verify: bool) !void {
         try app.commit_buffer.appendSlice(app.allocator, app.commit_preserved_subject);
         try app.commit_body_buffer.appendSlice(app.allocator, app.commit_preserved_body);
     }
+    // With no draft to restore, let the repo's prepare-commit-msg hook seed the
+    // fields (e.g. a branch-derived ticket prefix) as an interactive commit
+    // would — see git.prepareCommitMsg. Skipped when the message is preserved so
+    // the hook never clobbers text the user was in the middle of writing.
+    var seeded = false;
+    if (!restored and app.config.prepare_commit_msg_hook and app.git.git_dir.len > 0) {
+        if (app.git.prepareCommitMsg() catch null) |seed| {
+            defer app.allocator.free(seed);
+            if (seed.len > 0) {
+                const nl = std.mem.indexOfScalar(u8, seed, '\n');
+                const subject = if (nl) |i| seed[0..i] else seed;
+                const body = if (nl) |i| std.mem.trimStart(u8, seed[i + 1 ..], "\n") else "";
+                try app.commit_buffer.appendSlice(app.allocator, subject);
+                try app.commit_body_buffer.appendSlice(app.allocator, body);
+                seeded = subject.len > 0 or body.len > 0;
+            }
+        }
+    }
     app.commit_cursor = app.commit_buffer.items.len;
     app.commit_body_cursor = app.commit_body_buffer.items.len;
     app.commit_scroll = 0;
@@ -41,6 +59,8 @@ pub fn startCommitPrompt(app: *App, no_verify: bool) !void {
     app.commit_body_scroll_y = 0;
     if (restored) {
         try app.setMessage("enter commit message (restored draft)", .{});
+    } else if (seeded) {
+        try app.setMessage("enter commit message (prefilled by prepare-commit-msg)", .{});
     } else {
         try app.setMessage("enter commit message", .{});
     }

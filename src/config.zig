@@ -237,6 +237,10 @@ pub const Config = struct {
     /// Colour the Conventional-Commits prefix (`type(scope)!:`) in the commit
     /// list — type in accent, scope muted, breaking `!` in the removed colour.
     highlight_conventional_commits: bool = true,
+    /// Run the repo's `prepare-commit-msg` hook when the commit dialog opens and
+    /// seed the message fields from its output (e.g. a branch-derived ticket
+    /// prefix). Matches interactive git; disable to skip the hook at open time.
+    prepare_commit_msg_hook: bool = true,
     /// Accordion mode: when true, the focused side-panel list grows to
     /// `expanded_side_panel_weight` while the others shrink. Default off.
     expand_focused_side_panel: bool = false,
@@ -327,6 +331,10 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "highlight_conventional_commits")) {
             if (parseBool(value)) |on| self.highlight_conventional_commits = on;
+            return;
+        }
+        if (std.mem.eql(u8, key, "prepare_commit_msg_hook")) {
+            if (parseBool(value)) |on| self.prepare_commit_msg_hook = on;
             return;
         }
         if (std.mem.eql(u8, key, "expand_focused_side_panel")) {
@@ -482,6 +490,15 @@ test "commit_body_guide parses and defaults to 72" {
     var off: Config = .{};
     off.applyBytes("commit_body_guide = 0");
     try std.testing.expectEqual(@as(u16, 0), off.commit_body_guide);
+}
+
+test "prepare_commit_msg_hook parses and defaults on" {
+    const def: Config = .{};
+    try std.testing.expect(def.prepare_commit_msg_hook);
+
+    var cfg: Config = .{};
+    cfg.applyBytes("prepare_commit_msg_hook = false");
+    try std.testing.expect(!cfg.prepare_commit_msg_hook);
 }
 
 test "config parser applies theme colors and newer keybindings" {

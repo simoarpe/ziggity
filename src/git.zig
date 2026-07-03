@@ -47,6 +47,21 @@ pub fn isRetryableLockError(text: []const u8) bool {
         std.mem.indexOf(u8, text, "cannot lock ref") != null;
 }
 
+/// Drop git comment lines (those whose first character is `#`) from `raw` and
+/// trim surrounding blank lines — matching git's default `strip` cleanup of a
+/// message that came through the editor. Returns an owned slice.
+fn stripCommentLines(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    var it = std.mem.splitScalar(u8, raw, '\n');
+    while (it.next()) |line| {
+        if (line.len > 0 and line[0] == '#') continue; // full-line comment
+        try out.appendSlice(allocator, line);
+        try out.append(allocator, '\n');
+    }
+    return allocator.dupe(u8, std.mem.trim(u8, out.items, " \t\r\n"));
+}
+
 /// Run a process like `std.process.run`, but retry briefly on a transient git
 /// lock error instead of surfacing it. Returns the last result either way; the
 /// returned stdout/stderr are owned by `allocator`. Used for every git command
@@ -948,6 +963,47 @@ pub const Git = struct {
     pub fn commit(self: *Git, message: []const u8, no_verify: bool) !ExecResult {
         if (no_verify) return self.exec(&.{ "commit", "--no-verify", "-m", message });
         return self.exec(&.{ "commit", "-m", message });
+    }
+
+    /// Run the repo's `prepare-commit-msg` hook (if present) against an empty
+    /// message file the way an interactive commit would — no `source` argument,
+    /// so hooks that guard on an empty `$2` (e.g. a branch-derived ticket prefix)
+    /// fire — and return the resulting message with git comment (`#`) lines
+    /// stripped. Returns null when there is no runnable hook or it declines
+    /// (non-zero exit); the caller owns any returned slice.
+    ///
+    /// Uses git's default hook directory (`<git-dir>/hooks`); a `core.hooksPath`
+    /// relocation is not consulted, keeping the common no-hook case to a single
+    /// `access` check with no subprocess spawned.
+    pub fn prepareCommitMsg(self: *Git) !?[]u8 {
+        const hook_path = try std.fmt.allocPrint(self.allocator, "{s}/hooks/prepare-commit-msg", .{self.git_dir});
+        defer self.allocator.free(hook_path);
+        // Cheap gate: no runnable hook -> nothing to do (one syscall, no process).
+        std.Io.Dir.access(.cwd(), self.io, hook_path, .{ .execute = true }) catch return null;
+
+        const msg_path = try std.fmt.allocPrint(self.allocator, "{s}/COMMIT_EDITMSG", .{self.git_dir});
+        defer self.allocator.free(msg_path);
+        // Seed an empty template for the hook to populate, mirroring git's flow.
+        std.Io.Dir.writeFile(.cwd(), self.io, .{ .sub_path = msg_path, .data = "" }) catch return null;
+
+        var argv = [_][]const u8{ hook_path, msg_path };
+        const result = std.process.run(self.allocator, self.io, .{
+            .argv = &argv,
+            .cwd = .{ .path = self.root },
+            .environ_map = self.environ,
+            .stdout_limit = .limited(1 << 20),
+            .stderr_limit = .limited(1 << 20),
+        }) catch return null;
+        self.allocator.free(result.stdout);
+        self.allocator.free(result.stderr);
+        switch (result.term) {
+            .exited => |code| if (code != 0) return null,
+            else => return null,
+        }
+
+        const raw = std.Io.Dir.readFileAlloc(.cwd(), self.io, msg_path, self.allocator, .limited(1 << 20)) catch return null;
+        defer self.allocator.free(raw);
+        return try stripCommentLines(self.allocator, raw);
     }
 
     /// Append `path` to the repo's `.gitignore`, creating it if absent.
@@ -2115,4 +2171,83 @@ test "retryable lock errors are detected, other errors are not" {
     try std.testing.expect(!isRetryableLockError("error: pathspec 'x' did not match any file(s)"));
     try std.testing.expect(!isRetryableLockError("Everything up-to-date"));
     try std.testing.expect(!isRetryableLockError(""));
+}
+
+test "stripCommentLines drops comments and trims surrounding blanks" {
+    const a = std.testing.allocator;
+
+    const kept = try stripCommentLines(a, "PROJ-1: \n# please enter a message\n# with lines\n");
+    defer a.free(kept);
+    try std.testing.expectEqualStrings("PROJ-1:", kept);
+
+    const body = try stripCommentLines(a, "subject line\n\nbody line\n# a comment\n");
+    defer a.free(body);
+    try std.testing.expectEqualStrings("subject line\n\nbody line", body);
+
+    // A `#` only counts as a comment at the very start of the line.
+    const mid = try stripCommentLines(a, "fix issue #42\n");
+    defer a.free(mid);
+    try std.testing.expectEqualStrings("fix issue #42", mid);
+
+    const empty = try stripCommentLines(a, "# all comments\n#\n");
+    defer a.free(empty);
+    try std.testing.expectEqualStrings("", empty);
+}
+
+test "prepareCommitMsg runs a guarded hook and seeds the branch ticket" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    // A minimal env: git and the hook's own `git`/`grep` need PATH; HOME points at
+    // the scratch dir so the test never reads or writes the real git config.
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    // A PATH broad enough to find git/sh/grep on macOS and Linux without reading
+    // the real environment (which needs libc `getenv`).
+    try env.put("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    try env.put("HOME", dir_path);
+    try env.put("GIT_CONFIG_GLOBAL", "/dev/null");
+    try env.put("GIT_CONFIG_SYSTEM", "/dev/null");
+
+    const setup =
+        \\set -e
+        \\git init -q
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git checkout -q -b feature/PROJ-42-thing
+        \\mkdir -p .git/hooks
+        \\cat > .git/hooks/prepare-commit-msg <<'EOF'
+        \\#!/bin/sh
+        \\[ -z "$2" ] || exit 0
+        \\ticket=$(git symbolic-ref --short HEAD | grep -oE '[A-Z]+-[0-9]+')
+        \\printf '%s: %s' "$ticket" "$(cat "$1")" > "$1"
+        \\EOF
+        \\chmod +x .git/hooks/prepare-commit-msg
+    ;
+    var sh = [_][]const u8{ "sh", "-c", setup };
+    const r = try std.process.run(a, tio, .{
+        .argv = &sh,
+        .cwd = .{ .path = dir_path },
+        .environ_map = &env,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+    a.free(r.stdout);
+    a.free(r.stderr);
+    switch (r.term) {
+        .exited => |code| if (code != 0) return error.SetupFailed,
+        else => return error.SetupFailed,
+    }
+
+    var git = try Git.initAt(a, tio, &env, dir_path);
+    defer git.deinit();
+
+    const seed = (try git.prepareCommitMsg()) orelse return error.HookProducedNoSeed;
+    defer a.free(seed);
+    try std.testing.expectEqualStrings("PROJ-42:", seed);
 }

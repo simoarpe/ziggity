@@ -150,7 +150,11 @@ the section for the panel you're on). Press `q` to quit.
   nudges you toward the [50/72 rule](https://dev.to/noelworden/improving-your-commit-message-with-the-50-72-rule-3g79):
   the summary shows a live character count (yellow, turning red once it exceeds
   `commit_summary_limit` — default 50), and the description shows a soft vertical
-  guide at the body-wrap column (`commit_body_guide` — default 72, `0` off).
+  guide at the body-wrap column (`commit_body_guide` — default 72, `0` off). When
+  the editor opens, the repo's `prepare-commit-msg` hook runs (as it would for an
+  interactive commit) and pre-fills the fields — e.g. a branch-derived ticket
+  prefix — editable before you commit (`prepare_commit_msg_hook = true`, disable
+  to skip it).
 - Per-commit: reset (`g`, soft/mixed/hard), revert (`t`), checkout (`space`,
   detached), branch from it (`n`), move commits to a new branch (`N`), tag (`T`),
   change author (`a`), and a copy-attribute menu (`y`: hash/subject/author).
@@ -355,6 +359,11 @@ commit_body_guide = 72
 # Colour the Conventional-Commits prefix (`type(scope)!:`) in the commit list:
 # type in accent, scope muted, breaking `!` in red. Default on.
 highlight_conventional_commits = true
+
+# Run the repo's prepare-commit-msg hook when the commit dialog opens and pre-fill
+# the message from its output (e.g. a branch-derived ticket prefix), matching an
+# interactive commit. Default on; set false to skip the hook at open time.
+prepare_commit_msg_hook = true
 
 # Seconds between idle background working-tree refreshes (git status, run off the
 # UI thread). On a big repo a tight interval makes git status thrash; default 10.
