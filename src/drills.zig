@@ -62,7 +62,7 @@ pub fn reloadCommitFilesAfterRefresh(app: *App) void {
 /// Drill from a branch/tag in the Branches panel into its commits (the
 /// "sub-commits" view): the Branches panel then lists `ref`'s commits.
 pub fn openBranchCommits(app: *App, ref: []const u8) !void {
-    const commits = try app.git.loadCommits(ref, 100);
+    const commits = try app.git.loadCommits(ref, app_mod.commit_load_batch);
     model.deinitCommits(app.allocator, app.branch_commits);
     app.branch_commits = commits;
     app.branch_commit_index = 0;
@@ -134,7 +134,7 @@ pub fn deactivateBranchFiles(app: *App) void {
 /// selection position. If the ref is gone (no commits come back), exit the
 /// whole Branches drill back to the branch list.
 pub fn reloadBranchCommitsAfterRefresh(app: *App) void {
-    const commits = app.git.loadCommits(app.branch_commits_ref, 100) catch null;
+    const commits = app.git.loadCommits(app.branch_commits_ref, app_mod.commit_load_batch) catch null;
     if (commits == null or commits.?.len == 0) {
         if (commits) |c| model.deinitCommits(app.allocator, c);
         deactivateBranchCommits(app); // also drops the files level

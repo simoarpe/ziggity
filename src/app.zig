@@ -953,7 +953,7 @@ fn loadCommitsW(ctx: *RepoLoadCtx) void {
 }
 fn loadReflogW(ctx: *RepoLoadCtx) void {
     var g = ctx.git();
-    ctx.reflog = g.loadReflog(100) catch null;
+    ctx.reflog = g.loadReflog(ctx.commit_limit) catch null;
 }
 fn loadStashW(ctx: *RepoLoadCtx) void {
     var g = ctx.git();
@@ -1101,7 +1101,7 @@ pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process
         } else |_| {}
     }
     if (scopes.contains(.reflog)) {
-        if (wgit.loadReflog(100)) |c| {
+        if (wgit.loadReflog(commit_limit)) |c| {
             d.reflog = c;
             loaded.insert(.reflog);
         } else |_| {}
@@ -4931,20 +4931,30 @@ pub const App = struct {
         return index -| 1;
     }
 
-    /// Incremental commit loading: when the Commits log is scrolled near its
-    /// loaded end and git may have more (the last load returned a full
-    /// `commit_limit` page), request the next batch and reload the commits
-    /// scope. A short page means the whole history is already loaded.
+    /// Incremental history loading: when the Commits panel's list (the log or the
+    /// reflog — both bounded by `commit_limit`) is scrolled near its loaded end
+    /// and git may have more (the last load returned a full page), request the
+    /// next batch and reload that scope. A short page means it's all loaded.
     fn maybeLoadMoreCommits(self: *App) void {
-        if (self.commits_tab != .commits or self.commit_files_active) return;
-        const len = self.data.commits.len;
+        if (self.commit_files_active) return;
+        const len = switch (self.commits_tab) {
+            .commits => self.data.commits.len,
+            .reflog => self.data.reflog.len,
+        };
         if (len == 0 or len != self.commit_limit) return;
         const lv = self.listView(.commits) orelse return;
+        const sel = switch (self.commits_tab) {
+            .commits => self.commit_index,
+            .reflog => self.reflog_index,
+        };
         const threshold: usize = 25;
-        const near = self.commit_index + threshold >= len or lv.scroll + lv.view_h + threshold >= len;
+        const near = sel + threshold >= len or lv.scroll + lv.view_h + threshold >= len;
         if (!near) return;
         self.commit_limit += commit_load_batch;
-        self.refreshViews(ScopeSet.init(.{ .commits = true }));
+        self.refreshViews(ScopeSet.init(switch (self.commits_tab) {
+            .commits => .{ .commits = true },
+            .reflog => .{ .reflog = true },
+        }));
     }
 
     /// The largest `main_scroll` that still shows content: stops at the point
