@@ -144,10 +144,11 @@ the section for the panel you're on). Press `q` to quit.
   `highlight_conventional_commits`), and a Reflog tab for recovery (checkout `space`,
   reset HEAD `g`, branch `n`).
 - Commit (`c`), commit `--no-verify` (`w`), amend (`A`) in a centered editor with
-  a summary line and optional multi-line body (`tab` switches fields). The summary
-  shows a live character count (yellow, turning red once it exceeds
+  a summary line and optional multi-line body (`tab` switches fields). The editor
+  nudges you toward the [50/72 rule](https://dev.to/noelworden/improving-your-commit-message-with-the-50-72-rule-3g79):
+  the summary shows a live character count (yellow, turning red once it exceeds
   `commit_summary_limit` — default 50), and the description shows a soft vertical
-  guide at the git body-wrap column (`commit_body_guide` — default 72, `0` off).
+  guide at the body-wrap column (`commit_body_guide` — default 72, `0` off).
 - Per-commit: reset (`g`, soft/mixed/hard), revert (`t`), checkout (`space`,
   detached), branch from it (`n`), move commits to a new branch (`N`), tag (`T`),
   change author (`a`), and a copy-attribute menu (`y`: hash/subject/author).
