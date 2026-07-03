@@ -7,6 +7,7 @@ const stash_mod = @import("stash.zig");
 const commits_mod = @import("commits.zig");
 const commitops_mod = @import("commitops.zig");
 const rebaseplan_mod = @import("rebaseplan.zig");
+const conflicts_mod = @import("conflicts.zig");
 const fixupbase_mod = @import("fixupbase.zig");
 const commitgraph_mod = @import("commitgraph.zig");
 const config_mod = @import("config.zig");
@@ -36,6 +37,7 @@ pub const Mode = enum {
     operation,
     rebase_plan,
     commit_graph,
+    conflict_resolve,
 };
 
 /// Environment variable names for the credential bridge. When the user has
@@ -1716,6 +1718,14 @@ pub const App = struct {
     // (`stagingLayoutForOpen`); `\` overrides it for that file only.
     staging_split: bool = false,
     staging_other_diff: []u8 = &.{},
+    // Per-conflict merge resolution (`mode == .conflict_resolve`; see
+    // conflicts.zig): the file being resolved, its current content, the parsed
+    // conflict blocks, the selected conflict, and a per-pick undo stack.
+    conflict_path: []u8 = &.{},
+    conflict_content: []u8 = &.{},
+    conflicts: []conflicts_mod.Conflict = &.{},
+    conflict_index: usize = 0,
+    conflict_undo: std.ArrayList([]u8) = .empty,
     main_view_height: u16 = 0,
     /// Panel hit-boxes captured by the renderer for mouse handling.
     panel_rects: [6]PanelRect = undefined,
@@ -2119,6 +2129,8 @@ pub const App = struct {
         if (self.remote_drill) |r| self.allocator.free(r);
         if (self.tag_message_owned) |m| self.allocator.free(m);
         if (self.submodule_url_owned) |u| self.allocator.free(u);
+        conflicts_mod.close(self);
+        self.conflict_undo.deinit(self.allocator);
         self.files_tree.deinit(self.allocator);
         self.commit_tree.deinit(self.allocator);
         self.branch_tree.deinit(self.allocator);
@@ -2464,6 +2476,10 @@ pub const App = struct {
         }
         if (self.mode == .rebase_plan) {
             try rebaseplan_mod.handleKey(self, key);
+            return;
+        }
+        if (self.mode == .conflict_resolve) {
+            try conflicts_mod.handleKey(self, key);
             return;
         }
         if (self.mode == .commit_graph) {
@@ -4658,6 +4674,11 @@ pub const App = struct {
                 if (self.treeSelectedRow()) |row| {
                     if (row.is_dir) return self.toggleTreeCollapse();
                 }
+            }
+            // A conflicted file opens the per-conflict resolution view; a normal
+            // file opens the hunk/line staging view.
+            if (self.selectedFile()) |file| {
+                if (file.conflict) return conflicts_mod.open(self, file.path);
             }
             return staging_mod.openStaging(self);
         }
@@ -7491,7 +7512,7 @@ pub const App = struct {
 
     /// Run a mutation that touched only the working tree (stage/unstage/discard/
     /// resolve) — refreshes just the file list, so it stays snappy on big repos.
-    fn runMutationFiles(self: *App, result: git_mod.ExecResult, comptime success_fmt: []const u8, args: anytype) !void {
+    pub fn runMutationFiles(self: *App, result: git_mod.ExecResult, comptime success_fmt: []const u8, args: anytype) !void {
         return self.runMutationScoped(result, Refresh.files, success_fmt, args);
     }
 

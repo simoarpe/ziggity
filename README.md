@@ -184,8 +184,11 @@ the section for the panel you're on). Press `q` to quit.
   remove it from its source commit, or reset it.
 - `rebase --onto` from a marked base (`B`), and mid-rebase amend (`m`'s menu can
   amend the stopped `edit` commit and continue).
-- Conflict resolution: take ours/theirs on conflicted files, continue/abort (`m`);
-  `MERGING`/`REBASING` shown in the Status panel.
+- Conflict resolution: `enter` on a conflicted file opens a per-conflict
+  resolver with line numbers — `j`/`k` walk between conflicts, `o`/`t`/`b` keep
+  ours/theirs/both for the current one, `u` undoes the last pick, and the file is
+  staged automatically once the last conflict is resolved. `m` still offers the
+  whole-op continue/abort actions; `MERGING`/`REBASING` shown in the Status panel.
 
 </details>
 

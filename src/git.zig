@@ -1177,6 +1177,20 @@ pub const Git = struct {
         return self.exec(&.{ "revert", "--no-edit", hash });
     }
 
+    /// Read a working-tree file (relative to the repo root) into an owned slice.
+    pub fn readWorkingFile(self: *Git, path: []const u8) ![]u8 {
+        const full = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.root, path });
+        defer self.allocator.free(full);
+        return std.Io.Dir.readFileAlloc(.cwd(), self.io, full, self.allocator, .limited(64 * 1024 * 1024));
+    }
+
+    /// Overwrite a working-tree file (relative to the repo root) with `data`.
+    pub fn writeWorkingFile(self: *Git, path: []const u8, data: []const u8) !void {
+        const full = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.root, path });
+        defer self.allocator.free(full);
+        try std.Io.Dir.writeFile(.cwd(), self.io, .{ .sub_path = full, .data = data });
+    }
+
     /// Verify a commit's GPG signature. gpg writes its human-readable result
     /// (Good/Bad signature, key, signer) to stderr; exit is non-zero for a bad
     /// or missing signature. The caller shows the output in a dialog.

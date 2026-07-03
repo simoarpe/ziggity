@@ -8,6 +8,7 @@ const git_mod = @import("git.zig");
 const filetree = @import("filetree.zig");
 const model = @import("model.zig");
 const patch_mod = @import("patch.zig");
+const conflicts_mod = @import("conflicts.zig");
 const rebaseplan_mod = @import("rebaseplan.zig");
 const staging_mod = @import("staging.zig");
 const commitgraph_mod = @import("commitgraph.zig");
@@ -1014,6 +1015,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         .help => drawHelpPopup(root, app),
         .operation => drawOperationPopup(root, app),
         .commit_graph => drawCommitGraphPopup(root, app),
+        .conflict_resolve => drawConflicts(root, app),
         else => {},
     }
 }
@@ -1094,6 +1096,104 @@ fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
     drawScrollbarRange(root, px0 + w - 1, py0 + 1, avail, app.commit_graph_lines, app.commit_graph_scroll, true);
 }
 
+fn drawConflicts(root: vaxis.Window, app: *app_mod.App) void {
+    const st = styles();
+    const w: u16 = root.width -| 4;
+    const h: u16 = root.height -| 2;
+    var title_buf: [256]u8 = undefined;
+    const title = std.fmt.bufPrint(&title_buf, "Resolve conflicts - {s}  ({d}/{d})", .{
+        app.conflict_path,
+        @min(app.conflict_index + 1, app.conflicts.len),
+        app.conflicts.len,
+    }) catch "Resolve conflicts";
+    const win = popup(root, w, h, title, null);
+
+    const footer_row: u16 = win.height -| 1;
+    print(win, footer_row, 0, "j/k conflict  o ours  t theirs  b both  u undo  esc back", st.bottom_accent);
+
+    const avail: usize = footer_row; // content rows above the footer
+    if (avail == 0 or app.conflicts.len == 0) return;
+
+    const content = app.conflict_content;
+    const idx = @min(app.conflict_index, app.conflicts.len - 1);
+    const cur = app.conflicts[idx];
+
+    // Total line count, matching conflicts.zig's line addressing (a trailing
+    // newline does not create an extra empty line).
+    var total: usize = 0;
+    {
+        var p: usize = 0;
+        while (p < content.len) : (total += 1) {
+            const nl = std.mem.indexOfScalarPos(u8, content, p, '\n');
+            p = if (nl) |n| n + 1 else content.len;
+        }
+    }
+    if (total == 0) return;
+
+    // Centre the viewport on the current conflict block.
+    const block_h = cur.end - cur.start + 1;
+    const center = cur.start + block_h / 2;
+    var scroll: usize = if (center > avail / 2) center - avail / 2 else 0;
+    const max_scroll = total -| avail;
+    if (scroll > max_scroll) scroll = max_scroll;
+
+    // Line-number gutter sized to the largest line number.
+    var gutter: u16 = 2;
+    {
+        var v = total;
+        var digits: u16 = 0;
+        while (v > 0) : (v /= 10) digits += 1;
+        gutter = @max(digits, 1) + 1; // number + one padding space
+    }
+
+    const ours_end = cur.ancestor orelse cur.target;
+    var line_no: usize = 0;
+    var p: usize = 0;
+    var row: u16 = 0;
+    while (p < content.len and row < footer_row) : (line_no += 1) {
+        const nl = std.mem.indexOfScalarPos(u8, content, p, '\n');
+        const line_end = if (nl) |n| n else content.len;
+        const next = if (nl) |n| n + 1 else content.len;
+        defer p = next;
+        if (line_no < scroll) continue;
+        var text = content[p..line_end];
+        if (text.len > 0 and text[text.len - 1] == '\r') text = text[0 .. text.len - 1];
+
+        const in_block = line_no >= cur.start and line_no <= cur.end;
+        const is_marker = conflicts_mod.isMarkerLine(text);
+
+        var base = st.normal;
+        if (in_block) {
+            applySel(&base, .active);
+            fillRow(win, row, base);
+        }
+
+        // Right-aligned 1-based line number in the gutter.
+        var num_buf: [16]u8 = undefined;
+        const num = std.fmt.bufPrint(&num_buf, "{d}", .{line_no + 1}) catch "";
+        const num_col: u16 = gutter -| 1 -| @as(u16, @intCast(num.len));
+        print(win, row, num_col, num, if (in_block) base else st.muted);
+
+        var line_style = base;
+        if (is_marker) {
+            line_style.fg = st.warning.fg;
+            line_style.bold = true;
+        } else if (in_block) {
+            // Tint ours green and theirs red within the active block; the diff3
+            // base region keeps the default colour.
+            if (line_no > cur.start and line_no < ours_end) {
+                line_style.fg = st.added.fg;
+            } else if (line_no > cur.target and line_no < cur.end) {
+                line_style.fg = st.removed.fg;
+            }
+        }
+        print(win, row, gutter, text, line_style);
+        row += 1;
+    }
+
+    drawScrollbarRange(root, (root.width - w) / 2 + w - 1, (root.height - h) / 2 + 1, avail, total, scroll, true);
+}
+
 const help_lines = [_][]const u8{
     "Global",
     "  q / ctrl+c     quit",
@@ -1136,7 +1236,9 @@ const help_lines = [_][]const u8{
     "  s              stash menu (all / +untracked / staged / file)",
     "  / / ctrl+b     filter by path / status filter",
     "  `              toggle directory tree",
-    "  enter          open the hunk/line staging view",
+    "  enter          open the hunk/line staging view (per-conflict resolver",
+    "                 on a conflicted file: j/k between conflicts, o/t/b pick",
+    "                 ours/theirs/both, u undo)",
     "  m              merge/rebase actions: continue, amend+continue, abort",
     "  Worktrees tab  space/enter switch into it   n new   o open in editor   d remove",
     "  Submodules tab enter enter it   space update   n add   e edit URL   d remove   b bulk",
