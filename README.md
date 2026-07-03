@@ -138,11 +138,12 @@ the section for the panel you're on). Press `q` to quit.
 <details>
 <summary><b>Commits &amp; history</b></summary>
 
-- Recent commits from `git log`, each row showing the author's initials in a
-  stable per-author colour and a highlighted [Conventional Commits](https://www.conventionalcommits.org/)
-  prefix (type in accent, scope muted, breaking `!` in red;
-  `highlight_conventional_commits`), and a Reflog tab for recovery (checkout `space`,
-  reset HEAD `g`, branch `n`).
+- Recent commits from `git log` (loaded incrementally — the log grows as you
+  scroll toward the end, so it's never capped), each row showing the author's
+  initials in a stable per-author colour and a highlighted
+  [Conventional Commits](https://www.conventionalcommits.org/) prefix (type in
+  accent, scope muted, breaking `!` in red; `highlight_conventional_commits`),
+  and a Reflog tab for recovery (checkout `space`, reset HEAD `g`, branch `n`).
 - Commit (`c`), commit `--no-verify` (`w`), amend (`A`) in a centered editor with
   a summary line and optional multi-line body (`tab` switches fields). The editor
   nudges you toward the [50/72 rule](https://dev.to/noelworden/improving-your-commit-message-with-the-50-72-rule-3g79):

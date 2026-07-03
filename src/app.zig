@@ -316,6 +316,11 @@ const ListView = struct {
 /// leaving a jarring tiny remainder. Key-repeat covers fast traversal.
 pub const horizontal_scroll_step: u16 = 6;
 
+/// The Commits panel loads this many commits initially, then grows by the same
+/// step as the user scrolls toward the end (incremental loading), so the log is
+/// never silently truncated at a fixed cap.
+pub const commit_load_batch: usize = 300;
+
 /// True when a push failed because the remote has diverged and the push needs to
 /// be forced. Matches git's English rejection messages.
 fn pushNeedsForce(output: []const u8) bool {
@@ -887,6 +892,7 @@ const RepoLoadCtx = struct {
     git_dir: []const u8,
     branch_sort: model.BranchSortOrder,
     untracked: git_mod.Git.UntrackedFiles,
+    commit_limit: usize,
 
     status: ?model.StatusSummary = null,
     state: model.RepoState = .clean,
@@ -943,7 +949,7 @@ fn loadSubmodulesW(ctx: *RepoLoadCtx) void {
 }
 fn loadCommitsW(ctx: *RepoLoadCtx) void {
     var g = ctx.git();
-    ctx.commits = g.loadCommits("HEAD", 100) catch null;
+    ctx.commits = g.loadCommits("HEAD", ctx.commit_limit) catch null;
 }
 fn loadReflogW(ctx: *RepoLoadCtx) void {
     var g = ctx.git();
@@ -960,8 +966,8 @@ fn loadStashW(ctx: *RepoLoadCtx) void {
 /// instead of the sum of them all. The result is page-owned; the UI thread
 /// deep-copies it into the gpa (see `App.applyRepoLoad`). `root`/`environ` are
 /// borrowed read-only.
-pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, git_dir: []const u8, branch_sort: model.BranchSortOrder, untracked: git_mod.Git.UntrackedFiles) ?model.RepoData {
-    var ctx = RepoLoadCtx{ .gpa = gpa, .io = io, .environ = environ, .root = root, .git_dir = git_dir, .branch_sort = branch_sort, .untracked = untracked };
+pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, git_dir: []const u8, branch_sort: model.BranchSortOrder, untracked: git_mod.Git.UntrackedFiles, commit_limit: usize) ?model.RepoData {
+    var ctx = RepoLoadCtx{ .gpa = gpa, .io = io, .environ = environ, .root = root, .git_dir = git_dir, .branch_sort = branch_sort, .untracked = untracked, .commit_limit = commit_limit };
 
     // Ordered slowest-first (status/files/commits/branches are the heavy ones on
     // a big repo) so that when the concurrency limit is reached, it's the cheap
@@ -1033,7 +1039,7 @@ pub const ScopedData = struct {
 /// Worker-thread entry: load just the requested views on a throwaway
 /// page-allocator `Git`. `filters` are applied to the commits load so an active
 /// Commits filter is preserved. Borrows `root`/`environ`/filter strings.
-pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, git_dir: []const u8, scopes: ScopeSet, filters: LogFilters, branch_sort: model.BranchSortOrder, untracked: git_mod.Git.UntrackedFiles) ScopedData {
+pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, git_dir: []const u8, scopes: ScopeSet, filters: LogFilters, branch_sort: model.BranchSortOrder, untracked: git_mod.Git.UntrackedFiles, commit_limit: usize) ScopedData {
     var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root, .git_dir = @constCast(git_dir), .branch_sort = branch_sort, .untracked_files = untracked };
     // Borrowed filter strings (owned by the caller's run struct); wgit only
     // reads them and we never call clearLogFilters, so nothing is freed here.
@@ -1089,7 +1095,7 @@ pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process
         } else |_| {}
     }
     if (scopes.contains(.commits)) {
-        if (wgit.loadCommits("HEAD", 100)) |c| {
+        if (wgit.loadCommits("HEAD", commit_limit)) |c| {
             d.commits = c;
             loaded.insert(.commits);
         } else |_| {}
@@ -1648,6 +1654,10 @@ pub const App = struct {
     submodule_index: usize = 0,
     commit_index: usize = 0,
     reflog_index: usize = 0,
+    // How many commits the Commits panel currently requests from `git log`; grows
+    // by `commit_load_batch` as the user scrolls near the end (see
+    // `maybeLoadMoreCommits`). Threaded into the async loaders.
+    commit_limit: usize = commit_load_batch,
     stash_index: usize = 0,
     // Range (multi) selection over the focused list. `range_anchor` is the fixed
     // endpoint (null = no range); the live cursor is the other endpoint, so the
@@ -3437,6 +3447,7 @@ pub const App = struct {
         const max = self.activeListLen(panel) -| lv.view_h;
         if (down) {
             lv.scroll = @min(lv.scroll + 1, max);
+            if (panel == .commits) self.maybeLoadMoreCommits();
         } else {
             lv.scroll -|= 1;
         }
@@ -4865,6 +4876,7 @@ pub const App = struct {
         if (self.focus == .main) return self.scrollMain(1);
         if (self.rangeActive() and !self.range_sticky) self.clearRange();
         self.moveSelection(self.focus, true);
+        if (self.focus == .commits) self.maybeLoadMoreCommits();
         self.resetMainView();
         try self.updatePreview();
     }
@@ -4917,6 +4929,22 @@ pub const App = struct {
     fn step(index: usize, down: bool, len: usize) usize {
         if (down) return if (index + 1 < len) index + 1 else index;
         return index -| 1;
+    }
+
+    /// Incremental commit loading: when the Commits log is scrolled near its
+    /// loaded end and git may have more (the last load returned a full
+    /// `commit_limit` page), request the next batch and reload the commits
+    /// scope. A short page means the whole history is already loaded.
+    fn maybeLoadMoreCommits(self: *App) void {
+        if (self.commits_tab != .commits or self.commit_files_active) return;
+        const len = self.data.commits.len;
+        if (len == 0 or len != self.commit_limit) return;
+        const lv = self.listView(.commits) orelse return;
+        const threshold: usize = 25;
+        const near = self.commit_index + threshold >= len or lv.scroll + lv.view_h + threshold >= len;
+        if (!near) return;
+        self.commit_limit += commit_load_batch;
+        self.refreshViews(ScopeSet.init(.{ .commits = true }));
     }
 
     /// The largest `main_scroll` that still shows content: stops at the point

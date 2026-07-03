@@ -195,11 +195,12 @@ const RepoLoadRun = struct {
     environ: *std.process.Environ.Map,
     branch_sort: model.BranchSortOrder = .date,
     untracked: git_mod.Git.UntrackedFiles = .all,
+    commit_limit: usize = app_mod.commit_load_batch,
     result: ?model.RepoData = null,
 };
 
 fn repoLoadWorker(rl: *RepoLoadRun) void {
-    rl.result = app_mod.loadRepoDataAsync(async_allocator, rl.io, rl.environ, rl.root, rl.git_dir, rl.branch_sort, rl.untracked);
+    rl.result = app_mod.loadRepoDataAsync(async_allocator, rl.io, rl.environ, rl.root, rl.git_dir, rl.branch_sort, rl.untracked, rl.commit_limit);
     _ = rl.loop.tryPostEvent(.repo_load_done) catch false;
 }
 
@@ -219,6 +220,7 @@ const ScopedLoadRun = struct {
     path: ?[]u8 = null,
     branch_sort: model.BranchSortOrder = .date,
     untracked: git_mod.Git.UntrackedFiles = .all,
+    commit_limit: usize = app_mod.commit_load_batch,
     result: ?app_mod.ScopedData = null,
 
     fn freeFilters(self: *ScopedLoadRun) void {
@@ -236,7 +238,7 @@ fn scopedLoadWorker(sr: *ScopedLoadRun) void {
         .grep = sr.grep,
         .author = sr.author,
         .path = sr.path,
-    }, sr.branch_sort, sr.untracked);
+    }, sr.branch_sort, sr.untracked, sr.commit_limit);
     _ = sr.loop.tryPostEvent(.scoped_load_done) catch false;
 }
 
@@ -346,7 +348,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     // Load the repo off-thread: the loop's initial winsize event
     // paints the skeleton with "Loading…" placeholders right away, and the
     // panels fill in when `repo_load_done` lands — no startup freeze, no flash.
-    var repo_load_run: RepoLoadRun = .{ .io = io, .loop = &loop, .root = app.git.root, .git_dir = app.git.git_dir, .environ = app.git.environ, .branch_sort = app.git.branch_sort, .untracked = app.git.untracked_files };
+    var repo_load_run: RepoLoadRun = .{ .io = io, .loop = &loop, .root = app.git.root, .git_dir = app.git.git_dir, .environ = app.git.environ, .branch_sort = app.git.branch_sort, .untracked = app.git.untracked_files, .commit_limit = app.commit_limit };
     var repo_load_future: ?std.Io.Future(void) = null;
     defer if (repo_load_future) |*f| {
         f.cancel(io);
@@ -503,7 +505,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             // On a successful switch the app marks an initial load pending; start
             // it against the new root. (A failed switch leaves the app unchanged.)
             if (app.initial_load_pending) {
-                repo_load_run = .{ .io = io, .loop = &loop, .root = app.git.root, .git_dir = app.git.git_dir, .environ = app.git.environ, .branch_sort = app.git.branch_sort, .untracked = app.git.untracked_files };
+                repo_load_run = .{ .io = io, .loop = &loop, .root = app.git.root, .git_dir = app.git.git_dir, .environ = app.git.environ, .branch_sort = app.git.branch_sort, .untracked = app.git.untracked_files, .commit_limit = app.commit_limit };
                 repo_load_future = io.concurrent(repoLoadWorker, .{&repo_load_run}) catch blk: {
                     app.applyRepoLoad(null, async_allocator);
                     break :blk null;
@@ -634,6 +636,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     .path = if (filters.path) |p| async_allocator.dupe(u8, p) catch null else null,
                     .branch_sort = app.git.branch_sort,
                     .untracked = app.git.untracked_files,
+                    .commit_limit = app.commit_limit,
                     .result = null,
                 };
                 scoped_load_future = io.concurrent(scopedLoadWorker, .{&scoped_load_run}) catch blk: {
