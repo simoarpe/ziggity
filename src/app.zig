@@ -1695,6 +1695,9 @@ pub const App = struct {
     branch_commits_active: bool = false,
     branch_commits: []model.Commit = &.{},
     branch_commit_index: usize = 0,
+    // Incremental loading for the Branches sub-commits drill (mirrors
+    // `commit_limit` for the Commits panel): grows as you scroll toward the end.
+    branch_commit_limit: usize = commit_load_batch,
     branch_commits_ref: []u8 = &.{},
     branch_files: []model.CommitFile = &.{},
     branch_file_index: usize = 0,
@@ -1862,11 +1865,11 @@ pub const App = struct {
     // Tag-creation scratch: the annotation message entered after the tag name,
     // held across the optional "tag exists — overwrite?" force confirmation.
     // (The tag name itself is stashed in `remote_name_buf`.)
-    tag_message_buf: [1024]u8 = undefined,
-    tag_message_len: usize = 0,
+    // Owned (no fixed cap): a tag annotation message can be long / multi-line.
+    tag_message_owned: ?[]u8 = null,
     // The commit-ish a new tag points at: a hash when tagging the selected
     // commit (Commits tab `T`), or empty to tag HEAD (Tags tab `n`).
-    tag_target_buf: [64]u8 = undefined,
+    tag_target_buf: [256]u8 = undefined, // a ref/hash — 256 > git's ref-name limit
     tag_target_len: usize = 0,
     // The interactive-rebase editor (`i`): an owned, newest-first plan of
     // commits with their actions, the parent of the oldest one as the rebase
@@ -1948,15 +1951,17 @@ pub const App = struct {
         [_][]u8{&.{}} ** @typeInfo(TextPromptKind).@"enum".fields.len,
     // Holds the remote name between the two-step add-remote prompt (name → URL)
     // and the remote acted on by edit/remove. No allocation needed.
-    remote_name_buf: [128]u8 = undefined,
+    // 256 > git's 255-byte ref-name limit, so a remote/branch/tag name never
+    // truncates here.
+    remote_name_buf: [256]u8 = undefined,
     remote_name_len: usize = 0,
     /// Scratch for chained worktree/submodule prompts: the base ref a new
     /// worktree checks out (empty = HEAD), and the URL stashed between the two
     /// `git submodule add` prompts.
     worktree_base_buf: [512]u8 = undefined,
     worktree_base_len: usize = 0,
-    submodule_url_buf: [1024]u8 = undefined,
-    submodule_url_len: usize = 0,
+    // Owned (no fixed cap): a submodule URL can be arbitrarily long.
+    submodule_url_owned: ?[]u8 = null,
     mode: Mode = .normal,
     status_filter_index: usize = 0,
     help_scroll: usize = 0,
@@ -2112,6 +2117,8 @@ pub const App = struct {
         model.deinitCommits(self.allocator, self.branch_commits);
         self.allocator.free(self.branch_commits_ref);
         if (self.remote_drill) |r| self.allocator.free(r);
+        if (self.tag_message_owned) |m| self.allocator.free(m);
+        if (self.submodule_url_owned) |u| self.allocator.free(u);
         self.files_tree.deinit(self.allocator);
         self.commit_tree.deinit(self.allocator);
         self.branch_tree.deinit(self.allocator);
@@ -3448,6 +3455,7 @@ pub const App = struct {
         if (down) {
             lv.scroll = @min(lv.scroll + 1, max);
             if (panel == .commits) self.maybeLoadMoreCommits();
+            if (panel == .branches) drills_mod.maybeLoadMoreBranchCommits(self);
         } else {
             lv.scroll -|= 1;
         }
@@ -4237,9 +4245,21 @@ pub const App = struct {
         return self.requestEditPath(wt.path);
     }
 
+    /// Store `value` in an owned prompt-stash slot (freeing any previous value),
+    /// for a two-step prompt whose first value has no fixed-size cap.
+    fn setOwned(self: *App, slot: *?[]u8, value: []const u8) void {
+        if (slot.*) |old| self.allocator.free(old);
+        slot.* = self.allocator.dupe(u8, value) catch null;
+    }
+
+    fn clearOwned(self: *App, slot: *?[]u8) void {
+        if (slot.*) |old| self.allocator.free(old);
+        slot.* = null;
+    }
+
     /// `n` on the Submodules tab: add a submodule (prompt URL, then path).
     pub fn startAddSubmodule(self: *App) !void {
-        self.submodule_url_len = 0;
+        self.clearOwned(&self.submodule_url_owned);
         return self.startTextPrompt(.add_submodule_url);
     }
 
@@ -4877,6 +4897,7 @@ pub const App = struct {
         if (self.rangeActive() and !self.range_sticky) self.clearRange();
         self.moveSelection(self.focus, true);
         if (self.focus == .commits) self.maybeLoadMoreCommits();
+        if (self.focus == .branches) drills_mod.maybeLoadMoreBranchCommits(self);
         self.resetMainView();
         try self.updatePreview();
     }
@@ -5677,9 +5698,7 @@ pub const App = struct {
                 // An existing tag needs --force to overwrite — confirm first,
                 // carrying the message across in its own buffer.
                 if (self.tagExists(name)) {
-                    const m = @min(value.len, self.tag_message_buf.len);
-                    @memcpy(self.tag_message_buf[0..m], value[0..m]);
-                    self.tag_message_len = m;
+                    self.setOwned(&self.tag_message_owned, value);
                     self.mode = .normal;
                     self.text_prompt_kind = null;
                     self.input_buffer.clearRetainingCapacity();
@@ -5886,16 +5905,14 @@ pub const App = struct {
                 // Remember the URL (keeps it if the path step is cancelled), then
                 // ask for the path in a second prompt.
                 self.savePromptDraft(.add_submodule_url);
-                const n = @min(value.len, self.submodule_url_buf.len);
-                @memcpy(self.submodule_url_buf[0..n], value[0..n]);
-                self.submodule_url_len = n;
+                self.setOwned(&self.submodule_url_owned, value);
                 self.text_prompt_kind = .add_submodule_path;
                 self.input_buffer.clearRetainingCapacity();
                 try self.setMessage("path for the new submodule", .{});
                 return;
             },
             .add_submodule_path => {
-                const url = self.submodule_url_buf[0..self.submodule_url_len];
+                const url = self.submodule_url_owned orelse "";
                 defer {
                     self.mode = .normal;
                     self.text_prompt_kind = null;
@@ -6650,7 +6667,7 @@ pub const App = struct {
             },
             .force_tag => {
                 const name = self.remote_name_buf[0..self.remote_name_len];
-                const message = self.tag_message_buf[0..self.tag_message_len];
+                const message = self.tag_message_owned orelse "";
                 self.clearPromptDraft(.new_tag); // created -> forget the draft
                 return self.requestMutation(.{ .create_tag = .{ .name = name, .message = message, .force = true, .target = self.tag_target_buf[0..self.tag_target_len] } }, .{ .gerund = "creating tag", .command = "git tag -f", .refresh = Refresh.tags }, "created tag {s}", .{name});
             },

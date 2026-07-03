@@ -62,7 +62,8 @@ pub fn reloadCommitFilesAfterRefresh(app: *App) void {
 /// Drill from a branch/tag in the Branches panel into its commits (the
 /// "sub-commits" view): the Branches panel then lists `ref`'s commits.
 pub fn openBranchCommits(app: *App, ref: []const u8) !void {
-    const commits = try app.git.loadCommits(ref, app_mod.commit_load_batch);
+    app.branch_commit_limit = app_mod.commit_load_batch; // fresh drill starts at the base batch
+    const commits = try app.git.loadCommits(ref, app.branch_commit_limit);
     model.deinitCommits(app.allocator, app.branch_commits);
     app.branch_commits = commits;
     app.branch_commit_index = 0;
@@ -134,7 +135,7 @@ pub fn deactivateBranchFiles(app: *App) void {
 /// selection position. If the ref is gone (no commits come back), exit the
 /// whole Branches drill back to the branch list.
 pub fn reloadBranchCommitsAfterRefresh(app: *App) void {
-    const commits = app.git.loadCommits(app.branch_commits_ref, app_mod.commit_load_batch) catch null;
+    const commits = app.git.loadCommits(app.branch_commits_ref, app.branch_commit_limit) catch null;
     if (commits == null or commits.?.len == 0) {
         if (commits) |c| model.deinitCommits(app.allocator, c);
         deactivateBranchCommits(app); // also drops the files level
@@ -143,6 +144,21 @@ pub fn reloadBranchCommitsAfterRefresh(app: *App) void {
     model.deinitCommits(app.allocator, app.branch_commits);
     app.branch_commits = commits.?;
     app.branch_commit_index = @min(app.branch_commit_index, app.branch_commits.len - 1);
+}
+
+/// Incremental loading for the sub-commits drill: when it's scrolled near the
+/// loaded end and the last load returned a full `branch_commit_limit` page (so
+/// git may have more), grow the limit and reload — no fixed cap.
+pub fn maybeLoadMoreBranchCommits(app: *App) void {
+    if (!app.branch_commits_active or app.branch_files_active) return;
+    const len = app.branch_commits.len;
+    if (len == 0 or len != app.branch_commit_limit) return;
+    const lv = app.listView(.branches) orelse return;
+    const threshold: usize = 25;
+    const near = app.branch_commit_index + threshold >= len or lv.scroll + lv.view_h + threshold >= len;
+    if (!near) return;
+    app.branch_commit_limit += app_mod.commit_load_batch;
+    reloadBranchCommitsAfterRefresh(app);
 }
 
 /// Reload the Branches drill's file list after a refresh; drop it if its
