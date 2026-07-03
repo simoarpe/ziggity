@@ -1168,11 +1168,17 @@ fn drawConflicts(root: vaxis.Window, app: *app_mod.App) void {
             fillRow(win, row, base);
         }
 
-        // Right-aligned 1-based line number in the gutter.
+        // Right-aligned 1-based line number in the gutter — accent + bold for the
+        // active conflict's lines (over its highlight background), muted elsewhere.
         var num_buf: [16]u8 = undefined;
         const num = std.fmt.bufPrint(&num_buf, "{d}", .{line_no + 1}) catch "";
         const num_col: u16 = gutter -| 1 -| @as(u16, @intCast(num.len));
-        print(win, row, num_col, num, if (in_block) base else st.muted);
+        var gutter_style = if (in_block) base else st.muted;
+        if (in_block) {
+            gutter_style.fg = st.bottom_accent.fg;
+            gutter_style.bold = true;
+        }
+        print(win, row, num_col, num, gutter_style);
 
         var line_style = base;
         if (is_marker) {
