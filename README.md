@@ -258,7 +258,9 @@ Press **`?`** in the app for the full, always-current overlay. The essentials:
 - `ctrl+b`: files status filter menu
 - `j`/`k` or arrows: move selection · `h`/`l` or arrows: cycle side panels
 - `H`/`L`: scroll the focused panel left/right (diff, or a list wider than the panel)
-- `tab`: focus the Diff panel from any side panel (press again to return)
+- `tab`: focus the Diff panel from any side panel (press again to return). Over a
+  working-tree file, `enter` there opens its stage/unstage view (the panel title
+  and footer show the hint)
 - `z`: maximize the Diff panel to full screen — the side panels hide and the diff
   fills the terminal; press `z` again or `esc` to restore the normal layout
 - `1`–`5`: focus status / files / branches / commits / stash

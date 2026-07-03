@@ -966,6 +966,10 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     else if (app.contentFocus() == .branches and app.selectedBranchRefName() != null)
         // A selected branch/tag shows its commit graph, titled "Log".
         "Log"
+    else if (app.focus == .main and app.contentFocus() == .files and app.files_tab == .files and app.selectedFile() != null)
+        // Tabbed into a working-tree file's diff: advertise that <enter> opens
+        // the stage/unstage view (the behaviour isn't otherwise discoverable).
+        "Diff (enter to stage)"
     else
         "Diff";
     // Clamp the main panel's scroll to the current content (using the previous
@@ -2760,11 +2764,11 @@ fn footerHints(c: FooterCtx) []const u8 {
         .stash => "space apply  g pop  d drop  r rename  enter view" ++ global,
         .main => if (c.fullscreen)
             (if (c.main_file)
-                "j/k scroll  H/L pan  e edit  PgUp/PgDn page  drag select  ^o copy all  z exit full  esc back" ++ global
+                "enter stage  j/k scroll  H/L pan  e edit  PgUp/PgDn page  drag select  ^o copy all  z exit full  esc back" ++ global
             else
                 "j/k scroll  H/L pan  PgUp/PgDn page  drag select  ^o copy all  z exit full  esc back" ++ global)
         else if (c.main_file)
-            "j/k scroll  H/L pan  e edit  PgUp/PgDn page  drag select  ^o copy all  z full  esc back" ++ global
+            "enter stage  j/k scroll  H/L pan  e edit  PgUp/PgDn page  drag select  ^o copy all  z full  esc back" ++ global
         else
             "j/k scroll  H/L pan  PgUp/PgDn page  drag select  ^o copy all  z full  esc back" ++ global,
     };
@@ -3339,6 +3343,11 @@ test "footer hints have no key contradictions per stage" {
     // The Diff panel advertises the fullscreen toggle, reflecting its state.
     try std.testing.expect(has(footerHints(.{ .focus = .main }), "z full"));
     try std.testing.expect(has(footerHints(.{ .focus = .main, .fullscreen = true }), "z exit full"));
+
+    // Over a working-tree file, the Diff panel advertises `enter` → staging;
+    // a plain commit/branch diff does not (enter does nothing there).
+    try std.testing.expect(has(footerHints(.{ .focus = .main, .main_file = true }), "enter stage"));
+    try std.testing.expect(!has(footerHints(.{ .focus = .main }), "enter stage"));
 
     // Conflict state (Files panel): advertises the resolve/continue keys, and
     // must NOT promise "esc back" — the panel is top-level during a conflict,
