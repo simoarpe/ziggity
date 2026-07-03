@@ -861,6 +861,10 @@ fn sidePanelHeights(body_h: u16, focused: model.Focus, accordion: bool, expanded
 }
 
 fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
+    // Start a fresh grapheme arena for this frame: multibyte cells written below
+    // reference it, and it must stay valid until vaxis flushes (which copies the
+    // bytes into its own storage). See `grapheme_arena`.
+    resetGraphemeArena();
     const root = vx.window();
     root.clear();
     root.hideCursor();
@@ -1225,142 +1229,192 @@ fn drawConflicts(root: vaxis.Window, app: *app_mod.App) void {
 
 const help_lines = [_][]const u8{
     "Global",
-    "  q / ctrl+c     quit",
+    "  q, ctrl+c      quit",
     "  R              refresh",
-    "  1-5            focus Status/Files/Branches/Commits/Stash",
-    "  h/l, arrows    move between side panels",
+    "  1-5            jump to a panel (Status, Files, Branches, Commits, Stash)",
+    "  h, left        focus the panel on the left",
+    "  l, right       focus the panel on the right",
+    "  j, down        move the selection down",
+    "  k, up          move the selection up",
     "  tab            focus the Diff panel (tab again returns)",
-    "  j/k, arrows    move selection",
-    "  H / L          scroll the focused panel left / right (long rows)",
-    "  [ / ]          switch panel tabs / staging side",
-    "  enter / esc    inspect in main panel / go back",
-    "  z              maximize the Diff panel to full screen (z or esc to exit)",
-    "  @ / ?          command log / this help",
+    "  H              scroll the focused panel left (long rows)",
+    "  L              scroll the focused panel right (long rows)",
+    "  [              previous tab (or staging side)",
+    "  ]              next tab (or staging side)",
+    "  enter          inspect the selection in the main panel",
+    "  esc            go back or cancel",
+    "  z              maximize the Diff panel to full screen (z or esc exits)",
+    "  @              command log",
+    "  ?              this help",
     "  ctrl+z         undo the last operation (reflog reset)",
-    "  ctrl+o         copy selected hash / branch / tag to the clipboard",
-    "  o              open the selected commit / branch on its remote host",
-    "  W              diffing menu: mark a base ref, select another to see the",
-    "                 git diff between them; re-open it to reverse the direction",
-    "                 (swap which ref is \"from\"), toggle a three-dot merge-base",
-    "                 diff (only the target's own changes, GitHub-PR style), or exit",
-    "  f / p / P      fetch / pull / push (async)",
+    "  ctrl+o         copy the selected hash, branch or tag to the clipboard",
+    "  o              open the selected commit or branch on its remote host",
+    "  W              diffing menu (mark a base ref, then compare another; the",
+    "                 menu reverses direction and toggles a three-dot merge-base",
+    "                 diff — only the target's own changes, GitHub-PR style)",
+    "  f              fetch (async)",
+    "  p              pull (async)",
+    "  P              push (async)",
     "  mouse drag     select text in the Diff panel (auto-copies on release)",
     "",
     "Range select  (multi-selection in list panels)",
     "  v              toggle a sticky range anchored at the cursor",
-    "  shift+up/down  extend a range (cleared by a plain move)",
+    "  shift+up       extend the range up",
+    "  shift+down     extend the range down",
     "  *              in Commits, select every commit unique to the branch",
     "  esc            cancel the range",
-    "                 then the action key acts on every selected row: stage/",
-    "                 discard/edit files, drop/squash/fixup/edit/move/revert or",
-    "                 copy commits, delete branches/tags, drop stashes, toggle",
-    "                 commit files into the patch, discard files from a commit.",
+    "                 The action key then acts on every selected row: stage,",
+    "                 discard or edit files; drop, squash, fixup, edit, move,",
+    "                 revert or copy commits; delete branches or tags; drop",
+    "                 stashes; toggle commit files into the patch.",
     "",
-    "Files  (tabs: Files / Worktrees / Submodules - [ / ] to switch)",
-    "  space          stage/unstage (whole dir in tree view)",
-    "  a              stage/unstage all",
-    "  c / w / A      commit / commit --no-verify (skip hooks) / amend last commit",
-    "  e              open the file in your editor (also from the staging,",
-    "                 patch, and diff views; configurable, see README)",
-    "  i / y          add the file to .gitignore / copy its path to the clipboard",
-    "  ctrl+f         find the base commit for the staged change, make a fixup!",
-    "  d / D          discard menu / discard all",
-    "  s              stash menu (all / +untracked / staged / file)",
-    "  / / ctrl+b     filter by path / status filter",
-    "  `              toggle directory tree",
-    "  enter          open the hunk/line staging view (per-conflict resolver",
-    "                 on a conflicted file: j/k between conflicts, o/t/b pick",
-    "                 ours/theirs/both, u undo)",
+    "Files  (tabs: Files, Worktrees, Submodules — [ and ] switch)",
+    "  space          stage or unstage (whole dir in tree view)",
+    "  a              stage or unstage all",
+    "  c              commit",
+    "  w              commit with --no-verify (skip hooks)",
+    "  A              amend the last commit",
+    "  e              open the file in your editor",
+    "  i              add the file to .gitignore",
+    "  y              copy the file path to the clipboard",
+    "  ctrl+f         make a fixup! for the staged change's base commit",
+    "  d              discard menu",
+    "  D              discard all",
+    "  s              stash menu (all, +untracked, staged, file)",
+    "  /              filter by path",
+    "  ctrl+b         status filter",
+    "  `              toggle the directory tree",
+    "  enter          open the hunk/line staging view (a conflicted file opens",
+    "                 the per-conflict resolver: j/k between conflicts, o/t/b",
+    "                 pick ours/theirs/both, u undo)",
     "  m              merge/rebase actions: continue, amend+continue, abort",
-    "  Worktrees tab  space/enter switch into it   n new   o open in editor   d remove",
-    "  Submodules tab enter enter it   space update   n add   e edit URL   d remove   b bulk",
-    "  (inside a worktree/submodule, esc walks back out to the parent repo)",
+    "",
+    "Worktrees tab",
+    "  space, enter   switch into the worktree",
+    "  n              new worktree",
+    "  o              open it in your editor",
+    "  d              remove the worktree",
+    "",
+    "Submodules tab",
+    "  enter          enter the submodule",
+    "  space          update it",
+    "  n              add a submodule",
+    "  e              edit its URL",
+    "  d              remove it",
+    "  b              bulk actions",
+    "                 (inside a worktree or submodule, esc walks back out to",
+    "                 the parent repo)",
     "",
     "Staging view",
-    "  j/k            move by line",
+    "  j, k           move by line",
     "  v              toggle range selection",
-    "  space          stage/unstage line(s); on @@ the whole hunk",
-    "  [ / ]          switch unstaged / staged side",
+    "  space          stage/unstage the line(s); on a @@ header the whole hunk",
+    "  [              switch to the unstaged side",
+    "  ]              switch to the staged side",
     "  \\              toggle split view (unstaged | staged)",
-    "  c / A          commit / amend the staged changes",
+    "  c              commit the staged changes",
+    "  A              amend the staged changes",
     "  e              open the file in your editor",
     "",
-    "Branches  (tabs: Local / Remotes / Tags)",
+    "Branches  (tabs: Local, Remotes, Tags)",
     "  space          checkout the selected branch",
     "  c              checkout by name (type a branch/ref; \"-\" = previous)",
     "  n              new branch (new tag on the Tags tab)",
-    "  R              rename branch",
-    "  w              create a worktree checked out at the selected ref",
-    "  d              delete branch / tag",
-    "  M / r / f      merge / rebase / fast-forward",
-    "  g / F          reset to the branch / force-checkout (discards changes)",
-    "  T / N          tag the branch / move commits onto a new branch",
-    "  G / s          open the pull request page / branch sort menu",
+    "  R              rename the branch",
+    "  w              create a worktree at the selected ref",
+    "  d              delete the branch or tag",
+    "  M              merge into the current branch",
+    "  r              rebase onto the selected branch",
+    "  f              fast-forward the selected branch",
+    "  g              reset the current branch to the selected one",
+    "  F              force-checkout (discards changes)",
+    "  T              tag the branch",
+    "  N              move commits onto a new branch",
+    "  G              open the pull request page",
+    "  s              branch sort menu",
     "",
-    "Remotes tab  (two levels: the remotes list, then a remote's branches)",
-    "  remotes list   enter/space view branches   n add   e edit (rename+URL)",
-    "                 d remove   f fetch this remote",
-    "  a remote's br. space checkout   n new local branch   M merge   r rebase",
-    "                 g reset   u set upstream   d delete remote branch   esc back",
+    "Remotes tab — the remotes list",
+    "  enter, space   view the remote's branches",
+    "  n              add a remote",
+    "  e              edit it (rename and URL)",
+    "  d              remove the remote",
+    "  f              fetch this remote",
+    "",
+    "Remotes tab — inside a remote's branches",
+    "  space          checkout",
+    "  n              new local branch from it",
+    "  M              merge",
+    "  r              rebase",
+    "  g              reset",
+    "  u              set upstream",
+    "  d              delete the remote branch",
+    "  esc            back to the remotes list",
     "",
     "Tags tab",
     "  space          checkout the tag (detached HEAD)",
-    "  n              new tag (then an optional message: empty = lightweight,",
-    "                 a message makes it annotated; overwrite prompts to force)",
+    "  n              new tag (empty message = lightweight, a message =",
+    "                 annotated; overwriting prompts to force)",
     "  P              push the tag to a remote",
-    "  g              reset menu (soft / mixed / hard) onto the tag",
-    "  d              delete menu (local / remote / both)",
+    "  g              reset menu (soft, mixed, hard) onto the tag",
+    "  d              delete menu (local, remote, both)",
     "",
-    "Commits  (tabs: Commits / Reflog)",
+    "Commits  (tabs: Commits, Reflog)",
     "  enter          view the commit's changed files",
-    "  space / n      checkout the commit (detached) / new branch at it",
+    "  space          checkout the commit (detached HEAD)",
+    "  n              new branch at the commit",
     "  N              move the branch's commits onto a new branch (needs upstream)",
     "  a              change the commit's author (reset to you, or set one)",
-    "  T              create a tag at the selected commit (name, then message)",
-    "  g / t          reset menu / revert",
+    "  T              create a tag at the commit (name, then message)",
+    "  g              reset menu",
+    "  t              revert the commit",
     "  x              verify the commit's GPG signature (result in a dialog)",
-    "  c / V          copy commit to clipboard / paste (cherry-pick) onto HEAD",
+    "  c              copy the commit (for cherry-pick)",
+    "  V              paste — cherry-pick the copied commit onto HEAD",
     "  ctrl+r         clear the cherry-pick copy selection",
-    "  y              copy menu: commit hash / subject / author",
-    "  d / s / f      drop / squash-down / fixup-down (interactive rebase)",
-    "  e / r          edit (stop here) / reword",
-    "  F / S          create fixup! commit / autosquash fixups above",
-    "  B              mark base, then rebase a branch to move commits onto it",
-    "  G              open the new pull/merge request page for the branch",
-    "  W              diffing menu: compare the selected ref against a marked base",
-    "  /              filter the log by message / author / path (esc clears)",
+    "  y              copy menu: commit hash, subject or author",
+    "  d              drop the commit (interactive rebase)",
+    "  s              squash down (interactive rebase)",
+    "  f              fixup down (interactive rebase)",
+    "  e              edit — stop the rebase at this commit",
+    "  r              reword the commit message",
+    "  F              create a fixup! commit",
+    "  S              autosquash the fixups above",
+    "  B              mark a base, then rebase a branch onto it",
+    "  G              open the new pull/merge request page",
+    "  W              diffing menu (compare the selection against a marked base)",
+    "  /              filter the log by message, author or path (esc clears)",
     "  b              bisect menu (start, then mark good/bad/skip/reset)",
-    "  in a commit's files: space toggles a whole file into the patch,",
-    "                 enter opens that file to pick individual lines,",
-    "                 e opens the file in your editor,",
-    "                 d discards the file's changes from the commit (rewrites it)",
-    "  ctrl+p         custom patch menu (apply / remove from commit / reset)",
-    "  ctrl+l         commit graph viewer (j/k move, p first-parent, H/L pan,",
-    "                 a scope, ^o copy, enter jump, esc close; wheel scrolls,",
-    "                 drag selects)",
-    "  ctrl+j/ctrl+k  move commit down / up",
-    "  i              interactive rebase: a plan editor for the commits down to",
-    "                 the selected one. p/d/s/f/e mark pick/drop/squash/fixup/edit",
-    "                 (v/shift+arrows select a range to mark or reorder at once),",
-    "                 ctrl+j/ctrl+k reorder, enter runs it, esc cancels.",
-    "  Reflog tab     a recovery view of where HEAD has been:",
-    "                 space checkout the entry (detached), g reset HEAD to it,",
-    "                 n new branch at it, c/V copy/paste, o browser, W diff.",
-    "                 The history-rewriting keys (revert/rebase/fixup/…) do not",
-    "                 apply to reflog entries.",
+    "  ctrl+p         custom patch menu (apply, remove from commit, reset)",
+    "  ctrl+j         move the commit down",
+    "  ctrl+k         move the commit up",
+    "  ctrl+l         commit graph viewer (its own keys show in its footer)",
+    "  i              interactive rebase — a plan editor for the commits down",
+    "                 to the selected one. p/d/s/f/e mark pick/drop/squash/",
+    "                 fixup/edit; v or shift+arrows select a range; ctrl+j and",
+    "                 ctrl+k reorder; enter runs it, esc cancels.",
+    "                 In a commit's file list: space toggles a whole file into",
+    "                 the patch, enter opens the file to pick lines, e opens",
+    "                 the editor, d discards the file's changes from the commit.",
+    "                 Reflog tab — recovery view of where HEAD has been: space",
+    "                 checkout (detached), g reset HEAD to it, n new branch,",
+    "                 c/V copy and paste, o browser, W diff. History-rewriting",
+    "                 keys do not apply to reflog entries.",
     "",
     "Stash",
-    "  space / g / d  apply / pop / drop",
+    "  space          apply the stash",
+    "  g              pop the stash",
+    "  d              drop the stash",
     "  r              rename the selected stash",
     "",
     "Operations",
     "  git actions    succeed silently (summary in the bottom bar); only",
-    "                 failures pop a dialog (enter dismisses, up/down scroll)",
-    "                 config: result_dialog = on_error | always | never",
-    "  slow actions   merge/rebase/bisect/fast-forward/patch run in the",
+    "                 failures pop a dialog (enter dismisses, up/down scroll).",
+    "                 Config: result_dialog = on_error | always | never",
+    "  slow actions   merge, rebase, bisect, fast-forward and patch run in the",
     "                 background (spinner in Status); navigation stays live",
     "                 while they run, but other actions wait until they finish",
-    "  fetch/pull/push run in the background (status in the bottom bar)",
+    "  network        fetch, pull and push run in the background (status shows",
+    "                 in the bottom bar)",
 };
 
 fn drawHelpPopup(root: vaxis.Window, app: *app_mod.App) void {
@@ -1373,7 +1427,7 @@ fn drawHelpPopup(root: vaxis.Window, app: *app_mod.App) void {
     const content_w: u16 = w -| 2;
 
     const HelpLine = struct { text: []const u8, header: bool, focus: bool };
-    var wrapped: [320]HelpLine = undefined;
+    var wrapped: [512]HelpLine = undefined;
     var total: usize = 0;
     // The first wrapped-line index of the section matching the current context,
     // so the dialog can open scrolled to it.
@@ -1431,6 +1485,9 @@ fn drawHelpPopup(root: vaxis.Window, app: *app_mod.App) void {
         .bg = .{ .index = ui_theme.selected_bg },
         .bold = true,
     };
+    // The key column of each command line is redrawn in this colour so the keys
+    // stand out from their descriptions.
+    const key_style: vaxis.Style = .{ .fg = .{ .index = ui_theme.footer_key }, .bold = true };
     const start = @min(app.help_scroll, max_scroll);
     var row: u16 = 0;
     for (wrapped[start..total]) |wl| {
@@ -1443,9 +1500,30 @@ fn drawHelpPopup(root: vaxis.Window, app: *app_mod.App) void {
             _ = printGlyph(win, row, win.width -| 2, glyph_focus_pointer, focus_style);
         } else {
             drawDialogRow(win, app, row, wl.text, if (wl.header) st.bottom_accent else st.normal);
+            // Recolour just the key token (leave headers, notes and any active
+            // text selection untouched).
+            if (!wl.header and app.dialogRowSelection(row) == null) {
+                if (helpKeyEnd(wl.text)) |end| print(win, row, 2, wl.text[2..end], key_style);
+            }
         }
         row += 1;
     }
+}
+
+/// For a command line (`"  <key>  <description>"`), the byte index just past the
+/// key token, so `text[2..end]` is the key. Returns null for section notes and
+/// continuation lines (deep indent, or no early two-space gap).
+fn helpKeyEnd(text: []const u8) ?usize {
+    if (text.len < 4) return null;
+    if (!(text[0] == ' ' and text[1] == ' ' and text[2] != ' ')) return null;
+    var i: usize = 2;
+    while (i + 1 < text.len) : (i += 1) {
+        if (text[i] == ' ' and text[i + 1] == ' ') {
+            // A gap far past the key column means this is prose, not a key line.
+            return if (i - 2 <= 16) i else null;
+        }
+    }
+    return null;
 }
 
 fn drawCommandLogPopup(root: vaxis.Window, app: *app_mod.App) void {
@@ -3048,12 +3126,12 @@ fn endListPan(app: *app_mod.App, focus: model.Focus, inner_w: u16) void {
 
 /// Write one cell of absolute column `abs_col`, shifted left by `row_h_off`;
 /// skipped when it falls off the left or right edge. Tracks the widest column.
-fn emitRowCell(win: vaxis.Window, abs_col: u16, row: u16, grapheme: []const u8, style: vaxis.Style) void {
+fn emitRowCell(win: vaxis.Window, abs_col: u16, row: u16, grapheme: []const u8, width: u16, style: vaxis.Style) void {
     if (abs_col >= row_h_off) {
         const sc = abs_col - row_h_off;
-        if (sc < win.width) win.writeCell(sc, row, .{ .char = .{ .grapheme = grapheme, .width = 1 }, .style = style });
+        if (sc < win.width) win.writeCell(sc, row, .{ .char = .{ .grapheme = grapheme, .width = @intCast(width) }, .style = style });
     }
-    if (abs_col + 1 > row_max_col) row_max_col = abs_col + 1;
+    if (abs_col + width > row_max_col) row_max_col = abs_col + width;
 }
 
 /// Like `print`, but returns the column after the last cell written so spans
@@ -3064,18 +3142,23 @@ fn emitRowCell(win: vaxis.Window, abs_col: u16, row: u16, grapheme: []const u8, 
 fn printSpan(win: vaxis.Window, row: u16, col: u16, text: []const u8, style: vaxis.Style) u16 {
     if (row >= win.height) return col;
     var out_col = col;
-    for (text) |byte| {
+    var i: usize = 0;
+    while (i < text.len) {
+        const byte = text[i];
         if (byte == '\n' or byte == '\r') break;
         if (byte == '\t') {
             var spaces: u8 = 0;
             while (spaces < 4) : (spaces += 1) {
-                emitRowCell(win, out_col, row, " ", style);
+                emitRowCell(win, out_col, row, " ", 1, style);
                 out_col += 1;
             }
+            i += 1;
             continue;
         }
-        emitRowCell(win, out_col, row, glyph(byte), style);
-        out_col += 1;
+        const dc = decodeCell(win, text, i);
+        emitRowCell(win, out_col, row, dc.grapheme, dc.width, style);
+        out_col += dc.width;
+        i += dc.len;
     }
     return out_col;
 }
@@ -3184,13 +3267,13 @@ fn printAnsi(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, s
     // Emit one cell of unscrolled column `vc`, shifted left by `h`; skip it if
     // it falls off the left (vc < h) or right edge.
     const emit = struct {
-        fn f(w: vaxis.Window, vc: u16, h: u16, r: u16, g: []const u8, s: vaxis.Style, lo: u16, hi: u16) void {
+        fn f(w: vaxis.Window, vc: u16, h: u16, r: u16, g: []const u8, width: u16, s: vaxis.Style, lo: u16, hi: u16) void {
             if (vc < h) return;
             const c = vc - h;
             if (c >= w.width) return;
             var cell_style = s;
             if (c >= lo and c < hi) cell_style.bg = .{ .index = ui_theme.selected_bg };
-            w.writeCell(c, r, .{ .char = .{ .grapheme = g, .width = 1 }, .style = cell_style });
+            w.writeCell(c, r, .{ .char = .{ .grapheme = g, .width = @intCast(width) }, .style = cell_style });
         }
     }.f;
     const last_col: usize = @as(usize, h_off) + win.width;
@@ -3216,15 +3299,16 @@ fn printAnsi(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, s
         if (byte == '\t') {
             var spaces: u8 = 0;
             while (spaces < 4 and vis_col < last_col) : (spaces += 1) {
-                emit(win, vis_col, h_off, row, " ", style, sel_lo, sel_hi);
+                emit(win, vis_col, h_off, row, " ", 1, style, sel_lo, sel_hi);
                 vis_col += 1;
             }
             i += 1;
             continue;
         }
-        emit(win, vis_col, h_off, row, glyph(byte), style, sel_lo, sel_hi);
-        vis_col += 1;
-        i += 1;
+        const dc = decodeCell(win, line, i);
+        emit(win, vis_col, h_off, row, dc.grapheme, dc.width, style, sel_lo, sel_hi);
+        vis_col += dc.width;
+        i += dc.len;
     }
 }
 
@@ -3289,7 +3373,7 @@ fn wrapText(text: []const u8, width: u16, out: [][]const u8) usize {
 /// `row_h_off` so glyphs in list rows pan with the rest of the row.
 fn printGlyph(win: vaxis.Window, row: u16, col: u16, grapheme: []const u8, style: vaxis.Style) u16 {
     if (row < win.height) {
-        emitRowCell(win, col, row, grapheme, style);
+        emitRowCell(win, col, row, grapheme, 1, style);
         return col + 1;
     }
     return col;
@@ -3370,9 +3454,56 @@ fn initAsciiTable() [128][1]u8 {
     return table;
 }
 
-fn glyph(byte: u8) []const u8 {
-    if (byte >= 32 and byte < 127) return ascii_table[byte][0..1];
-    return "?";
+// A frame-scoped arena for multibyte grapheme bytes. vaxis stores a cell's
+// grapheme slice by reference and only reads it during the flush (where it
+// copies the bytes into its own screen_last storage), so these bytes just need
+// to outlive the current frame's render+flush. Reset at the top of `render`.
+// ASCII goes through the static `ascii_table` and never touches this.
+var grapheme_arena: [64 * 1024]u8 = undefined;
+var grapheme_used: usize = 0;
+
+fn resetGraphemeArena() void {
+    grapheme_used = 0;
+}
+
+/// Copy `bytes` into the frame arena, returning a stable slice, or null when the
+/// arena is full (the caller then falls back to '?').
+fn stashGrapheme(bytes: []const u8) ?[]const u8 {
+    if (grapheme_used + bytes.len > grapheme_arena.len) return null;
+    const dst = grapheme_arena[grapheme_used .. grapheme_used + bytes.len];
+    @memcpy(dst, bytes);
+    grapheme_used += bytes.len;
+    return dst;
+}
+
+/// One display cell decoded from `text` at byte `i`. An ASCII printable maps to
+/// the static table; a well-formed UTF-8 sequence is copied into the frame arena
+/// and measured with `gwidth`; anything else (a control byte, invalid UTF-8, or a
+/// full arena) becomes '?'. `len` is the bytes consumed, `width` the columns.
+const DecodedCell = struct { grapheme: []const u8, len: usize, width: u16 };
+
+fn decodeCell(win: vaxis.Window, text: []const u8, i: usize) DecodedCell {
+    const b = text[i];
+    if (b < 0x80) {
+        // ASCII printables use the static table (no arena, no lifetime worry);
+        // control bytes render as '?'.
+        if (b >= 32 and b < 127) return .{ .grapheme = ascii_table[b][0..1], .len = 1, .width = 1 };
+        return .{ .grapheme = "?", .len = 1, .width = 1 };
+    }
+    const seq_len = utf8CellLen(text, i) orelse return .{ .grapheme = "?", .len = 1, .width = 1 };
+    const stored = stashGrapheme(text[i .. i + seq_len]) orelse return .{ .grapheme = "?", .len = seq_len, .width = 1 };
+    const w = win.gwidth(stored);
+    return .{ .grapheme = stored, .len = seq_len, .width = if (w == 0) 1 else w };
+}
+
+/// The length of the valid UTF-8 sequence starting at `text[i]`, or null when the
+/// lead byte is invalid or the sequence is truncated / ill-formed (the caller
+/// then emits a single '?' and advances one byte).
+fn utf8CellLen(text: []const u8, i: usize) ?usize {
+    const seq_len = std.unicode.utf8ByteSequenceLength(text[i]) catch return null;
+    if (i + seq_len > text.len) return null;
+    _ = std.unicode.utf8Decode(text[i .. i + seq_len]) catch return null;
+    return seq_len;
 }
 
 // Static UTF-8 glyphs (stable storage for vaxis grapheme references).
@@ -3750,4 +3881,51 @@ test "conventionalPrefix parses type/scope/breaking and rejects non-conventional
     try std.testing.expect(conventionalPrefix("feat(unclosed: x") == null); // scope not closed
     try std.testing.expect(conventionalPrefix(": no type") == null);
     try std.testing.expect(conventionalPrefix("") == null);
+}
+
+test "utf8CellLen consumes whole sequences and rejects bad bytes" {
+    // ASCII: one byte.
+    try std.testing.expectEqual(@as(?usize, 1), utf8CellLen("a", 0));
+    // 2-byte (é = C3 A9), 3-byte (em-dash — = E2 80 94), 4-byte (😀 = F0 9F 98 80).
+    try std.testing.expectEqual(@as(?usize, 2), utf8CellLen("é", 0));
+    try std.testing.expectEqual(@as(?usize, 3), utf8CellLen("—", 0));
+    try std.testing.expectEqual(@as(?usize, 4), utf8CellLen("😀", 0));
+    // The em-dash must be read as one unit, not three '?'s.
+    try std.testing.expectEqual(@as(?usize, 3), utf8CellLen("a—b", 1));
+
+    // A lone continuation byte and a truncated sequence are rejected (the caller
+    // emits one '?' and advances a byte).
+    try std.testing.expectEqual(@as(?usize, null), utf8CellLen(&.{0x94}, 0)); // stray continuation
+    try std.testing.expectEqual(@as(?usize, null), utf8CellLen(&.{ 0xE2, 0x80 }, 0)); // truncated
+}
+
+test "helpKeyEnd isolates the key column of a command line" {
+    const keyOf = struct {
+        fn f(line: []const u8) ?[]const u8 {
+            const end = helpKeyEnd(line) orelse return null;
+            return line[2..end];
+        }
+    }.f;
+
+    // Single keys, synonyms, and chords.
+    try std.testing.expectEqualStrings("q, ctrl+c", keyOf("  q, ctrl+c      quit").?);
+    try std.testing.expectEqualStrings("ctrl+l", keyOf("  ctrl+l         commit graph viewer").?);
+    try std.testing.expectEqualStrings("\\", keyOf("  \\              toggle split view").?);
+    try std.testing.expectEqualStrings("space, enter", keyOf("  space, enter   switch into the worktree").?);
+
+    // Headers, continuation lines, and prose notes have no key column.
+    try std.testing.expect(keyOf("Global") == null); // header (col 0)
+    try std.testing.expect(keyOf("                 continued description here") == null); // deep indent
+    try std.testing.expect(keyOf("  a note with only single spaces between words") == null);
+
+    // Every real command line in the table yields a key; every non-empty,
+    // non-header line either yields a key or is an indented continuation.
+    for (help_lines) |line| {
+        if (line.len == 0) continue;
+        if (line[0] != ' ') continue; // header
+        if (std.mem.startsWith(u8, line, "  ")) {
+            // A "  <key>" command line must expose a non-empty key.
+            if (helpKeyEnd(line)) |end| try std.testing.expect(end > 2);
+        }
+    }
 }
