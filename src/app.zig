@@ -6178,8 +6178,14 @@ pub const App = struct {
             &rebase_actions_menu
         else
             &conflict_actions_menu;
+        const title: []const u8 = switch (self.data.state) {
+            .rebasing => "Rebase actions",
+            .merging => "Merge actions",
+            .cherry_picking => "Cherry-pick actions",
+            .clean => self.data.state.label(),
+        };
         self.mode = .menu;
-        self.active_menu = .{ .title = self.data.state.label(), .items = items, .index = 0 };
+        self.active_menu = .{ .title = title, .items = items, .index = 0 };
         try self.setMessage("{s} in progress", .{self.data.state.label()});
     }
 

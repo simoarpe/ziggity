@@ -2044,7 +2044,7 @@ fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
         print(win, 1, 0, line, st.bottom_accent);
     } else if (app.data.state != .clean) {
         var buf: [128]u8 = undefined;
-        const line = std.fmt.bufPrint(&buf, "{s} - m: continue / abort", .{app.data.state.label()}) catch app.data.state.label();
+        const line = std.fmt.bufPrint(&buf, "{s} - m: menu (continue, abort)", .{app.data.state.label()}) catch app.data.state.label();
         print(win, 1, 0, line, st.warning);
     } else if (app.data.bisecting) {
         print(win, 1, 0, "BISECTING - b: mark good/bad/skip/reset", st.warning);
@@ -2992,7 +2992,7 @@ fn footerHints(c: FooterCtx) []const u8 {
     if (c.conflict and c.focus == .files) {
         // No "esc back" here: the Files panel is at the top level during a
         // conflict, so esc has nothing to back out to (only `q` quits).
-        return "space resolve (ours/theirs)  m continue/abort  d discard" ++ global;
+        return "space resolve (ours/theirs)  m menu (continue/abort)  d discard" ++ global;
     }
     if (c.focus == .branches) {
         return switch (c.branches_tab) {
