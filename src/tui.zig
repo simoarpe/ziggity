@@ -2102,7 +2102,18 @@ fn drawFiles(win: vaxis.Window, app: *const app_mod.App) void {
         var col = printSpan(win, row, 0, file.short_status[0..1], statusCharStyle(file.short_status[0], true, file.conflict, base));
         col = printSpan(win, row, col, file.short_status[1..2], statusCharStyle(file.short_status[1], false, file.conflict, base));
         col = printSpan(win, row, col, " ", base);
-        const path_style = if (file.conflict) withFg(base, ui_theme.warning) else if (file.has_unstaged) withFg(base, ui_theme.unstaged) else if (file.has_staged) withFg(base, ui_theme.staged) else base;
+        // On the focused selection the unstaged red is illegible against the
+        // blue highlight, so draw that filename in the legible `selected_fg`
+        // instead; every other case keeps its status colour. The red status
+        // letter in the column above still marks the file as unstaged.
+        const path_style = if (file.conflict)
+            withFg(base, ui_theme.warning)
+        else if (file.has_unstaged)
+            withFg(base, if (sel == .active) ui_theme.selected_fg else ui_theme.unstaged)
+        else if (file.has_staged)
+            withFg(base, ui_theme.staged)
+        else
+            base;
         if (file.previous_path) |previous| {
             col = printSpan(win, row, col, previous, path_style);
             col = printSpan(win, row, col, " -> ", base);
