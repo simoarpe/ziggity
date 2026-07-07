@@ -2077,6 +2077,48 @@ pub const App = struct {
     mutation_gerund: []const u8 = "working",
     busy_flag: std.atomic.Value(bool) = .init(false),
     spinner_frame: usize = 0,
+    // Drives the Status-panel "about" splash animation (the rotating donut). The
+    // frame advances on each `.anim_tick`; `animate_flag` tells the ticker thread
+    // to keep posting those ticks while the splash is on screen and focused.
+    anim_frame: usize = 0,
+    animate_flag: std.atomic.Value(bool) = .init(false),
+    // Persistent storage for the about-splash's selectable text lines: the
+    // dialog-grid selection keeps row slices by reference and reads them on a
+    // later mouse-release, so they can't be transient render-time buffers.
+    about_bufs: [12][256]u8 = undefined,
+    // The about-splash URL and its clickable region (grid row + column span), set
+    // during render. A plain click there opens the browser directly — the OSC 8
+    // hyperlink alone isn't followed because the app captures the mouse.
+    about_url: []const u8 = "",
+    about_url_row: usize = 0,
+    about_url_lo: usize = 0,
+    about_url_hi: usize = 0,
+    about_url_hovered: bool = false,
+    // Last known pointer position (absolute cells; -1 = unknown), so the renderer
+    // can underline the URL while the pointer is over it.
+    mouse_col: i16 = -1,
+    mouse_row: i16 = -1,
+
+    /// Whether the pointer is currently over the about-splash URL.
+    pub fn hoveringAboutUrl(self: *const App) bool {
+        if (self.about_url.len == 0 or self.mouse_col < 0 or self.mouse_row < 0) return false;
+        const pt = self.dialogPointAt(@intCast(self.mouse_col), @intCast(self.mouse_row)) orelse return false;
+        return pt.row == self.about_url_row and pt.col >= self.about_url_lo and pt.col < self.about_url_hi;
+    }
+
+    /// The main panel shows the "about" splash (banner + repo info + animation)
+    /// whenever the Status panel is the content being inspected and no other view
+    /// (staging, diffing) has taken over the main area.
+    pub fn showAboutSplash(self: *const App) bool {
+        return self.contentFocus() == .status and !self.staging_active and self.diff_base == null;
+    }
+
+    /// Whether the ticker should keep animating: the splash is visible, we're at
+    /// the top level (no dialog), and the terminal has focus (no CPU spent
+    /// animating a hidden/backgrounded window).
+    pub fn wantsAnimation(self: *const App) bool {
+        return self.showAboutSplash() and self.mode == .normal and self.terminal_focused;
+    }
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -2976,6 +3018,10 @@ pub const App = struct {
     /// Returns true if the event changed state and a re-render is warranted.
     /// Motion/drag events (which flood with any-motion tracking) return false.
     pub fn handleMouse(self: *App, mouse: vaxis.Mouse) !bool {
+        // Track the pointer so the renderer can underline the URL on hover.
+        self.mouse_col = mouse.col;
+        self.mouse_row = mouse.row;
+
         // While a dialog is open the mouse drives wheel scrolling and
         // character-precise text selection of its content (operation-result,
         // help, and command-log popups). All other mouse input is ignored.
@@ -3022,6 +3068,58 @@ pub const App = struct {
                     return true;
                 },
                 else => {},
+            }
+            return false;
+        }
+
+        // The Status-panel "about" splash reuses the dialog-grid selection: drag
+        // over its text lines to select, release to copy. Its rows are registered
+        // in `drawAbout`; the banner and animated donut rows are left empty, so
+        // only the info lines are selectable.
+        if (self.showAboutSplash()) {
+            const c: u16 = if (mouse.col < 0) 0 else @intCast(mouse.col);
+            const rw: u16 = if (mouse.row < 0) 0 else @intCast(mouse.row);
+            switch (mouse.type) {
+                .press => if (mouse.button == .left) {
+                    if (self.dialogPointAt(c, rw)) |pt| {
+                        self.dialog_sel_active = true;
+                        self.dialog_sel_dragged = false;
+                        self.dialog_sel_anchor_row = pt.row;
+                        self.dialog_sel_anchor_col = pt.col;
+                        self.dialog_sel_head_row = pt.row;
+                        self.dialog_sel_head_col = pt.col;
+                        return true;
+                    }
+                },
+                .drag => if (self.dialog_sel_active) {
+                    if (self.dialogPointAt(c, rw)) |pt| {
+                        self.dialog_sel_head_row = pt.row;
+                        self.dialog_sel_head_col = pt.col;
+                        self.dialog_sel_dragged = true;
+                    }
+                    return true;
+                },
+                // Hover: repaint only when the URL's underline needs to flip on
+                // or off (motion events otherwise flood).
+                .motion => return self.hoveringAboutUrl() != self.about_url_hovered,
+                .release => if (self.dialog_sel_active) {
+                    if (self.dialog_sel_dragged) {
+                        try self.copyDialogSelection();
+                    } else if (self.about_url.len > 0 and
+                        self.dialog_sel_anchor_row == self.about_url_row and
+                        self.dialog_sel_anchor_col >= self.about_url_lo and
+                        self.dialog_sel_anchor_col < self.about_url_hi)
+                    {
+                        // A plain click on the URL opens it in the browser.
+                        if (self.git.openUrl(self.about_url)) |_| {
+                            try self.setMessage("opening {s}", .{self.about_url});
+                        } else |_| {
+                            try self.setMessage("failed to open the browser", .{});
+                        }
+                    }
+                    self.clearDialogSelection();
+                    return true;
+                },
             }
             return false;
         }

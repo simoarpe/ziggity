@@ -9,6 +9,7 @@ const filetree = @import("filetree.zig");
 const model = @import("model.zig");
 const patch_mod = @import("patch.zig");
 const conflicts_mod = @import("conflicts.zig");
+const donut_mod = @import("donut.zig");
 const rebaseplan_mod = @import("rebaseplan.zig");
 const staging_mod = @import("staging.zig");
 const commitgraph_mod = @import("commitgraph.zig");
@@ -23,6 +24,7 @@ const Event = union(enum) {
     focus_in,
     focus_out,
     refresh_tick,
+    anim_tick,
     command_done,
     preview_done,
     worktree_done,
@@ -407,6 +409,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             .mouse => |m| render_needed = try app.handleMouse(m),
             .winsize => |ws| try vx.resize(allocator, tty.writer(), ws),
             .refresh_tick => try app.handleRefreshTick(),
+            .anim_tick => app.anim_frame +%= 1,
             .focus_in => try app.handleFocusIn(),
             .focus_out => app.handleFocusOut(),
             .command_done => {
@@ -673,6 +676,8 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
 
         // Reflect foreground-busy state for the ticker (spinner animation speed).
         app.busy_flag.store(app.foregroundBusy(), .release);
+        // Reflect whether the about-splash animation wants continuous ticks.
+        app.animate_flag.store(app.wantsAnimation(), .release);
 
         // Wall-clock time for the branches "time ago" column (unix seconds).
         app.now_unix = @intCast(@divFloor(std.Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s));
@@ -765,13 +770,20 @@ fn refreshTickerRun(state: *RefreshTicker) void {
             // Busy: animate the spinner on every fast tick.
             idle_ms = 0;
             _ = state.loop.tryPostEvent(.refresh_tick) catch false;
-        } else if (interval_ms > 0) {
+        } else {
+            // The about-splash animation runs on every fast tick (independent of
+            // the background refresh, and without triggering a git status).
+            if (state.app.animate_flag.load(.acquire)) {
+                _ = state.loop.tryPostEvent(.anim_tick) catch false;
+            }
             // Idle: fire the periodic working-tree refresh only at the slower
             // cadence (built up from the fast ticks), not every tick.
-            idle_ms += spinner_tick_ms;
-            if (idle_ms >= interval_ms) {
-                idle_ms = 0;
-                _ = state.loop.tryPostEvent(.refresh_tick) catch false;
+            if (interval_ms > 0) {
+                idle_ms += spinner_tick_ms;
+                if (idle_ms >= interval_ms) {
+                    idle_ms = 0;
+                    _ = state.loop.tryPostEvent(.refresh_tick) catch false;
+                }
             }
         }
     }
@@ -1023,7 +1035,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         } else panel(root, side_w, 0, main_w, body_h, main_title, app.focus == .main, scroll);
         app.main_view_height = main.height;
         app.main_view_width = main.width;
-        drawDiff(main, app);
+        if (app.showAboutSplash()) drawAbout(main, app) else drawDiff(main, app);
     }
     // Indent the footer by one column so it lines up with the panel content
     // (just inside the left `│` border) and clears the terminal's rounded
@@ -2739,6 +2751,228 @@ fn drawStash(win: vaxis.Window, app: *const app_mod.App) void {
     }
 }
 
+// --- Status-panel "about" splash (banner + repo info + a rotating donut) ---
+
+/// The app version, mirrored from `build.zig.zon`.
+const app_version = "0.1.0";
+
+/// 5-row block-font glyphs (each 5 columns, `#` = filled) for the banner word.
+fn bannerGlyph(c: u8) [5][]const u8 {
+    return switch (c) {
+        'Z' => .{ "#####", "   ##", "  ## ", " ##  ", "#####" },
+        'I' => .{ " ### ", "  #  ", "  #  ", "  #  ", " ### " },
+        'G' => .{ " ####", "#    ", "#  ##", "#   #", " ####" },
+        'T' => .{ "#####", "  #  ", "  #  ", "  #  ", "  #  " },
+        'Y' => .{ "#   #", " # # ", "  #  ", "  #  ", "  #  " },
+        else => .{ "     ", "     ", "     ", "     ", "     " },
+    };
+}
+
+const banner_word = "ZIGGITY";
+const banner_rows = 5;
+const banner_width = banner_word.len * 5 + (banner_word.len - 1); // glyphs + gaps
+
+/// Build one banner row into `buf`, translating `#` to a full block. Returns the
+/// UTF-8 slice; its display width is always `banner_width` columns.
+fn buildBannerRow(buf: []u8, r: usize) []const u8 {
+    var n: usize = 0;
+    for (banner_word, 0..) |letter, li| {
+        if (li > 0 and n < buf.len) {
+            buf[n] = ' ';
+            n += 1;
+        }
+        for (bannerGlyph(letter)[r]) |ch| {
+            if (ch == '#') {
+                if (n + 3 <= buf.len) {
+                    @memcpy(buf[n .. n + 3], "\u{2588}"); // full block
+                    n += 3;
+                }
+            } else if (n < buf.len) {
+                buf[n] = ' ';
+                n += 1;
+            }
+        }
+    }
+    return buf[0..n];
+}
+
+fn centerCol(width: u16, content: u16) u16 {
+    return if (content >= width) 0 else (width - content) / 2;
+}
+
+/// Draw a centred, *selectable* splash text line on `row` and advance `row`.
+/// The text is left-padded to its centred column into an App-owned buffer and
+/// drawn via `drawDialogRow`, which registers it in the dialog-selection grid so
+/// a mouse drag can copy it (banner rows and the donut are left unregistered, so
+/// only these lines are selectable). Padding keeps the grid's column mapping
+/// aligned with what's on screen.
+fn aboutLine(win: vaxis.Window, app: *app_mod.App, row: *u16, slot: *usize, text: []const u8, style: vaxis.Style) void {
+    defer row.* += 1;
+    if (row.* >= win.height or slot.* >= app.about_bufs.len) return;
+    const buf = &app.about_bufs[slot.*];
+    slot.* += 1;
+    const pad: usize = if (text.len >= win.width) 0 else (@as(usize, win.width) - text.len) / 2;
+    var n: usize = 0;
+    while (n < pad and n < buf.len) : (n += 1) buf[n] = ' ';
+    const take = @min(text.len, buf.len - n);
+    @memcpy(buf[n .. n + take], text[0..take]);
+    n += take;
+    drawDialogRow(win, app, row.*, buf[0..n], style);
+}
+
+/// Like `aboutLine`, but the text is also emitted as an OSC 8 hyperlink so
+/// terminals that support it make `uri` clickable, while still being selectable
+/// (registered in the dialog grid) for drag-to-copy. `uri` must be a stable
+/// (static / App-owned) slice — vaxis keeps the link by reference until flush.
+fn aboutUrlLine(win: vaxis.Window, app: *app_mod.App, row: *u16, slot: *usize, uri: []const u8, style: vaxis.Style) void {
+    defer row.* += 1;
+    if (row.* >= win.height or slot.* >= app.about_bufs.len) return;
+    const buf = &app.about_bufs[slot.*];
+    slot.* += 1;
+    const pad: usize = if (uri.len >= win.width) 0 else (@as(usize, win.width) - uri.len) / 2;
+    var n: usize = 0;
+    while (n < pad and n < buf.len) : (n += 1) buf[n] = ' ';
+    const take = @min(uri.len, buf.len - n);
+    @memcpy(buf[n .. n + take], uri[0..take]);
+    n += take;
+    app.setDialogRow(row.*, buf[0..n]); // register for selection/copy
+    // Record the clickable region so a plain click opens the browser directly.
+    app.about_url = uri;
+    app.about_url_row = row.*;
+    app.about_url_lo = pad;
+    app.about_url_hi = n;
+    const hover = app.hoveringAboutUrl();
+    app.about_url_hovered = hover;
+
+    // Draw the cells ourselves so the URL columns carry the hyperlink (and an
+    // underline on hover); the padding columns are plain. Honour any live drag
+    // selection's highlight.
+    const sel = app.dialogRowSelection(row.*);
+    var col: u16 = 0;
+    while (col < n and col < win.width) : (col += 1) {
+        const is_url = col >= pad;
+        var cs = style;
+        if (sel) |s| {
+            if (col >= s.lo and col < s.hi) cs.bg = .{ .index = ui_theme.selected_bg };
+        }
+        if (is_url and hover) cs.ul_style = .single;
+        win.writeCell(col, row.*, .{
+            .char = .{ .grapheme = ascii_table[buf[col]][0..1], .width = 1 },
+            .style = cs,
+            .link = if (is_url) .{ .uri = uri } else .{},
+        });
+    }
+}
+
+/// The calendar year for `now_unix` (falls back to 2026 before the clock is set).
+fn currentYear(now_unix: i64) u16 {
+    if (now_unix <= 0) return 2026;
+    const es = std.time.epoch.EpochSeconds{ .secs = @intCast(now_unix) };
+    return es.getEpochDay().calculateYearDay().year;
+}
+
+fn drawAbout(win: vaxis.Window, app: *app_mod.App) void {
+    const st = styles();
+    if (win.width == 0 or win.height == 0) return;
+    // Register this frame's selection grid over the panel; rows left unset stay
+    // empty (non-selectable), so only the text lines below can be copied.
+    app.beginDialogGrid(@intCast(@max(win.x_off, 0)), @intCast(@max(win.y_off, 0)), win.height);
+    var row: u16 = 1;
+    var slot: usize = 0;
+
+    // Banner (only when there's vertical room for it plus the text below). Drawn
+    // with `print`, not registered — the block art isn't worth selecting.
+    if (win.height > banner_rows + 8 and win.width >= banner_width) {
+        var buf: [256]u8 = undefined;
+        var r: usize = 0;
+        while (r < banner_rows) : (r += 1) {
+            const line = buildBannerRow(&buf, r);
+            print(win, row, centerCol(win.width, banner_width), line, withFg(styles().normal, ui_theme.accent));
+            row += 1;
+        }
+        row += 1;
+    }
+
+    // Copyright / repository / version. Show a single year until the current
+    // year moves past the start year, then a "start-end" range.
+    const start_year = 2026;
+    const year = currentYear(app.now_unix);
+    var cbuf: [96]u8 = undefined;
+    const copyright = if (year <= start_year)
+        std.fmt.bufPrint(&cbuf, "Copyright {d} Simone Arpe", .{start_year}) catch "Copyright Simone Arpe"
+    else
+        std.fmt.bufPrint(&cbuf, "Copyright {d}-{d} Simone Arpe", .{ start_year, year }) catch "Copyright Simone Arpe";
+    aboutLine(win, app, &row, &slot, copyright, st.normal);
+    aboutUrlLine(win, app, &row, &slot, "https://github.com/simoarpe/ziggity", withFg(st.normal, ui_theme.accent));
+    var vbuf: [48]u8 = undefined;
+    aboutLine(win, app, &row, &slot, std.fmt.bufPrint(&vbuf, "version {s}", .{app_version}) catch "version", st.normal);
+    row += 1;
+
+    // The repo status the user likes (from the loaded data, not the git preview).
+    var sbuf: [128]u8 = undefined;
+    aboutLine(win, app, &row, &slot, std.fmt.bufPrint(&sbuf, "On branch {s}", .{app.data.current_branch}) catch "", st.normal);
+    if (app.data.upstream) |upstream| {
+        const ahead = app.data.ahead orelse 0;
+        const behind = app.data.behind orelse 0;
+        if (ahead == 0 and behind == 0) {
+            aboutLine(win, app, &row, &slot, std.fmt.bufPrint(&sbuf, "Up to date with {s}", .{upstream}) catch "", st.normal);
+        } else {
+            aboutLine(win, app, &row, &slot, std.fmt.bufPrint(&sbuf, "{s}: {d} ahead, {d} behind", .{ upstream, ahead, behind }) catch "", st.normal);
+        }
+    } else {
+        aboutLine(win, app, &row, &slot, "No upstream configured", st.normal);
+    }
+    aboutLine(win, app, &row, &slot, std.fmt.bufPrint(&sbuf, "{d} changed  ({d} staged, {d} unstaged)", .{ app.data.files.len, app.data.stagedCount(), app.data.unstagedCount() }) catch "", st.normal);
+    aboutLine(win, app, &row, &slot, std.fmt.bufPrint(&sbuf, "{d} branches  {d} stashes", .{ app.data.branches.len, app.data.stash.len }) catch "", st.normal);
+
+    // The donut fills whatever vertical space is left (unregistered rows).
+    const donut_top = row + 1;
+    if (win.height > donut_top + 6) {
+        drawDonut(win, donut_top, win.width, win.height - donut_top, app.anim_frame);
+    }
+}
+
+const donut_max_w = 200;
+const donut_max_h = 80;
+// Frame-local scratch for donut_mod.render (UI thread only): shade level per
+// cell (0 = empty) and the z-buffer. Sized generously; larger panels clamp.
+var donut_cell: [donut_max_w * donut_max_h]u8 = undefined;
+var donut_depth: [donut_max_w * donut_max_h]f32 = undefined;
+
+fn shadeColor(level: usize) u8 {
+    // A dim-blue -> cyan -> white ramp, all basic ANSI (palette-safe).
+    return if (level < 3) 4 else if (level < 6) 6 else if (level < 9) 14 else 15;
+}
+
+/// Compute one donut frame (via `donut_mod`) and blit it into the panel at
+/// `(0, y0)` sized `w x h` (panel-relative columns/rows). The shade math lives in
+/// `donut.zig`; here we only map levels to a glyph + colour and write cells.
+fn drawDonut(win: vaxis.Window, y0: u16, w: u16, h: u16, frame: usize) void {
+    const cw: usize = @min(@as(usize, w), donut_max_w);
+    const ch: usize = @min(@as(usize, h), donut_max_h);
+    if (cw < 8 or ch < 6) return;
+    const cells = cw * ch;
+    donut_mod.render(frame, cw, ch, donut_depth[0..cells], donut_cell[0..cells]);
+
+    // ASCII shades map through the static table so the grapheme reference is
+    // stable for vaxis (which stores it by reference until the flush).
+    var yy: usize = 0;
+    while (yy < ch) : (yy += 1) {
+        var xx: usize = 0;
+        while (xx < cw) : (xx += 1) {
+            const level = donut_cell[yy * cw + xx];
+            if (level == 0) continue;
+            const col: u16 = @intCast(xx);
+            const rr: u16 = y0 + @as(u16, @intCast(yy));
+            if (rr >= win.height or col >= win.width) continue;
+            win.writeCell(col, rr, .{
+                .char = .{ .grapheme = ascii_table[donut_mod.shades[level - 1]][0..1], .width = 1 },
+                .style = .{ .fg = .{ .index = shadeColor(level - 1) }, .bold = true },
+            });
+        }
+    }
+}
+
 fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
     if (app.staging_active) {
         return drawStagingPane(win, app, app.staging_diff, true, "No changes on this side - press [ or ] to switch", .main);
@@ -3892,6 +4126,22 @@ test "conventionalPrefix parses type/scope/breaking and rejects non-conventional
     try std.testing.expect(conventionalPrefix("feat(unclosed: x") == null); // scope not closed
     try std.testing.expect(conventionalPrefix(": no type") == null);
     try std.testing.expect(conventionalPrefix("") == null);
+}
+
+test "buildBannerRow is banner_width columns wide on every row" {
+    var buf: [256]u8 = undefined;
+    var r: usize = 0;
+    while (r < banner_rows) : (r += 1) {
+        const row = buildBannerRow(&buf, r);
+        // Each codepoint (space or full block) occupies exactly one column.
+        try std.testing.expectEqual(@as(usize, banner_width), std.unicode.utf8CountCodepoints(row) catch 0);
+    }
+}
+
+test "currentYear converts epoch seconds to the calendar year" {
+    try std.testing.expectEqual(@as(u16, 2026), currentYear(0)); // fallback
+    try std.testing.expectEqual(@as(u16, 2024), currentYear(1_704_067_200)); // 2024-01-01Z
+    try std.testing.expectEqual(@as(u16, 2026), currentYear(1_767_225_600)); // 2026-01-01Z
 }
 
 test "utf8CellLen consumes whole sequences and rejects bad bytes" {
