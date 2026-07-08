@@ -1645,6 +1645,12 @@ pub const App = struct {
     /// Set after a successful checkout so the next branches load moves the
     /// Branches selection onto the freshly checked-out (now current) branch.
     select_current_branch_pending: bool = false,
+    /// Set after an operation that advances HEAD to a new top commit (commit,
+    /// amend, revert, cherry-pick, merge, fast-forward, pull) so the next commits
+    /// load moves the Commits selection onto that newest commit — overriding the
+    /// usual "keep the previously-selected commit by hash" behaviour, which would
+    /// otherwise leave the cursor on the now-older commit.
+    select_top_commit_pending: bool = false,
     remote_index: usize = 0,
     /// The Remotes tab is two-level (like the upstream): a list of remotes, and
     /// — when drilled in via <enter> — that remote's branches. `remotes_index`
@@ -2290,6 +2296,10 @@ pub const App = struct {
             self.selectCurrentBranch();
             self.select_current_branch_pending = false;
         }
+        if (self.select_top_commit_pending) {
+            self.commit_index = 0; // the newest commit (new HEAD)
+            self.select_top_commit_pending = false;
+        }
         if (self.tree_view) self.rebuildTree(tree_path) catch {};
         self.updatePreview() catch {};
         self.setMessage("ready", .{}) catch {};
@@ -2430,6 +2440,10 @@ pub const App = struct {
         if (self.select_current_branch_pending and s.contains(.branches)) {
             self.selectCurrentBranch();
             self.select_current_branch_pending = false;
+        }
+        if (self.select_top_commit_pending and s.contains(.commits)) {
+            self.commit_index = 0; // the newest commit (new HEAD)
+            self.select_top_commit_pending = false;
         }
         // Keep each panel's open drill current with the refreshed repo. Reload
         // the Branches sub-commits list first (it may collapse the drill if its
@@ -7455,6 +7469,8 @@ pub const App = struct {
             if (mutable.ok()) {
                 // Network success stays silent (bottom bar).
                 try self.setMessage("{s} complete", .{op.label()});
+                // A pull advances HEAD; land the Commits cursor on the new top.
+                if (op == .pull) self.select_top_commit_pending = true;
             } else {
                 const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
                 const raw = if (stderr.len > 0) mutable.stderr else mutable.stdout;
@@ -7795,6 +7811,17 @@ pub const App = struct {
                 // onto it once the refreshed branch list lands.
                 switch (std.meta.activeTag(job)) {
                     .checkout, .new_branch_from, .move_to_new_branch => self.select_current_branch_pending = true,
+                    // Operations that put a new commit at the top of the log: land
+                    // the Commits cursor on it (the new HEAD).
+                    .commit,
+                    .amend,
+                    .revert,
+                    .revert_many,
+                    .create_fixup,
+                    .cherry_pick_many,
+                    .merge,
+                    .fast_forward_current,
+                    => self.select_top_commit_pending = true,
                     else => {},
                 }
             } else {
@@ -10312,6 +10339,36 @@ test "scoped refresh replaces only the loaded views" {
     // ...and the unrelated Commits view was left untouched.
     try std.testing.expectEqual(@as(usize, 1), app.data.commits.len);
     try std.testing.expectEqualStrings("keep me", app.data.commits[0].subject);
+}
+
+test "select_top_commit_pending lands the cursor on the new top commit after a reload" {
+    const allocator = std.testing.allocator;
+    const page = std.heap.page_allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer {
+        app.data.deinit(allocator);
+        deinitTestApp(&app);
+    }
+    // Currently on the (soon-to-be-older) commit.
+    app.data.commits = try allocator.alloc(model.Commit, 1);
+    app.data.commits[0] = .{ .hash = try allocator.dupe(u8, "old"), .short_hash = try allocator.dupe(u8, "old"), .author = try allocator.dupe(u8, "a"), .time = try allocator.dupe(u8, "t"), .refs = try allocator.dupe(u8, ""), .subject = try allocator.dupe(u8, "old") };
+    app.commit_index = 0;
+    app.select_top_commit_pending = true;
+
+    // A commits reload brings a new commit at the top; "old" shifts to index 1.
+    // Without the pending flag, restore-by-hash would re-anchor the cursor onto
+    // "old" (index 1); the flag overrides that to land on the new top (index 0).
+    var sd = ScopedData{ .scopes = ScopeSet.init(.{ .commits = true }) };
+    sd.data.commits = try page.alloc(model.Commit, 2);
+    sd.data.commits[0] = .{ .hash = try page.dupe(u8, "new"), .short_hash = try page.dupe(u8, "new"), .author = try page.dupe(u8, "a"), .time = try page.dupe(u8, "t"), .refs = try page.dupe(u8, ""), .subject = try page.dupe(u8, "new") };
+    sd.data.commits[1] = .{ .hash = try page.dupe(u8, "old"), .short_hash = try page.dupe(u8, "old"), .author = try page.dupe(u8, "a"), .time = try page.dupe(u8, "t"), .refs = try page.dupe(u8, ""), .subject = try page.dupe(u8, "old") };
+
+    app.applyScopedLoad(sd, page);
+
+    try std.testing.expectEqual(@as(usize, 0), app.commit_index);
+    try std.testing.expectEqualStrings("new", app.data.commits[0].subject);
+    try std.testing.expect(!app.select_top_commit_pending);
 }
 
 test "async initial load deep-copies into gpa and clears the loading state" {
