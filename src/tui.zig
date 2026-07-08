@@ -1695,12 +1695,15 @@ fn drawOperationPopup(root: vaxis.Window, app: *app_mod.App) void {
         return;
     }
 
-    // Outcome summary, colored by success (wrapped).
+    // Outcome summary: green (bold) on success, red (bold) on failure — so e.g.
+    // "signature verified" reads green and "signature check failed" reads red.
+    const ok_style: vaxis.Style = .{ .fg = .{ .index = ui_theme.added }, .bold = true };
+    const fail_style: vaxis.Style = .{ .fg = .{ .index = ui_theme.removed }, .bold = true };
     row += 1;
     var sum_lines: [4][]const u8 = undefined;
     const sum_n = wrapText(app.op_summary, cw, &sum_lines);
     for (sum_lines[0..sum_n]) |ln| {
-        drawDialogRow(win, app, row, ln, if (app.op_ok) st.normal else st.warning);
+        drawDialogRow(win, app, row, ln, if (app.op_ok) ok_style else fail_style);
         row += 1;
     }
 
@@ -1715,7 +1718,9 @@ fn drawOperationPopup(root: vaxis.Window, app: *app_mod.App) void {
         app.op_max_scroll = vis_n -| avail; // clamp target for the key handler
         var idx: usize = @min(app.op_scroll, app.op_max_scroll);
         while (idx < vis_n and row < footer_row) : (idx += 1) {
-            drawDialogRow(win, app, row, vis[idx], st.muted);
+            // The raw output (e.g. gpg's verification block) in the default
+            // foreground so it's legible, not the dim muted grey.
+            drawDialogRow(win, app, row, vis[idx], st.normal);
             row += 1;
         }
         // Scrollbar over just the output region, on the popup's right border
