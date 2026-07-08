@@ -279,6 +279,12 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     // the side panels.
     if (keymap.select.matches(key)) return .select;
 
+    // The merge/rebase actions menu (`m`) is reachable from every panel while an
+    // operation is in progress — you shouldn't have to be on the Files panel to
+    // continue/abort a rebase. When nothing is in progress the handler just says
+    // so. (`m` isn't bound to anything else, so a global match shadows nothing.)
+    if (keymap.conflict_menu.matches(key)) return .conflict_menu;
+
     switch (focus) {
         .files => {
             if (keymap.stage_all.matches(key)) return .stage_all;
@@ -291,7 +297,6 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
             if (keymap.commit.matches(key)) return .start_commit;
             if (keymap.commit_no_verify.matches(key)) return .commit_no_verify;
             if (keymap.amend.matches(key)) return .amend_commit;
-            if (keymap.conflict_menu.matches(key)) return .conflict_menu;
             if (keymap.ignore_file.matches(key)) return .ignore_file;
             if (keymap.copy_file_info.matches(key)) return .copy_file_info;
             if (keymap.find_fixup_base.matches(key)) return .find_fixup_base;

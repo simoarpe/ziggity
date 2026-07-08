@@ -325,7 +325,8 @@ Press **`?`** in the app for the full, always-current overlay. The essentials:
 - `i` / `y` / `ctrl+f` (Files): add to `.gitignore` / copy path / make a `fixup!`
 - `r` (Stash): rename the selected stash
 - `e` / `x` / `u` (Remotes): edit URL / remove remote / set upstream
-- `m`: merge/rebase actions (continue, amend+continue, abort) while in progress
+- `m`: merge/rebase actions (continue, amend+continue, abort) while in progress —
+  available from any panel, so you never have to switch to Files to continue/abort
 - `f` / `p` / `P`: fetch / pull / push
 - `esc`: step back one level (deselect, clear filter, exit diffing, cancel a
   prompt, leave a panel); never quits — only `q` does
