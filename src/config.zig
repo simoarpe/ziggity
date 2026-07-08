@@ -265,6 +265,12 @@ pub const Config = struct {
     /// thrash, so the default is a relaxed 10s. 0 disables the periodic refresh
     /// (it still refreshes after operations and on focus).
     refresh_interval_secs: u16 = 10,
+    /// Seconds between quiet background `git fetch`es, so "commits to pull" (the
+    /// inbound arrow / behind count) updates on its own — ahead/behind is measured
+    /// against the remote-tracking ref, which only advances on a fetch. Fails
+    /// silently if the remote needs credentials (it never prompts). `0` disables
+    /// the background fetch entirely.
+    fetch_interval_secs: u16 = 60,
     /// Local Branches panel ordering: `date` (default), `recency`, or `alphabetical`.
     branch_sort_order: model.BranchSortOrder = .date,
     skip_confirm: ConfirmSkips = .{},
@@ -336,6 +342,10 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "refresh_interval_secs")) {
             self.refresh_interval_secs = std.fmt.parseInt(u16, value, 10) catch self.refresh_interval_secs;
+            return;
+        }
+        if (std.mem.eql(u8, key, "fetch_interval_secs")) {
+            self.fetch_interval_secs = std.fmt.parseInt(u16, value, 10) catch self.fetch_interval_secs;
             return;
         }
         if (std.mem.eql(u8, key, "highlight_conventional_commits")) {
@@ -473,6 +483,19 @@ test "config parser applies key overrides and bounded layout" {
     try std.testing.expectEqual(@as(u21, 'x'), cfg.keymap.quit.codepoint);
     try std.testing.expectEqual(@as(u21, 'p'), cfg.keymap.push.codepoint);
     try std.testing.expect(cfg.keymap.push.ctrl);
+}
+
+test "fetch_interval_secs defaults to 60 and parses (0 disables)" {
+    const def: Config = .{};
+    try std.testing.expectEqual(@as(u16, 60), def.fetch_interval_secs);
+
+    var cfg: Config = .{};
+    cfg.applyBytes("fetch_interval_secs = 120");
+    try std.testing.expectEqual(@as(u16, 120), cfg.fetch_interval_secs);
+
+    var off: Config = .{};
+    off.applyBytes("fetch_interval_secs = 0");
+    try std.testing.expectEqual(@as(u16, 0), off.fetch_interval_secs);
 }
 
 test "commit_summary_limit parses and defaults to 50" {

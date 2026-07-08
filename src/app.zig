@@ -2006,6 +2006,9 @@ pub const App = struct {
     /// True while a network op is running off-loop (single in-flight).
     async_active: bool = false,
     async_op: AsyncOp = .fetch,
+    /// Set by the ticker when a periodic background fetch is due; the loop starts
+    /// it (off-thread) when no other network op is in flight.
+    bg_fetch_requested: bool = false,
 
     // Credential entry. When git reports an auth failure on a network op, the
     // two-step prompt collects a username then a (masked) password/token; the

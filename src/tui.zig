@@ -25,6 +25,8 @@ const Event = union(enum) {
     focus_out,
     refresh_tick,
     anim_tick,
+    fetch_tick,
+    bg_fetch_done,
     command_done,
     preview_done,
     worktree_done,
@@ -188,6 +190,33 @@ fn graphWorker(gr: *GraphRun) void {
 
 fn postGraph(gr: *GraphRun) void {
     _ = gr.loop.tryPostEvent(.graph_done) catch false;
+}
+
+/// A quiet periodic `git fetch` run off the UI loop (config `fetch_interval_secs`), so
+/// the behind/ahead counts reflect new remote commits. The shared environment
+/// has `GIT_TERMINAL_PROMPT=0` and no askpass, so it fails silently rather than
+/// prompting when the remote needs credentials. Output is discarded; posts
+/// `.bg_fetch_done` so the loop can refresh the branch/status views.
+const BgFetchRun = struct {
+    io: std.Io,
+    loop: *vaxis.Loop(Event),
+    root: []const u8,
+    environ: *std.process.Environ.Map,
+};
+
+fn bgFetchWorker(fr: *BgFetchRun) void {
+    const argv = [_][]const u8{ "git", "--no-optional-locks", "fetch", "--all", "--no-write-fetch-head" };
+    if (git_mod.runWithLockRetry(async_allocator, fr.io, .{
+        .argv = &argv,
+        .cwd = .{ .path = fr.root },
+        .environ_map = fr.environ,
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+    })) |r| {
+        async_allocator.free(r.stdout);
+        async_allocator.free(r.stderr);
+    } else |_| {}
+    _ = fr.loop.tryPostEvent(.bg_fetch_done) catch false;
 }
 
 /// A slow git mutation (merge/rebase/bisect/…) run off the UI loop on a
@@ -357,6 +386,10 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
         if (graph_run.result) |r| async_allocator.free(r);
     };
 
+    var bg_fetch_run: BgFetchRun = undefined;
+    var bg_fetch_future: ?std.Io.Future(void) = null;
+    defer if (bg_fetch_future) |*f| f.cancel(io);
+
     var mutation_run: MutationRun = undefined;
     var mutation_future: ?std.Io.Future(void) = null;
     defer if (mutation_future) |*f| {
@@ -410,6 +443,16 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             .winsize => |ws| try vx.resize(allocator, tty.writer(), ws),
             .refresh_tick => try app.handleRefreshTick(),
             .anim_tick => app.anim_frame +%= 1,
+            .fetch_tick => app.bg_fetch_requested = true,
+            .bg_fetch_done => {
+                if (bg_fetch_future) |*f| {
+                    f.await(io);
+                    bg_fetch_future = null;
+                    // New remote-tracking refs: refresh the status summary
+                    // (ahead/behind) and the branch list (its arrows).
+                    app.refreshViews(app_mod.ScopeSet.init(.{ .files = true, .branches = true }));
+                }
+            },
             .focus_in => try app.handleFocusIn(),
             .focus_out => app.handleFocusOut(),
             .command_done => {
@@ -508,6 +551,10 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 worktree_future = null;
                 if (worktree_run.result) |*r| r.deinit(async_allocator);
                 worktree_run.result = null;
+            }
+            if (bg_fetch_future) |*f| {
+                f.await(io);
+                bg_fetch_future = null;
             }
             if (scoped_load_future) |*f| {
                 f.await(io);
@@ -624,6 +671,14 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 };
                 render_needed = true;
             }
+        }
+
+        // Start a queued background auto-fetch off the loop — but never while a
+        // user's own network op is in flight (they'd contend / double-prompt).
+        if (bg_fetch_future == null and app.bg_fetch_requested and !app.async_active) {
+            app.bg_fetch_requested = false;
+            bg_fetch_run = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ };
+            bg_fetch_future = io.concurrent(bgFetchWorker, .{&bg_fetch_run}) catch null;
         }
 
         // Flush any pending stage/unstage toggles into a coalesced off-thread
@@ -759,6 +814,11 @@ fn refreshTickerRun(state: *RefreshTicker) void {
     // interval makes `git status` thrash a large repo; 0 disables the periodic
     // refresh entirely (it still refreshes after ops and on focus).
     const interval_ms: u64 = @as(u64, state.app.config.refresh_interval_secs) * 1000;
+    // Background auto-fetch cadence (config `fetch_interval_secs`, 0 = off). Seed
+    // the accumulator so the first fetch fires a few seconds after startup rather
+    // than a full interval later.
+    const fetch_interval_ms: u64 = @as(u64, state.app.config.fetch_interval_secs) * 1000;
+    var fetch_ms: u64 = if (fetch_interval_ms > 3000) fetch_interval_ms - 3000 else 0;
     var idle_ms: u64 = 0;
     while (!state.stop.load(.acquire)) {
         // Always sleep the short spinner tick so the ticker re-checks the
@@ -783,6 +843,14 @@ fn refreshTickerRun(state: *RefreshTicker) void {
                 if (idle_ms >= interval_ms) {
                     idle_ms = 0;
                     _ = state.loop.tryPostEvent(.refresh_tick) catch false;
+                }
+            }
+            // The background auto-fetch runs on its own (slower) cadence.
+            if (fetch_interval_ms > 0) {
+                fetch_ms += spinner_tick_ms;
+                if (fetch_ms >= fetch_interval_ms) {
+                    fetch_ms = 0;
+                    _ = state.loop.tryPostEvent(.fetch_tick) catch false;
                 }
             }
         }

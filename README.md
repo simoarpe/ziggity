@@ -377,6 +377,13 @@ prepare_commit_msg_hook = true
 # and when the terminal regains focus).
 refresh_interval_secs = 10
 
+# Seconds between quiet background `git fetch`es so "commits to pull" (the
+# inbound arrow / behind count) updates on its own — ahead/behind is measured
+# against the remote-tracking ref, which only advances on a fetch. It never
+# prompts: if the remote needs credentials (and no helper has them cached) it
+# fails silently. Set to 0 to disable the background fetch. Default 60.
+fetch_interval_secs = 60
+
 # Side-panel layout (lazygit-style): the Status panel is a fixed height, the
 # Files/Branches/Commits lists share the rest equally, and Stash stays small
 # unless it's focused. Enable the "accordion" to grow the focused list panel.
