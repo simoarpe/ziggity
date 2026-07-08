@@ -103,6 +103,9 @@ pub const EditorRequest = struct {
 };
 
 /// to do with the submitted text.
+/// Which stash-create variant the message prompt is collecting a message for.
+pub const StashKind = enum { all, untracked, staged, file };
+
 pub const TextPromptKind = enum {
     new_branch,
     checkout_by_name,
@@ -129,6 +132,7 @@ pub const TextPromptKind = enum {
     move_to_new_branch,
     set_commit_author,
     rename_stash,
+    stash_message,
 
     pub fn title(self: TextPromptKind) []const u8 {
         return switch (self) {
@@ -157,6 +161,7 @@ pub const TextPromptKind = enum {
             .move_to_new_branch => "New branch name (move commits onto it)",
             .set_commit_author => "Author as: Name <email>",
             .rename_stash => "Rename stash",
+            .stash_message => "Stash message (empty = default WIP name)",
         };
     }
 };
@@ -1989,6 +1994,10 @@ pub const App = struct {
     worktree_base_len: usize = 0,
     // Owned (no fixed cap): a submodule URL can be arbitrarily long.
     submodule_url_owned: ?[]u8 = null,
+    // The stash variant chosen from the stash menu, captured while the stash
+    // message prompt is open; `stash_path_owned` holds the file path for `.file`.
+    pending_stash_kind: StashKind = .all,
+    stash_path_owned: ?[]u8 = null,
     mode: Mode = .normal,
     status_filter_index: usize = 0,
     help_scroll: usize = 0,
@@ -2198,6 +2207,7 @@ pub const App = struct {
         if (self.remote_drill) |r| self.allocator.free(r);
         if (self.tag_message_owned) |m| self.allocator.free(m);
         if (self.submodule_url_owned) |u| self.allocator.free(u);
+        if (self.stash_path_owned) |p| self.allocator.free(p);
         conflicts_mod.close(self);
         self.conflict_undo.deinit(self.allocator);
         self.files_tree.deinit(self.allocator);
@@ -5591,6 +5601,23 @@ pub const App = struct {
         return self.requestMutation(.{ .cherry_pick_many = ordered.items }, .{ .gerund = "cherry-picking", .command = shown, .refresh = Refresh.all, .post = .clear_copied }, "cherry-picked {d} commit(s)", .{count});
     }
 
+    /// Open the stash-message prompt for `kind`, capturing the file path first
+    /// for a per-file stash (the selection can't change while the prompt is up,
+    /// but this keeps it explicit and independent of focus).
+    fn startStashPrompt(self: *App, kind: StashKind) !void {
+        if (kind == .file) {
+            const file = self.selectedFile() orelse {
+                try self.setMessage("no file selected", .{});
+                return;
+            };
+            self.setOwned(&self.stash_path_owned, file.path);
+        } else {
+            self.clearOwned(&self.stash_path_owned);
+        }
+        self.pending_stash_kind = kind;
+        try self.startTextPrompt(.stash_message);
+    }
+
     pub fn startTextPrompt(self: *App, kind: TextPromptKind) !void {
         var prefill: []const u8 = "";
         switch (kind) {
@@ -5645,6 +5672,8 @@ pub const App = struct {
             // Worktree/submodule prompts run from the Files panel's tabs.
             .new_worktree => self.focus = .files,
             .add_submodule_url, .add_submodule_path, .set_submodule_url => self.focus = .files,
+            // The stash variant/path is captured by startStashPrompt; keep focus.
+            .stash_message => {},
         }
         self.mode = .text_prompt;
         self.text_prompt_kind = kind;
@@ -5888,6 +5917,39 @@ pub const App = struct {
                 self.clearPromptDraft(.new_tag); // created -> forget the draft
                 return self.requestMutation(.{ .create_tag = .{ .name = name, .message = value, .force = false, .target = self.tag_target_buf[0..self.tag_target_len] } }, .{ .gerund = "creating tag", .command = "git tag", .refresh = Refresh.tags }, "created tag {s}", .{name});
             },
+            // The stash message accepts an empty value: no `-m`, so git uses its
+            // default `WIP on <branch>: …` name (matching `git stash push -m ""`).
+            .stash_message => {
+                const stash_kind = self.pending_stash_kind;
+                const msg: ?[]const u8 = if (value.len > 0) value else null;
+                // Run while `value`/`input_buffer` are still valid, then clean up.
+                const result = switch (stash_kind) {
+                    .all => try self.git.stashAll(msg),
+                    .untracked => try self.git.stashIncludingUntracked(msg),
+                    .staged => try self.git.stashStaged(msg),
+                    .file => blk: {
+                        const path = self.stash_path_owned orelse {
+                            self.mode = .normal;
+                            self.text_prompt_kind = null;
+                            self.input_buffer.clearRetainingCapacity();
+                            try self.setMessage("no file to stash", .{});
+                            return;
+                        };
+                        break :blk try self.git.stashFile(path, msg);
+                    },
+                };
+                self.mode = .normal;
+                self.text_prompt_kind = null;
+                self.input_buffer.clearRetainingCapacity();
+                self.clearOwned(&self.stash_path_owned);
+                const label: []const u8 = switch (stash_kind) {
+                    .all => "stashed all changes",
+                    .untracked => "stashed (incl. untracked)",
+                    .staged => "stashed staged changes",
+                    .file => "stashed file",
+                };
+                return self.runMutationScoped(result, Refresh.stash, "{s}", .{label});
+            },
             else => {},
         }
 
@@ -5952,6 +6014,8 @@ pub const App = struct {
                 }
                 return self.requestMutation(.{ .rename_stash = .{ .index = entry.index, .hash = entry.hash, .message = value } }, .{ .gerund = "renaming stash", .command = "git stash store", .refresh = Refresh.stash }, "renamed stash", .{});
             },
+            // Accepts an empty value; fully handled in the first switch above.
+            .stash_message => unreachable,
             // Checkout by typed name: `git checkout <value>` resolves a local
             // branch, DWIM-tracks a remote branch, detaches onto a tag/commit,
             // or (with "-") switches to the previous branch. `requestMutation`
@@ -6521,16 +6585,10 @@ pub const App = struct {
                 }
                 return self.requestMutation(.amend_continue_rebase, .{ .gerund = "rebasing", .command = "git commit --amend --no-edit && git rebase --continue" }, "amended and continued", .{});
             },
-            .stash_all => return self.runMutationScoped(try self.git.stashAll(), Refresh.stash, "stashed all changes", .{}),
-            .stash_untracked => return self.runMutationScoped(try self.git.stashIncludingUntracked(), Refresh.stash, "stashed (incl. untracked)", .{}),
-            .stash_staged => return self.runMutationScoped(try self.git.stashStaged(), Refresh.stash, "stashed staged changes", .{}),
-            .stash_file => {
-                const file = self.selectedFile() orelse {
-                    try self.setMessage("no file selected", .{});
-                    return;
-                };
-                return self.runMutationScoped(try self.git.stashFile(file.path), Refresh.stash, "stashed {s}", .{file.path});
-            },
+            .stash_all => return self.startStashPrompt(.all),
+            .stash_untracked => return self.startStashPrompt(.untracked),
+            .stash_staged => return self.startStashPrompt(.staged),
+            .stash_file => return self.startStashPrompt(.file),
             .filter_commits_message => return self.startCommitFilterPrompt(.commit_grep),
             .filter_commits_author => return self.startCommitFilterPrompt(.commit_author),
             .filter_commits_path => return self.startCommitFilterPrompt(.commit_path),

@@ -1392,21 +1392,29 @@ pub const Git = struct {
         return self.exec(&.{ "stash", "store", "-m", message, hash });
     }
 
-    pub fn stashAll(self: *Git) !ExecResult {
+    // The stash-create commands take an optional message. A null (or empty)
+    // message is passed as no `-m` at all, so git assigns its default
+    // `WIP on <branch>: <hash> <subject>` name — matching `git stash push -m ""`.
+    pub fn stashAll(self: *Git, message: ?[]const u8) !ExecResult {
+        if (message) |m| return self.exec(&.{ "stash", "push", "-m", m });
         return self.exec(&.{ "stash", "push" });
     }
 
     /// Stash tracked changes plus untracked files (`-u`).
-    pub fn stashIncludingUntracked(self: *Git) !ExecResult {
+    pub fn stashIncludingUntracked(self: *Git, message: ?[]const u8) !ExecResult {
+        if (message) |m| return self.exec(&.{ "stash", "push", "--include-untracked", "-m", m });
         return self.exec(&.{ "stash", "push", "--include-untracked" });
     }
 
     /// Stash only what is staged (`--staged`), leaving the working tree.
-    pub fn stashStaged(self: *Git) !ExecResult {
+    pub fn stashStaged(self: *Git, message: ?[]const u8) !ExecResult {
+        if (message) |m| return self.exec(&.{ "stash", "push", "--staged", "-m", m });
         return self.exec(&.{ "stash", "push", "--staged" });
     }
 
-    pub fn stashFile(self: *Git, path: []const u8) !ExecResult {
+    pub fn stashFile(self: *Git, path: []const u8, message: ?[]const u8) !ExecResult {
+        // `-- <path>` must come last.
+        if (message) |m| return self.exec(&.{ "stash", "push", "-m", m, "--", path });
         return self.exec(&.{ "stash", "push", "--", path });
     }
 
