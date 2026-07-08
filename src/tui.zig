@@ -845,8 +845,11 @@ fn refreshTickerRun(state: *RefreshTicker) void {
                     _ = state.loop.tryPostEvent(.refresh_tick) catch false;
                 }
             }
-            // The background auto-fetch runs on its own (slower) cadence.
+            // The background auto-fetch runs on its own (slower) cadence. A
+            // focus-triggered fetch restarts the countdown so the next timed one
+            // is a full interval away.
             if (fetch_interval_ms > 0) {
+                if (state.app.fetch_timer_reset.swap(false, .acquire)) fetch_ms = 0;
                 fetch_ms += spinner_tick_ms;
                 if (fetch_ms >= fetch_interval_ms) {
                     fetch_ms = 0;

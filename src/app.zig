@@ -2009,6 +2009,9 @@ pub const App = struct {
     /// Set by the ticker when a periodic background fetch is due; the loop starts
     /// it (off-thread) when no other network op is in flight.
     bg_fetch_requested: bool = false,
+    /// Set on terminal focus-gain to restart the ticker's fetch countdown, so a
+    /// focus-triggered fetch resets the interval (rather than firing again soon).
+    fetch_timer_reset: std.atomic.Value(bool) = .init(false),
 
     // Credential entry. When git reports an auth failure on a network op, the
     // two-step prompt collects a username then a (masked) password/token; the
@@ -3827,6 +3830,13 @@ pub const App = struct {
         // completion anyway.
         if (self.foregroundBusy()) return;
         self.refreshViews(Refresh.all);
+        // Regaining focus is a good moment to check the remote: kick an immediate
+        // background fetch (if enabled) and restart the periodic countdown so the
+        // next timed fetch is a full interval away.
+        if (self.config.fetch_interval_secs > 0) {
+            self.bg_fetch_requested = true;
+            self.fetch_timer_reset.store(true, .release);
+        }
     }
 
     pub fn handleFocusOut(self: *App) void {
