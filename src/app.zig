@@ -104,7 +104,8 @@ pub const EditorRequest = struct {
 
 /// to do with the submitted text.
 /// Which stash-create variant the message prompt is collecting a message for.
-pub const StashKind = enum { all, untracked, staged, file };
+/// `keep` snapshots the changes into a stash but leaves the working tree as-is.
+pub const StashKind = enum { all, untracked, staged, file, keep };
 
 pub const TextPromptKind = enum {
     new_branch,
@@ -451,6 +452,7 @@ pub const MenuAction = enum {
     stash_untracked,
     stash_staged,
     stash_file,
+    stash_keep,
     filter_commits_message,
     filter_commits_author,
     filter_commits_path,
@@ -593,6 +595,7 @@ pub const stash_menu = [_]MenuItem{
     .{ .label = "Stash including untracked files", .action = .stash_untracked },
     .{ .label = "Stash staged changes only", .action = .stash_staged },
     .{ .label = "Stash the selected file", .action = .stash_file },
+    .{ .label = "Stash but keep the changes in the working tree", .action = .stash_keep },
 };
 
 const commit_filter_menu = [_]MenuItem{
@@ -5923,30 +5926,28 @@ pub const App = struct {
                 const stash_kind = self.pending_stash_kind;
                 const msg: ?[]const u8 = if (value.len > 0) value else null;
                 // Run while `value`/`input_buffer` are still valid, then clean up.
-                const result = switch (stash_kind) {
+                // `keep` returns null when the tree is clean (nothing snapshotted).
+                const outcome: ?git_mod.ExecResult = switch (stash_kind) {
                     .all => try self.git.stashAll(msg),
                     .untracked => try self.git.stashIncludingUntracked(msg),
                     .staged => try self.git.stashStaged(msg),
-                    .file => blk: {
-                        const path = self.stash_path_owned orelse {
-                            self.mode = .normal;
-                            self.text_prompt_kind = null;
-                            self.input_buffer.clearRetainingCapacity();
-                            try self.setMessage("no file to stash", .{});
-                            return;
-                        };
-                        break :blk try self.git.stashFile(path, msg);
-                    },
+                    .file => if (self.stash_path_owned) |path| try self.git.stashFile(path, msg) else null,
+                    .keep => try self.git.stashKeeping(msg),
                 };
                 self.mode = .normal;
                 self.text_prompt_kind = null;
                 self.input_buffer.clearRetainingCapacity();
                 self.clearOwned(&self.stash_path_owned);
+                const result = outcome orelse {
+                    try self.setMessage("nothing to stash", .{});
+                    return;
+                };
                 const label: []const u8 = switch (stash_kind) {
                     .all => "stashed all changes",
                     .untracked => "stashed (incl. untracked)",
                     .staged => "stashed staged changes",
                     .file => "stashed file",
+                    .keep => "stashed (working tree kept)",
                 };
                 return self.runMutationScoped(result, Refresh.stash, "{s}", .{label});
             },
@@ -6589,6 +6590,7 @@ pub const App = struct {
             .stash_untracked => return self.startStashPrompt(.untracked),
             .stash_staged => return self.startStashPrompt(.staged),
             .stash_file => return self.startStashPrompt(.file),
+            .stash_keep => return self.startStashPrompt(.keep),
             .filter_commits_message => return self.startCommitFilterPrompt(.commit_grep),
             .filter_commits_author => return self.startCommitFilterPrompt(.commit_author),
             .filter_commits_path => return self.startCommitFilterPrompt(.commit_path),

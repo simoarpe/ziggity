@@ -210,8 +210,10 @@ the section for the panel you're on). Press `q` to quit.
   which ref is the diff's "from"), toggle a three-dot merge-base diff
   (`base...target` — only the target's own changes since it diverged, the
   GitHub-PR view; the title shows `[base X ...]`), or exit.
-- Stash menu (`s`): stash all / +untracked / staged-only / just the selected file;
-  apply / pop / drop / rename (`r`) on the Stash panel.
+- Stash menu (`s`): stash all / +untracked / staged-only / just the selected file /
+  keep-changes (snapshot into a stash but leave the working tree untouched). Each
+  asks for an optional message (empty = git's default `WIP on …` name). Apply /
+  pop / drop / rename (`r`) on the Stash panel.
 
 </details>
 

@@ -1418,6 +1418,29 @@ pub const Git = struct {
         return self.exec(&.{ "stash", "push", "--", path });
     }
 
+    /// Snapshot the current (tracked) changes into a stash entry WITHOUT touching
+    /// the working tree or index: `stash create` builds the commit and returns
+    /// its hash without modifying anything, then `stash store` records it. Returns
+    /// null when there is nothing to stash (a clean tree). The entry is named like
+    /// a normal push (git writes `On <branch>: <msg>` / `WIP on <branch>: …` as
+    /// the create commit's subject, which we reuse). Untracked files aren't
+    /// included — `git stash create` never captures them.
+    pub fn stashKeeping(self: *Git, message: ?[]const u8) !?ExecResult {
+        var create = if (message) |m|
+            try self.exec(&.{ "stash", "create", m })
+        else
+            try self.exec(&.{ "stash", "create" });
+        if (!create.ok()) return create; // caller now owns and reports the error
+        defer create.deinit(self.allocator);
+        const hash = std.mem.trim(u8, create.stdout, " \t\r\n");
+        if (hash.len == 0) return null; // clean tree: nothing was created
+        var subj = try self.exec(&.{ "log", "-1", "--format=%s", hash });
+        defer subj.deinit(self.allocator);
+        const subject = std.mem.trim(u8, subj.stdout, " \t\r\n");
+        if (subject.len > 0) return try self.exec(&.{ "stash", "store", "-m", subject, hash });
+        return try self.exec(&.{ "stash", "store", hash });
+    }
+
     fn resetFilePaths(self: *Git, file: model.FileStatus) !?ExecResult {
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(self.allocator);
