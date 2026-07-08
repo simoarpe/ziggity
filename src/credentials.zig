@@ -62,6 +62,13 @@ pub fn startCredentialPrompt(app: *App, op: AsyncOp) !void {
 }
 
 pub fn handleCredentialPromptKey(app: *App, key: vaxis.Key) !void {
+    // While pasting (e.g. a token with a trailing newline), esc/enter are pasted
+    // content, not cancel/advance; the single-line field drops pasted newlines.
+    if (app.pasting) {
+        if (app.isEnterKey(key) or app.isEscapeKey(key)) return;
+        _ = try app.editLine(&app.input_buffer, &app.prompt_cursor, key);
+        return;
+    }
     if (app.isEscapeKey(key)) {
         cancelCredentialPrompt(app);
         return;

@@ -23,6 +23,8 @@ const Event = union(enum) {
     winsize: vaxis.Winsize,
     focus_in,
     focus_out,
+    paste_start,
+    paste_end,
     refresh_tick,
     anim_tick,
     fetch_tick,
@@ -345,6 +347,9 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     const writer = tty.writer();
     try vx.enterAltScreen(writer);
     try vx.setMouseMode(writer, true);
+    // Bracketed paste: the terminal wraps pasted text in markers so a pasted
+    // newline arrives as content, not as an Enter that would submit a dialog.
+    try vx.setBracketedPaste(writer, true);
     try writer.writeAll(focus_events_set);
     try writer.flush();
     defer {
@@ -455,6 +460,10 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             },
             .focus_in => try app.handleFocusIn(),
             .focus_out => app.handleFocusOut(),
+            // Bracketed paste: while pasting, key events are literal text, not
+            // commands — so a pasted newline can't submit a dialog.
+            .paste_start => app.pasting = true,
+            .paste_end => app.pasting = false,
             .command_done => {
                 if (async_future) |*f| {
                     f.await(io);
@@ -795,6 +804,7 @@ fn runEditor(
     }
     vx.enterAltScreen(writer) catch {};
     vx.setMouseMode(writer, true) catch {};
+    vx.setBracketedPaste(writer, true) catch {}; // exitAltScreen reset it
     writer.writeAll(focus_events_set) catch {};
     writer.flush() catch {};
     vx.queryTerminal(writer, .fromSeconds(1)) catch {};

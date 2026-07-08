@@ -2000,6 +2000,10 @@ pub const App = struct {
     active_menu: ?Menu = null,
     pending_confirmation: ?Confirmation = null,
     terminal_focused: bool = true,
+    // True between a bracketed-paste start and end: incoming keys are literal
+    // text for the active input, never commands (so a pasted newline inserts a
+    // line break instead of submitting the dialog).
+    pasting: bool = false,
     running: bool = true,
     /// A network op the TUI loop should start; cleared once it spawns the worker.
     async_requested: ?AsyncOp = null,
@@ -2517,6 +2521,13 @@ pub const App = struct {
     }
 
     pub fn handleKey(self: *App, key: vaxis.Key) !void {
+        // During a bracketed paste only the text-input dialogs consume keys (as
+        // literal text); a paste into any other context is swallowed so pasted
+        // characters can't fire commands.
+        if (self.pasting) switch (self.mode) {
+            .commit_prompt, .file_filter_prompt, .text_prompt, .credential_prompt => {},
+            else => return,
+        };
         if (self.mode == .commit_prompt) {
             try commits_mod.handleCommitPromptKey(self, key);
             return;
@@ -5756,6 +5767,13 @@ pub const App = struct {
     }
 
     fn handleTextPromptKey(self: *App, key: vaxis.Key) !void {
+        // While pasting, esc/enter are pasted content, not cancel/submit. These
+        // prompts are single-line, so a pasted newline is simply dropped.
+        if (self.pasting) {
+            if (self.isEnterKey(key) or self.isEscapeKey(key)) return;
+            _ = try self.editLine(&self.input_buffer, &self.prompt_cursor, key);
+            return;
+        }
         if (self.isEscapeKey(key)) {
             self.cancelTextPrompt("cancelled");
             return;
@@ -6717,6 +6735,16 @@ pub const App = struct {
 
     /// `n` in the Branches panel creates a branch, or a tag on the Tags tab.
     fn handleFileFilterPromptKey(self: *App, key: vaxis.Key) !void {
+        // While pasting, drop esc/enter (this is a single-line filter) and just
+        // insert the pasted text.
+        if (self.pasting) {
+            if (self.isEnterKey(key) or self.isEscapeKey(key)) return;
+            if (try self.editLine(&self.file_filter_buffer, &self.file_filter_cursor, key) == .changed) {
+                self.filter_history_index = null;
+                try self.updateFileFilterFromPrompt();
+            }
+            return;
+        }
         if (self.isEscapeKey(key)) {
             try self.clearFileFilter();
             return;
@@ -9459,6 +9487,34 @@ test "filter history dedups consecutive entries and ignores empties" {
     try std.testing.expectEqual(@as(usize, 2), app.filter_history.items.len);
     try std.testing.expectEqualStrings("app", app.filter_history.items[0]);
     try std.testing.expectEqualStrings("zig", app.filter_history.items[1]);
+}
+
+test "bracketed paste: a newline in the commit subject moves to the body, not submit" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.mode = .commit_prompt;
+    app.commit_action = .create;
+    app.commit_field = .subject;
+    try app.commit_buffer.appendSlice(allocator, "the subject");
+    app.commit_cursor = app.commit_buffer.items.len;
+
+    app.pasting = true;
+    const enter = vaxis.Key{ .codepoint = vaxis.Key.enter };
+    try app.handleKey(enter);
+
+    // Still open (did NOT submit), now editing the body so the rest of the pasted
+    // text lands there; the subject line is untouched.
+    try std.testing.expect(app.mode == .commit_prompt);
+    try std.testing.expect(app.commit_field == .body);
+    try std.testing.expectEqualStrings("the subject", app.commit_buffer.items);
+
+    // A further pasted newline (now in the body) inserts a literal line break.
+    try app.handleKey(enter);
+    try std.testing.expect(app.mode == .commit_prompt);
+    try std.testing.expectEqualStrings("\n", app.commit_body_buffer.items);
 }
 
 test "tab toggles focus into the diff panel and back" {

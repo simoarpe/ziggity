@@ -169,7 +169,8 @@ pub fn amendLastCommit(app: *App) !void {
 }
 
 pub fn handleCommitPromptKey(app: *App, key: vaxis.Key) !void {
-    if (app.isEscapeKey(key)) {
+    // Mid-paste, esc is part of the pasted content, not a cancel.
+    if (app.isEscapeKey(key) and !app.pasting) {
         app.mode = .normal;
         // Keep an unfinalized "create" message so reopening restores it; a
         // reword's text is tied to its commit, so it is not preserved.
@@ -184,11 +185,18 @@ pub fn handleCommitPromptKey(app: *App, key: vaxis.Key) !void {
         app.commit_field = if (app.commit_field == .subject) .body else .subject;
         return;
     }
-    // Enter submits from the subject; in the body it inserts a newline.
+    // Enter submits from the subject; in the body it inserts a newline. While
+    // pasting, a newline never submits: in the subject it moves to the body (so
+    // the first pasted line is the subject and the rest becomes the body), and
+    // in the body it inserts a literal line break.
     if (app.isEnterKey(key)) {
         if (app.commit_field == .body) {
             try app.commit_body_buffer.insertSlice(app.allocator, app.commit_body_cursor, "\n");
             app.commit_body_cursor += 1;
+            return;
+        }
+        if (app.pasting) {
+            app.commit_field = .body;
             return;
         }
         return submitCommit(app);
