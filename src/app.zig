@@ -3048,6 +3048,7 @@ pub const App = struct {
             .bisect_menu => try self.startBisectMenu(),
             .stash_pop => try stash_mod.popSelectedStash(self),
             .stash_drop => try stash_mod.dropSelectedStash(self),
+            .stash_create_patch => try stash_mod.createPatchFromSelectedStash(self),
             .stash_rename => {
                 if (self.selectedStash() == null) {
                     try self.setMessage("no stash selected", .{});

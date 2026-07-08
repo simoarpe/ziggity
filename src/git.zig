@@ -1348,6 +1348,12 @@ pub const Git = struct {
         return self.exec(&.{"push"});
     }
 
+    /// The stash's changes as a plain (uncoloured) patch, including untracked
+    /// files, suitable for writing to a `.patch` file and `git apply`ing.
+    pub fn stashShowPatch(self: *Git, selector: []const u8) !ExecResult {
+        return self.exec(&.{ "stash", "show", "-p", "-u", "--no-ext-diff", selector });
+    }
+
     pub fn stashApply(self: *Git, index: usize) !ExecResult {
         const selector = try std.fmt.allocPrint(self.allocator, "stash@{{{d}}}", .{index});
         defer self.allocator.free(selector);

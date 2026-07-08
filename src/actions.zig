@@ -93,6 +93,7 @@ pub const Action = enum {
     backspace,
     stash_pop,
     stash_drop,
+    stash_create_patch,
 };
 
 /// Whether an action starts or could lead to a git mutation. While a
@@ -339,6 +340,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
             if (keymap.stash_apply.matches(key)) return .select;
             if (keymap.stash_pop.matches(key)) return .stash_pop;
             if (keymap.stash_drop.matches(key)) return .stash_drop;
+            if (keymap.stash_create_patch.matches(key)) return .stash_create_patch;
             if (keymap.stash_rename.matches(key)) return .stash_rename;
         },
         .status, .main => {},

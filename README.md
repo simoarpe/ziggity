@@ -213,7 +213,8 @@ the section for the panel you're on). Press `q` to quit.
 - Stash menu (`s`): stash all / +untracked / staged-only / just the selected file /
   keep-changes (snapshot into a stash but leave the working tree untouched). Each
   asks for an optional message (empty = git's default `WIP on …` name). Apply /
-  pop / drop / rename (`r`) on the Stash panel.
+  pop / drop / rename (`r`) / write to a patch file (`w` → `stash-<n>.patch`,
+  including untracked, `git apply`-able) on the Stash panel.
 
 </details>
 

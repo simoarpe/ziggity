@@ -101,6 +101,7 @@ pub const KeyMap = struct {
     stash_apply: Binding = .{ .codepoint = ' ' },
     stash_pop: Binding = .{ .codepoint = 'g' },
     stash_drop: Binding = .{ .codepoint = 'd' },
+    stash_create_patch: Binding = .{ .codepoint = 'w' },
     status_panel: Binding = .{ .codepoint = '1' },
     files_panel: Binding = .{ .codepoint = '2' },
     branches_panel: Binding = .{ .codepoint = '3' },
