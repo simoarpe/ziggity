@@ -20,26 +20,11 @@ binary. It is **not** a line-by-line port: it keeps lazygit's feel while leaning
 on idiomatic Zig, explicit memory ownership, plain `git` subprocesses (no
 libgit2), and [libvaxis](https://github.com/rockorager/libvaxis) for the UI.
 
-```text
-┌─[1] Status ─────────────┐┌─ Diff ───────────────────────────────┐
-│ repo → main ✓           ││ diff --git a/src/app.zig …            │
-├─[2] Files ──────────────┤│ @@ -10,7 +10,9 @@                      │
-│  M src/app.zig          ││ -    old line                         │
-│  A README.md            ││ +    new line                         │
-├─[3] Branches ───────────┤│ +    another new line                 │
-│  * main                 ││                                       │
-│    feature/range-select ││   (preview, staging, and ref-to-ref   │
-├─[4] Commits ────────────┤│    diffs render here)                 │
-│  ●  Add range select    ││                                       │
-│  ●  Fix plan scroll      ││                                       │
-├─[5] Stash ──────────────┤│                                       │
-│  stash@{0} wip           ││                                       │
-└─────────────────────────┘└───────────────────────────────────────┘
- space stage · c commit · ? help · q quit
-```
+<p align="center">
+  <img src="docs/screenshots/01-overview.png" alt="Ziggity - the main view" width="900">
+</p>
 
-> 📸 *A real screenshot/GIF belongs here — drop one at
-> `docs/assets/screenshot.png` and swap the diagram above for it.*
+<p align="center"><i>Status, Files, Branches, Commits and Stash panels with a live diff preview and a context-sensitive footer.</i></p>
 
 ---
 
@@ -47,6 +32,7 @@ libgit2), and [libvaxis](https://github.com/rockorager/libvaxis) for the UI.
 
 - [Quick start](#quick-start)
 - [Highlights](#highlights)
+- [Screenshots](#screenshots)
 - [Features](#features)
 - [Keybindings](#keybindings)
 - [Configuration](#configuration)
@@ -79,13 +65,96 @@ the section for the panel you're on). Press `q` to quit.
 - **Full interactive rebase** — drop/squash/fixup/edit/reword/move per commit, a
   plan editor (`i`), cherry-pick, custom patch building, autosquash, and
   `rebase --onto` from a marked base.
+- **History & inspection** — the real `git log --graph` DAG (`ctrl+l`) with
+  first-parent jumps, ref-to-ref diffing (`W`) with reverse and three-dot
+  (merge-base) modes, GPG signature verification (`x`), and log filtering (`/`).
 - **Multi-selection** — `v` / `shift+arrows` select a range in any list to act on
   many files, commits, branches, or stashes at once; `*` selects a branch's own
   commits.
-- **Responsive by design** — slow and network operations run off the UI thread
-  with a spinner; navigation stays live while they work.
+- **Stays in sync** — a quiet background `git fetch` keeps the inbound "commits to
+  pull" arrow current on its own; slow and network operations run off the UI
+  thread with a spinner while navigation stays live.
+- **Thoughtful touches** — `prepare-commit-msg` hook prefill, stash naming and a
+  keep-the-working-tree snapshot, per-stash patch export, and bracketed paste so a
+  pasted multi-line message never submits early.
 - **Lightweight & explicit** — one small binary, plain `git` subprocesses, no
   libgit2, fully remappable keys, themeable colours, and custom commands.
+
+## Screenshots
+
+A visual tour of the main features, captured from a real terminal session (see
+[`docs/screenshots`](docs/screenshots)).
+
+### Hunk- and line-level staging
+
+`enter` a file to open the staging view — stage or unstage individual lines or
+whole hunks (`space`), with an optional side-by-side unstaged/staged split.
+
+![Line-level staging view](docs/screenshots/02-staging.png)
+
+### Commits & history
+
+The Commits panel previews each commit's diff, including its GPG signature status;
+`enter` opens the commit's changed files.
+
+![Commits panel with diff preview](docs/screenshots/03-commits.png)
+
+`ctrl+l` opens the real `git log --graph` DAG in git's own colours — jump to a
+commit's first parent with `p`, or toggle all-branches with `a`.
+
+![Commit graph viewer](docs/screenshots/04-commit-graph.png)
+
+Full interactive rebase: press `i` on a commit to open a plan editor — mark
+`pick` / `drop` / `squash` / `fixup` / `edit`, reorder with `ctrl+j`/`ctrl+k`,
+then run it.
+
+![Interactive rebase plan editor](docs/screenshots/10-rebase-plan.png)
+
+### Committing
+
+`c` opens the commit dialog: a summary line plus an optional multi-line body, a
+live character count nudging the 50/72 rule, and (optionally) a
+`prepare-commit-msg` hook prefill.
+
+![Commit message dialog](docs/screenshots/08-commit-dialog.png)
+
+### Branches & tags
+
+The Branches panel shows ahead/behind arrows, upstream tracking and per-ref
+actions (merge, rebase, reset, checkout…); the Tags tab lists tags with their
+messages.
+
+![Branches panel](docs/screenshots/05-branches.png)
+
+![Tags tab](docs/screenshots/06-tags.png)
+
+### Stash
+
+A Stash panel with a diff preview. The stash menu (`s`) offers all / +untracked /
+staged-only / a single file / keep-changes, each with an optional message — and
+`w` writes any stash to a `git apply`-able patch file.
+
+![Stash panel](docs/screenshots/07-stash.png)
+
+![Stash menu](docs/screenshots/12-stash-menu.png)
+
+### Diffing & menus
+
+Mark any ref and diff another against it (`W`), with reverse and three-dot
+(merge-base) options. Destructive actions route through clear, explicit menus.
+
+![Diffing menu](docs/screenshots/14-diffing-menu.png)
+
+![Reset menu](docs/screenshots/13-reset-menu.png)
+
+### Help & the about screen
+
+`?` opens the keybindings overlay, scrolled to the panel you're on. Selecting the
+Status panel shows an about screen with a live animation.
+
+![Keybindings help overlay](docs/screenshots/09-help.png)
+
+![About screen](docs/screenshots/11-about-splash.png)
 
 ## Features
 
