@@ -125,15 +125,18 @@ pub const Theme = struct {
     /// is drawn in this legible colour instead (bright white by default). The
     /// status letters and other rows keep their normal colours.
     selected_fg: u8 = 15,
-    active: u8 = 10,
+    // Greens use the standard ANSI slot (2) rather than the bright one (10):
+    // terminal themes paint standard green tastefully, whereas bright green is
+    // often a harsh neon on default palettes.
+    active: u8 = 2,
     inactive_border: u8 = 8,
     muted: u8 = 8,
     title: u8 = 7,
     accent: u8 = 14,
-    staged: u8 = 10,
+    staged: u8 = 2,
     unstaged: u8 = 9,
     warning: u8 = 11,
-    added: u8 = 10,
+    added: u8 = 2,
     removed: u8 = 9,
     hunk: u8 = 14,
     header: u8 = 13,
