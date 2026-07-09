@@ -1,0 +1,78 @@
+# Builds Ziggity for every supported OS/arch and publishes a GitHub Release
+# with the binaries attached. Thanks to Zig's cross-compilation, one Linux
+# runner produces all of them.
+name: release
+
+# ── When does this run? ───────────────────────────────────────────────────
+on:
+  push:
+    tags:
+      - "v*"            # e.g. pushing the tag `v0.1.0` triggers a release
+  workflow_dispatch: {} # ...and you can also start it by hand from the Actions tab
+
+# The default token is read-only; creating a Release needs write access to the repo.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Get the source (this exact tag's code).
+      - uses: actions/checkout@v4
+
+      # 2. Install the pinned Zig version. Zig is pre-1.0 and breaks between
+      #    versions, so we lock it to what the project builds with.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # 3. Gate the release on the test suite — never ship a broken build.
+      - name: Test
+        run: zig build test
+
+      # 4. Cross-compile every target and package each binary.
+      - name: Build & package all targets
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"   # the tag name, e.g. v0.1.0
+          mkdir -p dist
+
+          # <arch>-<os>-<abi>. musl → fully static Linux binaries that run on
+          # any distro; windows-gnu → self-contained (no MSVC needed).
+          # NOTE: the Windows build compiles and libvaxis supports Windows, but
+          # it hasn't been smoke-tested on a real Windows box yet.
+          targets=(
+            aarch64-macos
+            x86_64-macos
+            x86_64-linux-musl
+            aarch64-linux-musl
+            x86_64-windows-gnu
+          )
+
+          for t in "${targets[@]}"; do
+            echo "::group::$t"
+            # ReleaseSafe: optimized, but keeps runtime safety checks (good for
+            # a tool that shells out to git and touches your repo).
+            zig build -Dtarget="$t" -Doptimize=ReleaseSafe --prefix "zig-out/$t"
+
+            bindir="zig-out/$t/bin"
+            name="ziggity-${version}-${t}"
+            if [[ "$t" == *windows* ]]; then
+              (cd "$bindir" && zip -q "${GITHUB_WORKSPACE}/dist/${name}.zip" ziggity.exe)
+            else
+              tar -czf "dist/${name}.tar.gz" -C "$bindir" ziggity
+            fi
+            echo "::endgroup::"
+          done
+
+          # Checksums so users (and package managers) can verify downloads.
+          (cd dist && sha256sum * > checksums.txt)
+          ls -la dist
+
+      # 5. Create/update the GitHub Release for this tag and upload everything.
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true   # auto-summarise commits since the last tag
