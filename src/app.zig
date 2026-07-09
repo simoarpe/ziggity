@@ -57,7 +57,11 @@ pub const CredentialStep = enum { username, password };
 /// by scanning the prompt — from the environment git inherited, then exit. Runs
 /// before any TUI setup; writes one line to stdout, which is what git reads.
 pub fn runAskpassHelper(init: std.process.Init) !void {
-    var it = std.process.Args.Iterator.init(init.minimal.args);
+    // `initAllocator` (not `init`) for cross-platform arg parsing — on Windows
+    // the command line is a single UTF-16 string that must be split with an
+    // allocator; `prompt` stays valid until `it.deinit()`.
+    var it = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
+    defer it.deinit();
     _ = it.next(); // argv[0]: our own path
     const prompt = it.next() orelse "";
     const wants_user = std.ascii.indexOfIgnoreCase(prompt, "username") != null;
