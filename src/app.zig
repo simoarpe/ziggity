@@ -1977,6 +1977,23 @@ pub const App = struct {
     filter_history: std.ArrayList([]u8) = .empty,
     filter_history_index: ?usize = null,
     input_buffer: std.ArrayList(u8) = .empty,
+    // Live ref-name completions for the checkout-by-name prompt: matches against
+    // local branches, remote branches and tags, rebuilt on each keystroke and
+    // shown under the input. The slices are borrowed from `data`, which is stable
+    // while the prompt is open (no refresh runs then). Empty for prompt kinds
+    // that don't offer completion.
+    prompt_suggestions: std.ArrayList([]const u8) = .empty,
+    // The highlighted completion, or null while the typed text is what Enter
+    // confirms. Down/Tab select into the list; Up past the top returns to null.
+    prompt_suggestion_index: ?usize = null,
+    prompt_suggestion_scroll: usize = 0,
+    // Absolute screen rectangle of the on-screen suggestion rows, captured by the
+    // renderer so a mouse click can map to a row. `prompt_list_rows` is 0 when no
+    // list is showing.
+    prompt_list_x: u16 = 0,
+    prompt_list_y: u16 = 0,
+    prompt_list_w: u16 = 0,
+    prompt_list_rows: u16 = 0,
     text_prompt_kind: ?TextPromptKind = null,
     // Per-creation-flow drafts: an unfinished name/value kept when its prompt is
     // cancelled, restored on reopen, and cleared once the thing is created.
@@ -2247,6 +2264,8 @@ pub const App = struct {
         self.patch_line_sel.deinit(self.allocator);
         self.allocator.free(self.patch_work_included);
         self.input_buffer.deinit(self.allocator);
+        self.clearPromptSuggestions();
+        self.prompt_suggestions.deinit(self.allocator);
         for (self.prompt_drafts) |d| self.allocator.free(d);
         self.preview_cache.deinit(self.allocator);
         self.allocator.free(self.preview_desired_key);
@@ -3070,6 +3089,10 @@ pub const App = struct {
         // While a dialog is open the mouse drives wheel scrolling and
         // character-precise text selection of its content (operation-result,
         // help, and command-log popups). All other mouse input is ignored.
+        // The checkout-by-name prompt lets the mouse pick a suggestion: a click
+        // on a result highlights it, and the wheel moves the highlight.
+        if (self.mode == .text_prompt) return self.handleTextPromptMouse(mouse);
+
         if (self.mode != .normal) {
             const c: u16 = if (mouse.col < 0) 0 else @intCast(mouse.col);
             const rw: u16 = if (mouse.row < 0) 0 else @intCast(mouse.row);
@@ -5695,7 +5718,135 @@ pub const App = struct {
         }
         self.prompt_cursor = self.input_buffer.items.len;
         self.prompt_scroll = 0;
+        self.refreshPromptSuggestions();
         try self.setMessage("{s}", .{kind.title()});
+    }
+
+    /// Rebuild the ref-name completion list from the current prompt input. Only
+    /// the checkout-by-name prompt offers completions; for every other kind (and
+    /// an empty input) the list is cleared. The stored slices are borrowed from
+    /// `data`, which stays put while the prompt is open. Selection resets to the
+    /// typed text (null) so a fresh keystroke never silently changes what Enter
+    /// would confirm.
+    fn refreshPromptSuggestions(self: *App) void {
+        self.clearPromptSuggestions();
+        if (self.text_prompt_kind != .checkout_by_name) return;
+        const needle = std.mem.trim(u8, self.input_buffer.items, " \t");
+        if (needle.len == 0) return;
+
+        const Ranked = struct { name: []const u8, rank: usize };
+        var ranked: std.ArrayList(Ranked) = .empty;
+        defer ranked.deinit(self.allocator);
+
+        // Local branches, remote-tracking branches and tags — the refs `git
+        // checkout <name>` can resolve, mirroring the reference-completion set.
+        const branch_groups = [_][]const model.Branch{ self.data.branches, self.data.remote_branches };
+        for (branch_groups) |group| {
+            for (group) |b| {
+                if (textmatch.suggestionRank(b.name, needle)) |r|
+                    ranked.append(self.allocator, .{ .name = b.name, .rank = r }) catch return;
+            }
+        }
+        for (self.data.tags) |t| {
+            if (textmatch.suggestionRank(t.name, needle)) |r|
+                ranked.append(self.allocator, .{ .name = t.name, .rank = r }) catch return;
+        }
+
+        std.mem.sort(Ranked, ranked.items, {}, struct {
+            fn lessThan(_: void, a: Ranked, c: Ranked) bool {
+                if (a.rank != c.rank) return a.rank < c.rank;
+                return std.mem.lessThan(u8, a.name, c.name);
+            }
+        }.lessThan);
+
+        // Cap the list so a bare letter over a huge ref set stays bounded; the
+        // best-ranked matches survive the truncation. Each name is duped so the
+        // list is self-owned and can't dangle if `data` is later refreshed.
+        const max_suggestions = 50;
+        for (ranked.items) |item| {
+            if (self.prompt_suggestions.items.len >= max_suggestions) break;
+            const dup = self.allocator.dupe(u8, item.name) catch return;
+            self.prompt_suggestions.append(self.allocator, dup) catch {
+                self.allocator.free(dup);
+                return;
+            };
+        }
+    }
+
+    /// Mouse handling while a text prompt is open: over the checkout suggestion
+    /// list a left click highlights the clicked result and the wheel moves the
+    /// highlight. Returns whether the frame should repaint.
+    fn handleTextPromptMouse(self: *App, mouse: vaxis.Mouse) bool {
+        const rows = self.prompt_list_rows;
+        if (rows == 0 or mouse.type != .press) return false;
+        switch (mouse.button) {
+            .wheel_up => {
+                self.moveSuggestion(false);
+                return true;
+            },
+            .wheel_down => {
+                self.moveSuggestion(true);
+                return true;
+            },
+            .left => {
+                if (mouse.col < 0 or mouse.row < 0) return false;
+                const c: u16 = @intCast(mouse.col);
+                const r: u16 = @intCast(mouse.row);
+                if (c < self.prompt_list_x or c >= self.prompt_list_x +| self.prompt_list_w) return false;
+                if (r < self.prompt_list_y or r >= self.prompt_list_y +| rows) return false;
+                const idx = self.prompt_suggestion_scroll + (r - self.prompt_list_y);
+                if (idx >= self.prompt_suggestions.items.len) return false;
+                self.prompt_suggestion_index = idx;
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    /// Free the owned completion strings and reset the selection.
+    fn clearPromptSuggestions(self: *App) void {
+        for (self.prompt_suggestions.items) |s| self.allocator.free(s);
+        self.prompt_suggestions.clearRetainingCapacity();
+        self.prompt_suggestion_index = null;
+        self.prompt_suggestion_scroll = 0;
+        self.prompt_list_rows = 0;
+    }
+
+    /// The highlighted completion, or null when the typed text is what Enter
+    /// confirms.
+    fn selectedSuggestion(self: *const App) ?[]const u8 {
+        const idx = self.prompt_suggestion_index orelse return null;
+        if (idx >= self.prompt_suggestions.items.len) return null;
+        return self.prompt_suggestions.items[idx];
+    }
+
+    /// Move the completion highlight. Down from the typed text enters the list at
+    /// the top match; Up off the top returns to editing the typed text.
+    fn moveSuggestion(self: *App, down: bool) void {
+        const len = self.prompt_suggestions.items.len;
+        if (len == 0) return;
+        if (down) {
+            const cur = self.prompt_suggestion_index orelse {
+                self.prompt_suggestion_index = 0;
+                return;
+            };
+            if (cur + 1 < len) self.prompt_suggestion_index = cur + 1;
+        } else {
+            const cur = self.prompt_suggestion_index orelse return;
+            self.prompt_suggestion_index = if (cur == 0) null else cur - 1;
+        }
+    }
+
+    /// Tab-complete the input with the highlighted match (or the top match when
+    /// nothing is highlighted yet), then re-filter so the list anchors on it.
+    fn acceptSuggestion(self: *App) void {
+        const idx = self.prompt_suggestion_index orelse 0;
+        if (idx >= self.prompt_suggestions.items.len) return;
+        const name = self.prompt_suggestions.items[idx];
+        self.input_buffer.clearRetainingCapacity();
+        self.input_buffer.appendSlice(self.allocator, name) catch return;
+        self.prompt_cursor = self.input_buffer.items.len;
+        self.refreshPromptSuggestions();
     }
 
     /// Outcome of feeding a key to `editLine`, so callers can react (e.g. the
@@ -5818,18 +5969,44 @@ pub const App = struct {
         // prompts are single-line, so a pasted newline is simply dropped.
         if (self.pasting) {
             if (self.isEnterKey(key) or self.isEscapeKey(key)) return;
-            _ = try self.editLine(&self.input_buffer, &self.prompt_cursor, key);
+            if (try self.editLine(&self.input_buffer, &self.prompt_cursor, key) == .changed)
+                self.refreshPromptSuggestions();
             return;
         }
         if (self.isEscapeKey(key)) {
             self.cancelTextPrompt("cancelled");
             return;
         }
+        // Completion navigation, active only while the prompt is offering
+        // suggestions (checkout-by-name). Down/Up move the highlight; Tab
+        // completes the input with the highlighted match.
+        if (self.prompt_suggestions.items.len > 0) {
+            if (key.matches(vaxis.Key.down, .{}) or key.matches('n', .{ .ctrl = true })) {
+                self.moveSuggestion(true);
+                return;
+            }
+            if (key.matches(vaxis.Key.up, .{}) or key.matches('p', .{ .ctrl = true })) {
+                self.moveSuggestion(false);
+                return;
+            }
+            if (key.matches(vaxis.Key.tab, .{})) {
+                self.acceptSuggestion();
+                return;
+            }
+        }
         if (self.isEnterKey(key)) {
+            // Enter on a highlighted match checks that ref out; otherwise the
+            // typed text is used verbatim (so a raw SHA or "-" still works).
+            if (self.selectedSuggestion()) |name| {
+                self.input_buffer.clearRetainingCapacity();
+                try self.input_buffer.appendSlice(self.allocator, name);
+                self.prompt_cursor = self.input_buffer.items.len;
+            }
             try self.submitTextPrompt();
             return;
         }
-        _ = try self.editLine(&self.input_buffer, &self.prompt_cursor, key);
+        if (try self.editLine(&self.input_buffer, &self.prompt_cursor, key) == .changed)
+            self.refreshPromptSuggestions();
     }
 
     fn cancelTextPrompt(self: *App, comptime reason: []const u8) void {
@@ -5840,6 +6017,7 @@ pub const App = struct {
         self.mode = .normal;
         self.text_prompt_kind = null;
         self.input_buffer.clearRetainingCapacity();
+        self.clearPromptSuggestions();
         self.setMessage(reason, .{}) catch {};
     }
 
@@ -5884,6 +6062,9 @@ pub const App = struct {
             return;
         };
         const value = std.mem.trim(u8, self.input_buffer.items, " \t\r\n");
+        // Whichever branch below runs, the prompt is closing: drop the
+        // completion list.
+        self.clearPromptSuggestions();
 
         // Commit filters accept an empty value (which clears that filter), so
         // they are handled before the non-empty guard below.
@@ -9884,6 +10065,45 @@ test "mouse wheel scrolls the panel under the cursor without changing focus" {
     try std.testing.expectEqual(model.Focus.commits, app.focus);
 }
 
+test "clicking a checkout suggestion highlights it" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // Stand in for an open checkout prompt whose renderer has published a
+    // three-row suggestion list at a known screen rectangle (rows 8..10,
+    // columns 10..39).
+    app.mode = .text_prompt;
+    app.text_prompt_kind = .checkout_by_name;
+    const names = [_][]const u8{ "feature/login", "feature/logout", "feature/search" };
+    for (names) |n| try app.prompt_suggestions.append(allocator, try allocator.dupe(u8, n));
+    app.prompt_suggestion_index = null;
+    app.prompt_suggestion_scroll = 0;
+    app.prompt_list_x = 10;
+    app.prompt_list_y = 8;
+    app.prompt_list_w = 30;
+    app.prompt_list_rows = 3;
+
+    // Clicking the middle row highlights index 1 and asks for a repaint.
+    try std.testing.expect(try app.handleMouse(.{ .col = 15, .row = 9, .button = .left, .mods = .{}, .type = .press }));
+    try std.testing.expectEqual(@as(?usize, 1), app.prompt_suggestion_index);
+
+    // Clicking the first row highlights index 0.
+    _ = try app.handleMouse(.{ .col = 12, .row = 8, .button = .left, .mods = .{}, .type = .press });
+    try std.testing.expectEqual(@as(?usize, 0), app.prompt_suggestion_index);
+
+    // Clicks outside the list (past its right edge, or below the last row) are
+    // ignored, leaving the highlight put.
+    _ = try app.handleMouse(.{ .col = 50, .row = 8, .button = .left, .mods = .{}, .type = .press });
+    _ = try app.handleMouse(.{ .col = 12, .row = 20, .button = .left, .mods = .{}, .type = .press });
+    try std.testing.expectEqual(@as(?usize, 0), app.prompt_suggestion_index);
+
+    // The wheel moves the highlight down (0 -> 1) over the list.
+    try std.testing.expect(try app.handleMouse(.{ .col = 12, .row = 9, .button = .wheel_down, .mods = .{}, .type = .press }));
+    try std.testing.expectEqual(@as(?usize, 1), app.prompt_suggestion_index);
+}
+
 test "clicking the diff panel opens staging only when it shows a working-tree file" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -10632,6 +10852,8 @@ fn deinitTestApp(app: *App) void {
     if (app.fetch_remote_name) |r| app.allocator.free(r);
     app.clearLockRecovery();
     app.input_buffer.deinit(app.allocator);
+    app.clearPromptSuggestions();
+    app.prompt_suggestions.deinit(app.allocator);
     for (app.prompt_drafts) |d| app.allocator.free(d);
     if (app.staging) |*parsed| parsed.deinit(app.allocator);
     app.allocator.free(app.staging_diff);

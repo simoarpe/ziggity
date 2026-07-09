@@ -1737,14 +1737,65 @@ fn drawTextPromptPopup(root: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
     const kind = app.text_prompt_kind orelse return;
     const w: u16 = @min(@as(u16, 64), root.width -| 4);
-    const win = popup(root, w, 5, kind.title(), null);
+
+    // Grow the popup to host a live completion list under the input (checkout by
+    // name). Rows: input (0), blank (1), suggestions (2..), footer (last).
+    const total = app.prompt_suggestions.items.len;
+    const max_visible: u16 = 7;
+    const list_rows: u16 = @intCast(@min(total, @as(usize, max_visible)));
+    const height: u16 = if (total > 0) 5 + list_rows else 5;
+    const win = popup(root, w, height, kind.title(), null);
+
+    // Absolute screen origin of the popup box (mirrors popup()'s centering math)
+    // so the mouse handler can map a click to a suggestion row. The interior
+    // starts one cell in from the border; suggestion rows begin at interior
+    // row 2, i.e. absolute row box_y + 3.
+    const box_w = @min(@max(w, @as(u16, 8)), root.width);
+    const box_h = @min(@max(height, @as(u16, 3)), root.height);
+    const box_x = (root.width - box_w) / 2;
+    const box_y = (root.height - box_h) / 2;
+
     // Horizontally scroll so the caret stays inside the box:
     // render the buffer starting at the scroll origin instead of clipping it.
     const caret = @min(app.prompt_cursor, app.input_buffer.items.len);
     const sc = app_mod.viewScroll(app.prompt_scroll, win.width, caret);
     app.prompt_scroll = sc.origin;
     print(win, 0, 0, app.input_buffer.items[sc.origin..], st.normal);
-    print(win, 2, 0, "enter confirm   esc cancel", st.bottom_accent);
+
+    if (total > 0) {
+        // Vertically window the matches, following the highlight (null = none).
+        const view: usize = @min(total, @as(usize, max_visible));
+        const target = app.prompt_suggestion_index orelse 0;
+        const vs = app_mod.viewScroll(app.prompt_suggestion_scroll, view, target);
+        app.prompt_suggestion_scroll = vs.origin;
+        const sel_style: vaxis.Style = .{
+            .fg = .{ .index = ui_theme.selected_fg },
+            .bg = .{ .index = ui_theme.selected_bg },
+        };
+        var i: usize = 0;
+        while (i < view) : (i += 1) {
+            const item_idx = vs.origin + i;
+            if (item_idx >= total) break;
+            const row: u16 = 2 + @as(u16, @intCast(i));
+            const is_sel = if (app.prompt_suggestion_index) |s| s == item_idx else false;
+            if (is_sel) {
+                fillRow(win, row, sel_style);
+                print(win, row, 1, app.prompt_suggestions.items[item_idx], sel_style);
+            } else {
+                print(win, row, 1, app.prompt_suggestions.items[item_idx], st.normal);
+            }
+        }
+        const footer: u16 = 2 + list_rows;
+        print(win, footer, 0, "enter confirm   tab complete   esc cancel", st.bottom_accent);
+        // Publish the list's hit-box for mouse selection.
+        app.prompt_list_x = box_x + 1;
+        app.prompt_list_y = box_y + 3;
+        app.prompt_list_w = win.width;
+        app.prompt_list_rows = list_rows;
+    } else {
+        print(win, 2, 0, "enter confirm   esc cancel", st.bottom_accent);
+        app.prompt_list_rows = 0;
+    }
     win.showCursor(@intCast(sc.view), 0);
 }
 
