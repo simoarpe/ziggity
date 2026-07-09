@@ -1753,7 +1753,6 @@ pub const App = struct {
     // outlive the flush, like every other cell-backing string (paths, diffs).
     branches_title_buf: [96]u8 = undefined,
     commits_title_buf: [80]u8 = undefined,
-    commit_filter_label_buf: [64]u8 = undefined,
     main_title_buf: [64]u8 = undefined,
     // Independent view scroll for the side list panels, so the mouse wheel
     // scrolls the view without moving the selection. The view re-anchors to the
@@ -4681,15 +4680,6 @@ pub const App = struct {
         };
     }
 
-    /// A short label for the active Commits-list filter, into `buf`, or null
-    /// when no filter is set. Drives the Commits panel title.
-    pub fn commitFilterLabel(self: *const App, buf: []u8) ?[]const u8 {
-        if (self.git.log_author) |a| return std.fmt.bufPrint(buf, "author:{s}", .{a}) catch "filtered";
-        if (self.git.log_grep) |g| return std.fmt.bufPrint(buf, "/{s}", .{g}) catch "filtered";
-        if (self.git.log_path) |p| return std.fmt.bufPrint(buf, "path:{s}", .{p}) catch "filtered";
-        return null;
-    }
-
     /// The commit list backing the Commits panel for the active tab.
     pub fn activeCommits(self: *const App) []model.Commit {
         return switch (self.commits_tab) {
@@ -6078,8 +6068,11 @@ pub const App = struct {
                 };
                 self.mode = .normal;
                 self.text_prompt_kind = null;
+                // `value` aliases `input_buffer`; apply the filter (which dupes
+                // it) before clearing the buffer, not after.
+                try self.applyCommitFilter(which, value);
                 self.input_buffer.clearRetainingCapacity();
-                return self.applyCommitFilter(which, value);
+                return;
             },
             // The tag-message step also accepts an empty value (a lightweight
             // tag), so it is handled before the non-empty guard.
@@ -6145,7 +6138,10 @@ pub const App = struct {
                 const result = try self.git.createBranch(value);
                 self.mode = .normal;
                 self.text_prompt_kind = null;
-                self.input_buffer.clearRetainingCapacity();
+                // `value` aliases `input_buffer`; defer the clear so it runs after
+                // the success message below formats it (clearRetainingCapacity
+                // overwrites the buffer with undefined).
+                defer self.input_buffer.clearRetainingCapacity();
                 self.clearPromptDraft(.new_branch); // created -> forget the draft
                 // `createBranch` checks out the new branch: select it (now the
                 // current branch) once the refreshed branch list lands, so the
@@ -6223,7 +6219,9 @@ pub const App = struct {
                 const result = try self.git.renameBranch(branch.name, value);
                 self.mode = .normal;
                 self.text_prompt_kind = null;
-                self.input_buffer.clearRetainingCapacity();
+                // Defer the clear: `value` aliases `input_buffer` and is used in
+                // the message below (clearRetainingCapacity poisons the buffer).
+                defer self.input_buffer.clearRetainingCapacity();
                 return self.runMutationScoped(result, Refresh.branches, "renamed to {s}", .{value});
             },
             .new_tag => {
@@ -6534,7 +6532,9 @@ pub const App = struct {
         if (value.len == 0) {
             try self.setMessage("commit filter cleared", .{});
         } else {
-            try self.setMessage("filtered commits ({d} shown)", .{self.data.commits.len});
+            // The reload is async, so `data.commits.len` here is the pre-filter
+            // count — report the filter itself rather than a stale number.
+            try self.setMessage("filtering commits ({s}: {s})", .{ @tagName(which), value });
         }
     }
 
@@ -10102,6 +10102,34 @@ test "clicking a checkout suggestion highlights it" {
     // The wheel moves the highlight down (0 -> 1) over the list.
     try std.testing.expect(try app.handleMouse(.{ .col = 12, .row = 9, .button = .wheel_down, .mods = .{}, .type = .press }));
     try std.testing.expectEqual(@as(?usize, 1), app.prompt_suggestion_index);
+}
+
+test "submitting a commit filter captures the typed value (no use-after-clear)" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    // setLogFilter only needs the allocator; the rest of Git is unused here.
+    app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = undefined };
+    defer app.git.clearLogFilters();
+
+    // Stand in for a filled-in grep prompt and submit it.
+    app.mode = .text_prompt;
+    app.text_prompt_kind = .commit_grep;
+    app.input_buffer.clearRetainingCapacity();
+    try app.input_buffer.appendSlice(allocator, "fix");
+    app.prompt_cursor = app.input_buffer.items.len;
+    try app.submitTextPrompt();
+
+    // The filter value aliases `input_buffer`, which `submitTextPrompt` clears.
+    // `clearRetainingCapacity` overwrites the buffer with undefined, so applying
+    // the filter must happen *before* the clear — otherwise `log_grep` captured
+    // garbage (the original bug) and this would fail.
+    try std.testing.expect(app.git.log_grep != null);
+    try std.testing.expectEqualStrings("fix", app.git.log_grep.?);
+    // The prompt closed and the buffer was cleared afterward.
+    try std.testing.expectEqual(Mode.normal, app.mode);
+    try std.testing.expectEqual(@as(usize, 0), app.input_buffer.items.len);
 }
 
 test "clicking the diff panel opens staging only when it shows a working-tree file" {

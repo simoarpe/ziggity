@@ -918,8 +918,11 @@ const SidePanelHeights = struct { status: u16, files: u16, branches: u16, commit
 /// joins the weighted group. With the accordion (`expand_focused_side_panel`),
 /// the focused list panel gets `expanded_weight` instead of 1, growing at the
 /// others' expense. The returned heights always sum to `body_h`.
-fn sidePanelHeights(body_h: u16, focused: model.Focus, accordion: bool, expanded_weight: u16) SidePanelHeights {
-    const status_h: u16 = @min(body_h, 5);
+fn sidePanelHeights(body_h: u16, focused: model.Focus, accordion: bool, expanded_weight: u16, extra_status_row: bool) SidePanelHeights {
+    // The Status panel is normally up to 5 tall (3 content rows: repo, summary,
+    // filter). It gets one more row when both a file filter and a commit filter
+    // need their own line.
+    const status_h: u16 = @min(body_h, if (extra_status_row) @as(u16, 6) else 5);
     const stash_fixed: u16 = @min(body_h -| status_h, 3);
     const stash_focused = focused == .stash;
 
@@ -994,6 +997,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         app.contentFocus(),
         app.config.expand_focused_side_panel,
         app.config.expanded_side_panel_weight,
+        app.git.hasLogFilter() and app.anyFileFilterActive(),
     );
     const status_h = heights.status;
     const files_h = heights.files;
@@ -1069,10 +1073,12 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
                     "[4] Commit files  (space: add to patch) (esc back)";
                 break :blk panel(root, 0, y, side_w, commits_h, t, app.focus == .commits, listScrollInfo(app, .commits));
             } else blk: {
-                // Show an active commit-log filter (Commits tab only) after the tabs.
-                var sbuf: [128]u8 = undefined;
-                const suffix = if (app.commits_tab == .commits)
-                    (if (app.commitFilterLabel(&app.commit_filter_label_buf)) |label| (std.fmt.bufPrint(&sbuf, "({s})", .{label}) catch label) else "")
+                // When the Commits list is filtered (Commits tab only), the title
+                // carries a yellow hint for clearing it (the filter value itself
+                // is shown in the Status panel). Esc only clears the filter while
+                // this panel is focused, so the hint reflects that.
+                const suffix = if (app.commits_tab == .commits and app.git.hasLogFilter())
+                    (if (app.focus == .commits) "(esc to cancel filter)" else "(filtered)")
                 else
                     "";
                 break :blk tabbedPanel(root, 0, y, side_w, commits_h, 4, &commits_tabs, @intFromEnum(app.commits_tab), suffix, app.focus == .commits, listScrollInfo(app, .commits));
@@ -2123,8 +2129,10 @@ fn tabbedPanel(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, number: ?u8, 
         col = drawTitleSpan(frame.raw, w, col, tab, if (i == active) active_style else st.muted);
     }
     if (suffix.len > 0) {
+        // The suffix is only ever the active commit-filter hint; draw it in the
+        // warning colour so a filtered list stands out.
         col = drawTitleSpan(frame.raw, w, col, " ", st.muted);
-        _ = drawTitleSpan(frame.raw, w, col, suffix, st.muted);
+        _ = drawTitleSpan(frame.raw, w, col, suffix, st.warning);
     }
     return frame.inner;
 }
@@ -2218,7 +2226,8 @@ fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
         print(win, 1, 0, line, st.muted);
     }
 
-    // Line 2: active filter, if any.
+    // Line 2: active file filter, if any.
+    var filter_row: u16 = 2;
     if (app.anyFileFilterActive()) {
         var filter_buf: [256]u8 = undefined;
         const line = if (app.fileDisplayFilterActive() and app.fileFilterActive())
@@ -2228,7 +2237,21 @@ fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
         else
             std.fmt.bufPrint(&filter_buf, "filter {d}/{d} {s}", .{ app.visibleFileCount(), app.data.files.len, app.file_filter }) catch return;
         print(win, 2, 0, line, st.muted);
+        filter_row = 3;
     }
+
+    // Active commit-log filter, in the warning colour so a filtered Commits list
+    // is obvious at a glance (esc clears it while that panel is focused).
+    var cbuf: [200]u8 = undefined;
+    const commit_filter: ?[]const u8 = if (app.git.log_author) |a|
+        (std.fmt.bufPrint(&cbuf, "filtering commits (author: {s})", .{a}) catch null)
+    else if (app.git.log_grep) |g|
+        (std.fmt.bufPrint(&cbuf, "filtering commits (message: {s})", .{g}) catch null)
+    else if (app.git.log_path) |p|
+        (std.fmt.bufPrint(&cbuf, "filtering commits (path: {s})", .{p}) catch null)
+    else
+        null;
+    if (commit_filter) |line| print(win, filter_row, 0, line, st.warning);
 }
 
 fn drawFiles(win: vaxis.Window, app: *const app_mod.App) void {
@@ -4148,7 +4171,7 @@ test "side panel heights match the weighting" {
 
     // Default (no accordion): status fixed, stash a small fixed size when not
     // focused, files/branches/commits share the rest equally. Fills body_h.
-    const h = sidePanelHeights(body_h, .files, false, 2);
+    const h = sidePanelHeights(body_h, .files, false, 2, false);
     try std.testing.expectEqual(@as(u16, 5), h.status);
     try std.testing.expectEqual(@as(u16, 3), h.stash);
     try std.testing.expectEqual(body_h, h.status + h.files + h.branches + h.commits + h.stash);
@@ -4156,12 +4179,12 @@ test "side panel heights match the weighting" {
     try std.testing.expect(lists_spread <= 1);
 
     // Stash focused: it joins the weighted group and grows past the fixed 3.
-    const hs = sidePanelHeights(body_h, .stash, false, 2);
+    const hs = sidePanelHeights(body_h, .stash, false, 2, false);
     try std.testing.expect(hs.stash > 3);
     try std.testing.expectEqual(body_h, hs.status + hs.files + hs.branches + hs.commits + hs.stash);
 
     // Accordion: the focused list panel is larger than the others.
-    const ha = sidePanelHeights(body_h, .commits, true, 2);
+    const ha = sidePanelHeights(body_h, .commits, true, 2, false);
     try std.testing.expect(ha.commits > ha.files);
     try std.testing.expectEqual(body_h, ha.status + ha.files + ha.branches + ha.commits + ha.stash);
 }
