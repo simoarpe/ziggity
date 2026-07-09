@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # 1. Get the source (this exact tag's code).
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # 2. Install the pinned Zig version. Zig is pre-1.0 and breaks between
       #    versions, so we lock it to what the project builds with.
@@ -71,7 +71,10 @@ jobs:
           ls -la dist
 
       # 5. Create/update the GitHub Release for this tag and upload everything.
+      #    Only on a tag push — a manual (workflow_dispatch) run stops after the
+      #    build/package steps above, letting you dry-run without a release.
       - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*

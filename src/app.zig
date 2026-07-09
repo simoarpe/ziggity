@@ -10837,7 +10837,11 @@ pub fn webUrlFromRemote(allocator: std.mem.Allocator, remote: []const u8) !?[]u8
 fn testApp(allocator: std.mem.Allocator, files: []model.FileStatus) !App {
     return App{
         .allocator = allocator,
-        .git = undefined,
+        // A minimally-valid Git: a real allocator and an empty `git_dir`, so code
+        // paths that gate on `git.git_dir.len` (e.g. the prepare-commit-msg hook
+        // seeding) short-circuit instead of dereferencing undefined memory. Tests
+        // that exercise git further override this with their own fields.
+        .git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = undefined },
         .config = .{},
         .diff = try allocator.dupe(u8, ""),
         .message = try allocator.dupe(u8, ""),
