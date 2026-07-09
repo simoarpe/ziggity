@@ -2284,7 +2284,7 @@ fn drawFiles(win: vaxis.Window, app: *const app_mod.App) void {
 /// Preserves `base`'s background/bold so selection highlighting is kept.
 fn statusCharStyle(c: u8, is_index: bool, conflict: bool, base: vaxis.Style) vaxis.Style {
     if (conflict) return withFg(base, ui_theme.warning);
-    if (c == ' ') return withFg(base, ui_theme.muted);
+    if (c == ' ') return dimmed(base);
     if (c == '?') return withFg(base, ui_theme.unstaged);
     return withFg(base, if (is_index) ui_theme.staged else ui_theme.unstaged);
 }
@@ -2420,9 +2420,9 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
             } else if (branch.upstream) |upstream| {
                 if (!upstreamIsDefault(branch.name, upstream)) {
                     end = printSpan(win, row, end, " ", base);
-                    end = printGlyph(win, row, end, glyph_to_branch, withFg(base, ui_theme.muted));
+                    end = printGlyph(win, row, end, glyph_to_branch, dimmed(base));
                     end = printSpan(win, row, end, " ", base);
-                    end = printSpan(win, row, end, upstream, withFg(base, ui_theme.muted));
+                    end = printSpan(win, row, end, upstream, dimmed(base));
                 }
                 end = printSpan(win, row, end, " ", base);
                 _ = drawBranchStatus(win, row, end, base, true, branch.ahead, branch.behind);
@@ -2762,9 +2762,9 @@ fn printCommitSubject(win: vaxis.Window, row: u16, col: u16, subject: []const u8
         return;
     };
     var c = printSpan(win, row, col, subject[0..cc.type_end], withFg(base, ui_theme.accent));
-    if (cc.scope_end > cc.type_end) c = printSpan(win, row, c, subject[cc.type_end..cc.scope_end], withFg(base, ui_theme.muted));
+    if (cc.scope_end > cc.type_end) c = printSpan(win, row, c, subject[cc.type_end..cc.scope_end], dimmed(base));
     if (cc.bang) c = printSpan(win, row, c, "!", withFg(base, ui_theme.removed));
-    c = printSpan(win, row, c, subject[cc.colon_start..cc.colon_end], withFg(base, ui_theme.muted));
+    c = printSpan(win, row, c, subject[cc.colon_start..cc.colon_end], dimmed(base));
     _ = printSpan(win, row, c, subject[cc.colon_end..], base);
 }
 
@@ -3809,7 +3809,11 @@ fn styles() StyleSet {
     const t = ui_theme;
     return .{
         .normal = .{ .fg = .default },
-        .muted = .{ .fg = .{ .index = t.muted } },
+        // De-emphasised secondary text (empty-state labels, breadcrumbs, tab
+        // separators, ...). Uses the terminal's own foreground dimmed rather than
+        // a fixed grey index, so it stays legible on any background instead of
+        // collapsing into a dark theme's backdrop.
+        .muted = .{ .fg = .default, .dim = true },
         .title = .{ .fg = .{ .index = t.title } },
         .active_title = .{ .fg = .{ .index = t.active }, .bold = true },
         .active_border = .{ .fg = .{ .index = t.active }, .bold = true },
@@ -3904,7 +3908,7 @@ const indent_spaces = " " ** 32;
 /// Render ahead/behind status: `↓2↑3`, `✓` when in sync, or `(unpushed)`
 /// when the branch has no upstream (never pushed). Returns the next column.
 fn drawBranchStatus(win: vaxis.Window, row: u16, col: u16, base: vaxis.Style, has_upstream: bool, ahead: usize, behind: usize) u16 {
-    if (!has_upstream) return printSpan(win, row, col, "(unpushed)", withFg(base, ui_theme.muted));
+    if (!has_upstream) return printSpan(win, row, col, "(unpushed)", dimmed(base));
     if (ahead == 0 and behind == 0) return printGlyph(win, row, col, glyph_uptodate, withFg(base, 10));
 
     var c = col;
@@ -3925,6 +3929,16 @@ fn drawBranchStatus(win: vaxis.Window, row: u16, col: u16, base: vaxis.Style, ha
 fn withFg(base: vaxis.Style, index: u8) vaxis.Style {
     var s = base;
     s.fg = .{ .index = index };
+    return s;
+}
+
+/// De-emphasise an inline span while keeping it legible on any background: the
+/// terminal's own foreground, dimmed, instead of a fixed grey (matches the
+/// `muted` style). Preserves the base's background so it works on a selected row.
+fn dimmed(base: vaxis.Style) vaxis.Style {
+    var s = base;
+    s.fg = .default;
+    s.dim = true;
     return s;
 }
 
