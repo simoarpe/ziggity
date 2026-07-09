@@ -154,8 +154,10 @@ fn graphWorker(gr: *GraphRun) void {
     // Rich one-line-per-commit format: hash, decorations, author, relative date,
     // then subject — colourised by git so printAnsi renders it directly.
     // Branch/tag names (%d) get a fixed bold magenta so they stand out rather
-    // than relying on git's theme-dependent auto decoration colours.
-    const base = [_][]const u8{ "git", "--no-optional-locks", "log", "--graph", "--color=always", "--decorate", "-n", "5000", "--format=format:%C(yellow)%h%C(bold magenta)%d%C(reset) %C(blue)%an%C(reset) %C(green)%ar%C(reset)  %s" };
+    // than relying on git's theme-dependent auto decoration colours. The author
+    // name is wrapped in 0x1f sentinels (not coloured by git) so `recolorGraphAuthors`
+    // can paint each author in its own palette colour, matching the Commits panel.
+    const base = [_][]const u8{ "git", "--no-optional-locks", "log", "--graph", "--color=always", "--decorate", "-n", "5000", "--format=format:%C(yellow)%h%C(bold magenta)%d%C(reset) %x1f%an%x1f %C(green)%ar%C(reset)  %s" };
     argv.appendSlice(async_allocator, &base) catch return postGraph(gr);
     if (gr.all) argv.append(async_allocator, "--all") catch return postGraph(gr);
     const r = git_mod.runWithLockRetry(async_allocator, gr.io, .{
@@ -519,6 +521,14 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 if (graph_future) |*f| {
                     f.await(io);
                     graph_future = null;
+                    // Paint each author name (0x1f-sentinel-wrapped by the log
+                    // format) in its own palette colour before the graph is stored.
+                    if (graph_run.result) |raw| {
+                        if (recolorGraphAuthors(async_allocator, raw)) |colored| {
+                            async_allocator.free(raw);
+                            graph_run.result = colored;
+                        } else |_| {}
+                    }
                     commitgraph_mod.complete(app, graph_run.result, graph_run.parents, graph_run.generation, async_allocator);
                     graph_run.result = null;
                     graph_run.parents = null;
@@ -2660,14 +2670,52 @@ const author_palette = [_]u8{
     178, 208, 209, 203, 168, 170, 141, 111,
 };
 
-/// A stable colour for an author name: the md5 of the name selects a fixed slot
-/// in `author_palette`, so each author always renders in the same distinct
-/// colour across sessions.
-fn authorColor(name: []const u8) vaxis.Color {
+/// The 256-colour palette index for an author name: the md5 of the name selects
+/// a fixed slot in `author_palette`, so each author always maps to the same
+/// distinct colour across sessions.
+fn authorColorIndex(name: []const u8) u8 {
     var digest: [16]u8 = undefined;
     std.crypto.hash.Md5.hash(name, &digest, .{});
     const slot = std.mem.readInt(u32, digest[0..4], .little) % author_palette.len;
-    return .{ .index = author_palette[slot] };
+    return author_palette[slot];
+}
+
+/// A stable colour for an author name, for the Commits-panel initials.
+fn authorColor(name: []const u8) vaxis.Color {
+    return .{ .index = authorColorIndex(name) };
+}
+
+/// Rewrite each sentinel-wrapped author name (`\x1f<name>\x1f`, emitted by the
+/// graph log format) into a per-author 256-colour SGR span, so every author
+/// shows in its own palette colour in the `ctrl+l` graph viewer — matching the
+/// initials in the Commits panel. Returns a freshly-allocated buffer; the caller
+/// owns it and should free the input separately. On any allocation failure the
+/// error propagates and the caller keeps the untouched original.
+fn recolorGraphAuthors(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var i: usize = 0;
+    while (i < raw.len) {
+        if (raw[i] != 0x1f) {
+            try out.append(alloc, raw[i]);
+            i += 1;
+            continue;
+        }
+        // Author span: bytes between this sentinel and the next.
+        const end = std.mem.indexOfScalarPos(u8, raw, i + 1, 0x1f) orelse {
+            // Unmatched sentinel (shouldn't happen): drop it, emit the rest.
+            try out.appendSlice(alloc, raw[i + 1 ..]);
+            i = raw.len;
+            break;
+        };
+        const name = raw[i + 1 .. end];
+        var esc: [16]u8 = undefined;
+        try out.appendSlice(alloc, try std.fmt.bufPrint(&esc, "\x1b[38;5;{d}m", .{authorColorIndex(name)}));
+        try out.appendSlice(alloc, name);
+        try out.appendSlice(alloc, "\x1b[39m");
+        i = end + 1;
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 /// The compact author tag: two words → one leading char each; one word → its
@@ -4213,6 +4261,28 @@ test "author colour is a stable per-author indexed colour" {
     try std.testing.expectEqual(a1.index, a2.index);
     // Different authors (almost always) differ — these two do.
     try std.testing.expect(a1.index != b.index);
+}
+
+test "recolorGraphAuthors wraps sentinel authors in their palette colour" {
+    const alloc = std.testing.allocator;
+    // Two commit lines, each with a 0x1f-wrapped author name.
+    const raw = "* abc \x1fAda Lovelace\x1f 2d  subject\n* def \x1fAlan Turing\x1f 3d  other";
+    const out = try recolorGraphAuthors(alloc, raw);
+    defer alloc.free(out);
+
+    // The sentinels are gone, replaced by SGR spans.
+    try std.testing.expect(std.mem.indexOfScalar(u8, out, 0x1f) == null);
+    // Each author is wrapped in its own 256-colour code + a default-fg reset.
+    var buf: [32]u8 = undefined;
+    const ada = try std.fmt.bufPrint(&buf, "\x1b[38;5;{d}mAda Lovelace\x1b[39m", .{authorColorIndex("Ada Lovelace")});
+    try std.testing.expect(std.mem.indexOf(u8, out, ada) != null);
+    // Surrounding text (graph glyphs, hash, date, subject) is preserved.
+    try std.testing.expect(std.mem.indexOf(u8, out, "* abc ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, " 2d  subject\n") != null);
+    // Text with no sentinels round-trips unchanged.
+    const plain = try recolorGraphAuthors(alloc, "no authors here");
+    defer alloc.free(plain);
+    try std.testing.expectEqualStrings("no authors here", plain);
 }
 
 test "conventionalPrefix parses type/scope/breaking and rejects non-conventional" {
