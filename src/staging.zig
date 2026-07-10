@@ -145,6 +145,20 @@ pub fn moveStagingCursor(app: *App, delta: i8) void {
     scrollToStagingCursor(app);
 }
 
+/// Move the line cursor to a mouse-clicked line. `pane` says which diff pane was
+/// clicked (`.main` = the active side, `.other` = the read-only side in a split
+/// view) and `line` is the line index within that pane's diff. Clicking the
+/// other side switches to it first; the cursor is clamped into the hunk area and
+/// any in-progress range selection is dropped.
+pub fn clickStagingLine(app: *App, pane: app_mod.SelPane, line: usize) !void {
+    if (pane == .other) try toggleStagingSide(app);
+    const first = stagingFirstLine(app);
+    const last = stagingLastLine(app);
+    app.staging_anchor = null; // a plain click starts a fresh single-line selection
+    app.staging_cursor = if (line < first) first else if (line > last) last else line;
+    scrollToStagingCursor(app);
+}
+
 pub fn scrollToStagingCursor(app: *App) void {
     const height: usize = if (app.main_view_height == 0) 20 else app.main_view_height;
     if (app.staging_cursor < app.main_scroll) {

@@ -3260,16 +3260,17 @@ pub const App = struct {
                         self.diff_sel_active = false;
                     } else {
                         // Fresh click (no prior selection). In the staging view it
-                        // just clears; on the main diff it opens staging when the
-                        // diff is a working-tree file (same as <enter>/<tab> from
-                        // Files), else focuses the diff to scroll it.
+                        // moves the line cursor to the clicked line; on the main
+                        // diff it opens staging when the diff is a working-tree
+                        // file (same as <enter>/<tab> from Files), else focuses the
+                        // diff to scroll it.
                         self.diff_sel_active = false;
-                        if (!self.staging_active) {
-                            if (self.contentFocus() == .files) {
-                                try staging_mod.openStaging(self);
-                            } else {
-                                try self.focusPanel(.main);
-                            }
+                        if (self.staging_active) {
+                            staging_mod.clickStagingLine(self, self.diff_sel_pane, self.diff_sel_anchor_line) catch {};
+                        } else if (self.contentFocus() == .files) {
+                            try staging_mod.openStaging(self);
+                        } else {
+                            try self.focusPanel(.main);
                         }
                     }
                     self.diff_sel_dragged = false;
@@ -10194,6 +10195,33 @@ test "submitting a commit filter captures the typed value (no use-after-clear)" 
     // The prompt closed and the buffer was cleared afterward.
     try std.testing.expectEqual(Mode.normal, app.mode);
     try std.testing.expectEqual(@as(usize, 0), app.input_buffer.items.len);
+}
+
+test "clicking a staging line moves the line cursor, clamped to the hunk area" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // Minimal staging diff: header (line 0), a hunk header (1), then body (2..4).
+    const diff = "diff --git a/f b/f\n@@ -1,2 +1,3 @@\n context\n+added one\n+added two\n";
+    app.allocator.free(app.staging_diff);
+    app.staging_diff = try allocator.dupe(u8, diff);
+    app.staging = try diff_mod.parse(allocator, diff);
+    app.staging_active = true;
+    app.main_view_height = 10;
+
+    // A click on a body line lands the cursor exactly there.
+    try staging_mod.clickStagingLine(&app, .main, 3);
+    try std.testing.expectEqual(@as(usize, 3), app.staging_cursor);
+
+    // A click above the first hunk clamps down to the first selectable line.
+    try staging_mod.clickStagingLine(&app, .main, 0);
+    try std.testing.expectEqual(staging_mod.stagingFirstLine(&app), app.staging_cursor);
+
+    // A click past the end clamps to the last line.
+    try staging_mod.clickStagingLine(&app, .main, 999);
+    try std.testing.expectEqual(staging_mod.stagingLastLine(&app), app.staging_cursor);
 }
 
 test "clicking the diff panel opens staging only when it shows a working-tree file" {
