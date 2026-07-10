@@ -2932,8 +2932,8 @@ fn drawStash(win: vaxis.Window, app: *const app_mod.App) void {
 
 // --- Status-panel "about" splash (banner + repo info + a rotating donut) ---
 
-/// The app version, mirrored from `build.zig.zon`.
-const app_version = "0.1.0";
+/// The app version, sourced from `build.zig.zon` at build time so it can't drift.
+const app_version = @import("build_options").version;
 
 /// 5-row block-font glyphs (each 5 columns, `#` = filled) for the banner word.
 fn bannerGlyph(c: u8) [5][]const u8 {
