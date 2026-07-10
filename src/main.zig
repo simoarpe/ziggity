@@ -1,5 +1,21 @@
 const std = @import("std");
 const ziggity = @import("ziggity");
+const build_options = @import("build_options");
+
+const help_text =
+    \\ziggity — a terminal UI for Git
+    \\
+    \\Usage:
+    \\  ziggity              Launch the TUI in the current git repository
+    \\  ziggity --help       Show this help and exit
+    \\  ziggity --version    Show the version and exit
+    \\
+    \\Run it from inside a git repository; press ? in the app for keybindings.
+    \\Requires the `git` command to be installed.
+    \\
+    \\Homepage: https://github.com/simoarpe/ziggity
+    \\
+;
 
 /// A TUI owns the terminal, so `std.log` output must never reach stderr — it
 /// lands on the alt-screen and corrupts it. vaxis logs capability detection at
@@ -25,6 +41,9 @@ pub fn main(init: std.process.Init) !void {
     if (init.environ_map.get(ziggity.app.askpass_env_marker) != null) {
         return ziggity.app.runAskpassHelper(init);
     }
+
+    // `--help` / `--version`: print and exit before touching the terminal.
+    if (try handleCliFlags(init)) return;
 
     var app = ziggity.app.App.init(init.gpa, init.io, init.environ_map) catch |err| blk: {
         // Not in a repo: offer to create one here and continue; otherwise exit
@@ -54,6 +73,50 @@ pub fn main(init: std.process.Init) !void {
         writer.flush() catch {};
         std.process.exit(1);
     };
+}
+
+/// Handle `--help` / `--version` (and short forms) from the first argument.
+/// Prints to stdout and returns true when a flag was handled (the caller then
+/// returns without starting the TUI). An unknown `-…` option is reported on
+/// stderr and exits with code 2. Uses `initAllocator` for cross-platform args.
+fn handleCliFlags(init: std.process.Init) !bool {
+    var it = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
+    defer it.deinit();
+    _ = it.next(); // argv[0]
+    const arg = it.next() orelse return false;
+
+    if (eqAny(arg, &.{ "-h", "--help" })) {
+        try writeStdout(init, help_text);
+        return true;
+    }
+    if (eqAny(arg, &.{ "-v", "-V", "--version" })) {
+        try writeStdout(init, "ziggity " ++ build_options.version ++ "\n");
+        return true;
+    }
+    // Ziggity takes no options; flag it so a typo (e.g. `--verison`) isn't
+    // silently swallowed into launching the TUI. A non-`-` argument is ignored.
+    if (arg.len > 0 and arg[0] == '-') {
+        var buf: [256]u8 = undefined;
+        var w: std.Io.File.Writer = .init(.stderr(), init.io, &buf);
+        w.interface.print("ziggity: unknown option '{s}'\nTry 'ziggity --help'.\n", .{arg}) catch {};
+        w.interface.flush() catch {};
+        std.process.exit(2);
+    }
+    return false;
+}
+
+fn eqAny(arg: []const u8, options: []const []const u8) bool {
+    for (options) |o| {
+        if (std.mem.eql(u8, arg, o)) return true;
+    }
+    return false;
+}
+
+fn writeStdout(init: std.process.Init, text: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    var w: std.Io.File.Writer = .init(.stdout(), init.io, &buf);
+    try w.interface.writeAll(text);
+    try w.interface.flush();
 }
 
 /// Prompt (on the cooked terminal, before the TUI starts) to create a git repo

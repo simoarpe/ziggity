@@ -19,6 +19,12 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Expose the package version (single source of truth: build.zig.zon) to the
+    // executable as `@import("build_options").version`, so `--version` can't drift.
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    const build_options_mod = build_options.createModule();
+
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -26,6 +32,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "ziggity", .module = lib_mod },
             .{ .name = "vaxis", .module = vaxis_mod },
+            .{ .name = "build_options", .module = build_options_mod },
         },
     });
 
