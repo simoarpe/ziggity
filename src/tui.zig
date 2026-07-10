@@ -143,10 +143,24 @@ const GraphRun = struct {
     root: []const u8,
     environ: *std.process.Environ.Map,
     all: bool,
+    // When not `all` but the current branch tracks an upstream, include it so the
+    // default graph shows the commits to pull (the remote's lane) alongside HEAD.
+    include_upstream: bool,
     generation: u64,
     result: ?[]u8 = null,
     parents: ?[]u8 = null,
 };
+
+/// Append the revision scope shared by both graph passes: `--all` for every
+/// ref, else `HEAD @{upstream}` to show the current branch and its incoming
+/// commits, else nothing (git defaults to HEAD when there is no upstream).
+fn appendGraphScope(argv: *std.ArrayList([]const u8), gr: *GraphRun) !void {
+    if (gr.all) {
+        try argv.append(async_allocator, "--all");
+    } else if (gr.include_upstream) {
+        try argv.appendSlice(async_allocator, &.{ "HEAD", "@{upstream}" });
+    }
+}
 
 fn graphWorker(gr: *GraphRun) void {
     var argv: std.ArrayList([]const u8) = .empty;
@@ -159,7 +173,7 @@ fn graphWorker(gr: *GraphRun) void {
     // can paint each author in its own palette colour, matching the Commits panel.
     const base = [_][]const u8{ "git", "--no-optional-locks", "log", "--graph", "--color=always", "--decorate", "-n", "5000", "--format=format:%C(yellow)%h%C(bold magenta)%d%C(reset) %x1f%an%x1f %C(green)%ar%C(reset)  %s" };
     argv.appendSlice(async_allocator, &base) catch return postGraph(gr);
-    if (gr.all) argv.append(async_allocator, "--all") catch return postGraph(gr);
+    appendGraphScope(&argv, gr) catch return postGraph(gr);
     const r = git_mod.runWithLockRetry(async_allocator, gr.io, .{
         .argv = argv.items,
         .cwd = .{ .path = gr.root },
@@ -177,7 +191,7 @@ fn graphWorker(gr: *GraphRun) void {
     defer pargv.deinit(async_allocator);
     const pbase = [_][]const u8{ "git", "--no-optional-locks", "log", "-n", "5000", "--format=%h %p" };
     pargv.appendSlice(async_allocator, &pbase) catch return postGraph(gr);
-    if (gr.all) pargv.append(async_allocator, "--all") catch return postGraph(gr);
+    appendGraphScope(&pargv, gr) catch return postGraph(gr);
     if (git_mod.runWithLockRetry(async_allocator, gr.io, .{
         .argv = pargv.items,
         .cwd = .{ .path = gr.root },
@@ -681,6 +695,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     .root = app.git.root,
                     .environ = app.git.environ,
                     .all = req.all,
+                    .include_upstream = req.include_upstream,
                     .generation = req.generation,
                     .result = null,
                 };
@@ -1063,7 +1078,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         }
         y += branches_h;
         {
-            const commits_tabs = [_][]const u8{ "Commits", "Reflog" };
+            const commits_tabs = [_][]const u8{ "Commits", "Reflog", "Divergence" };
             const w = if (app.mode == .rebase_plan) blk: {
                 break :blk panel(root, 0, y, side_w, commits_h, "[4] Interactive rebase (enter run, esc cancel)", app.focus == .commits, listScrollInfo(app, .commits));
             } else if (app.commitsFilesActive()) blk: {
@@ -1170,7 +1185,7 @@ fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
     const win = popup(root, w, h, title, null);
 
     const footer_row: u16 = win.height -| 1;
-    print(win, footer_row, 0, "j/k move  p parent  H/L pan  a all/current  ^o copy hash  enter go-to  esc close", st.bottom_accent);
+    print(win, footer_row, 0, "j/k move  @ current  p parent  H/L pan  a all/current  ^o copy hash  enter go-to  esc close", st.bottom_accent);
 
     if (app.commit_graph_loading or app.commit_graph == null) {
         var sbuf: [48]u8 = undefined;
@@ -1469,7 +1484,7 @@ const help_lines = [_][]const u8{
     "  g              reset menu (soft, mixed, hard) onto the tag",
     "  d              delete menu (local, remote, both)",
     "",
-    "Commits  (tabs: Commits, Reflog)",
+    "Commits  (tabs: Commits, Reflog, Divergence)",
     "  enter          view the commit's changed files",
     "  space          checkout the commit (detached HEAD)",
     "  n              new branch at the commit",
@@ -1498,7 +1513,9 @@ const help_lines = [_][]const u8{
     "  ctrl+p         custom patch menu (apply, remove from commit, reset)",
     "  ctrl+j         move the commit down",
     "  ctrl+k         move the commit up",
-    "  ctrl+l         commit graph viewer (its own keys show in its footer)",
+    "  ctrl+l         commit graph viewer — the current branch and its upstream",
+    "                 (so incoming commits show); a toggles all branches, @ jumps",
+    "                 to the current commit (HEAD). Its own keys show in its footer.",
     "  i              interactive rebase — a plan editor for the commits down",
     "                 to the selected one. p/d/s/f/e mark pick/drop/squash/",
     "                 fixup/edit; v or shift+arrows select a range; ctrl+j and",
@@ -1510,6 +1527,11 @@ const help_lines = [_][]const u8{
     "                 checkout (detached), g reset HEAD to it, n new branch,",
     "                 c/V copy and paste, o browser, W diff. History-rewriting",
     "                 keys do not apply to reflog entries.",
+    "                 Divergence tab — the current branch vs its upstream: \u{2191}",
+    "                 (ahead, your local commits to push) and \u{2193} (behind,",
+    "                 incoming commits to pull). A read-only view: checkout,",
+    "                 new branch, copy/paste and W diff work; history-rewriting",
+    "                 and HEAD-moving keys are disabled.",
     "",
     "Stash",
     "  space          apply the stash",
@@ -2833,10 +2855,33 @@ fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const m
         applySel(&base, sel);
         if (sel != .none) fillRow(win, row, base);
 
-        const hash_fg = if (marked) ui_theme.warning else if (copied) ui_theme.staged else ui_theme.hash;
+        // Hash colour: the cherry-pick/rebase markers win; then the Divergence
+        // tab's ahead(↑)/behind(↓) tint (green/red); otherwise the push state
+        // (unpushed = red, pushed/none = the usual `git log` hash colour) so
+        // commits ahead of the remote stand out at a glance.
+        const hash_fg = if (marked)
+            ui_theme.warning
+        else if (copied)
+            ui_theme.staged
+        else if (commit.divergence == .ahead)
+            ui_theme.staged
+        else if (commit.divergence == .behind)
+            ui_theme.unstaged
+        else switch (commit.status) {
+            .unpushed => ui_theme.unstaged,
+            .pushed, .none => ui_theme.hash,
+        };
+        var col: u16 = 0;
+        // On the Divergence tab, lead the row with ↑ (ahead, to push) / ↓
+        // (behind, to pull) so which side each commit is on reads at a glance.
+        if (commit.divergence != .none) {
+            const arrow = if (commit.divergence == .ahead) "\u{2191}" else "\u{2193}";
+            col = printSpan(win, row, col, arrow, withFg(base, hash_fg));
+            col = printSpan(win, row, col, " ", base);
+        }
         var buf: [80]u8 = undefined;
         const head = std.fmt.bufPrint(&buf, "{c}{s} ", .{ marker, commit.short_hash }) catch "";
-        var col = printSpan(win, row, 0, head, withFg(base, hash_fg));
+        col = printSpan(win, row, col, head, withFg(base, hash_fg));
 
         // The author's initials in a stable per-author colour, padded to a
         // two-cell column so the subjects still line up.
@@ -2904,7 +2949,13 @@ fn drawCommits(win: vaxis.Window, app: *const app_mod.App) void {
     }
     const commits = app.activeCommits();
     if (commits.len == 0) {
-        const empty_label = if (app.initial_load_pending) "Loading..." else if (app.commits_tab == .reflog) "No reflog entries" else "No commits";
+        const empty_label = if (app.initial_load_pending)
+            "Loading..."
+        else switch (app.commits_tab) {
+            .reflog => "No reflog entries",
+            .divergence => "In sync with upstream (or no upstream)",
+            .commits => "No commits",
+        };
         print(win, 0, 0, empty_label, styles().muted);
         return;
     }
@@ -3278,6 +3329,10 @@ fn drawStagingSplit(root: vaxis.Window, app: *app_mod.App, x: u16, y: u16, w: u1
 fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
     fillRow(win, 0, st.bottom);
+    // The commit-graph viewer is a full overlay with its own footer, so the
+    // Commits-panel hints below it are just noise — keep the main bar clean while
+    // it's open (the normal footer returns automatically once it closes).
+    if (app.mode == .commit_graph) return;
     if (app.mode == .commit_prompt) {
         print(win, 0, 0, "tab switch field  -  enter commit/newline  -  esc cancel", st.bottom_accent);
         return;
@@ -3369,6 +3424,8 @@ const FooterCtx = struct {
     commits_files: bool = false,
     /// Commits panel showing the Reflog tab (vs the commit log).
     reflog: bool = false,
+    /// Commits panel showing the Divergence tab (ahead/behind vs upstream).
+    divergence: bool = false,
     /// The interactive-rebase plan editor is open.
     rebase_plan: bool = false,
     /// Branches panel drilled into a branch's commit list.
@@ -3439,7 +3496,9 @@ fn footerHints(c: FooterCtx) []const u8 {
         .status => "1-5 panels  enter inspect  f fetch  p pull  P push" ++ global,
         .files => unreachable,
         .branches => unreachable,
-        .commits => if (c.reflog)
+        .commits => if (c.divergence)
+            "\u{2191} ahead / \u{2193} incoming  space checkout  n new-branch  c/v/^r copy/paste/clear  y copy  W diff  [/] tabs" ++ global
+        else if (c.reflog)
             "space checkout  g reset  n new-branch  c/v/^r copy/paste/clear  y copy  o browser  W diff  [/] tabs" ++ global
         else
             "enter files  space checkout  n/N branch/move  T tag  g reset  t revert  x verify-sig  c/v/^r copy/paste/clear  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  G pr  ^l graph  W diff  / filter  b bisect  ^j/^k move" ++ global,
@@ -3467,6 +3526,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
         .staging = app.staging_active,
         .commits_files = app.commitsFilesActive(),
         .reflog = app.commits_tab == .reflog,
+        .divergence = app.commits_tab == .divergence,
         .rebase_plan = app.mode == .rebase_plan,
         .branch_commits = app.branch_commits_active,
         .branch_files = app.branchFilesActive(),

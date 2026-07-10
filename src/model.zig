@@ -203,6 +203,15 @@ pub fn deinitCommits(allocator: std.mem.Allocator, commits: []Commit) void {
     allocator.free(commits);
 }
 
+/// A commit's position relative to its branch's upstream, for the hash colour
+/// in the Commits panel: `unpushed` (ahead of the remote), `pushed` (already on
+/// the remote), or `none` (no upstream / not computed).
+pub const CommitStatus = enum { none, unpushed, pushed };
+
+/// Which side of a left-right divergence log a commit is on: `ahead` (local,
+/// ↑) or `behind` (upstream-only / incoming, ↓). `none` outside that view.
+pub const Divergence = enum { none, ahead, behind };
+
 pub const Commit = struct {
     hash: []u8,
     short_hash: []u8,
@@ -210,6 +219,8 @@ pub const Commit = struct {
     time: []u8,
     refs: []u8,
     subject: []u8,
+    status: CommitStatus = .none,
+    divergence: Divergence = .none,
 
     pub fn deinit(self: *Commit, allocator: std.mem.Allocator) void {
         allocator.free(self.hash);
@@ -523,7 +534,7 @@ fn dupeCommit(a: std.mem.Allocator, c: Commit) std.mem.Allocator.Error!Commit {
     const refs = try a.dupe(u8, c.refs);
     errdefer a.free(refs);
     const subject = try a.dupe(u8, c.subject);
-    return .{ .hash = hash, .short_hash = short_hash, .author = author, .time = time, .refs = refs, .subject = subject };
+    return .{ .hash = hash, .short_hash = short_hash, .author = author, .time = time, .refs = refs, .subject = subject, .status = c.status, .divergence = c.divergence };
 }
 
 fn dupeStash(a: std.mem.Allocator, s: StashEntry) std.mem.Allocator.Error!StashEntry {

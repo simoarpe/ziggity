@@ -841,7 +841,103 @@ pub const Git = struct {
         var result = try self.exec(argv.items);
         defer result.deinit(self.allocator);
         if (!result.ok()) return self.allocator.alloc(model.Commit, 0);
-        return parseCommits(self.allocator, result.stdout);
+        const commits = try parseCommits(self.allocator, result.stdout);
+        // Colour each commit by push state in the main (HEAD) view.
+        if (std.mem.eql(u8, ref_name, "HEAD")) self.markPushStatus(commits);
+        return commits;
+    }
+
+    /// Tag each commit `unpushed` (ahead of the current branch's upstream) or
+    /// `pushed`, so the Commits panel can colour the hash (red vs the usual
+    /// yellow). Best-effort: with no upstream (`rev-list` fails) statuses are
+    /// left `.none` and the default hash colour is used.
+    fn markPushStatus(self: *Git, commits: []model.Commit) void {
+        var res = self.exec(&.{ "rev-list", "@{upstream}..HEAD" }) catch return;
+        defer res.deinit(self.allocator);
+        if (!res.ok()) return;
+
+        var unpushed = std.BufSet.init(self.allocator);
+        defer unpushed.deinit();
+        var lines = std.mem.tokenizeScalar(u8, res.stdout, '\n');
+        while (lines.next()) |line| {
+            const h = std.mem.trim(u8, line, " \r");
+            if (h.len > 0) unpushed.insert(h) catch return;
+        }
+        for (commits) |*c| c.status = if (unpushed.contains(c.hash)) .unpushed else .pushed;
+    }
+
+    /// Commits that diverge between the current branch and its upstream, for the
+    /// Divergence tab — a left-right log of `HEAD...@{upstream}`. `%m` marks each
+    /// side: `<` = ahead (local-only, ↑ — to push), `>` = behind (on the
+    /// upstream, ↓ — to pull). Ahead commits are grouped first. Empty when there
+    /// is no upstream or the branch is in sync.
+    pub fn loadDivergence(self: *Git, limit: usize) ![]model.Commit {
+        const limit_arg = try std.fmt.allocPrint(self.allocator, "-{d}", .{limit});
+        defer self.allocator.free(limit_arg);
+        var result = self.exec(&.{
+            "log",
+            "--left-right",
+            "--date=relative",
+            "--pretty=format:%m%x00%H%x00%h%x00%an%x00%cr%x00%s",
+            "--no-show-signature",
+            limit_arg,
+            "HEAD...@{upstream}",
+        }) catch return self.allocator.alloc(model.Commit, 0);
+        defer result.deinit(self.allocator);
+        if (!result.ok()) return self.allocator.alloc(model.Commit, 0);
+
+        const commits = try parseDivergence(self.allocator, result.stdout);
+        // Group the ahead (↑) commits before the behind (↓) ones. Moving the
+        // structs re-uses their owned buffers; only the old slice is freed.
+        const ordered = try self.allocator.alloc(model.Commit, commits.len);
+        var n: usize = 0;
+        for (commits) |c| if (c.divergence == .ahead) {
+            ordered[n] = c;
+            n += 1;
+        };
+        for (commits) |c| if (c.divergence != .ahead) {
+            ordered[n] = c;
+            n += 1;
+        };
+        self.allocator.free(commits);
+        return ordered;
+    }
+
+    fn parseDivergence(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Commit {
+        var commits: std.ArrayList(model.Commit) = .empty;
+        errdefer {
+            for (commits.items) |*item| item.deinit(allocator);
+            commits.deinit(allocator);
+        }
+        var lines = std.mem.splitScalar(u8, bytes, '\n');
+        while (lines.next()) |line| {
+            if (line.len == 0) continue;
+            var fields = std.mem.splitScalar(u8, line, 0);
+            const marker = fields.next() orelse continue; // "<" (ahead) / ">" (behind)
+            const hash = fields.next() orelse continue;
+            const short_hash = fields.next() orelse continue;
+            const author = fields.next() orelse "";
+            const time = fields.next() orelse "";
+            const subject = fields.next() orelse "";
+            const divergence: model.Divergence = if (marker.len > 0 and marker[0] == '<')
+                .ahead
+            else if (marker.len > 0 and marker[0] == '>')
+                .behind
+            else
+                .none;
+            var item = model.Commit{
+                .hash = try allocator.dupe(u8, hash),
+                .short_hash = try allocator.dupe(u8, short_hash),
+                .author = try allocator.dupe(u8, author),
+                .time = try allocator.dupe(u8, time),
+                .refs = try allocator.dupe(u8, ""),
+                .subject = try allocator.dupe(u8, subject),
+                .divergence = divergence,
+            };
+            errdefer item.deinit(allocator);
+            try commits.append(allocator, item);
+        }
+        return commits.toOwnedSlice(allocator);
     }
 
     pub fn loadReflog(self: *Git, limit: usize) ![]model.Commit {
@@ -1987,6 +2083,26 @@ test "parse commits handles empty (unborn branch) output" {
     const commits = try parseCommits(std.testing.allocator, "");
     defer std.testing.allocator.free(commits);
     try std.testing.expectEqual(@as(usize, 0), commits.len);
+}
+
+test "parseDivergence maps left-right marks to ahead/behind" {
+    const allocator = std.testing.allocator;
+    // Fields per line: mark, hash, short, author, reltime, subject.
+    // `<` = ahead (local-only), `>` = behind (upstream-only).
+    const input =
+        "<\x00aaa111\x00aaa\x00me\x001 day ago\x00mine, ahead\n" ++
+        ">\x00bbb222\x00bbb\x00them\x002 days ago\x00theirs, behind";
+    const commits = try Git.parseDivergence(allocator, input);
+    defer {
+        for (commits) |*c| c.deinit(allocator);
+        allocator.free(commits);
+    }
+    try std.testing.expectEqual(@as(usize, 2), commits.len);
+    try std.testing.expectEqual(model.Divergence.ahead, commits[0].divergence);
+    try std.testing.expectEqualStrings("aaa111", commits[0].hash);
+    try std.testing.expectEqualStrings("mine, ahead", commits[0].subject);
+    try std.testing.expectEqual(model.Divergence.behind, commits[1].divergence);
+    try std.testing.expectEqualStrings("theirs, behind", commits[1].subject);
 }
 
 test "parse branches captures current marker, upstream, and gone upstream" {

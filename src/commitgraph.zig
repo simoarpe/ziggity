@@ -12,7 +12,7 @@ const model = @import("model.zig");
 const App = app_mod.App;
 
 /// What the TUI loop needs to load a graph off-thread.
-pub const LoadReq = struct { all: bool, generation: u64 };
+pub const LoadReq = struct { all: bool, include_upstream: bool, generation: u64 };
 
 /// `ctrl+l`: open the viewer, scoped to the current branch, and request a load.
 pub fn open(app: *App) !void {
@@ -68,7 +68,14 @@ fn requestLoad(app: *App) void {
 pub fn takeLoad(app: *App) ?LoadReq {
     if (!app.commit_graph_wanted) return null;
     app.commit_graph_wanted = false;
-    return .{ .all = app.commit_graph_all, .generation = app.commit_graph_generation };
+    // Include the upstream in the current-branch view only when it exists and
+    // still resolves (a `[gone]` upstream would make `git log @{upstream}` fail).
+    const include_upstream = app.data.upstream != null and !app.data.upstream_gone;
+    return .{
+        .all = app.commit_graph_all,
+        .include_upstream = include_upstream,
+        .generation = app.commit_graph_generation,
+    };
 }
 
 /// TUI loop hook: a graph load finished. `text` is owned by `gpa`. Stale results
@@ -137,8 +144,25 @@ pub fn handleKey(app: *App, key: anytype) !void {
     if (km.copy_clipboard.matches(key)) return copyCursorHash(app);
     // `p` jumps the cursor to the current commit's first parent.
     if (km.graph_first_parent.matches(key)) return goToFirstParent(app);
+    // `@` jumps the cursor to the current commit (HEAD).
+    if (km.graph_goto_head.matches(key)) return goToHead(app);
     // enter jumps the Commits-panel selection to the row under the cursor.
     if (app.isEnterKey(key)) return jumpToSelected(app);
+}
+
+/// `@`: move the cursor to the current commit (HEAD) and recentre on it. HEAD is
+/// the newest entry of the Commits log, so its hash names the row to find.
+fn goToHead(app: *App) !void {
+    if (app.data.commits.len == 0) {
+        try app.setMessage("no current commit", .{});
+        return;
+    }
+    const row = rowForHash(app, app.data.commits[0].short_hash) orelse {
+        try app.setMessage("current commit is not in this view", .{});
+        return;
+    };
+    app.commit_graph_sel = row;
+    app.commit_graph_recenter = true;
 }
 
 /// ctrl+o: copy the full hash of the commit on the cursor row.
@@ -265,6 +289,9 @@ pub fn close(app: *App) void {
     app.commit_graph_wanted = false;
     app.commit_graph_generation +%= 1; // discard any in-flight load
     app.mode = .normal;
+    // Clear the "loading commit graph..." status so it doesn't linger in the
+    // restored footer.
+    app.setMessage("", .{}) catch {};
 }
 
 pub fn freeGraph(app: *App) void {

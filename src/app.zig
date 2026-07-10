@@ -429,11 +429,13 @@ pub const FilesTab = enum {
 pub const CommitsTab = enum {
     commits,
     reflog,
+    divergence,
 
     pub fn label(self: CommitsTab) []const u8 {
         return switch (self) {
             .commits => "Commits",
             .reflog => "Reflog",
+            .divergence => "Divergence",
         };
     }
 };
@@ -1676,6 +1678,11 @@ pub const App = struct {
     submodule_index: usize = 0,
     commit_index: usize = 0,
     reflog_index: usize = 0,
+    divergence_index: usize = 0,
+    // The Divergence tab's commits (ahead ↑ / behind ↓ vs upstream), loaded
+    // synchronously when you switch to the tab. Owned here (not in `data`), so
+    // it's decoupled from the async refresh machinery; freed on deinit.
+    divergence_commits: []model.Commit = &.{},
     // How many commits the Commits panel currently requests from `git log`; grows
     // by `commit_load_batch` as the user scrolls near the end (see
     // `maybeLoadMoreCommits`). Threaded into the async loaders.
@@ -2269,6 +2276,7 @@ pub const App = struct {
         self.input_buffer.deinit(self.allocator);
         self.clearPromptSuggestions();
         self.prompt_suggestions.deinit(self.allocator);
+        self.freeDivergenceCommits();
         for (self.prompt_drafts) |d| self.allocator.free(d);
         self.preview_cache.deinit(self.allocator);
         self.allocator.free(self.preview_desired_key);
@@ -2486,6 +2494,11 @@ pub const App = struct {
         if (self.branch_commits_active and s.contains(.branches)) drills_mod.reloadBranchCommitsAfterRefresh(self);
         if (self.branch_files_active and s.contains(.branches)) drills_mod.reloadBranchFilesAfterRefresh(self);
         if (self.commit_files_active and s.contains(.commits)) drills_mod.reloadCommitFilesAfterRefresh(self);
+        // Keep the Divergence tab live: its ahead/behind set moves with HEAD
+        // (commits) and the upstream ref (status/branches after a fetch).
+        if (self.commits_tab == .divergence and
+            (s.contains(.commits) or s.contains(.status) or s.contains(.branches)))
+            self.loadDivergenceTab();
         self.updatePreview() catch {};
     }
 
@@ -2794,11 +2807,14 @@ pub const App = struct {
         // (e.g. R=refresh, f=fetch), or does nothing if it has none.
         const in_branch_drill = self.branch_commits_active and actions.isBranchManagement(action);
         const in_commit_files = self.commitsFilesActive() and self.focus == .commits and actions.isCommitListAction(action);
+        // The Divergence tab is a read-only-ish view: history-rewriting / HEAD-
+        // moving commit actions are suppressed (fall through to global meaning).
+        const in_divergence = self.focus == .commits and self.commits_tab == .divergence and actions.isDivergenceBlocked(action);
         // The Files panel's Worktrees / Submodules tabs are not a working-tree
         // file list, so the file-specific keys (stage-all, commit, discard-all,
         // tree toggle, …) don't apply there.
         const in_files_subtab = self.focus == .files and self.files_tab != .files and actions.isFilesContentAction(action);
-        if (in_branch_drill or in_commit_files or in_files_subtab) {
+        if (in_branch_drill or in_commit_files or in_files_subtab or in_divergence) {
             action = actions.fromNormalKey(key, self.config.keymap, .status) orelse return;
         }
         // While a slow op runs, navigation/inspection stay live but mutating
@@ -3338,6 +3354,7 @@ pub const App = struct {
             else switch (self.commits_tab) {
                 .commits => self.data.commits.len,
                 .reflog => self.data.reflog.len,
+                .divergence => self.divergence_commits.len,
             },
             .stash => self.data.stash.len,
             .status, .main => 0,
@@ -3368,6 +3385,7 @@ pub const App = struct {
             else switch (self.commits_tab) {
                 .commits => self.commit_index,
                 .reflog => self.reflog_index,
+                .divergence => self.divergence_index,
             },
             .stash => self.stash_index,
             .status, .main => 0,
@@ -3849,6 +3867,10 @@ pub const App = struct {
                     .reflog => {
                         if (self.data.reflog.len == 0) return;
                         self.reflog_index = @min(clicked, self.data.reflog.len - 1);
+                    },
+                    .divergence => {
+                        if (self.divergence_commits.len == 0) return;
+                        self.divergence_index = @min(clicked, self.divergence_commits.len - 1);
                     },
                 }
             },
@@ -4689,13 +4711,34 @@ pub const App = struct {
         return switch (self.commits_tab) {
             .commits => self.data.commits,
             .reflog => self.data.reflog,
+            .divergence => self.divergence_commits,
         };
+    }
+
+    /// (Re)load the Divergence tab's commits (ahead ↑ / behind ↓ vs upstream)
+    /// synchronously and reset its cursor. A best-effort snapshot: an empty list
+    /// means no upstream or an in-sync branch.
+    fn loadDivergenceTab(self: *App) void {
+        self.freeDivergenceCommits();
+        self.divergence_commits = self.git.loadDivergence(commit_load_batch) catch &.{};
+        // Clamp (don't reset) the cursor so a live reload keeps your position.
+        if (self.divergence_commits.len == 0)
+            self.divergence_index = 0
+        else if (self.divergence_index >= self.divergence_commits.len)
+            self.divergence_index = self.divergence_commits.len - 1;
+    }
+
+    fn freeDivergenceCommits(self: *App) void {
+        for (self.divergence_commits) |*c| c.deinit(self.allocator);
+        if (self.divergence_commits.len > 0) self.allocator.free(self.divergence_commits);
+        self.divergence_commits = &.{};
     }
 
     pub fn activeCommitIndex(self: *const App) usize {
         return switch (self.commits_tab) {
             .commits => self.commit_index,
             .reflog => self.reflog_index,
+            .divergence => self.divergence_index,
         };
     }
 
@@ -4910,11 +4953,21 @@ pub const App = struct {
                 // The commit-files view has no tabs; leave it intact (<esc>
                 // backs out of it) rather than switching the hidden log tab.
                 if (self.commitsFilesActive()) return;
-                // Only two tabs, so prev and next are equivalent here.
-                self.commits_tab = switch (self.commits_tab) {
-                    .commits => .reflog,
-                    .reflog => .commits,
+                self.commits_tab = switch (direction) {
+                    .next => switch (self.commits_tab) {
+                        .commits => .reflog,
+                        .reflog => .divergence,
+                        .divergence => .commits,
+                    },
+                    .prev => switch (self.commits_tab) {
+                        .commits => .divergence,
+                        .divergence => .reflog,
+                        .reflog => .commits,
+                    },
                 };
+                // The Divergence tab is loaded on demand (a snapshot each time
+                // you switch to it).
+                if (self.commits_tab == .divergence) self.loadDivergenceTab();
                 self.resetMainView();
                 self.resetListHScroll(.commits);
                 try self.updatePreview();
@@ -5140,6 +5193,7 @@ pub const App = struct {
                 } else switch (self.commits_tab) {
                     .commits => self.commit_index = step(self.commit_index, down, self.data.commits.len),
                     .reflog => self.reflog_index = step(self.reflog_index, down, self.data.reflog.len),
+                    .divergence => self.divergence_index = step(self.divergence_index, down, self.divergence_commits.len),
                 }
             },
             .stash => self.stash_index = step(self.stash_index, down, self.data.stash.len),
@@ -5158,15 +5212,20 @@ pub const App = struct {
     /// next batch and reload that scope. A short page means it's all loaded.
     fn maybeLoadMoreCommits(self: *App) void {
         if (self.commit_files_active) return;
+        // The Divergence tab loads a fixed batch synchronously (not via the async
+        // scope loader), so it has no incremental pagination.
+        if (self.commits_tab == .divergence) return;
         const len = switch (self.commits_tab) {
             .commits => self.data.commits.len,
             .reflog => self.data.reflog.len,
+            .divergence => self.divergence_commits.len,
         };
         if (len == 0 or len != self.commit_limit) return;
         const lv = self.listView(.commits) orelse return;
         const sel = switch (self.commits_tab) {
             .commits => self.commit_index,
             .reflog => self.reflog_index,
+            .divergence => self.divergence_index,
         };
         const threshold: usize = 25;
         const near = sel + threshold >= len or lv.scroll + lv.view_h + threshold >= len;
@@ -5175,6 +5234,7 @@ pub const App = struct {
         self.refreshViews(ScopeSet.init(switch (self.commits_tab) {
             .commits => .{ .commits = true },
             .reflog => .{ .reflog = true },
+            .divergence => .{ .commits = true },
         }));
     }
 
@@ -10890,6 +10950,7 @@ fn deinitTestApp(app: *App) void {
     app.input_buffer.deinit(app.allocator);
     app.clearPromptSuggestions();
     app.prompt_suggestions.deinit(app.allocator);
+    app.freeDivergenceCommits();
     for (app.prompt_drafts) |d| app.allocator.free(d);
     if (app.staging) |*parsed| parsed.deinit(app.allocator);
     app.allocator.free(app.staging_diff);

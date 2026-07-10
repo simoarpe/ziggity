@@ -10,20 +10,22 @@ pub fn build(b: *std.Build) void {
     });
     const vaxis_mod = vaxis_dep.module("vaxis");
 
+    // Expose the package version (single source of truth: build.zig.zon) as
+    // `@import("build_options").version`, so both the `--version` flag (exe) and
+    // the about screen (lib) stay in sync and never drift.
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    const build_options_mod = build_options.createModule();
+
     const lib_mod = b.addModule("ziggity", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "vaxis", .module = vaxis_mod },
+            .{ .name = "build_options", .module = build_options_mod },
         },
     });
-
-    // Expose the package version (single source of truth: build.zig.zon) to the
-    // executable as `@import("build_options").version`, so `--version` can't drift.
-    const build_options = b.addOptions();
-    build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
-    const build_options_mod = build_options.createModule();
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),

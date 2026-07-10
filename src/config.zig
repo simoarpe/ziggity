@@ -59,6 +59,9 @@ pub const KeyMap = struct {
     log_menu: Binding = .{ .codepoint = 'l', .ctrl = true },
     // In the commit-graph viewer: jump the cursor to the current commit's first parent.
     graph_first_parent: Binding = .{ .codepoint = 'p' },
+    // In the commit-graph viewer: jump the cursor to the current commit (HEAD).
+    // `@` is git's own shorthand for HEAD.
+    graph_goto_head: Binding = .{ .codepoint = '@' },
     force_checkout: Binding = .{ .codepoint = 'F' },
     branch_sort: Binding = .{ .codepoint = 's' },
     ignore_file: Binding = .{ .codepoint = 'i' },

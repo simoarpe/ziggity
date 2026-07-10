@@ -145,6 +145,37 @@ pub fn isCommitListAction(self: Action) bool {
     };
 }
 
+/// Commit actions that don't make sense on the Divergence tab (a read-only-ish
+/// view of ahead/behind commits): anything that rewrites history or moves HEAD.
+/// Viewing, checkout, branching-off, cherry-pick copy/paste, copying, diffing
+/// and the graph stay available. Suppressed keys fall through to their global
+/// meaning (usually nothing), like the commit-files view does.
+pub fn isDivergenceBlocked(self: Action) bool {
+    return switch (self) {
+        .reset_commit,
+        .revert_commit,
+        .rebase_drop,
+        .rebase_squash,
+        .rebase_edit,
+        .rebase_reword,
+        .rebase_move_down,
+        .rebase_move_up,
+        .rebase_create_fixup,
+        .rebase_autosquash,
+        .rebase_fixup,
+        .interactive_rebase,
+        .mark_base,
+        .bisect_menu,
+        .tag_commit,
+        .open_pull_request,
+        .move_to_new_branch,
+        .amend_attribute,
+        .start_commit_filter,
+        => true,
+        else => false,
+    };
+}
+
 /// Working-tree file actions that only make sense on the Files panel's Files
 /// tab — suppressed on its Worktrees / Submodules tabs (which list refs, not a
 /// working-tree file set). `select`/`discard_selected`/`focus_main` are handled
