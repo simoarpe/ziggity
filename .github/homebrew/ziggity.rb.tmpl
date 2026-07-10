@@ -1,0 +1,38 @@
+class Ziggity < Formula
+  desc "Terminal UI for Git, written in Zig"
+  homepage "https://github.com/simoarpe/ziggity"
+  version "__VERSION__"
+  license "MIT"
+
+  depends_on "git"
+
+  on_macos do
+    on_arm do
+      url "__BASE__/ziggity-__TAG__-aarch64-macos.tar.gz"
+      sha256 "__SHA_MAC_ARM__"
+    end
+    on_intel do
+      url "__BASE__/ziggity-__TAG__-x86_64-macos.tar.gz"
+      sha256 "__SHA_MAC_X64__"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "__BASE__/ziggity-__TAG__-aarch64-linux-musl.tar.gz"
+      sha256 "__SHA_LIN_ARM__"
+    end
+    on_intel do
+      url "__BASE__/ziggity-__TAG__-x86_64-linux-musl.tar.gz"
+      sha256 "__SHA_LIN_X64__"
+    end
+  end
+
+  def install
+    bin.install "ziggity"
+  end
+
+  test do
+    assert_match "ziggity #{version}", shell_output("#{bin}/ziggity --version")
+  end
+end

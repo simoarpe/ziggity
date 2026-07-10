@@ -81,3 +81,53 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true   # auto-summarise commits since the last tag
+
+      # 6. Point the Homebrew tap at this release: render Formula/ziggity.rb from
+      #    the template (new version + URLs + sha256s) and push it to
+      #    simoarpe/homebrew-ziggity. Needs a token that can write to THAT repo —
+      #    the default GITHUB_TOKEN only covers this one. Create a fine-grained
+      #    PAT (contents: write on the tap repo) and add it as the repo secret
+      #    Z_HOMEBREW_TAP_TOKEN. Without it, this step logs and skips (releases still
+      #    succeed).
+      - name: Update Homebrew tap
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          TAP_TOKEN: ${{ secrets.Z_HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAP_TOKEN}" ]; then
+            echo "Z_HOMEBREW_TAP_TOKEN not set — skipping the formula bump."
+            exit 0
+          fi
+
+          tag="${GITHUB_REF_NAME}"          # v0.2.0
+          version="${tag#v}"                # 0.2.0
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
+
+          # sha256 of a given asset, from the checksums we just generated.
+          sha() { awk -v f="ziggity-${tag}-$1" '$2==f{print $1}' dist/checksums.txt; }
+
+          sed \
+            -e "s|__VERSION__|${version}|g" \
+            -e "s|__TAG__|${tag}|g" \
+            -e "s|__BASE__|${base}|g" \
+            -e "s|__SHA_MAC_ARM__|$(sha aarch64-macos.tar.gz)|g" \
+            -e "s|__SHA_MAC_X64__|$(sha x86_64-macos.tar.gz)|g" \
+            -e "s|__SHA_LIN_ARM__|$(sha aarch64-linux-musl.tar.gz)|g" \
+            -e "s|__SHA_LIN_X64__|$(sha x86_64-linux-musl.tar.gz)|g" \
+            .github/homebrew/ziggity.rb.tmpl > /tmp/ziggity.rb
+
+          git clone --depth 1 \
+            "https://x-access-token:${TAP_TOKEN}@github.com/simoarpe/homebrew-ziggity.git" tap
+          mkdir -p tap/Formula
+          cp /tmp/ziggity.rb tap/Formula/ziggity.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "Formula already up to date."
+          else
+            git add Formula/ziggity.rb
+            git commit -m "ziggity ${version}"
+            git push
+          fi
