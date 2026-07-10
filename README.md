@@ -161,8 +161,10 @@ The Commits panel previews each commit's diff, including its GPG signature statu
 
 ![Commits panel with diff preview](docs/screenshots/03-commits.png)
 
-`ctrl+l` opens the real `git log --graph` DAG in git's own colours — jump to a
-commit's first parent with `p`, or toggle all-branches with `a`.
+`ctrl+l` opens the real `git log --graph` DAG in git's own colours. By default
+it shows the current branch **and its upstream**, so the commits you're behind
+by (the remote's lane) are visible right away; `a` toggles all branches. Jump to
+the current commit (HEAD) with `@`, or to a commit's first parent with `p`.
 
 ![Commit graph viewer](docs/screenshots/04-commit-graph.png)
 
@@ -273,9 +275,15 @@ Status panel shows an about screen with a live animation.
   scroll toward the end, so it's never capped), each row showing the author's
   initials in a stable per-author colour and a highlighted
   [Conventional Commits](https://www.conventionalcommits.org/) prefix (type in
-  accent, scope muted, breaking `!` in red; `highlight_conventional_commits`),
-  and a Reflog tab for recovery (also incrementally loaded — checkout `space`,
-  reset HEAD `g`, branch `n`).
+  accent, scope muted, breaking `!` in red; `highlight_conventional_commits`).
+  The short hash is tinted by push state — **red** for commits not yet on the
+  remote, the usual yellow once pushed.
+- Three tabs (`[` / `]` to switch): **Commits**, a **Reflog** recovery view
+  (checkout `space`, reset HEAD `g`, branch `n`), and a **Divergence** view of
+  the current branch versus its upstream — `↑` ahead (your local commits to
+  push) grouped above `↓` behind (incoming commits to pull). The Divergence tab
+  is read-only: checkout, branch-off, copy/paste and diff work; history-editing
+  keys are disabled.
 - Commit (`c`), commit `--no-verify` (`w`), amend (`A`) in a centered editor with
   a summary line and optional multi-line body (`tab` switches fields). The editor
   nudges you toward the [50/72 rule](https://dev.to/noelworden/improving-your-commit-message-with-the-50-72-rule-3g79):
@@ -295,9 +303,10 @@ Status panel shows an about screen with a live animation.
 - A navigable changed-file list per commit (`enter`); `d` there discards a file's
   changes from that commit (rebase + amend).
 - Commit graph viewer (`ctrl+l`): the real `git log --graph` DAG in git's colours,
-  loaded off-thread; toggle current/all branches (`a`), `p` jumps to the current
-  commit's first parent, `enter` jumps the selection, mouse scroll/drag/click
-  supported.
+  loaded off-thread. The default view shows the current branch and its upstream
+  (so incoming commits to pull are visible); `a` toggles all branches. `@` jumps
+  to the current commit (HEAD), `p` to the first parent, `enter` jumps the
+  selection; mouse scroll/drag/click supported.
 - Log filtering (`/`): by message (`--grep`), author, or path; persists across
   refreshes and shows in the panel title.
 - Bisect (`b`): mark the selected commit good/bad, then mark good/bad/skip until
@@ -446,9 +455,9 @@ Press **`?`** in the app for the full, always-current overlay. The essentials:
 - `T` / `a` (Commits): tag the commit / change its author
 - `y` / `ctrl+r`: copy-attribute menu / clear the cherry-pick selection
 - `i` (Commits): interactive rebase plan editor
-- `ctrl+l` (Commits): commit graph viewer (`j`/`k` move, `p` first-parent, `H`/`L`
-  pan, `a` toggle all-branches, `ctrl+o` copy, `enter` jump, `esc` close; mouse
-  scroll/drag/click)
+- `ctrl+l` (Commits): commit graph viewer (`j`/`k` move, `@` current commit,
+  `p` first-parent, `H`/`L` pan, `a` toggle all-branches, `ctrl+o` copy,
+  `enter` jump, `esc` close; mouse scroll/drag/click)
 - `G` (Commits): open the PR page · `B`: mark a `rebase --onto` base
 - `W`: diff the selected commit/branch against another marked ref
 - `/` (Commits): filter the log · `b` (Commits): bisect menu
