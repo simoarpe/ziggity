@@ -11,7 +11,7 @@
 <p align="center">
   <img alt="Zig 0.16" src="https://img.shields.io/badge/Zig-0.16.0-f7a41d">
   <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue">
-  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey">
 </p>
 
 `ziggity` brings the core lazygit workflow — stage, commit, branch, rebase, and
@@ -30,37 +30,99 @@ libgit2), and [libvaxis](https://github.com/rockorager/libvaxis) for the UI.
 
 ## Contents
 
-- [Quick start](#quick-start)
+- [Installation](#installation)
 - [Highlights](#highlights)
 - [Screenshots](#screenshots)
 - [Features](#features)
 - [Keybindings](#keybindings)
 - [Configuration](#configuration)
-- [Status & roadmap](#status--roadmap)
+- [Status & Roadmap](#status--roadmap)
 - [Development](#development)
 - [License](#license)
 
-## Quick start
+## Installation
+
+Ziggity needs the `git` command on your `PATH` at runtime — it drives git as a
+subprocess. Install a prebuilt binary (below), or build from source.
+
+### Manual Installation
+
+Every [release](https://github.com/simoarpe/ziggity/releases) ships static
+binaries for macOS, Linux, and Windows — no Zig toolchain required.
+
+#### macOS / Linux
+
+Grab the archive for your platform from the releases page — `aarch64-macos` or
+`x86_64-macos` for macOS, `x86_64-linux-musl` or `aarch64-linux-musl` for Linux
+(the musl builds are fully static and run on any distro) — then:
+
+```sh
+# set VERSION to the latest release and pick your OS/arch — see the releases page
+VERSION=v0.1.0
+curl -LO https://github.com/simoarpe/ziggity/releases/download/$VERSION/ziggity-$VERSION-aarch64-macos.tar.gz
+tar -xzf ziggity-$VERSION-aarch64-macos.tar.gz
+sudo mv ziggity /usr/local/bin/      # or any directory on your PATH
+command -v ziggity                   # confirm it's on your PATH
+```
+
+On macOS the binary isn't notarized, so Gatekeeper may block it on first run.
+Clear the quarantine flag once:
+
+```sh
+xattr -d com.apple.quarantine /usr/local/bin/ziggity
+```
+
+#### Windows
+
+Download `ziggity-<version>-x86_64-windows-gnu.zip`, unzip it, and put
+`ziggity.exe` in a folder on your `PATH`. Requires
+[Git for Windows](https://git-scm.com/download/win).
+
+> **Note:** Windows builds are cross-compiled and not yet smoke-tested on
+> Windows — treat them as experimental for now.
+
+#### Verify the Download (Optional)
+
+Each release includes a `checksums.txt`:
+
+```sh
+sha256sum --ignore-missing -c checksums.txt   # macOS: shasum -a 256 --ignore-missing -c checksums.txt
+```
+
+### Compile from Source
 
 **Requirements:** [Zig `0.16.0`](https://ziglang.org/download/) and `git` on your `PATH`.
 
 ```sh
 git clone https://github.com/simoarpe/ziggity
 cd ziggity
-zig build                 # binary at ./zig-out/bin/ziggity
-zig build test            # run the test suite
-
-./zig-out/bin/ziggity     # run inside any Git repository
+zig build -Doptimize=ReleaseSafe     # binary at ./zig-out/bin/ziggity
+zig build test                       # (optional) run the test suite
 ```
 
-Press `?` at any time for the in-app keybindings overlay (it opens scrolled to
-the section for the panel you're on). Press `q` to quit.
+The build leaves the binary at `./zig-out/bin/ziggity`. **Add it to your
+`PATH`** so you can run `ziggity` from anywhere — either copy it into a
+directory already on your `PATH`:
+
+```sh
+sudo cp zig-out/bin/ziggity /usr/local/bin/
+```
+
+or add `zig-out/bin` to your `PATH` (e.g. in `~/.zshrc` or `~/.bashrc`):
+
+```sh
+export PATH="$PWD/zig-out/bin:$PATH"
+```
+
+Once installed, run `ziggity` inside any Git repository. Press `?` for the
+in-app keybindings overlay (it opens scrolled to the panel you're on), and `q`
+to quit.
 
 ## Highlights
 
 - **Whole lazygit workflow** — status, files, branches, commits, and stash
   panels with diff previews and a context-sensitive footer.
-- **Hunk- and line-level staging** — `enter` a file to stage individual lines or
+- **Hunk and line-level staging** — `enter` a file to stage individual lines or
   hunks, with an optional side-by-side unstaged/staged split.
 - **Full interactive rebase** — drop/squash/fixup/edit/reword/move per commit, a
   plan editor (`i`), cherry-pick, custom patch building, autosquash, and
@@ -85,14 +147,14 @@ the section for the panel you're on). Press `q` to quit.
 A visual tour of the main features, captured from a real terminal session (see
 [`docs/screenshots`](docs/screenshots)).
 
-### Hunk- and line-level staging
+### Hunk and Line-Level Staging
 
 `enter` a file to open the staging view — stage or unstage individual lines or
 whole hunks (`space`), with an optional side-by-side unstaged/staged split.
 
 ![Line-level staging view](docs/screenshots/02-staging.png)
 
-### Commits & history
+### Commits & History
 
 The Commits panel previews each commit's diff, including its GPG signature status;
 `enter` opens the commit's changed files.
@@ -118,7 +180,7 @@ live character count nudging the 50/72 rule, and (optionally) a
 
 ![Commit message dialog](docs/screenshots/08-commit-dialog.png)
 
-### Branches & tags
+### Branches & Tags
 
 The Branches panel shows ahead/behind arrows, upstream tracking and per-ref
 actions (merge, rebase, reset, checkout…); the Tags tab lists tags with their
@@ -138,7 +200,7 @@ staged-only / a single file / keep-changes, each with an optional message — an
 
 ![Stash menu](docs/screenshots/12-stash-menu.png)
 
-### Diffing & menus
+### Diffing & Menus
 
 Mark any ref and diff another against it (`W`), with reverse and three-dot
 (merge-base) options. Destructive actions route through clear, explicit menus.
@@ -147,7 +209,7 @@ Mark any ref and diff another against it (`W`), with reverse and three-dot
 
 ![Reset menu](docs/screenshots/13-reset-menu.png)
 
-### Help & the about screen
+### Help & the About Screen
 
 `?` opens the keybindings overlay, scrolled to the panel you're on. Selecting the
 Status panel shows an about screen with a live animation.
@@ -163,7 +225,7 @@ Status panel shows an about screen with a live animation.
 
 - Files panel from `git status --porcelain -z`; stage/unstage a file (`space`)
   or everything (`a`).
-- Hunk- and line-level staging: `enter` opens a staging view to stage/unstage
+- Hunk and line-level staging: `enter` opens a staging view to stage/unstage
   individual lines (`v` for a range) or whole hunks (`tab` switches the
   unstaged/staged side; `\` toggles a side-by-side split — see
   [Staging layout](#staging-layout-staging_split)).
@@ -545,7 +607,7 @@ press their key, so a repo-local `.ziggity.ini` cannot run anything on its own.
 
 </details>
 
-### Staging layout (`staging_split`)
+### Staging Layout (`staging_split`)
 
 The staging view (`enter`/`tab` on a file) shows one pane (the active side) or two
 side by side (Unstaged | Staged). `staging_split` decides how each file opens:
@@ -577,7 +639,7 @@ Terminal editors (vim, nano, emacs, micro, helix, kakoune, …) **suspend** zigg
 and resume when you quit them; GUI editors (VS Code, Sublime, Zed, …) just
 **launch**. `editor_in_terminal = true|false` forces which behaviour to use.
 
-## Status & roadmap
+## Status & Roadmap
 
 The lazygit-parity feature roadmap is **complete**. Known smaller gaps:
 
@@ -603,7 +665,7 @@ zig build test --summary all               # run all tests
 zig build -Doptimize=ReleaseFast           # optimized build
 ```
 
-### Source layout
+### Source Layout
 
 | File | Responsibility |
 |---|---|
@@ -621,7 +683,7 @@ Supporting modules split cohesive areas out of `app.zig`: `staging.zig`,
 `editor.zig`, `diff.zig`, `credentials.zig`. All Git data is loaded through `git`
 commands rather than reimplementing Git internals.
 
-### libvaxis gotcha: cells store graphemes by reference
+### libvaxis Gotcha: Cells Store Graphemes by Reference
 
 libvaxis stores each screen cell's grapheme as a **slice into the source text**
 (`Window.print` does `.grapheme = grapheme.bytes(segment.text)` — it does not copy
