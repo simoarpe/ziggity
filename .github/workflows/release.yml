@@ -23,6 +23,8 @@ jobs:
 
       # 2. Install the pinned Zig version. Zig is pre-1.0 and breaks between
       #    versions, so we lock it to what the project builds with.
+      #    (Still on Node 20 as of v2.2.1 — GitHub runs it on Node 24 anyway;
+      #    bump the major once mlugg/setup-zig ships a Node 24 release.)
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
@@ -75,7 +77,7 @@ jobs:
       #    build/package steps above, letting you dry-run without a release.
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: true   # auto-summarise commits since the last tag
