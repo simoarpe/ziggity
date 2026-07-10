@@ -43,7 +43,24 @@ libgit2), and [libvaxis](https://github.com/rockorager/libvaxis) for the UI.
 ## Installation
 
 Ziggity needs the `git` command on your `PATH` at runtime — it drives git as a
-subprocess. Install a prebuilt binary (below), or build from source.
+subprocess. Install via Homebrew, grab a prebuilt binary, or build from source.
+
+### Homebrew (macOS / Linux)
+
+```sh
+brew install simoarpe/ziggity/ziggity
+```
+
+That taps [`simoarpe/homebrew-ziggity`](https://github.com/simoarpe/homebrew-ziggity)
+and installs the binary — the short form of:
+
+```sh
+brew tap simoarpe/ziggity
+brew install ziggity
+```
+
+Upgrade with `brew upgrade ziggity`. Unlike a downloaded binary, a Homebrew
+install isn't quarantined, so it runs on macOS without a Gatekeeper prompt.
 
 ### Manual Installation
 
