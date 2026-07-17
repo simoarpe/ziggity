@@ -862,9 +862,15 @@ fn refreshTickerRun(state: *RefreshTicker) void {
         std.Io.sleep(state.io, spinner_tick, .awake) catch return;
         if (state.stop.load(.acquire)) return;
         if (state.app.busy_flag.load(.acquire)) {
-            // Busy: animate the spinner on every fast tick.
+            // Busy: animate the loading spinner on every fast tick — and keep the
+            // about-splash donut spinning too, so a pull/push/etc. doesn't freeze
+            // it. `animate_flag` still stops it when the splash is hidden or the
+            // terminal is unfocused.
             idle_ms = 0;
             _ = state.loop.tryPostEvent(.refresh_tick) catch false;
+            if (state.app.animate_flag.load(.acquire)) {
+                _ = state.loop.tryPostEvent(.anim_tick) catch false;
+            }
         } else {
             // The about-splash animation runs on every fast tick (independent of
             // the background refresh, and without triggering a git status).
