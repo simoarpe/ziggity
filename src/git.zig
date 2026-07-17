@@ -1520,27 +1520,47 @@ pub const Git = struct {
         return self.exec(&.{ "stash", "push", "--", path });
     }
 
-    /// Snapshot the current (tracked) changes into a stash entry WITHOUT touching
-    /// the working tree or index: `stash create` builds the commit and returns
-    /// its hash without modifying anything, then `stash store` records it. Returns
-    /// null when there is nothing to stash (a clean tree). The entry is named like
-    /// a normal push (git writes `On <branch>: <msg>` / `WIP on <branch>: …` as
-    /// the create commit's subject, which we reuse). Untracked files aren't
-    /// included — `git stash create` never captures them.
+    /// Stash the working state — tracked, staged, AND untracked — into a new
+    /// entry while leaving the working tree and index exactly as they were.
+    /// `git stash create` can't capture untracked files, so this pushes
+    /// everything and immediately re-applies it: `push --include-untracked`
+    /// records the full state, `apply --index` restores it (preserving the
+    /// staged/unstaged split; a plain apply is the fallback). Returns null for a
+    /// clean tree. The removal is transient — the tree ends unchanged — but the
+    /// two steps aren't atomic.
     pub fn stashKeeping(self: *Git, message: ?[]const u8) !?ExecResult {
-        var create = if (message) |m|
-            try self.exec(&.{ "stash", "create", m })
+        const before = try self.stashTop();
+        defer self.allocator.free(before);
+
+        var pushed = if (message) |m|
+            try self.exec(&.{ "stash", "push", "--include-untracked", "-m", m })
         else
-            try self.exec(&.{ "stash", "create" });
-        if (!create.ok()) return create; // caller now owns and reports the error
-        defer create.deinit(self.allocator);
-        const hash = std.mem.trim(u8, create.stdout, " \t\r\n");
-        if (hash.len == 0) return null; // clean tree: nothing was created
-        var subj = try self.exec(&.{ "log", "-1", "--format=%s", hash });
-        defer subj.deinit(self.allocator);
-        const subject = std.mem.trim(u8, subj.stdout, " \t\r\n");
-        if (subject.len > 0) return try self.exec(&.{ "stash", "store", "-m", subject, hash });
-        return try self.exec(&.{ "stash", "store", hash });
+            try self.exec(&.{ "stash", "push", "--include-untracked" });
+        if (!pushed.ok()) return pushed; // caller owns and reports the error
+
+        // A clean tree pushes nothing, so the stash ref is unchanged.
+        const after = try self.stashTop();
+        defer self.allocator.free(after);
+        if (std.mem.eql(u8, before, after)) {
+            pushed.deinit(self.allocator);
+            return null;
+        }
+        pushed.deinit(self.allocator);
+
+        // Restore the working tree + index from the stash we just made (keeping
+        // it). `--index` preserves the staged/unstaged split; if it can't, a
+        // plain apply still restores the files.
+        var applied = try self.exec(&.{ "stash", "apply", "--index" });
+        if (applied.ok()) return applied;
+        applied.deinit(self.allocator);
+        return try self.exec(&.{ "stash", "apply" });
+    }
+
+    /// The top stash commit hash (`refs/stash`), or "" when there is no stash.
+    fn stashTop(self: *Git) ![]u8 {
+        var r = try self.exec(&.{ "rev-parse", "--quiet", "--verify", "refs/stash" });
+        defer r.deinit(self.allocator);
+        return self.allocator.dupe(u8, std.mem.trim(u8, r.stdout, " \t\r\n"));
     }
 
     fn resetFilePaths(self: *Git, file: model.FileStatus) !?ExecResult {

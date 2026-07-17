@@ -601,7 +601,7 @@ pub const stash_menu = [_]MenuItem{
     .{ .label = "Stash including untracked files", .action = .stash_untracked },
     .{ .label = "Stash staged changes only", .action = .stash_staged },
     .{ .label = "Stash the selected file", .action = .stash_file },
-    .{ .label = "Stash but keep the changes in the working tree", .action = .stash_keep },
+    .{ .label = "Stash but keep the working tree (incl. untracked)", .action = .stash_keep },
 };
 
 const commit_filter_menu = [_]MenuItem{
