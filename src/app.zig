@@ -111,6 +111,11 @@ pub const EditorRequest = struct {
 /// `keep` snapshots the changes into a stash but leaves the working tree as-is.
 pub const StashKind = enum { all, untracked, staged, file, keep };
 
+/// Wall-clock milliseconds per donut animation frame. Matches the ticker's
+/// spinner cadence, so the rotation runs at the same speed as before but is now
+/// driven by elapsed time (see `App.advanceDonut`) instead of tick count.
+const donut_frame_ms: i96 = 80;
+
 pub const TextPromptKind = enum {
     new_branch,
     checkout_by_name,
@@ -2132,10 +2137,19 @@ pub const App = struct {
     mutation_gerund: []const u8 = "working",
     busy_flag: std.atomic.Value(bool) = .init(false),
     spinner_frame: usize = 0,
-    // Drives the Status-panel "about" splash animation (the rotating donut). The
-    // frame advances on each `.anim_tick`; `animate_flag` tells the ticker thread
-    // to keep posting those ticks while the splash is on screen and focused.
+    // Drives the Status-panel "about" splash animation (the rotating donut).
+    // `anim_frame` is derived from accumulated *active* monotonic time (see
+    // `advanceDonut`), NOT the count of `.anim_tick` events — so a dropped or
+    // bursted tick can't make the donut stall or fast-forward, only skip a
+    // frame. Each tick adds the (capped) time since the previous tick to
+    // `anim_accum_ns`, so a long gap — lost focus, hidden splash, a blocked
+    // loop — resumes the spin where it left off instead of jumping. `animate_flag`
+    // tells the ticker thread to keep posting ticks while the splash is on
+    // screen and focused; `anim_last_ns` is the previous tick's monotonic
+    // instant (0 = not yet stamped).
     anim_frame: usize = 0,
+    anim_last_ns: i96 = 0,
+    anim_accum_ns: i96 = 0,
     animate_flag: std.atomic.Value(bool) = .init(false),
     // Persistent storage for the about-splash's selectable text lines: the
     // dialog-grid selection keeps row slices by reference and reads them on a
@@ -3895,6 +3909,29 @@ pub const App = struct {
             count += 1;
         }
         return null;
+    }
+
+    /// Advance the about-splash donut, accumulating the *active* time since the
+    /// previous tick. Rotation is a function of that accumulated time — not the
+    /// number of `.anim_tick` events delivered — so irregular tick delivery
+    /// (drops under load, bursts after the loop unblocks) can't distort the spin
+    /// speed. The per-tick step is capped so a long gap — the terminal losing
+    /// focus, the splash being hidden, or the loop blocking on a git op — doesn't
+    /// count as elapsed animation and fast-forward the donut on resume; instead
+    /// it continues from where it left off.
+    pub fn advanceDonut(self: *App, io: std.Io) void {
+        const now: i96 = std.Io.Timestamp.now(io, .awake).nanoseconds;
+        defer self.anim_last_ns = now;
+        if (self.anim_last_ns == 0) return; // first tick: just stamp the clock
+        var delta = now - self.anim_last_ns;
+        if (delta <= 0) return;
+        // A gap longer than a few frame periods means we were paused (lost focus,
+        // splash hidden, loop blocked), not merely jittery — clamp it so the spin
+        // resumes rather than jumping ahead by the whole idle duration.
+        const max_step: i96 = donut_frame_ms * std.time.ns_per_ms * 3;
+        if (delta > max_step) delta = max_step;
+        self.anim_accum_ns += delta;
+        self.anim_frame = @intCast(@divFloor(self.anim_accum_ns, donut_frame_ms * std.time.ns_per_ms));
     }
 
     pub fn handleRefreshTick(self: *App) !void {

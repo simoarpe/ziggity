@@ -463,7 +463,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             .mouse => |m| render_needed = try app.handleMouse(m),
             .winsize => |ws| try vx.resize(allocator, tty.writer(), ws),
             .refresh_tick => try app.handleRefreshTick(),
-            .anim_tick => app.anim_frame +%= 1,
+            .anim_tick => app.advanceDonut(io),
             .fetch_tick => app.bg_fetch_requested = true,
             .bg_fetch_done => {
                 if (bg_fetch_future) |*f| {
