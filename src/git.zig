@@ -1515,9 +1515,12 @@ pub const Git = struct {
     }
 
     pub fn stashFile(self: *Git, path: []const u8, message: ?[]const u8) !ExecResult {
-        // `-- <path>` must come last.
-        if (message) |m| return self.exec(&.{ "stash", "push", "-m", m, "--", path });
-        return self.exec(&.{ "stash", "push", "--", path });
+        // `--include-untracked` so a selected *untracked* file can be stashed too:
+        // a bare `stash push -- <path>` errors ("pathspec did not match any
+        // file(s) known to git") on a path git doesn't yet track. The pathspec
+        // still limits the stash to just this one file. `-- <path>` must come last.
+        if (message) |m| return self.exec(&.{ "stash", "push", "--include-untracked", "-m", m, "--", path });
+        return self.exec(&.{ "stash", "push", "--include-untracked", "--", path });
     }
 
     /// Stash the working state — tracked, staged, AND untracked — into a new
