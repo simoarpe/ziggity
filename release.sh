@@ -81,7 +81,7 @@ branch=$(git rev-parse --abbrev-ref HEAD)
 
 [ -z "$(git status --porcelain)" ] || die "working tree is not clean — commit or stash first"
 
-info "fetching origin…"
+info "fetching origin..."
 git fetch --quiet origin "$MAIN_BRANCH" --tags
 if [ -n "$(git rev-list "HEAD..origin/$MAIN_BRANCH" 2>/dev/null)" ]; then
   die "local $MAIN_BRANCH is behind origin/$MAIN_BRANCH — pull first"
@@ -213,7 +213,7 @@ verify_brew() {
     warn "could not find the workflow run; polling for the release instead"
   fi
 
-  info "waiting for release $tag to be published…"
+  info "waiting for release ${tag} to be published..."
   local i
   for i in $(seq 1 30); do
     gh release view "$tag" --repo "$REPO" >/dev/null 2>&1 && break
@@ -222,7 +222,7 @@ verify_brew() {
   gh release view "$tag" --repo "$REPO" >/dev/null 2>&1 \
     || { warn "release $tag not visible yet — verify brew manually later"; return 0; }
 
-  info "waiting for the tap formula to reflect $release…"
+  info "waiting for the tap formula to reflect ${release}..."
   for i in $(seq 1 30); do
     local fv
     fv=$(gh api "repos/$TAP_REPO/contents/$TAP_FORMULA" \
