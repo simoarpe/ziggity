@@ -44,6 +44,7 @@ libgit2), and [libvaxis](https://github.com/rockorager/libvaxis) for the UI.
 - [Configuration](#configuration)
 - [Status & Roadmap](#status--roadmap)
 - [Development](#development)
+- [Sponsor](#sponsor)
 - [License](#license)
 
 ## Installation
@@ -731,6 +732,22 @@ In `src/tui.zig`:
   into a stack buffer is fine for list rows, popups, the footer, etc.
 - Only vaxis `printSegment` is by-reference, and it's used only for panel/popup
   titles — dynamic titles must live in an App-owned buffer (`app.*_title_buf`).
+
+## Sponsor
+
+Ziggity is free and open source, built in spare time. If it saves you some of
+yours, you can support its development on Ko-fi — no pressure, no paywalled
+features, just a tip jar that helps keep the work going.
+
+<p align="center">
+  <a href="https://ko-fi.com/simoarpe">
+    <img src="https://img.shields.io/badge/Support%20on-Ko--fi-ff5e5b?logo=ko-fi&logoColor=white" alt="Support Ziggity on Ko-fi">
+  </a>
+</p>
+
+<p align="center"><a href="https://ko-fi.com/simoarpe">ko-fi.com/simoarpe</a></p>
+
+You can also help for free: star the repo, report bugs, and tell a friend. 💛
 
 ## License
 
