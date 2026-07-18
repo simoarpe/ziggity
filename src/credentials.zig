@@ -48,6 +48,23 @@ pub fn isAuthFailure(output: []const u8) bool {
     return false;
 }
 
+/// A short, actionable suffix for the failure summary when the host rejected a
+/// password because it requires a token — by far the most common HTTPS auth
+/// failure (GitHub, GitLab, etc. dropped password auth). Empty for other causes.
+pub fn tokenHintSuffix(output: []const u8) []const u8 {
+    const token_needles = [_][]const u8{
+        "Password authentication is not supported",
+        "Support for password authentication was removed",
+        "Invalid username or token",
+        "token", // e.g. "you must use a personal access token"
+    };
+    for (token_needles) |n| {
+        if (std.ascii.indexOfIgnoreCase(output, n) != null)
+            return " — use a personal access token, not a password";
+    }
+    return "";
+}
+
 /// Open the two-step credential prompt (username, then masked password) and
 /// remember `op` so it can be re-run once both fields are entered.
 pub fn startCredentialPrompt(app: *App, op: AsyncOp) !void {
@@ -148,5 +165,15 @@ pub fn buildCredentialEnv(app: *const App, gpa: std.mem.Allocator) !std.process.
     try env.put("SSH_ASKPASS_REQUIRE", "force");
     try env.put(app_mod.askpass_env_user, app.git_username.?);
     try env.put(app_mod.askpass_env_pass, app.git_password.?);
+    // Make the credentials the user just entered authoritative: clear any
+    // configured credential helper for this one invocation. git consults a
+    // helper (e.g. macOS osxkeychain) BEFORE our askpass, so a stale cached
+    // entry would otherwise shadow the entered token and keep failing no matter
+    // what is typed — the classic "it keeps asking" loop. An empty
+    // `credential.helper` resets the helper list; injected via GIT_CONFIG_* so
+    // it affects only this process and never touches the user's real git config.
+    try env.put("GIT_CONFIG_COUNT", "1");
+    try env.put("GIT_CONFIG_KEY_0", "credential.helper");
+    try env.put("GIT_CONFIG_VALUE_0", "");
     return env;
 }

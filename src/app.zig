@@ -7826,11 +7826,27 @@ pub const App = struct {
                 } else if (pushNeedsForce(raw) and op == .push_force) {
                     try self.requestConfirmation(.force_push_plain, "force push with lease rejected — force push? (y/n)", .{});
                 } else if (credentials_mod.isAuthFailure(raw) and self.exe_path != null) {
-                    // git could not authenticate. If we already supplied
-                    // credentials, they were wrong — forget them. Either way,
-                    // (re-)prompt and retry once the user enters them.
-                    if (credentials_mod.gitCredentialsSet(self)) credentials_mod.clearGitCredentials(self);
-                    try credentials_mod.startCredentialPrompt(self, op);
+                    if (credentials_mod.gitCredentialsSet(self)) {
+                        // We already supplied credentials and they were STILL
+                        // rejected. Silently re-opening the prompt here loops the
+                        // user through username/password forever — e.g. when they
+                        // keep entering an account password that the host no
+                        // longer accepts. Forget the bad credentials and surface
+                        // git's own message so the reason is visible (commonly
+                        // "Password authentication is not supported" → use a
+                        // personal access token).
+                        credentials_mod.clearGitCredentials(self);
+                        var label_buf: [128]u8 = undefined;
+                        const summary = std.fmt.bufPrint(&label_buf, "{s} failed: credentials rejected{s}", .{
+                            op.label(),
+                            credentials_mod.tokenHintSuffix(raw),
+                        }) catch "authentication rejected";
+                        try self.reportFailure(summary, raw);
+                    } else {
+                        // First auth failure — no credentials tried yet. Prompt
+                        // for them and retry once entered.
+                        try credentials_mod.startCredentialPrompt(self, op);
+                    }
                 } else {
                     var label_buf: [64]u8 = undefined;
                     const summary = std.fmt.bufPrint(&label_buf, "{s} failed", .{op.label()}) catch "command failed";
@@ -8772,6 +8788,18 @@ test "isAuthFailure matches credential errors but not other failures" {
     try std.testing.expect(!credentials_mod.isAuthFailure(" ! [rejected]        main -> main (non-fast-forward)"));
     try std.testing.expect(!credentials_mod.isAuthFailure("Everything up-to-date"));
     try std.testing.expect(!credentials_mod.isAuthFailure("fatal: unable to access: Could not resolve host: github.com"));
+}
+
+test "tokenHintSuffix nudges toward a token only when the host rejected a password" {
+    // The exact message the user reported.
+    try std.testing.expectEqualStrings(
+        " — use a personal access token, not a password",
+        credentials_mod.tokenHintSuffix("remote: Invalid username or token. Password authentication is not supported for Git operations.\nfatal: Authentication failed for 'https://github.com/o/r.git/'"),
+    );
+    // A generic auth failure (e.g. plain "Authentication failed") gets no token
+    // nudge — the cause may be a wrong username or a revoked token.
+    try std.testing.expectEqualStrings("", credentials_mod.tokenHintSuffix("fatal: Authentication failed for 'https://example.com/r'"));
+    try std.testing.expectEqualStrings("", credentials_mod.tokenHintSuffix("git@github.com: Permission denied (publickey)."));
 }
 
 test "credential prompt collects username then password and queues a retry" {
