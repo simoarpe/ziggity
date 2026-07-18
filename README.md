@@ -21,6 +21,12 @@ on idiomatic Zig, explicit memory ownership, plain `git` subprocesses (no
 libgit2), and [libvaxis](https://github.com/rockorager/libvaxis) for the UI.
 
 <p align="center">
+  <img src="docs/assets/ziggity-donut.gif" alt="Ziggity - the animated about splash with a spinning donut" width="900">
+</p>
+
+<p align="center"><i>The Status panel's about splash, complete with a rotating ASCII donut.</i></p>
+
+<p align="center">
   <img src="docs/screenshots/01-overview.png" alt="Ziggity - the main view" width="900">
 </p>
 
