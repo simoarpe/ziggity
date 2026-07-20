@@ -7617,11 +7617,20 @@ pub const App = struct {
             },
             .commit => |hash| {
                 empty_msg = "Could not load commit.\n";
+                // Two sections so a commit whose patch is enormous (e.g. a large
+                // binary / vendored-toolchain import) still previews instead of
+                // failing wholesale. The first — message, GPG signature, and the
+                // file stat — is small and always loads. The second is the patch;
+                // if it blows past the preview byte cap the worker skips it
+                // WITHOUT discarding the stat above, and never dumps tens of MB of
+                // raw bytes into the panel. Runs off the UI thread.
+                // (`--stat` alone gives the diffstat without the patch; `--format=`
+                // on the patch section suppresses a duplicate header.)
                 try sections.append(page_alloc, .{
-                    // `--show-signature` prepends git's GPG verification block for
-                    // a signed commit (nothing extra for unsigned ones). Runs in
-                    // this off-thread preview worker, so it never blocks the UI.
-                    .argv = try dupArgv(&.{ "show", "--no-ext-diff", "--color=always", "--show-signature", "--stat", "--patch", ctx_arg, hash }),
+                    .argv = try dupArgv(&.{ "show", "--no-ext-diff", "--color=always", "--show-signature", "--stat", hash }),
+                });
+                try sections.append(page_alloc, .{
+                    .argv = try dupArgv(&.{ "show", "--no-ext-diff", "--color=always", "--format=", "--patch", ctx_arg, hash }),
                 });
             },
             .commit_range => |r| {
