@@ -1155,7 +1155,10 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         } else panel(root, side_w, 0, main_w, body_h, main_title, app.focus == .main, scroll);
         app.main_view_height = main.height;
         app.main_view_width = main.width;
-        if (app.showAboutSplash()) drawAbout(main, app) else drawDiff(main, app);
+        if (app.showAboutSplash()) drawAbout(main, app) else {
+            refreshOnDiffChange(vx, app);
+            drawDiff(main, app);
+        }
     }
     // Indent the footer by one column so it lines up with the panel content
     // (just inside the left `│` border) and clears the terminal's rounded
@@ -3209,6 +3212,34 @@ fn drawDonut(win: vaxis.Window, y0: u16, w: u16, h: u16, frame: usize) void {
             });
         }
     }
+}
+
+// vaxis skips repainting cells hidden behind a wide glyph (its skip-flag
+// optimisation). When the Diff panel's content shrinks or changes, wide glyphs
+// from a *previous* diff (emoji / CJK — e.g. bytes of binary content that happen
+// to decode as UTF-8) can leave stray cells behind (see the "Cells Store
+// Graphemes by Reference" gotcha). A one-shot full refresh whenever the diff
+// content or scroll changes repaints every cell and clears them. Keyed on the
+// slice identity + scroll so it fires only on change, never every frame (which
+// would defeat vaxis' skip optimisation and the spinner/donut animations).
+var last_diff_addr: usize = 0;
+var last_diff_len: usize = 0;
+var last_diff_scroll: usize = 0;
+var last_diff_hscroll: u16 = 0;
+var last_diff_spinner: bool = false;
+
+fn refreshOnDiffChange(vx: *vaxis.Vaxis, app: *const app_mod.App) void {
+    const addr = @intFromPtr(app.diff.ptr);
+    const spinner = app.previewSpinnerVisible();
+    if (addr == last_diff_addr and app.diff.len == last_diff_len and
+        app.main_scroll == last_diff_scroll and app.main_hscroll == last_diff_hscroll and
+        spinner == last_diff_spinner) return;
+    last_diff_addr = addr;
+    last_diff_len = app.diff.len;
+    last_diff_scroll = app.main_scroll;
+    last_diff_hscroll = app.main_hscroll;
+    last_diff_spinner = spinner;
+    vx.queueRefresh();
 }
 
 fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
