@@ -3225,7 +3225,8 @@ fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
         const msg = std.fmt.bufPrint(&buf, "{s} loading diff...", .{glyph}) catch "loading diff...";
         const mid_row: u16 = win.height / 2;
         const col: u16 = if (win.width > msg.len) (win.width - @as(u16, @intCast(msg.len))) / 2 else 0;
-        print(win, mid_row, col, msg, styles().muted);
+        // Same accent the push/pull/merge foreground-op spinner uses.
+        print(win, mid_row, col, msg, styles().bottom_accent);
         return;
     }
 

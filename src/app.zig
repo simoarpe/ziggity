@@ -665,6 +665,15 @@ pub const PreviewSection = struct {
     // `<N> bytes` (git's `--stat` binary-file lines), e.g. `836736 bytes
     // (817 KB)`. Only meaningful for `--stat` sections.
     annotate_sizes: bool = false,
+    // When this section's output exceeds `marks_huge_at` bytes (0 = never), flag
+    // the whole job "huge" so later `skip_if_huge` sections are dropped.
+    marks_huge_at: usize = 0,
+    // Skip this section entirely once an earlier section flagged the job huge.
+    // Used to drop a commit's (tens-of-MB, often binary) patch once its stat
+    // shows the commit is enormous: the file list is the useful summary, and
+    // generating the patch just to hit the byte cap would stall the worker and
+    // spray binary noise into the panel.
+    skip_if_huge: bool = false,
 };
 
 /// Append a human-readable size — ` (817 KB)`, ` (12.2 MB)`, ` (1.4 GB)` — for a
@@ -686,8 +695,26 @@ fn appendHumanSize(gpa: std.mem.Allocator, out: *std.ArrayList(u8), bytes: u64) 
     try out.appendSlice(gpa, s catch return);
 }
 
+/// Advance past any ANSI escape sequences starting at `i` (git colourises the
+/// stat with `--color=always`, so `\e[..m` can sit between the number and the
+/// word "bytes"). Returns the index of the first non-escape byte.
+fn skipAnsi(text: []const u8, i: usize) usize {
+    var j = i;
+    while (j < text.len and text[j] == 0x1b) {
+        if (j + 1 < text.len and text[j + 1] == '[') {
+            var k = j + 2;
+            while (k < text.len and !(text[k] >= 0x40 and text[k] <= 0x7e)) k += 1;
+            j = if (k < text.len) k + 1 else k; // include the final byte
+        } else {
+            j += 1;
+        }
+    }
+    return j;
+}
+
 /// Copy `text`, appending a human-readable size after every `<digits> bytes`
-/// run (git's `--stat` binary lines). Returns a fresh gpa-owned buffer.
+/// run (git's `--stat` binary lines), tolerating ANSI colour codes between the
+/// number and the word "bytes". Returns a fresh gpa-owned buffer.
 fn annotateByteSizes(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
     const suffix = " bytes";
     var out: std.ArrayList(u8) = .empty;
@@ -714,12 +741,15 @@ fn annotateByteSizes(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
             };
         }
         try out.appendSlice(gpa, text[i..j]); // the digits themselves
-        if (std.mem.startsWith(u8, text[j..], suffix)) {
-            try out.appendSlice(gpa, suffix);
-            j += suffix.len;
+        // Skip any ANSI reset/colour between the number and " bytes".
+        const after_ansi = skipAnsi(text, j);
+        if (std.mem.startsWith(u8, text[after_ansi..], suffix)) {
+            try out.appendSlice(gpa, text[j .. after_ansi + suffix.len]); // codes + " bytes"
             if (!overflow) try appendHumanSize(gpa, &out, value);
+            i = after_ansi + suffix.len;
+        } else {
+            i = j;
         }
-        i = j;
     }
     return out.toOwnedSlice(gpa);
 }
@@ -740,7 +770,13 @@ pub const PreviewJob = struct {
     pub fn run(self: PreviewJob, gpa: std.mem.Allocator, io: std.Io, root: []const u8) ![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(gpa);
+        var huge = false;
         for (self.sections) |sec| {
+            if (sec.skip_if_huge and huge) {
+                if (out.items.len > 0) try out.append(gpa, '\n');
+                try out.appendSlice(gpa, "(diff omitted — large commit; file summary above)\n");
+                continue;
+            }
             var argv: std.ArrayList([]const u8) = .empty;
             defer argv.deinit(gpa);
             try argv.append(gpa, "git");
@@ -776,6 +812,7 @@ pub const PreviewJob = struct {
             } else {
                 try out.appendSlice(gpa, res.stdout);
             }
+            if (sec.marks_huge_at != 0 and res.stdout.len > sec.marks_huge_at) huge = true;
         }
         if (out.items.len == 0) return gpa.dupe(u8, self.empty_msg);
         return out.toOwnedSlice(gpa);
@@ -7727,9 +7764,14 @@ pub const App = struct {
                 try sections.append(page_alloc, .{
                     .argv = try dupArgv(&.{ "show", "--no-ext-diff", "--color=always", "--show-signature", "--stat", hash }),
                     .annotate_sizes = true,
+                    // A stat this large (~thousands of files) means the patch is
+                    // tens of MB and/or binary — skip it rather than stall the
+                    // worker and render noise. Normal commits have a tiny stat.
+                    .marks_huge_at = 256 * 1024,
                 });
                 try sections.append(page_alloc, .{
                     .argv = try dupArgv(&.{ "show", "--no-ext-diff", "--color=always", "--format=", "--patch", ctx_arg, hash }),
+                    .skip_if_huge = true,
                 });
             },
             .commit_range => |r| {
@@ -9690,6 +9732,13 @@ test "annotateByteSizes appends a human-readable size after each byte count" {
     try std.testing.expect(std.mem.indexOf(u8, out, "512 bytes\n") != null); // sub-KiB untouched
     try std.testing.expect(std.mem.indexOf(u8, out, "1255140 insertions") != null); // not a byte count
     try std.testing.expect(std.mem.indexOf(u8, out, "1255140 insertions(+) (") == null);
+
+    // git colourises the count with `--color=always`, putting `\e[m` between the
+    // number and " bytes" — the annotator must skip it.
+    const colored = " lldb | Bin \x1b[31m0\x1b[m -> \x1b[32m836736\x1b[m bytes\n";
+    const cout = try annotateByteSizes(a, colored);
+    defer a.free(cout);
+    try std.testing.expect(std.mem.indexOf(u8, cout, "836736\x1b[m bytes (817 KB)") != null);
 }
 
 test "preview pipeline queues a git job, caches it, and serves repeats instantly" {
