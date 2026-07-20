@@ -661,7 +661,68 @@ pub const PreviewSection = struct {
     argv: []const []const u8,
     label: []const u8 = "",
     keep_on_error: bool = false,
+    // Post-process the output to append a human-readable size after each
+    // `<N> bytes` (git's `--stat` binary-file lines), e.g. `836736 bytes
+    // (817 KB)`. Only meaningful for `--stat` sections.
+    annotate_sizes: bool = false,
 };
+
+/// Append a human-readable size — ` (817 KB)`, ` (12.2 MB)`, ` (1.4 GB)` — for a
+/// byte count of at least 1 KiB; nothing for smaller (already readable) sizes.
+fn appendHumanSize(gpa: std.mem.Allocator, out: *std.ArrayList(u8), bytes: u64) !void {
+    const KiB: u64 = 1024;
+    const MiB: u64 = 1024 * 1024;
+    const GiB: u64 = 1024 * 1024 * 1024;
+    var buf: [32]u8 = undefined;
+    const f: f64 = @floatFromInt(bytes);
+    const s = if (bytes >= GiB)
+        std.fmt.bufPrint(&buf, " ({d:.1} GB)", .{f / @as(f64, GiB)})
+    else if (bytes >= MiB)
+        std.fmt.bufPrint(&buf, " ({d:.1} MB)", .{f / @as(f64, MiB)})
+    else if (bytes >= KiB)
+        std.fmt.bufPrint(&buf, " ({d} KB)", .{bytes / KiB})
+    else
+        return;
+    try out.appendSlice(gpa, s catch return);
+}
+
+/// Copy `text`, appending a human-readable size after every `<digits> bytes`
+/// run (git's `--stat` binary lines). Returns a fresh gpa-owned buffer.
+fn annotateByteSizes(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
+    const suffix = " bytes";
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var i: usize = 0;
+    while (i < text.len) {
+        const at_number = std.ascii.isDigit(text[i]) and (i == 0 or !std.ascii.isDigit(text[i - 1]));
+        if (!at_number) {
+            try out.append(gpa, text[i]);
+            i += 1;
+            continue;
+        }
+        var j = i;
+        var value: u64 = 0;
+        var overflow = false;
+        while (j < text.len and std.ascii.isDigit(text[j])) : (j += 1) {
+            const scaled = std.math.mul(u64, value, 10) catch {
+                overflow = true;
+                break;
+            };
+            value = std.math.add(u64, scaled, text[j] - '0') catch {
+                overflow = true;
+                break;
+            };
+        }
+        try out.appendSlice(gpa, text[i..j]); // the digits themselves
+        if (std.mem.startsWith(u8, text[j..], suffix)) {
+            try out.appendSlice(gpa, suffix);
+            j += suffix.len;
+            if (!overflow) try appendHumanSize(gpa, &out, value);
+        }
+        i = j;
+    }
+    return out.toOwnedSlice(gpa);
+}
 
 /// A git-backed preview to render off the UI thread. Built on the UI thread
 /// from the current selection (see `buildPreviewJob`), run by the TUI loop's
@@ -705,7 +766,16 @@ pub const PreviewJob = struct {
             if (!usable) continue;
             if (out.items.len > 0) try out.append(gpa, '\n');
             try out.appendSlice(gpa, sec.label);
-            try out.appendSlice(gpa, res.stdout);
+            if (sec.annotate_sizes) {
+                if (annotateByteSizes(gpa, res.stdout)) |annotated| {
+                    defer gpa.free(annotated);
+                    try out.appendSlice(gpa, annotated);
+                } else |_| {
+                    try out.appendSlice(gpa, res.stdout); // OOM: fall back to raw
+                }
+            } else {
+                try out.appendSlice(gpa, res.stdout);
+            }
         }
         if (out.items.len == 0) return gpa.dupe(u8, self.empty_msg);
         return out.toOwnedSlice(gpa);
@@ -2104,6 +2174,11 @@ pub const App = struct {
     preview_wanted: ?PreviewJob = null,
     preview_inflight_key: []const u8 = &.{},
     preview_loading: bool = false,
+    // The key of the content currently in `self.diff`. When it differs from
+    // `preview_desired_key` while `preview_loading`, the selection has moved to
+    // something not yet loaded, so the diff panel shows an animated loading
+    // spinner instead of the previous item's (stale, confusing) content.
+    preview_shown_key: []const u8 = &.{},
 
     // Background working-tree refresh (the 1.5s tick). `..._requested` is set by
     // the tick for the TUI loop to start a worker; `..._active` guards against
@@ -2295,6 +2370,7 @@ pub const App = struct {
         self.preview_cache.deinit(self.allocator);
         self.allocator.free(self.preview_desired_key);
         self.allocator.free(self.preview_inflight_key);
+        self.allocator.free(self.preview_shown_key);
         if (self.preview_wanted) |job| job.deinit(page_alloc);
         if (self.mutation_requested) |job| job.deinit(page_alloc);
         page_alloc.free(self.mutation_msg);
@@ -3935,9 +4011,10 @@ pub const App = struct {
     }
 
     pub fn handleRefreshTick(self: *App) !void {
-        // While a foreground op runs the ticker fires fast to animate the
-        // spinner; advance it and skip the (paused) background refresh.
-        if (self.foregroundBusy()) {
+        // While a foreground op runs — or a preview is still loading off-thread
+        // — the ticker fires fast to animate the spinner; advance it and skip the
+        // (paused) background refresh.
+        if (self.foregroundBusy() or self.preview_loading) {
             self.spinner_frame +%= 1;
             return;
         }
@@ -4653,6 +4730,8 @@ pub const App = struct {
         self.preview_desired_key = &.{};
         a.free(self.preview_inflight_key);
         self.preview_inflight_key = &.{};
+        a.free(self.preview_shown_key);
+        self.preview_shown_key = &.{};
         self.preview_loading = false;
         if (self.preview_wanted) |job| job.deinit(page_alloc);
         self.preview_wanted = null;
@@ -7463,6 +7542,7 @@ pub const App = struct {
         self.diff = text;
         self.preview_loading = false;
         self.setDesiredKey("");
+        self.setShownKey("");
     }
 
     /// Render the preview for `kind`: instantly from cache when warm, otherwise
@@ -7478,6 +7558,7 @@ pub const App = struct {
             self.allocator.free(self.diff);
             self.diff = dup;
             self.preview_loading = false;
+            self.setShownKey(key);
             return;
         }
 
@@ -7497,9 +7578,9 @@ pub const App = struct {
         if (self.preview_wanted) |w| w.deinit(page_alloc);
         self.preview_wanted = job;
         self.preview_loading = true;
-        // Avoid a blank panel on the very first preview; thereafter we keep the
-        // previous diff on screen until the worker fills it in.
-        if (self.diff.len == 0) self.diff = try self.allocator.dupe(u8, "Loading...\n");
+        // `self.diff` still holds the previous item's text, but while this new
+        // preview loads the panel renders an animated spinner instead (see
+        // `previewSpinnerVisible`), so the stale content is never shown.
     }
 
     /// Content-addressed cache key for `kind`. The diff-context is folded in
@@ -7547,6 +7628,23 @@ pub const App = struct {
                 self.preview_wanted = null;
             }
         }
+    }
+
+    /// Record which preview key the text currently in `self.diff` represents, so
+    /// the renderer can distinguish fresh content from a stale previous item
+    /// while a new preview loads.
+    fn setShownKey(self: *App, key: []const u8) void {
+        if (std.mem.eql(u8, key, self.preview_shown_key)) return;
+        if (self.allocator.dupe(u8, key)) |dup| {
+            self.allocator.free(self.preview_shown_key);
+            self.preview_shown_key = dup;
+        } else |_| {}
+    }
+
+    /// True when the diff panel should render the loading spinner: a preview is
+    /// in flight for a selection whose content is not what is currently shown.
+    pub fn previewSpinnerVisible(self: *const App) bool {
+        return self.preview_loading and !std.mem.eql(u8, self.preview_shown_key, self.preview_desired_key);
     }
 
     /// Translate a `PreviewKind` into a page-allocated `PreviewJob` (git commands
@@ -7628,6 +7726,7 @@ pub const App = struct {
                 // on the patch section suppresses a duplicate header.)
                 try sections.append(page_alloc, .{
                     .argv = try dupArgv(&.{ "show", "--no-ext-diff", "--color=always", "--show-signature", "--stat", hash }),
+                    .annotate_sizes = true,
                 });
                 try sections.append(page_alloc, .{
                     .argv = try dupArgv(&.{ "show", "--no-ext-diff", "--color=always", "--format=", "--patch", ctx_arg, hash }),
@@ -7713,6 +7812,7 @@ pub const App = struct {
                     self.allocator.free(self.diff);
                     self.diff = dup;
                     self.preview_loading = false;
+                    self.setShownKey(job.key);
                 } else |_| {}
             }
             gpa.free(t);
@@ -9572,6 +9672,26 @@ test "diffing mode marks a ref base and clears cleanly" {
     try std.testing.expect(app.diff_base == null);
 }
 
+test "annotateByteSizes appends a human-readable size after each byte count" {
+    const a = std.testing.allocator;
+    // A KiB..GiB range, plus a sub-KiB value that stays untouched, plus a
+    // non-"bytes" number (a line count) that must NOT be annotated.
+    const in =
+        " lldb        | Bin 0 -> 836736 bytes\n" ++
+        " server      | Bin 0 -> 12833960 bytes\n" ++
+        " huge        | Bin 0 -> 2147483648 bytes\n" ++
+        " tiny        | Bin 0 -> 512 bytes\n" ++
+        " 6908 files changed, 1255140 insertions(+)\n";
+    const out = try annotateByteSizes(a, in);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "836736 bytes (817 KB)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "12833960 bytes (12.2 MB)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "2147483648 bytes (2.0 GB)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "512 bytes\n") != null); // sub-KiB untouched
+    try std.testing.expect(std.mem.indexOf(u8, out, "1255140 insertions") != null); // not a byte count
+    try std.testing.expect(std.mem.indexOf(u8, out, "1255140 insertions(+) (") == null);
+}
+
 test "preview pipeline queues a git job, caches it, and serves repeats instantly" {
     const allocator = std.testing.allocator;
     const page = std.heap.page_allocator;
@@ -9592,7 +9712,8 @@ test "preview pipeline queues a git job, caches it, and serves repeats instantly
     try app.updatePreview();
     try std.testing.expect(app.preview_wanted != null);
     try std.testing.expect(app.preview_loading);
-    try std.testing.expectEqualStrings("Loading...\n", app.diff);
+    // The not-yet-loaded selection shows a spinner (not stale/placeholder text).
+    try std.testing.expect(app.previewSpinnerVisible());
 
     // The TUI loop would claim the job and run it off-thread; simulate that and
     // hand back the rendered diff.
@@ -11064,6 +11185,7 @@ fn deinitTestApp(app: *App) void {
     app.preview_cache.deinit(app.allocator);
     app.allocator.free(app.preview_desired_key);
     app.allocator.free(app.preview_inflight_key);
+    app.allocator.free(app.preview_shown_key);
     if (app.preview_wanted) |job| job.deinit(page_alloc);
     if (app.mutation_requested) |job| job.deinit(page_alloc);
     page_alloc.free(app.mutation_msg);

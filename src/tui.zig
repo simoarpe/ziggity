@@ -764,7 +764,9 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
         }
 
         // Reflect foreground-busy state for the ticker (spinner animation speed).
-        app.busy_flag.store(app.foregroundBusy(), .release);
+        // Speed the ticker up (to animate the spinner + repaint) while a
+        // foreground op runs OR a preview is still loading off-thread.
+        app.busy_flag.store(app.foregroundBusy() or app.preview_loading, .release);
         // Reflect whether the about-splash animation wants continuous ticks.
         app.animate_flag.store(app.wantsAnimation(), .release);
 
@@ -3212,6 +3214,19 @@ fn drawDonut(win: vaxis.Window, y0: u16, w: u16, h: u16, frame: usize) void {
 fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
     if (app.staging_active) {
         return drawStagingPane(win, app, app.staging_diff, true, "No changes on this side - press [ or ] to switch", .main);
+    }
+
+    // Selection moved to something not yet loaded: show an animated spinner for
+    // *this* item rather than the previous one's diff (which would be stale and
+    // confusing). Each selection independently reflects its own load state.
+    if (app.previewSpinnerVisible()) {
+        const glyph = spinnerGlyph(app.spinner_frame);
+        var buf: [48]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{s} loading diff...", .{glyph}) catch "loading diff...";
+        const mid_row: u16 = win.height / 2;
+        const col: u16 = if (win.width > msg.len) (win.width - @as(u16, @intCast(msg.len))) / 2 else 0;
+        print(win, mid_row, col, msg, styles().muted);
+        return;
     }
 
     const text = app.diff;
