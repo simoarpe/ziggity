@@ -1267,6 +1267,7 @@ pub const Mutation = union(enum) {
     commit: struct { message: []const u8, no_verify: bool },
     amend,
     checkout: []const u8,
+    checkout_track: []const u8,
     revert: []const u8,
     revert_many: []const []const u8,
     create_fixup: []const u8,
@@ -1321,6 +1322,7 @@ pub const Mutation = union(enum) {
             .commit => |x| wgit.commit(x.message, x.no_verify),
             .amend => wgit.amendCommit(),
             .checkout => |b| wgit.checkout(b),
+            .checkout_track => |b| wgit.checkoutTrack(b),
             .revert => |h| wgit.revertCommit(h),
             .revert_many => |hs| wgit.revertCommits(hs),
             .create_fixup => |h| wgit.createFixup(h),
@@ -1390,6 +1392,7 @@ pub const Mutation = union(enum) {
             .commit => |x| .{ .commit = .{ .message = try gpa.dupe(u8, x.message), .no_verify = x.no_verify } },
             .amend => .amend,
             .checkout => |b| .{ .checkout = try gpa.dupe(u8, b) },
+            .checkout_track => |b| .{ .checkout_track = try gpa.dupe(u8, b) },
             .revert => |h| .{ .revert = try gpa.dupe(u8, h) },
             .create_fixup => |h| .{ .create_fixup = try gpa.dupe(u8, h) },
             .revert_many => |hs| .{ .revert_many = try dupeStrList(gpa, hs) },
@@ -1430,7 +1433,7 @@ pub const Mutation = union(enum) {
 
     pub fn deinit(self: Mutation, gpa: std.mem.Allocator) void {
         switch (self) {
-            .checkout, .revert, .create_fixup, .delete_tag, .remove_worktree, .update_submodule, .remove_submodule, .merge, .rebase, .autosquash => |s| gpa.free(s),
+            .checkout, .checkout_track, .revert, .create_fixup, .delete_tag, .remove_worktree, .update_submodule, .remove_submodule, .merge, .rebase, .autosquash => |s| gpa.free(s),
             .commit => |x| gpa.free(x.message),
             .create_tag => |x| {
                 gpa.free(x.name);
@@ -4361,6 +4364,22 @@ pub const App = struct {
         return null;
     }
 
+    /// Whether `name` is a remote-tracking branch (e.g. `origin/feature`).
+    fn isRemoteBranchName(self: *const App, name: []const u8) bool {
+        for (self.data.remote_branches) |b| {
+            if (std.mem.eql(u8, b.name, name)) return true;
+        }
+        return false;
+    }
+
+    /// Whether a local branch named `name` exists.
+    fn localBranchExists(self: *const App, name: []const u8) bool {
+        for (self.data.branches) |b| {
+            if (std.mem.eql(u8, b.name, name)) return true;
+        }
+        return false;
+    }
+
     /// The selected remote branch — only when drilled into a remote (on the
     /// remotes list itself there is no branch selected).
     pub fn selectedRemoteBranch(self: *const App) ?model.Branch {
@@ -6422,6 +6441,16 @@ pub const App = struct {
                     self.mode = .normal;
                     self.text_prompt_kind = null;
                     self.input_buffer.clearRetainingCapacity();
+                }
+                // A remote-tracking ref (e.g. "origin/feature") checked out
+                // directly lands on a detached HEAD. Instead switch to an
+                // existing local branch of the same name, or create a local
+                // tracking branch with `--track` — so we end up on a real branch.
+                if (self.isRemoteBranchName(value)) {
+                    const local = textmatch.localNameForRemote(value);
+                    if (self.localBranchExists(local))
+                        return self.requestMutation(.{ .checkout = local }, .{ .gerund = "checking out", .command = "git checkout", .refresh = Refresh.checkout }, "checked out {s}", .{local});
+                    return self.requestMutation(.{ .checkout_track = value }, .{ .gerund = "checking out", .command = "git checkout --track", .refresh = Refresh.checkout }, "checked out {s}", .{local});
                 }
                 return self.requestMutation(.{ .checkout = value }, .{ .gerund = "checking out", .command = "git checkout", .refresh = Refresh.checkout }, "checked out {s}", .{value});
             },
@@ -9378,6 +9407,54 @@ test "T on a local branch tags that branch, not HEAD" {
     try app.submitTextPrompt(); // name -> message step
     try app.submitTextPrompt(); // empty message -> create
     try std.testing.expectEqualStrings("feature", app.mutation_requested.?.create_tag.target);
+}
+
+test "checkout-by-name uses --track for a remote branch (avoids detached HEAD)" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = undefined };
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    var remotes = [_]model.Branch{.{ .name = @constCast("origin/feature") }};
+    var locals = [_]model.Branch{}; // no local "feature"
+    app.data.remote_branches = &remotes;
+    app.data.branches = &locals;
+
+    app.text_prompt_kind = .checkout_by_name;
+    try app.input_buffer.appendSlice(allocator, "origin/feature");
+    try app.submitTextPrompt();
+
+    switch (app.mutation_requested.?) {
+        .checkout_track => |ref| try std.testing.expectEqualStrings("origin/feature", ref),
+        else => try std.testing.expect(false),
+    }
+}
+
+test "checkout-by-name switches to an existing local branch instead of --track" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = undefined };
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    var remotes = [_]model.Branch{.{ .name = @constCast("origin/feature") }};
+    var locals = [_]model.Branch{.{ .name = @constCast("feature") }};
+    app.data.remote_branches = &remotes;
+    app.data.branches = &locals;
+
+    app.text_prompt_kind = .checkout_by_name;
+    try app.input_buffer.appendSlice(allocator, "origin/feature");
+    try app.submitTextPrompt();
+
+    switch (app.mutation_requested.?) {
+        .checkout => |ref| try std.testing.expectEqualStrings("feature", ref),
+        else => try std.testing.expect(false),
+    }
 }
 
 test "T on the commits tab tags the selected commit, not HEAD" {

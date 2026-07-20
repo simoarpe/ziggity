@@ -1127,6 +1127,12 @@ pub const Git = struct {
         return self.exec(&.{ "checkout", branch_name });
     }
 
+    /// Check out a remote-tracking ref (e.g. `origin/feature`) as a new local
+    /// tracking branch (`feature`) instead of a detached HEAD: `checkout --track`.
+    pub fn checkoutTrack(self: *Git, ref: []const u8) !ExecResult {
+        return self.exec(&.{ "checkout", "--track", ref });
+    }
+
     /// Force-checkout a branch, discarding uncommitted changes (`checkout -f`).
     pub fn forceCheckout(self: *Git, branch_name: []const u8) !ExecResult {
         return self.exec(&.{ "checkout", "-f", branch_name });
