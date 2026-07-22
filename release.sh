@@ -3,7 +3,9 @@
 # release.sh — cut a Ziggity release.
 #
 # What it does (in order):
-#   1. Bump build.zig.zon from  0.x.0-dev  ->  0.x.0,  commit, push.
+#   1. Bump build.zig.zon from  0.x.0-dev  ->  0.x.0,  point the README install
+#      snippets at the new tag (the `VERSION=` line and the Windows zip name),
+#      commit, push.
 #   2. Tag v0.x.0 (annotated) and push the tag.
 #         -> pushing the tag triggers the `release.yml` GitHub Action, which
 #            cross-compiles every target, publishes the GitHub Release, and
@@ -35,6 +37,7 @@ TAP_FORMULA="Formula/ziggity.rb"
 BREW_FORMULA="simoarpe/ziggity/ziggity"
 MAIN_BRANCH="main"
 ZON="build.zig.zon"
+README="README.md"
 
 # ── options ───────────────────────────────────────────────────────────────
 ASSUME_YES=0
@@ -109,7 +112,7 @@ ok "next dev version    : $next_dev"
 
 echo
 step "Plan"
-info "1. $ZON: $current  ->  $release   (commit + push)"
+info "1. $ZON: $current  ->  $release,  README install snippets -> $tag   (commit + push)"
 info "2. tag $tag         (push -> triggers release.yml: build, publish, tap bump)"
 if [ "$DO_BREW" -eq 1 ]; then
   info "3. wait for the release, then verify: brew install $BREW_FORMULA"
@@ -132,6 +135,31 @@ set_version() {
   [ "$got" = "$newver" ] || die "failed to set version to $newver (got '$got')"
 }
 
+# ── helper: point the README install snippets at the just-released tag ────
+# Two spots reference a concrete version: the `VERSION=vX.Y.Z` line in the
+# macOS/Linux snippet, and the `ziggity-<...>-x86_64-windows-gnu.zip` filename
+# in the Windows section (which may still hold the `<version>` placeholder).
+# Both are rewritten to the release tag so a fresh clone's README always shows a
+# real, downloadable version. Idempotent, and a no-op (with a warning) if the
+# patterns ever drift.
+update_readme() {
+  local tag="$1" tmp   # tag is like v0.4.0
+  [ -f "$README" ] || { warn "$README not found — skipping README version bump"; return 0; }
+  tmp=$(mktemp)
+  sed -E \
+    -e "s/^VERSION=v[0-9]+\.[0-9]+\.[0-9]+([-A-Za-z0-9.]*)?$/VERSION=${tag}/" \
+    -e "s/ziggity-(<version>|v[0-9]+\.[0-9]+\.[0-9]+)-x86_64-windows-gnu\.zip/ziggity-${tag}-x86_64-windows-gnu.zip/g" \
+    "$README" >"$tmp"
+  mv "$tmp" "$README"
+
+  # Confirm both spots now read the release tag; warn (don't die) so a README
+  # tweak can never block a release that is otherwise ready.
+  grep -qxF "VERSION=${tag}" "$README" \
+    || warn "README: 'VERSION=${tag}' not found after update — check the macOS/Linux snippet"
+  grep -qF "ziggity-${tag}-x86_64-windows-gnu.zip" "$README" \
+    || warn "README: Windows zip filename not updated to ${tag} — check the Windows section"
+}
+
 # ── test gate ─────────────────────────────────────────────────────────────
 if [ "$DO_TEST" -eq 1 ]; then
   step "Running test suite (gate)"
@@ -141,10 +169,13 @@ else
   warn "skipping tests (--no-test)"
 fi
 
-# ── step 1: bump to release, commit, push ─────────────────────────────────
+# ── step 1: bump to release, update the README, commit, push ──────────────
 step "Bumping $ZON to $release"
 set_version "$release"
-git add "$ZON"
+ok "set version to $release"
+update_readme "$tag"
+ok "pointed README install snippets at $tag"
+git add "$ZON" "$README"
 git commit -q -m "Release $tag"
 ok "committed 'Release $tag'"
 git push origin "$MAIN_BRANCH"
