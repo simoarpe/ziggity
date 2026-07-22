@@ -4374,6 +4374,55 @@ pub const App = struct {
         return null;
     }
 
+    /// A file added with `git add -N` (intent-to-add): staged column blank,
+    /// work-tree column 'A'. Its content lives only in the working tree with an
+    /// empty placeholder in the index, and git's stash cannot record that state
+    /// (it fails with "Entry '…' not uptodate. Cannot merge.").
+    fn isIntentToAdd(f: model.FileStatus) bool {
+        return f.short_status[0] == ' ' and f.short_status[1] == 'A';
+    }
+
+    pub fn hasIntentToAddFiles(self: *const App) bool {
+        for (self.data.files) |f| {
+            if (isIntentToAdd(f)) return true;
+        }
+        return false;
+    }
+
+    /// A stash failed and the tree has intent-to-add files: almost certainly
+    /// the cause (git can't stash them). Gate on the error text too so an
+    /// unrelated failure isn't misattributed.
+    fn stashHitIntentToAdd(self: *const App, stderr: []const u8) bool {
+        if (!self.hasIntentToAddFiles()) return false;
+        return std.mem.indexOf(u8, stderr, "not uptodate") != null or
+            std.mem.indexOf(u8, stderr, "Cannot save the current worktree state") != null;
+    }
+
+    /// Explain, plainly, why git cannot stash while intent-to-add files are
+    /// present, listing the offending files and how to resolve them. Shown up
+    /// front when the stash menu is opened, and as a backstop if a stash still
+    /// fails with git's cryptic "not uptodate" error.
+    pub fn explainIntentToAddStash(self: *App) !void {
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        const w = &aw.writer;
+        try w.writeAll("These files were added with `git add -N` (git calls it \"intent to add\"):\n\n");
+        for (self.data.files) |f| {
+            if (isIntentToAdd(f)) try w.print("    {s}\n", .{f.path});
+        }
+        try w.writeAll(
+            "\nThat is a half-added state: git knows their names but not their\n" ++
+            "contents, and git refuses to stash while any file is like this. So no\n" ++
+            "stash can run right now. This is a git limitation, not a ziggity one.\n\n" ++
+            "Your files are safe on disk and nothing changed. To continue, close\n" ++
+            "this (enter), then do ONE of these:\n\n" ++
+            "  - press  a  to stage them normally  (then stash works), or\n" ++
+            "  - run  git rm --cached <path>  in a terminal to untrack them instead\n" ++
+            "    (the file stays on disk, just no longer half-added).",
+        );
+        try self.reportFailure("cannot stash: files are half-added (git add -N)", aw.written());
+    }
+
     /// Whether `name` is a remote-tracking branch (e.g. `origin/feature`).
     pub fn isRemoteBranchName(self: *const App, name: []const u8) bool {
         for (self.data.remote_branches) |b| {
@@ -6364,6 +6413,16 @@ pub const App = struct {
                     try self.setMessage("nothing to stash", .{});
                     return;
                 };
+                // git's stash cannot handle intent-to-add files and fails with a
+                // cryptic "not uptodate" error. Detect that and explain it plainly
+                // instead (no stash variant can work while those files are present).
+                if (!result.ok() and self.stashHitIntentToAdd(result.stderr)) {
+                    var mutable = result;
+                    defer mutable.deinit(self.allocator);
+                    try self.explainIntentToAddStash();
+                    self.refreshViews(Refresh.stash);
+                    return;
+                }
                 const label: []const u8 = switch (stash_kind) {
                     .all => "stashed all changes",
                     .untracked => "stashed (incl. untracked)",
@@ -9798,6 +9857,45 @@ test "W marks the selected ref directly; W again opens the options menu" {
     try app.handleKey(w);
     try std.testing.expectEqual(Mode.menu, app.mode);
     try std.testing.expectEqual(@as(usize, diffing_menu_active.len), app.active_menu.?.items.len);
+}
+
+test "intent-to-add stash failure is detected, not misattributed" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    const ita_err = "error: Entry 'f.py' not uptodate. Cannot merge.\nCannot save the current worktree state";
+
+    // An intent-to-add file ("  A" — blank index, 'A' work tree) present: the
+    // "not uptodate" stash failure is attributed to it.
+    var ita = [_]model.FileStatus{.{ .path = @constCast("f.py"), .short_status = .{ ' ', 'A' }, .has_staged = false, .has_unstaged = true, .tracked = false, .added = true, .deleted = false, .conflict = false }};
+    app.data.files = &ita;
+    try std.testing.expect(app.hasIntentToAddFiles());
+    try std.testing.expect(app.stashHitIntentToAdd(ita_err));
+    try std.testing.expect(!app.stashHitIntentToAdd("some unrelated error")); // wrong error text
+
+    // No intent-to-add file: the same error is NOT attributed to intent-to-add
+    // (it falls through to the generic failure report).
+    var normal = [_]model.FileStatus{.{ .path = @constCast("g.py"), .short_status = .{ 'M', ' ' }, .has_staged = true, .has_unstaged = false, .tracked = true, .added = false, .deleted = false, .conflict = false }};
+    app.data.files = &normal;
+    try std.testing.expect(!app.hasIntentToAddFiles());
+    try std.testing.expect(!app.stashHitIntentToAdd(ita_err));
+
+    // Opening the stash menu with intent-to-add present shows the explanation
+    // dialog up front instead of the (mostly unusable) menu.
+    app.data.files = &ita;
+    try stash_mod.startStashMenu(&app);
+    try std.testing.expectEqual(Mode.operation, app.mode); // the explanation dialog, not .menu
+    try std.testing.expect(std.mem.indexOf(u8, app.op_output, "git add -N") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app.op_output, "f.py") != null);
+
+    // A normal tree opens the menu as usual.
+    app.data.files = &normal;
+    app.mode = .normal;
+    try stash_mod.startStashMenu(&app);
+    try std.testing.expectEqual(Mode.menu, app.mode);
+    app.closeMenu();
 }
 
 test "diff dot default: branches get three-dot, commits two-dot" {

@@ -11,6 +11,10 @@ pub fn startStashMenu(self: *App) !void {
         try self.setMessage("nothing to stash", .{});
         return;
     }
+    // git cannot stash while intent-to-add (`git add -N`) files are present —
+    // every menu option but "staged only" would fail with a cryptic error — so
+    // explain it up front instead of opening a menu that mostly cannot work.
+    if (self.hasIntentToAddFiles()) return self.explainIntentToAddStash();
     self.focus = .files;
     self.mode = .menu;
     self.active_menu = .{ .title = "Stash", .items = &app_mod.stash_menu, .index = 0 };
