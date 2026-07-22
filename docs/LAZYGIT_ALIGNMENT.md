@@ -67,13 +67,13 @@ history for the full feature list. For the record:
 Beyond the original backlog, the wider lazygit feature set is also implemented:
 interactive rebase (incl. marked-base and mid-rebase amend), undo, diffing mode,
 commit log filtering, bisect, custom patch building, remote management,
-clipboard/open-in-browser, a stash menu, and a modal result dialog for
-synchronous operations.
+clipboard/open-in-browser, a stash menu, a recent repositories switcher (`ctrl+r`),
+and a modal result dialog for synchronous operations.
 
 ## Lazygit references (default keybindings)
 - Universal: `q` quit, `<esc>` back, `<tab>`/`<backtab>` next/prev block,
   `h`/`l`/`←`/`→` prev/next block, `1`-`5` jump to block, `[`/`]` prev/next tab,
-  `,`/`.` page up/down, `<`/`>` top/bottom, `/` search.
+  `,`/`.` page up/down, `<`/`>` top/bottom, `/` search, `<c-r>` recent repos.
 - Files: `<space>` toggle stage, `a` stage/unstage all, `c` commit,
   `d` discard menu, `<enter>` focus staging/main.
 - Branches: `<space>` checkout, `<enter>` view commits, `n` new, `d` delete.

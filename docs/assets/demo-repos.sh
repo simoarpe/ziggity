@@ -149,5 +149,37 @@ git add src/app.zig
 printf '\n// TODO: measure cell width once per frame\n' >> src/tui.zig
 printf '# Release notes draft\n\n- faster previews\n- calmer refreshes\n' > docs/notes.md
 
-echo "demo repos ready: /tmp/zdemo-commit, /tmp/zdemo-co/clone, /tmp/zdemo-fetch, /tmp/zhero/ziggity, /tmp/zdemo-auth, /tmp/zdemo-graph"
+# --- /tmp/zrecent: the recent-repositories switcher demo (recent-repos.tape) -
+# A handful of realistically named repos on different branches, plus a seeded
+# recent list, so ctrl+r shows a full, tidy switcher. Everything (repos and the
+# recent list) lives under a private XDG state dir, so the shot never depends on
+# or touches your real recent list. recent-repos.tape points XDG_STATE_HOME here
+# and opens the "aurora" repo, which ziggity prepends on launch (and the
+# switcher then hides as the current repo), leaving the five seeded rows.
+rm -rf /tmp/zrecent
+mkdir -p /tmp/zrecent/state/ziggity
+zrecent_repo() { # <path> <branch>
+  mkdir -p "$1"
+  git -C "$1" init -q -b "$2"
+  git -C "$1" config user.email demo@ziggity.dev
+  git -C "$1" config user.name "Demo"
+  printf '# %s\n' "$(basename "$1")" > "$1/README.md"
+  git -C "$1" add .
+  git -C "$1" commit -q -m "Initial commit"
+}
+zrecent_repo /tmp/zrecent/projects/aurora main
+zrecent_repo /tmp/zrecent/work/api-gateway release/2.1
+zrecent_repo /tmp/zrecent/projects/lexer main
+zrecent_repo /tmp/zrecent/work/billing-service feature/invoices
+zrecent_repo /tmp/zrecent/projects/dotfiles main
+zrecent_repo /tmp/zrecent/sandbox/raytracer-zig experiment/bvh
+cat > /tmp/zrecent/state/ziggity/recent <<'REOF'
+/tmp/zrecent/work/api-gateway
+/tmp/zrecent/projects/lexer
+/tmp/zrecent/work/billing-service
+/tmp/zrecent/projects/dotfiles
+/tmp/zrecent/sandbox/raytracer-zig
+REOF
+
+echo "demo repos ready: /tmp/zdemo-commit, /tmp/zdemo-co/clone, /tmp/zdemo-fetch, /tmp/zhero/ziggity, /tmp/zdemo-auth, /tmp/zdemo-graph, /tmp/zrecent"
 echo "for credentials.tape, also start:  python3 /tmp/auth401.py &"

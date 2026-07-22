@@ -36,6 +36,7 @@ pub const Action = enum {
     amend_attribute,
     interactive_rebase,
     log_menu,
+    recent_repos,
     commit_no_verify,
     ignore_file,
     copy_file_info,
@@ -279,6 +280,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     if (keymap.command_log.matches(key)) return .command_log;
     if (keymap.help.matches(key)) return .help;
     if (keymap.undo.matches(key)) return .undo;
+    if (keymap.recent_repos.matches(key)) return .recent_repos;
     if (keymap.copy_clipboard.matches(key)) return .copy_to_clipboard;
     if (keymap.open_browser.matches(key)) return .open_browser;
     if (keymap.diff_mark.matches(key)) return .diff_mark;

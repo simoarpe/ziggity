@@ -336,6 +336,22 @@ the checked out branch, so inspecting another branch means losing your spot.
 Diffing mode understands the drill too: the marked ref is the commit you are
 actually on, not the branch that contains it.
 
+### Jump Between Repositories
+
+`ctrl+r` opens the recent repositories switcher: a list of every repo you have
+opened in ziggity, most recent first, each row aligned as name, current branch,
+and path. Pick one with `enter` and ziggity re-roots in place, no restart and
+no second process. The list lives in a plain text file under the XDG state
+directory (`~/.local/state/ziggity/recent`), one path per line, safe to read or
+edit by hand.
+
+Navigate with `j` and `k` or the mouse wheel, and pan long paths left and right
+with `H` and `L`. Click a row to highlight it, or drag to select and copy text;
+switching always happens on `enter`. If a listed repo has since been moved or
+deleted, picking it asks whether to drop it from the list (nothing on disk is
+touched). Remove the highlighted entry at any time with `d`; removing the last
+one just closes the switcher.
+
 ### Stash Without Losing Your Working Tree
 
 The stash menu has the variant that other tools skip: snapshot everything
@@ -577,6 +593,15 @@ options. Destructive actions route through clear, explicit menus.
 
 ![Reset menu](docs/screenshots/13-reset-menu.png)
 
+### Recent Repositories
+
+`ctrl+r` opens the recent repositories switcher: every repo you have opened
+before, aligned as name, branch, and path. `j` and `k` or the wheel move the
+highlight, `H` and `L` pan long paths, `enter` switches in place, and `d`
+removes an entry.
+
+![Recent repositories switcher](docs/screenshots/19-recent-repos.png)
+
 ### Help & the About Screen
 
 `?` opens the keybindings overlay, scrolled to the panel you are on.
@@ -754,6 +779,8 @@ Selecting the Status panel shows an about screen with a live animation.
   and a stale keychain entry cannot shadow what you type.
 - Safe undo of the last operation (`ctrl+z`, reflog reset after
   confirmation).
+- Recent repositories switcher (`ctrl+r`): jump to another repo you have
+  opened before, without restarting (see below).
 - Find the fixup base for a staged change and make a `fixup!` (`ctrl+f`, via
   blame).
 - Mouse text selection with automatic copy in the diff panel and the read
@@ -793,6 +820,7 @@ essentials:
 - `?`: keybindings help overlay (`j` and `k` to scroll), opened to the
   section for the current panel
 - `ctrl+z`: undo the last operation (reflog reset, after confirmation)
+- `ctrl+r`: switch to a recently opened repository (see below)
 - `@`: command log (recent git commands ziggity ran)
 - `ctrl+o`: copy the selected hash, branch or tag to the system clipboard
 - `o`: open the selected commit or branch on its remote host

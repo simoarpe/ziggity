@@ -20,6 +20,7 @@ const filetree = @import("filetree.zig");
 const git_mod = @import("git.zig");
 const model = @import("model.zig");
 const patch_mod = @import("patch.zig");
+const recentrepos = @import("recentrepos.zig");
 const staging_mod = @import("staging.zig");
 const textmatch = @import("textmatch.zig");
 
@@ -38,6 +39,7 @@ pub const Mode = enum {
     rebase_plan,
     commit_graph,
     conflict_resolve,
+    recent_repos,
 };
 
 /// Environment variable names for the credential bridge. When the user has
@@ -206,6 +208,9 @@ pub const Confirmation = enum {
     /// single commit). Confirming discards the current patch and starts a new
     /// one with the selected file.
     reset_patch,
+    /// Offered when a ctrl+r recent repository no longer resolves as a git repo.
+    /// Confirming drops it from the recent list (nothing on disk is touched).
+    remove_recent_repo,
 };
 
 /// What to re-run after the user confirms deleting a stale git lock file. Only
@@ -2159,6 +2164,23 @@ pub const App = struct {
     undo_label_len: usize = 0,
     active_menu: ?Menu = null,
     pending_confirmation: ?Confirmation = null,
+    // ctrl+r recent-repository switcher (mode `.recent_repos`): a scrollable,
+    // mouse-interactive overlay modeled on the commit-graph viewer. `recent_repos`
+    // holds one absolute path per entry; `recent_rows` the matching aligned
+    // display strings (name / branch / path), same length and index. Both are
+    // freed by `freeRecentView`. `recent_sel` is the cursor, `recent_scroll` the
+    // vertical view offset, `recent_hscroll` the H/L horizontal pan,
+    // `recent_view_h` the visible row count (set by the renderer), and
+    // `recent_max_width` the widest row (to clamp the pan). `recent_remove_path`
+    // carries a dead entry into the "remove from recent list?" confirmation.
+    recent_repos: [][]u8 = &.{},
+    recent_rows: [][]u8 = &.{},
+    recent_sel: usize = 0,
+    recent_scroll: usize = 0,
+    recent_hscroll: u16 = 0,
+    recent_view_h: u16 = 0,
+    recent_max_width: usize = 0,
+    recent_remove_path: ?[]u8 = null,
     terminal_focused: bool = true,
     // True between a bracketed-paste start and end: incoming keys are literal
     // text for the active input, never commands (so a pasted newline inserts a
@@ -2344,6 +2366,8 @@ pub const App = struct {
         // (best-effort; null disables the on-disk draft, e.g. in tests).
         if (app.git.git_dir.len > 0) {
             app.commit_draft_path = std.fs.path.join(allocator, &.{ app.git.git_dir, "ZIGGITY_PENDING_COMMIT" }) catch null;
+            // Remember this repo for the ctrl+r switcher (best-effort).
+            recentrepos.record(allocator, io, env_map, app.git.root);
         }
 
         // The initial repo load runs off-thread, started by the TUI loop (see
@@ -2421,6 +2445,8 @@ pub const App = struct {
         if (self.push_upstream_branch) |b| self.allocator.free(b);
         if (self.fetch_remote_name) |r| self.allocator.free(r);
         self.clearLockRecovery();
+        self.freeRecentView();
+        if (self.recent_remove_path) |p| self.allocator.free(p);
         if (self.reroot_request) |p| self.allocator.free(p);
         for (self.repo_stack.items) |p| self.allocator.free(p);
         self.repo_stack.deinit(self.allocator);
@@ -2746,6 +2772,10 @@ pub const App = struct {
         }
         if (self.mode == .commit_graph) {
             try commitgraph_mod.handleKey(self, key);
+            return;
+        }
+        if (self.mode == .recent_repos) {
+            try self.handleRecentKey(key);
             return;
         }
         if (self.mode == .text_prompt) {
@@ -3119,6 +3149,7 @@ pub const App = struct {
                 try self.setMessage("help", .{});
             },
             .undo => try self.startUndoConfirm(),
+            .recent_repos => try self.openRecentRepos(),
             .copy_to_clipboard => try self.requestClipboardCopy(),
             .open_browser => try diffmode_mod.openSelectionInBrowser(self),
             // W: with no base yet and a ref under the cursor, mark it right away
@@ -3259,10 +3290,22 @@ pub const App = struct {
                 .press => switch (mouse.button) {
                     .wheel_up => {
                         self.clearDialogSelection();
+                        // The switcher fits its content, so scrolling the view is
+                        // usually a no-op; move the highlighted row instead.
+                        if (self.mode == .recent_repos) {
+                            self.recent_sel -|= 1;
+                            self.recentEnsureVisible();
+                            return true;
+                        }
                         return self.dialogScroll(false);
                     },
                     .wheel_down => {
                         self.clearDialogSelection();
+                        if (self.mode == .recent_repos) {
+                            if (self.recent_sel + 1 < self.recent_rows.len) self.recent_sel += 1;
+                            self.recentEnsureVisible();
+                            return true;
+                        }
                         return self.dialogScroll(true);
                     },
                     .left => if (self.dialogPointAt(c, rw)) |pt| {
@@ -3290,6 +3333,10 @@ pub const App = struct {
                     } else if (self.mode == .commit_graph) {
                         // A plain click moves the graph cursor to that row.
                         commitgraph_mod.selectRow(self, self.commit_graph_scroll + self.dialog_sel_anchor_row);
+                    } else if (self.mode == .recent_repos) {
+                        // A click only selects the row under the cursor; switching
+                        // always requires enter.
+                        self.recentSelectRow(self.recent_scroll + self.dialog_sel_anchor_row);
                     }
                     self.clearDialogSelection();
                     return true;
@@ -3841,6 +3888,8 @@ pub const App = struct {
                 self.commit_graph_scroll = if (down) @min(self.commit_graph_scroll + lines, max_scroll) else self.commit_graph_scroll -| lines;
                 return true;
             },
+            // .recent_repos handles the wheel in `handleMouse` (it moves the
+            // selection, not the view), so it never reaches here.
             else => return false,
         }
     }
@@ -4798,6 +4847,257 @@ pub const App = struct {
         self.reroot_push = false;
     }
 
+    /// Empty the drill stack (each path is owned). Used when a recent-repo switch
+    /// starts a fresh session rather than drilling into a sub-repo.
+    fn clearRepoStack(self: *App) void {
+        for (self.repo_stack.items) |p| self.allocator.free(p);
+        self.repo_stack.clearRetainingCapacity();
+    }
+
+    // ---- Recent-repositories switcher (ctrl+r, mode `.recent_repos`) ----------
+
+    /// `ctrl+r`: (re)build the list and open the switcher overlay. The current
+    /// repo is left out; with nothing else visited, report that instead of
+    /// opening an empty overlay.
+    fn openRecentRepos(self: *App) !void {
+        self.freeRecentView(); // any prior rows are stale
+
+        const loaded = recentrepos.load(self.allocator, self.git.io, self.git.environ);
+        defer self.allocator.free(loaded); // items are moved into `kept` or freed
+
+        var kept: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (kept.items) |p| self.allocator.free(p);
+            kept.deinit(self.allocator);
+        }
+        for (loaded) |p| {
+            if (std.mem.eql(u8, p, self.git.root)) {
+                self.allocator.free(p);
+                continue;
+            }
+            kept.append(self.allocator, p) catch self.allocator.free(p);
+        }
+        if (kept.items.len == 0) {
+            kept.deinit(self.allocator);
+            try self.setMessage("no other recent repositories", .{});
+            return;
+        }
+
+        self.recent_repos = try kept.toOwnedSlice(self.allocator);
+        try self.buildRecentRows();
+        self.recent_sel = 0;
+        self.recent_scroll = 0;
+        self.recent_hscroll = 0;
+        self.mode = .recent_repos;
+        try self.setMessage("switch repository", .{});
+    }
+
+    /// Max widths for the aligned name/branch columns; longer values overflow
+    /// (their path just starts further right) rather than blow out every row.
+    const recent_name_cap = 40;
+    const recent_branch_cap = 30;
+
+    /// (Re)build the aligned display rows from `recent_repos`: each row is
+    /// "name  branch  path", name and branch padded to the list's max so the
+    /// three columns line up. Also records the widest row for the pan clamp.
+    fn buildRecentRows(self: *App) !void {
+        self.freeRecentRows();
+        const n = self.recent_repos.len;
+        if (n == 0) return;
+
+        const branches = try self.allocator.alloc(?[]u8, n);
+        defer {
+            for (branches) |b| if (b) |bb| self.allocator.free(bb);
+            self.allocator.free(branches);
+        }
+        var wname: usize = 0;
+        var wbranch: usize = 0;
+        for (self.recent_repos, 0..) |path, i| {
+            branches[i] = recentrepos.currentBranch(self.allocator, self.git.io, path);
+            wname = @max(wname, std.fs.path.basename(path).len);
+            if (branches[i]) |b| wbranch = @max(wbranch, b.len);
+        }
+        wname = @min(wname, recent_name_cap);
+        wbranch = @min(wbranch, recent_branch_cap);
+
+        const rows = try self.allocator.alloc([]u8, n);
+        var built: usize = 0;
+        errdefer {
+            for (rows[0..built]) |r| self.allocator.free(r);
+            self.allocator.free(rows);
+        }
+        var max_width: usize = 0;
+        for (self.recent_repos, 0..) |path, i| {
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(self.allocator);
+            try appendPadded(self.allocator, &buf, std.fs.path.basename(path), wname);
+            try buf.appendSlice(self.allocator, "  ");
+            try appendPadded(self.allocator, &buf, if (branches[i]) |b| b else "", wbranch);
+            try buf.appendSlice(self.allocator, "  ");
+            try buf.appendSlice(self.allocator, path);
+            rows[i] = try buf.toOwnedSlice(self.allocator);
+            max_width = @max(max_width, rows[i].len);
+            built += 1;
+        }
+        self.recent_rows = rows;
+        self.recent_max_width = max_width;
+    }
+
+    /// Append `s` to `buf`, right-padded with spaces to `width` (no padding when
+    /// `s` is already at least that wide).
+    fn appendPadded(a: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u8, width: usize) !void {
+        try buf.appendSlice(a, s);
+        var k = s.len;
+        while (k < width) : (k += 1) try buf.append(a, ' ');
+    }
+
+    pub fn handleRecentKey(self: *App, key: vaxis.Key) !void {
+        if (self.isDialogCloseKey(key)) return self.closeRecentRepos();
+        const km = self.config.keymap;
+        const n = self.recent_rows.len;
+        if (km.up.matches(key) or key.matches(vaxis.Key.up, .{})) {
+            self.recent_sel -|= 1;
+            return self.recentEnsureVisible();
+        }
+        if (km.down.matches(key) or key.matches(vaxis.Key.down, .{})) {
+            if (n > 0 and self.recent_sel + 1 < n) self.recent_sel += 1;
+            return self.recentEnsureVisible();
+        }
+        if (key.matches(vaxis.Key.page_up, .{})) {
+            self.recent_sel -|= 10;
+            return self.recentEnsureVisible();
+        }
+        if (key.matches(vaxis.Key.page_down, .{})) {
+            if (n > 0) self.recent_sel = @min(self.recent_sel + 10, n - 1);
+            return self.recentEnsureVisible();
+        }
+        // H / L pan horizontally so long paths can be read (clamped by the renderer).
+        if (km.scroll_left.matches(key)) {
+            self.recent_hscroll -|= horizontal_scroll_step;
+            return;
+        }
+        if (km.scroll_right.matches(key)) {
+            self.recent_hscroll +|= horizontal_scroll_step;
+            return;
+        }
+        if (self.isEnterKey(key) or km.select.matches(key)) return self.switchToRecent();
+        // `d` removes the highlighted entry from the list (nothing on disk).
+        if (key.matches('d', .{})) return self.removeSelectedRecent();
+    }
+
+    /// Mouse: move the cursor to an absolute row index (clamped).
+    pub fn recentSelectRow(self: *App, index: usize) void {
+        if (self.recent_rows.len == 0) return;
+        self.recent_sel = @min(index, self.recent_rows.len - 1);
+    }
+
+    /// Scroll the view just enough to keep the cursor row visible after keyboard
+    /// navigation (the wheel scrolls freely and does not call this).
+    fn recentEnsureVisible(self: *App) void {
+        const h = self.recent_view_h;
+        if (h == 0) return;
+        if (self.recent_sel < self.recent_scroll) {
+            self.recent_scroll = self.recent_sel;
+        } else if (self.recent_sel >= self.recent_scroll + h) {
+            self.recent_scroll = self.recent_sel - h + 1;
+        }
+    }
+
+    /// `enter` / click on the selected row: switch to the highlighted repo in
+    /// place. A live repo re-roots; a dead entry raises the "remove from recent
+    /// list?" confirmation instead.
+    pub fn switchToRecent(self: *App) !void {
+        if (self.recent_sel >= self.recent_repos.len) return;
+        const path = self.recent_repos[self.recent_sel];
+        if (std.mem.eql(u8, path, self.git.root)) return self.closeRecentRepos(); // already here
+
+        if (!self.isLikelyGitRepo(path)) {
+            if (self.recent_remove_path) |old| self.allocator.free(old);
+            self.recent_remove_path = try self.allocator.dupe(u8, path);
+            self.closeRecentRepos();
+            return self.requestConfirmation(.remove_recent_repo, "not a git repository", .{});
+        }
+
+        if (self.foregroundBusy()) {
+            try self.setMessage("operation in progress...", .{});
+            return;
+        }
+        // Dupe the path before closing (which frees `recent_repos`), then re-root.
+        // A recent-repo switch starts fresh: drop the drill stack (esc will not
+        // walk back into the old repo) and re-root without pushing onto it.
+        const dup = try self.allocator.dupe(u8, path);
+        self.closeRecentRepos();
+        self.clearRepoStack();
+        if (self.reroot_request) |old| self.allocator.free(old);
+        self.reroot_request = dup;
+        self.reroot_push = false;
+    }
+
+    /// `d`: remove the highlighted entry from the list, then rebuild the rows.
+    /// Closes the overlay when the last entry is removed.
+    fn removeSelectedRecent(self: *App) !void {
+        if (self.recent_sel >= self.recent_repos.len) return;
+        recentrepos.remove(self.allocator, self.git.io, self.git.environ, self.recent_repos[self.recent_sel]);
+        // Drop the entry from the in-memory arrays and rebuild the display rows.
+        const removed = self.recent_sel;
+        self.allocator.free(self.recent_repos[removed]);
+        const kept = try self.dropRecentAt(removed);
+        self.allocator.free(self.recent_repos);
+        self.recent_repos = kept;
+        if (self.recent_repos.len == 0) {
+            self.closeRecentRepos();
+            try self.setMessage("removed from recent list (list now empty)", .{});
+            return;
+        }
+        if (self.recent_sel >= self.recent_repos.len) self.recent_sel = self.recent_repos.len - 1;
+        try self.buildRecentRows();
+        self.recentEnsureVisible();
+        try self.setMessage("removed from recent list", .{});
+    }
+
+    /// A new `recent_repos` slice with the entry at `idx` omitted (its string was
+    /// already freed by the caller). The surviving path strings are moved over.
+    fn dropRecentAt(self: *App, idx: usize) ![][]u8 {
+        const out = try self.allocator.alloc([]u8, self.recent_repos.len - 1);
+        var j: usize = 0;
+        for (self.recent_repos, 0..) |p, i| {
+            if (i == idx) continue;
+            out[j] = p;
+            j += 1;
+        }
+        return out;
+    }
+
+    fn closeRecentRepos(self: *App) void {
+        self.freeRecentView();
+        self.mode = .normal;
+    }
+
+    /// Free the aligned display rows only (kept separate so `buildRecentRows` can
+    /// rebuild them without touching the path list).
+    fn freeRecentRows(self: *App) void {
+        for (self.recent_rows) |r| self.allocator.free(r);
+        if (self.recent_rows.len > 0) self.allocator.free(self.recent_rows);
+        self.recent_rows = &.{};
+    }
+
+    /// Free all switcher buffers (rows and paths).
+    fn freeRecentView(self: *App) void {
+        self.freeRecentRows();
+        recentrepos.freeList(self.allocator, self.recent_repos);
+        self.recent_repos = &.{};
+    }
+
+    /// Cheap dead-entry check for the switcher: does `<path>/.git` exist? Catches
+    /// the common cases (repo moved, deleted, or on an unmounted volume) without a
+    /// `git` subprocess. The eventual re-root still validates for real.
+    fn isLikelyGitRepo(self: *App, path: []const u8) bool {
+        const dotgit = std.fs.path.join(self.allocator, &.{ path, ".git" }) catch return false;
+        defer self.allocator.free(dotgit);
+        std.Io.Dir.access(.cwd(), self.git.io, dotgit, .{}) catch return false;
+        return true;
+    }
+
     /// Free every piece of repo-specific state ahead of a re-root: loaded data,
     /// drill/staging/patch/preview/diff buffers, filters, credentials, and the
     /// selection. Persistent state (config, exe_path, editor buffers, the repo
@@ -4917,6 +5217,10 @@ pub const App = struct {
         else
             null;
         self.commit_draft_loaded = false;
+
+        // Remember the repo we just switched into for the ctrl+r switcher.
+        if (self.git.git_dir.len > 0)
+            recentrepos.record(self.allocator, self.git.io, self.git.environ, self.git.root);
 
         self.focus = .files;
         self.main_origin = .files;
@@ -5298,6 +5602,7 @@ pub const App = struct {
                 break :blk "git is locked. Delete the lock file and retry?";
             },
             .reset_patch => "You can only build a patch from one commit at a time. Discard the current patch?",
+            .remove_recent_repo => "not a git repository, do you want to remove it from recent list? (this action won't remove anything from disk)",
         };
     }
 
@@ -7383,6 +7688,11 @@ pub const App = struct {
             self.pending_confirmation = null;
             // Drop any lock-recovery state if this was the lock prompt.
             self.clearLockRecovery();
+            // Keep a declined dead entry: just drop the pending path.
+            if (self.recent_remove_path) |p| {
+                self.allocator.free(p);
+                self.recent_remove_path = null;
+            }
             try self.setMessage("cancelled", .{});
             return;
         }
@@ -7537,6 +7847,14 @@ pub const App = struct {
                     .toggle_file_range => patch_mod.applyPatchRangeToggle(self),
                     .line_view => patch_mod.doOpenPatchLineView(self),
                 };
+            },
+            .remove_recent_repo => {
+                if (self.recent_remove_path) |p| {
+                    recentrepos.remove(self.allocator, self.git.io, self.git.environ, p);
+                    self.allocator.free(p);
+                    self.recent_remove_path = null;
+                }
+                return self.setMessage("removed from recent list", .{});
             },
         }
     }
@@ -12063,4 +12381,41 @@ test "collectDirFiles scopes a folder discard to files under it" {
     defer root.deinit(allocator);
     try app.collectDirFiles("", false, &root);
     try std.testing.expectEqual(@as(usize, 4), root.items.len);
+}
+
+test "appendPadded right-pads to width and leaves longer strings intact" {
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(a);
+    try App.appendPadded(a, &buf, "ab", 5);
+    try std.testing.expectEqualStrings("ab   ", buf.items);
+    buf.clearRetainingCapacity();
+    try App.appendPadded(a, &buf, "abcdef", 3);
+    try std.testing.expectEqualStrings("abcdef", buf.items);
+}
+
+test "dropRecentAt compacts the recent list around the removed index" {
+    const a = std.testing.allocator;
+    var app = try testApp(a, &.{});
+    defer deinitTestApp(&app);
+
+    const paths = try a.alloc([]u8, 3);
+    paths[0] = try a.dupe(u8, "/a");
+    paths[1] = try a.dupe(u8, "/b");
+    paths[2] = try a.dupe(u8, "/c");
+    app.recent_repos = paths;
+
+    // Mirror removeSelectedRecent: free the removed string, compact, swap slices.
+    a.free(app.recent_repos[1]);
+    const kept = try app.dropRecentAt(1);
+    a.free(app.recent_repos);
+    app.recent_repos = kept;
+
+    try std.testing.expectEqual(@as(usize, 2), app.recent_repos.len);
+    try std.testing.expectEqualStrings("/a", app.recent_repos[0]);
+    try std.testing.expectEqualStrings("/c", app.recent_repos[1]);
+
+    for (app.recent_repos) |p| a.free(p);
+    a.free(app.recent_repos);
+    app.recent_repos = &.{};
 }

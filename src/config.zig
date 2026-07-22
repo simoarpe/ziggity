@@ -57,6 +57,9 @@ pub const KeyMap = struct {
     amend_attribute: Binding = .{ .codepoint = 'a' },
     interactive_rebase: Binding = .{ .codepoint = 'i' },
     log_menu: Binding = .{ .codepoint = 'l', .ctrl = true },
+    // Open the recent-repositories switcher: jump to another repo opened earlier
+    // in this or a past session, without restarting.
+    recent_repos: Binding = .{ .codepoint = 'r', .ctrl = true },
     // In the commit-graph viewer: jump the cursor to the current commit's first parent.
     graph_first_parent: Binding = .{ .codepoint = 'p' },
     // In the commit-graph viewer: jump the cursor to the current commit (HEAD).
@@ -237,6 +240,9 @@ pub const ConfirmSkips = struct {
     /// When set, switching the custom patch to another commit discards the old
     /// patch without asking.
     reset_patch: bool = false,
+    /// Field exists so `shouldSkipConfirm`'s comptime lookup covers every
+    /// Confirmation tag; the dead recent-repo prompt is never auto-skipped.
+    remove_recent_repo: bool = false,
 };
 
 pub const Config = struct {

@@ -1207,6 +1207,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         .help => drawHelpPopup(root, app),
         .operation => drawOperationPopup(root, app),
         .commit_graph => drawCommitGraphPopup(root, app),
+        .recent_repos => drawRecentReposPopup(root, app),
         .conflict_resolve => drawConflicts(root, app),
         else => {},
     }
@@ -1286,6 +1287,58 @@ fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
         row += 1;
     }
     drawScrollbarRange(root, px0 + w - 1, py0 + 1, avail, app.commit_graph_lines, app.commit_graph_scroll, true);
+}
+
+fn drawRecentReposPopup(root: vaxis.Window, app: *app_mod.App) void {
+    const st = styles();
+    const rows_n = app.recent_rows.len;
+    // Size to content, capped to the screen. `popup` adds a border, so the height
+    // arg is inner-content-height + 2; inner height holds the rows plus the footer.
+    const min_w: usize = 56; // keep the footer hint readable
+    const w: u16 = @intCast(@min(@as(usize, root.width -| 4), @max(min_w, app.recent_max_width + 4)));
+    const h: u16 = @intCast(@min(@as(usize, root.height -| 2), rows_n + 3));
+    const win = popup(root, w, h, "Recent repositories", null);
+
+    const footer_row: u16 = win.height -| 1;
+    print(win, footer_row, 0, "j/k move  H/L pan  enter switch  d remove  esc close", st.bottom_accent);
+
+    const avail: usize = footer_row; // content rows above the footer
+    if (avail == 0) return;
+    app.recent_view_h = @intCast(avail);
+
+    const max_scroll = rows_n -| avail;
+    if (app.recent_scroll > max_scroll) app.recent_scroll = max_scroll;
+
+    // Clamp the horizontal pan to the widest row.
+    const content_w: usize = win.width;
+    const max_hscroll: u16 = @intCast(app.recent_max_width -| content_w);
+    if (app.recent_hscroll > max_hscroll) app.recent_hscroll = max_hscroll;
+    const h_off = app.recent_hscroll;
+
+    // Register the visible rows for mouse selection/copy and click-to-select.
+    const px0: u16 = (root.width - w) / 2;
+    const py0: u16 = (root.height - h) / 2;
+    app.beginDialogGrid(px0 + 1, py0 + 1, footer_row);
+
+    var row: u16 = 0;
+    var idx: usize = app.recent_scroll;
+    while (idx < rows_n) : (idx += 1) {
+        if (row >= footer_row) break;
+        const line = app.recent_rows[idx];
+        const selected = idx == app.recent_sel;
+        var base = st.normal;
+        if (selected) {
+            applySel(&base, .active);
+            fillRow(win, row, base);
+        }
+        app.setDialogRow(row, line);
+        const sel = app.dialogRowSelection(row);
+        const lo: u16 = if (sel) |s| s.lo else 0;
+        const hi: u16 = if (sel) |s| s.hi else 0;
+        printAnsi(win, row, line, base, lo, hi, h_off);
+        row += 1;
+    }
+    drawScrollbarRange(root, px0 + w - 1, py0 + 1, avail, rows_n, app.recent_scroll, true);
 }
 
 fn drawConflicts(root: vaxis.Window, app: *app_mod.App) void {
@@ -1412,6 +1465,7 @@ const help_lines = [_][]const u8{
     "  @              command log",
     "  ?              this help",
     "  ctrl+z         undo the last operation (reflog reset)",
+    "  ctrl+r         switch to a recently opened repository",
     "  ctrl+o         copy the selected hash, branch or tag to the clipboard",
     "  o              open the selected commit or branch on its remote host",
     "  W              mark the selected ref as the diff base (the marked row",
@@ -2095,6 +2149,7 @@ fn drawConfirmPopup(root: vaxis.Window, app: *app_mod.App) void {
         .force_push, .force_push_plain => "Force push",
         .delete_index_lock => "Git locked",
         .reset_patch => "Discard patch",
+        .remove_recent_repo => "Remove from recent list",
     };
     // Wrap the message so a long prompt (e.g. a worktree path) stays readable
     // inside the box instead of being clipped, growing the popup's height.
@@ -3437,10 +3492,11 @@ fn drawStagingSplit(root: vaxis.Window, app: *app_mod.App, x: u16, y: u16, w: u1
 fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
     fillRow(win, 0, st.bottom);
-    // The commit-graph viewer is a full overlay with its own footer, so the
-    // Commits-panel hints below it are just noise — keep the main bar clean while
-    // it's open (the normal footer returns automatically once it closes).
-    if (app.mode == .commit_graph) return;
+    // The commit-graph viewer and the recent-repositories switcher are full
+    // overlays with their own footers, so the panel hints below them are just
+    // noise — keep the main bar clean while they're open (the normal footer
+    // returns automatically once they close).
+    if (app.mode == .commit_graph or app.mode == .recent_repos) return;
     if (app.mode == .commit_prompt) {
         print(win, 0, 0, "tab switch field  -  enter commit/newline  -  esc cancel", st.bottom_accent);
         return;
