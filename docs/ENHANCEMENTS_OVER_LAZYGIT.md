@@ -76,11 +76,21 @@ index of those intentional differences.
   remote tracking ref happens to be stored locally.
   [Details](../README.md#a-force-push-that-never-dead-ends)
 
-- **Merge base (three dot) diffing.** Diffing mode can show
-  `git diff base...target`, only the target's own changes since divergence,
-  the pull request view. Composes with the reverse toggle; the panel title
-  always shows the active semantics. Addresses lazygit issue
-  [#3767](https://github.com/jesseduffield/lazygit/issues/3767).
+- **A diffing mode you can read off the screen.** One `W` marks the selected
+  ref as the base (no menu detour), a note explains the mode, the marked row
+  keeps a colored diamond, and the Diff title tracks every selection in
+  git's own notation with the real ref names (`main...feature/login`): order
+  is direction, dot count is mode. lazygit's diffing opens a menu first and
+  shows no marker and no comparison state.
+  [Details](../README.md#diffs-the-way-review-tools-show-them)
+
+- **Merge base (three dot) diffing, on by default for branches.** Diffing
+  mode can show `git diff base...target`, only the target's own changes
+  since divergence, the pull request view; it is the default whenever the
+  marked base is a branch, while commits and tags default to the plain two
+  dot comparison. Composes with the invert toggle. Addresses lazygit issue
+  [#3767](https://github.com/jesseduffield/lazygit/issues/3767), still open
+  there.
   [Details](../README.md#diffs-the-way-review-tools-show-them)
 
 - **First parent navigation in the commit graph.** `p` jumps to the current

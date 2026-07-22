@@ -273,15 +273,35 @@ sometimes a plain force, and sometimes only advice to pull first.
 
 ### Diffs the Way Review Tools Show Them
 
-Diffing mode (`W`) marks any ref and diffs another against it. On top of the
-usual two dot diff, Ziggity adds a merge base toggle: `git diff base...target`,
-only the target's own changes since the branches diverged. That is the view
-every pull request page shows, and the thing you actually want after merging
-`master` into your branch, when a plain two dot diff drowns you in changes
-that are not yours. Requested in lazygit as issue
-[#3767](https://github.com/jesseduffield/lazygit/issues/3767) and still open
-there; in Ziggity it is one menu item, it composes with the reverse toggle,
-and the panel title always shows which semantics are active.
+Comparing two refs is one keystroke: press `W` on any branch or commit and it
+becomes the diff base. A short note explains what just happened and how to
+leave, the marked row keeps a colored diamond while you navigate, and the
+Diff title tracks every move in git's own notation with the real ref names:
+`main..58e4886a`, `main...feature/login`. The order around the dots is the
+direction, the dot count is the mode, so the whole state is always readable
+off the screen. In lazygit the same feature opens a menu first and then keeps
+its state in your head: no marker on the marked ref, no indication of what is
+being compared against what.
+
+<p align="center">
+  <img src="docs/assets/ziggity-diffing.gif" alt="Diffing mode: one keystroke marks a base, the title tracks the comparison" width="900">
+</p>
+
+<p align="center"><i>One W marks the branch and explains itself. The diamond stays on the base; the title follows the selection with real ref names.</i></p>
+
+The dot count matters because the two views answer different questions.
+`base..selected` is the full difference between the two snapshots.
+`base...selected` diffs from the merge base: only the selected side's own
+changes since the histories diverged, which is what every pull request page
+shows, and what you actually want after merging `master` into your branch,
+when a plain two dot diff drowns you in changes that are not yours. That
+merge base view was requested in lazygit as issue
+[#3767](https://github.com/jesseduffield/lazygit/issues/3767) and is still
+open there. Ziggity not only has it, it defaults to it whenever the marked
+base is a branch, while commits and tags default to the plain two dot
+comparison, because comparing snapshots is usually what those mean. Press `W`
+again for the options: invert the direction, switch the dots, type an
+arbitrary ref, or exit.
 
 ### History Navigation with Intent
 
@@ -698,11 +718,17 @@ Selecting the Status panel shows an about screen with a live animation.
   drop, squash, fixup, edit, move, revert or copy commits, delete branches or
   tags, drop stashes, toggle commit files into a patch, or discard files from
   a commit.
-- Diffing mode (`W`): mark a commit or branch, select another, see `git diff`
-  between the two refs in the main panel. Reopen the menu to reverse the
-  direction (swap which ref the diff starts from), toggle a merge base diff
-  (`base...target`, only the target's own changes since it diverged, the
-  pull request view; the title shows `[base X ...]`), or exit.
+- Diffing mode (`W`): press `W` on a commit or branch to mark it as the base
+  (the row keeps a colored diamond marker and an explanatory note opens),
+  select another ref, and the main panel shows `git diff` between the two.
+  `W` again opens the options: invert the direction, switch the dots, enter
+  an arbitrary ref, or exit. The Diff title always shows the live state in
+  git's own notation with the real ref names (`main...feature/login`, with a
+  full SHA shortened to its short hash): `base..selected` is the full two
+  dot difference, `base...selected` the three dot view (only the selected
+  side's changes since the refs diverged, what a pull request shows), and
+  inverting swaps the order around the dots. Branch bases default to three
+  dots, commit and tag bases to two.
 - Stash menu (`s`): stash all, all plus untracked, staged only, just the
   selected file, or keep everything (snapshot into a stash, untracked files
   included, while leaving the working tree untouched). Each asks for an
@@ -770,9 +796,9 @@ essentials:
 - `@`: command log (recent git commands ziggity ran)
 - `ctrl+o`: copy the selected hash, branch or tag to the system clipboard
 - `o`: open the selected commit or branch on its remote host
-- `W`: diffing mode. Mark a ref, then select another to diff; reopen the menu
-  to reverse the direction, toggle a merge base diff, or exit (esc also
-  exits)
+- `W`: diffing mode. Marks the selected ref as the base; select another to
+  diff, `W` again for options (invert, switch the dots, arbitrary ref, exit;
+  esc also exits)
 - mouse: click a panel to focus; wheel to navigate and scroll; drag over the
   diff or a dialog to select and copy text
 - `/`: filter files by path live; enter accepts; esc clears
