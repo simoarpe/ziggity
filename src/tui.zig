@@ -9,6 +9,7 @@ const filetree = @import("filetree.zig");
 const model = @import("model.zig");
 const patch_mod = @import("patch.zig");
 const conflicts_mod = @import("conflicts.zig");
+const diffmode_mod = @import("diffmode.zig");
 const donut_mod = @import("donut.zig");
 const rebaseplan_mod = @import("rebaseplan.zig");
 const staging_mod = @import("staging.zig");
@@ -989,6 +990,16 @@ fn sidePanelHeights(body_h: u16, focused: model.Focus, accordion: bool, expanded
     };
 }
 
+/// Shorten a ref for the diffing title: a full hex SHA becomes its short hash,
+/// names get a generous cap so a truncated branch name cannot masquerade as
+/// the three-dot notation.
+fn diffTitleRef(ref: []const u8) []const u8 {
+    const is_sha = ref.len == 40 and for (ref) |ch| {
+        if (!std.ascii.isHex(ch)) break false;
+    } else true;
+    return ref[0..@min(ref.len, @as(usize, if (is_sha) 8 else 40))];
+}
+
 fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     // Start a fresh grapheme arena for this frame: multibyte cells written below
     // reference it, and it must stay valid until vaxis flushes (which copies the
@@ -1123,9 +1134,20 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         "Building patch (esc back)"
     else if (app.staging_active)
         (if (app.staging_staged_view) "Staging - staged" else "Staging - unstaged")
-    else if (app.diff_base) |diff_ref|
-        // The " ..." suffix marks three-dot (merge-base) mode.
-        (std.fmt.bufPrint(&app.main_title_buf, "Diff [base {s}{s}]", .{ diff_ref[0..@min(diff_ref.len, 16)], if (app.diff_three_dot) " ..." else "" }) catch "Diff [diffing]")
+    else if (app.diff_base) |diff_ref| blk: {
+        // git's own notation carries the whole state: the order around the
+        // dots is the direction (left = the diff's "from"), and the dot count
+        // is the mode (.. full difference, ... merge-base / only the selected
+        // side's changes). Both sides show their real ref; "selected" only
+        // appears when the cursor is somewhere without a diffable ref.
+        const dots: []const u8 = if (app.diff_three_dot) "..." else "..";
+        const base = diffTitleRef(diff_ref);
+        const target: []const u8 = if (diffmode_mod.selectedRefForDiff(app)) |t| diffTitleRef(t) else "selected";
+        break :blk (if (app.diff_reverse)
+            std.fmt.bufPrint(&app.main_title_buf, "Diff [{s}{s}{s}]", .{ target, dots, base })
+        else
+            std.fmt.bufPrint(&app.main_title_buf, "Diff [{s}{s}{s}]", .{ base, dots, target })) catch "Diff [diffing]";
+    }
     else if (app.contentFocus() == .branches and app.selectedBranchRefName() != null)
         // A selected branch/tag shows its commit graph, titled "Log".
         "Log"
@@ -1152,6 +1174,14 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         const main = if (app.staging_active and !app.staging_patch_mode) blk: {
             const staging_tabs = [_][]const u8{ "Unstaged", "Staged" };
             break :blk tabbedPanel(root, side_w, 0, main_w, body_h, null, &staging_tabs, @as(usize, if (app.staging_staged_view) 1 else 0), "", app.focus == .main, scroll);
+        } else if (app.diff_base != null) blk: {
+            // Diffing mode: the title carries the whole state (base..selected),
+            // so draw it in the warning colour — the same "a mode is active"
+            // signal the commit-filter indicator uses.
+            const frame = panelBorder(root, side_w, 0, main_w, body_h, app.focus == .main, scroll);
+            if (main_w >= 4 and body_h >= 3)
+                _ = drawTitleSpan(frame.raw, main_w, 2, main_title, styles().warning);
+            break :blk frame.inner;
         } else panel(root, side_w, 0, main_w, body_h, main_title, app.focus == .main, scroll);
         app.main_view_height = main.height;
         app.main_view_width = main.width;
@@ -1384,9 +1414,13 @@ const help_lines = [_][]const u8{
     "  ctrl+z         undo the last operation (reflog reset)",
     "  ctrl+o         copy the selected hash, branch or tag to the clipboard",
     "  o              open the selected commit or branch on its remote host",
-    "  W              diffing menu (mark a base ref, then compare another; the",
-    "                 menu reverses direction and toggles a three-dot merge-base",
-    "                 diff — only the target's own changes, GitHub-PR style)",
+    "  W              mark the selected ref as the diff base (the marked row",
+    "                 shows a diamond), then select any other ref to compare. W",
+    "                 again opens the options: invert the direction, switch the",
+    "                 dots, or exit. The Diff title shows the state: base..selected",
+    "                 is the full difference, base...selected only the selected",
+    "                 side's changes since diverging (the pull-request view).",
+    "                 Branches default to three dots, commits and tags to two.",
     "  f              fetch (async)",
     "  p              pull (async)",
     "  P              push (async)",
@@ -2449,6 +2483,10 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
         row += 1;
     }) {
         const branch = branches[idx];
+        // '*' = the checked-out branch; a coloured ◆ = the diffing-mode base,
+        // kept visible while navigating away to pick the other side (it wins
+        // the marker slot; the current branch keeps its green styling).
+        const diffbase = app.diff_base != null and std.mem.eql(u8, app.diff_base.?, branch.name);
         const marker: u8 = if (branch.current) '*' else ' ';
 
         const base = blk: {
@@ -2472,8 +2510,14 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
         }
 
         var buf: [512]u8 = undefined;
-        const line = std.fmt.bufPrint(&buf, "{c} {s}", .{ marker, branch.name }) catch branch.name;
-        end = printSpan(win, row, end, line, base);
+        if (diffbase) {
+            end = printGlyph(win, row, end, glyph_diff_base, withFg(base, ui_theme.header));
+            const line = std.fmt.bufPrint(&buf, " {s}", .{branch.name}) catch branch.name;
+            end = printSpan(win, row, end, line, base);
+        } else {
+            const line = std.fmt.bufPrint(&buf, "{c} {s}", .{ marker, branch.name }) catch branch.name;
+            end = printSpan(win, row, end, line, base);
+        }
 
         // The Remotes tab shows just the ref name. Local branches show their
         // tracking status: ahead/behind (per-branch), in-sync (✓), or gone — and
@@ -2852,9 +2896,12 @@ fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const m
     }) {
         const commit = commits[idx];
         // A leading marker flags commits copied to the cherry-pick clipboard;
-        // a 'B' flags the commit marked as the base for a rebase --onto.
+        // a 'B' flags the commit marked as the base for a rebase --onto; a ◆
+        // flags the diffing-mode base, so the marked ref stays visible while
+        // navigating away from it.
         const copied = app.isCommitCopied(commit.hash);
         const marked = app.isMarkedBase(commit.hash);
+        const diffbase = app.diff_base != null and std.mem.eql(u8, app.diff_base.?, commit.hash);
         const marker: u8 = if (marked) 'B' else if (copied) '*' else ' ';
 
         // The selection background/bold spans the whole row; the short hash is
@@ -2871,6 +2918,8 @@ fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const m
         // commits ahead of the remote stand out at a glance.
         const hash_fg = if (marked)
             ui_theme.warning
+        else if (diffbase)
+            ui_theme.header
         else if (copied)
             ui_theme.staged
         else if (commit.divergence == .ahead)
@@ -2890,8 +2939,15 @@ fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const m
             col = printSpan(win, row, col, " ", base);
         }
         var buf: [80]u8 = undefined;
-        const head = std.fmt.bufPrint(&buf, "{c}{s} ", .{ marker, commit.short_hash }) catch "";
-        col = printSpan(win, row, col, head, withFg(base, hash_fg));
+        if (diffbase and !marked) {
+            // The diffing base leads with a coloured diamond instead of a letter.
+            col = printGlyph(win, row, col, glyph_diff_base, withFg(base, ui_theme.header));
+            const head = std.fmt.bufPrint(&buf, "{s} ", .{commit.short_hash}) catch "";
+            col = printSpan(win, row, col, head, withFg(base, hash_fg));
+        } else {
+            const head = std.fmt.bufPrint(&buf, "{c}{s} ", .{ marker, commit.short_hash }) catch "";
+            col = printSpan(win, row, col, head, withFg(base, hash_fg));
+        }
 
         // The author's initials in a stable per-author colour, padded to a
         // two-cell column so the subjects still line up.
@@ -4054,6 +4110,7 @@ const glyph_uptodate = "✓"; // U+2713
 const glyph_collapsed = "▸"; // U+25B8
 const glyph_focus_pointer = "◀"; // U+25C0 (marks the help section for the current context)
 const glyph_expanded = "▾"; // U+25BE
+const glyph_diff_base = "◆"; // U+25C6 (the diffing-mode base marker)
 const indent_spaces = " " ** 32;
 
 /// Render ahead/behind status: `↓2↑3`, `✓` when in sync, or `(unpushed)`

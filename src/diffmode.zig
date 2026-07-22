@@ -45,9 +45,20 @@ pub fn diffAgainstSelected(app: *App) !void {
         try app.setMessage("select a commit or branch to diff", .{});
         return;
     };
+    // Smart default for the dot mode: a branch base almost always wants the
+    // three-dot "what did this branch do" view (the pull-request semantics),
+    // while commits and tags compare snapshots, where two-dot is the honest
+    // answer. For two commits on one line of history the outputs are identical
+    // anyway, so the two-dot default costs nothing. The title always shows the
+    // active dots, so the default is never hidden state.
+    const is_branch = !(app.branch_commits_active and app.contentFocus() == .branches) and
+        app.contentFocus() == .branches and
+        (app.branches_tab == .local or app.branches_tab == .remotes);
     clearDiffBase(app);
     app.diff_base = try app.allocator.dupe(u8, ref);
-    try app.setMessage("diffing from {s} - select another ref (esc to exit)", .{ref});
+    app.diff_three_dot = is_branch;
+    try app.setMessage("comparing using {s} as base - select another ref (W options, esc exits)", .{ref});
+    try openDiffingDialog(app);
     try app.updatePreview();
 }
 
@@ -64,8 +75,47 @@ pub fn diffAgainstRef(app: *App, ref: []const u8) !void {
     const owned = try app.allocator.dupe(u8, ref);
     clearDiffBase(app);
     app.diff_base = owned;
-    try app.setMessage("diffing from {s} - select another ref (esc to exit)", .{owned});
+    // A typed ref that names a known branch gets the branch default (three-dot).
+    app.diff_three_dot = app.localBranchExists(owned) or app.isRemoteBranchName(owned);
+    try app.setMessage("comparing using {s} as base - select another ref (W options, esc exits)", .{owned});
+    try openDiffingDialog(app);
     try app.updatePreview();
+}
+
+/// The explicit "you are now in diffing mode" note, shown as a dialog when a
+/// base is marked: names the base, spells out the two-dot/three-dot semantics
+/// and the invert option, and says how to leave. Enter/esc dismisses it; the
+/// compact hint stays in the bottom bar afterwards.
+fn openDiffingDialog(app: *App) !void {
+    const base = app.diff_base.?;
+    const dots: []const u8 = if (app.diff_three_dot) "..." else "..";
+    const active: []const u8 = if (app.diff_three_dot)
+        "only the selected side's own changes since the refs\n    diverged (the view a pull request shows)"
+    else
+        "the full difference between the two refs";
+    const other: []const u8 = if (app.diff_three_dot)
+        "switch to .. (the full difference between the two refs)"
+    else
+        "switch to ... (only the selected side's changes since\n               diverging - the view a pull request shows)";
+    app.allocator.free(app.op_command);
+    app.op_command = try std.fmt.allocPrint(app.allocator, "git diff {s}{s}<selected>", .{ base, dots });
+    app.allocator.free(app.op_summary);
+    app.op_summary = try app.allocator.dupe(u8, "Diffing mode");
+    app.allocator.free(app.op_output);
+    app.op_output = try std.fmt.allocPrint(app.allocator,
+        "Base marked: {s} (its row shows a \u{25C6})\n\n" ++
+        "Select any other commit, branch or tag; the Diff panel follows,\n" ++
+        "showing:\n\n" ++
+        "    git diff {s}{s}selected\n    {s}\n\n" ++
+        "Press W again for options:\n\n" ++
+        "    invert     swap the two sides (selected{s}{s})\n" ++
+        "    dots       {s}\n\n" ++
+        "Branches default to three dots, commits and tags to two.\n" ++
+        "Enter or esc closes this note; esc again exits diffing mode.", .{ base, base, dots, active, dots, base, other });
+    app.op_ok = true;
+    app.op_running = false;
+    app.op_scroll = 0;
+    app.mode = .operation;
 }
 
 /// Open the focused commit or branch on its remote's web host. Derives an https

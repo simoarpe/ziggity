@@ -582,14 +582,14 @@ const conflict_actions_menu = [_]MenuItem{
 /// The Diffing menu (W). The first two entries are always shown; the reverse /
 /// exit entries appear only while diffing is active.
 pub const diffing_menu_inactive = [_]MenuItem{
-    .{ .label = "Diff the selected ref", .action = .diff_against_selected },
-    .{ .label = "Enter a ref to diff against...", .action = .diff_enter_ref },
+    .{ .label = "Use the selected ref as the diff base", .action = .diff_against_selected },
+    .{ .label = "Type a ref to use as base...", .action = .diff_enter_ref },
 };
 pub const diffing_menu_active = [_]MenuItem{
-    .{ .label = "Diff the selected ref", .action = .diff_against_selected },
-    .{ .label = "Enter a ref to diff against...", .action = .diff_enter_ref },
-    .{ .label = "Reverse diff direction", .action = .diff_reverse_direction },
-    .{ .label = "Toggle merge-base diff (three-dot: only the target's own changes)", .action = .diff_toggle_three_dot },
+    .{ .label = "Use the selected ref as the new base", .action = .diff_against_selected },
+    .{ .label = "Type a ref to use as base...", .action = .diff_enter_ref },
+    .{ .label = "Invert the direction (swap base and selected)", .action = .diff_reverse_direction },
+    .{ .label = "Switch between .. and ... (full diff / only selected's changes)", .action = .diff_toggle_three_dot },
     .{ .label = "Exit diff mode", .action = .diff_exit },
 };
 
@@ -1879,7 +1879,7 @@ pub const App = struct {
     // outlive the flush, like every other cell-backing string (paths, diffs).
     branches_title_buf: [96]u8 = undefined,
     commits_title_buf: [80]u8 = undefined,
-    main_title_buf: [64]u8 = undefined,
+    main_title_buf: [128]u8 = undefined,
     // Independent view scroll for the side list panels, so the mouse wheel
     // scrolls the view without moving the selection. The view re-anchors to the
     // selection only when the *selection* changes (keyboard/click/refresh), not
@@ -3121,7 +3121,14 @@ pub const App = struct {
             .undo => try self.startUndoConfirm(),
             .copy_to_clipboard => try self.requestClipboardCopy(),
             .open_browser => try diffmode_mod.openSelectionInBrowser(self),
-            .diff_mark => try diffmode_mod.startDiffingMenu(self),
+            // W: with no base yet and a ref under the cursor, mark it right away
+            // (the common case, no menu detour). W again, or W somewhere without
+            // a markable ref, opens the options menu (reverse, three-dot, enter
+            // an arbitrary ref, exit).
+            .diff_mark => if (self.diff_base == null and diffmode_mod.selectedRefForDiff(self) != null)
+                try diffmode_mod.diffAgainstSelected(self)
+            else
+                try diffmode_mod.startDiffingMenu(self),
             .patch_menu => try self.startPatchMenu(),
             .conflict_menu => try self.startConflictActionsMenu(),
             .stage_all => try staging_mod.toggleAllStaged(self),
@@ -4368,7 +4375,7 @@ pub const App = struct {
     }
 
     /// Whether `name` is a remote-tracking branch (e.g. `origin/feature`).
-    fn isRemoteBranchName(self: *const App, name: []const u8) bool {
+    pub fn isRemoteBranchName(self: *const App, name: []const u8) bool {
         for (self.data.remote_branches) |b| {
             if (std.mem.eql(u8, b.name, name)) return true;
         }
@@ -4376,7 +4383,7 @@ pub const App = struct {
     }
 
     /// Whether a local branch named `name` exists.
-    fn localBranchExists(self: *const App, name: []const u8) bool {
+    pub fn localBranchExists(self: *const App, name: []const u8) bool {
         for (self.data.branches) |b| {
             if (std.mem.eql(u8, b.name, name)) return true;
         }
@@ -7079,15 +7086,22 @@ pub const App = struct {
             .diff_enter_ref => try self.startTextPrompt(.diff_ref),
             .diff_reverse_direction => {
                 self.diff_reverse = !self.diff_reverse;
-                try self.setMessage("reversed diff direction", .{});
+                // Teach the order with git's own notation: the left side of the
+                // dots is the diff's "from".
+                const base = self.diff_base orelse "base";
+                const dots: []const u8 = if (self.diff_three_dot) "..." else "..";
+                if (self.diff_reverse)
+                    try self.setMessage("reversed: now selected{s}{s}", .{ dots, base })
+                else
+                    try self.setMessage("reversed: now {s}{s}selected", .{ base, dots });
                 try self.updatePreview();
             },
             .diff_toggle_three_dot => {
                 self.diff_three_dot = !self.diff_three_dot;
                 if (self.diff_three_dot)
-                    try self.setMessage("three-dot (merge-base) diff on", .{})
+                    try self.setMessage("three-dot: only the selected side's changes since the refs diverged", .{})
                 else
-                    try self.setMessage("three-dot diff off", .{});
+                    try self.setMessage("two-dot: the full difference between the two refs", .{});
                 try self.updatePreview();
             },
             .diff_exit => {
@@ -9744,6 +9758,82 @@ test "bisect menu reflects whether a bisect is in progress" {
     try std.testing.expectEqual(@as(usize, bisect_actions_menu.len), app.active_menu.?.items.len);
 }
 
+test "W marks the selected ref directly; W again opens the options menu" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    const w = vaxis.Key{ .codepoint = 'W' };
+
+    // On a panel with no markable ref, W falls back to the (inactive) menu.
+    app.focus = .status;
+    try app.handleKey(w);
+    try std.testing.expectEqual(Mode.menu, app.mode);
+    try std.testing.expectEqual(@as(usize, diffing_menu_inactive.len), app.active_menu.?.items.len);
+    app.closeMenu();
+    app.mode = .normal;
+
+    // On a commit, the first W marks it as the base (no menu) and opens the
+    // explanatory dialog naming the base and the ../... semantics.
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("aaaaaaa"), .short_hash = @constCast("aaa"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("first") },
+    };
+    app.data.commits = &commits;
+    app.focus = .commits;
+    app.commit_index = 0;
+    try app.handleKey(w);
+    try std.testing.expectEqual(Mode.operation, app.mode); // the diffing-mode note
+    try std.testing.expectEqualStrings("aaaaaaa", app.diff_base.?);
+    try std.testing.expect(!app.diff_three_dot); // a commit base defaults to two-dot
+    try std.testing.expect(std.mem.indexOf(u8, app.op_output, "Base marked: aaaaaaa") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app.op_output, "git diff aaaaaaa..selected") != null);
+
+    // Dismissing the note keeps diffing mode active.
+    const esc = vaxis.Key{ .codepoint = vaxis.Key.escape };
+    try app.handleKey(esc);
+    try std.testing.expectEqual(Mode.normal, app.mode);
+    try std.testing.expect(app.diff_base != null);
+
+    // The second W opens the options menu (invert, dots toggle, exit).
+    try app.handleKey(w);
+    try std.testing.expectEqual(Mode.menu, app.mode);
+    try std.testing.expectEqual(@as(usize, diffing_menu_active.len), app.active_menu.?.items.len);
+}
+
+test "diff dot default: branches get three-dot, commits two-dot" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // A branch base defaults to the three-dot (pull request) view.
+    var branches = [_]model.Branch{.{ .name = @constCast("feature") }};
+    app.data.branches = &branches;
+    app.focus = .branches;
+    app.branches_tab = .local;
+    app.branch_index = 0;
+    try diffmode_mod.diffAgainstSelected(&app);
+    try std.testing.expectEqualStrings("feature", app.diff_base.?);
+    try std.testing.expect(app.diff_three_dot);
+
+    // A commit base defaults to the plain two-dot difference.
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("bbbbbbb"), .short_hash = @constCast("bbb"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("x") },
+    };
+    app.data.commits = &commits;
+    app.focus = .commits;
+    app.commit_index = 0;
+    try diffmode_mod.diffAgainstSelected(&app);
+    try std.testing.expectEqualStrings("bbbbbbb", app.diff_base.?);
+    try std.testing.expect(!app.diff_three_dot);
+
+    // A typed ref that names a known branch also gets three-dot.
+    try diffmode_mod.diffAgainstRef(&app, "feature");
+    try std.testing.expect(app.diff_three_dot);
+    try diffmode_mod.diffAgainstRef(&app, "v1.0");
+    try std.testing.expect(!app.diff_three_dot);
+}
+
 test "diffing mode marks a ref base and clears cleanly" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -10229,9 +10319,12 @@ test "esc steps out of a drill before exiting diffing mode" {
     const esc = vaxis.Key{ .codepoint = vaxis.Key.escape };
 
     // Diffing is active (a base is marked) AND we have drilled into a branch's
-    // commit list from the Branches panel.
+    // commit list from the Branches panel. Marking opens the explanatory note;
+    // dismiss it first.
     try diffmode_mod.diffAgainstRef(&app, "main");
     try std.testing.expect(app.diff_base != null);
+    try app.handleKey(esc); // close the diffing-mode note
+    try std.testing.expectEqual(Mode.normal, app.mode);
     app.focus = .branches;
     app.branch_commits = &.{};
     app.branch_commits_active = true;
