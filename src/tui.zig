@@ -1518,7 +1518,6 @@ const help_lines = [_][]const u8{
     "  S              autosquash the fixups above",
     "  B              mark a base, then rebase a branch onto it",
     "  G              open the new pull/merge request page",
-    "  W              diffing menu (compare the selection against a marked base)",
     "  /              filter the log by message, author or path (esc clears)",
     "  b              bisect menu (start, then mark good/bad/skip/reset)",
     "  ctrl+p         custom patch menu (apply, remove from commit, reset)",

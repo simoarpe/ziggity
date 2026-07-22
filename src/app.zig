@@ -2975,12 +2975,6 @@ pub const App = struct {
                     try self.updatePreview();
                     return;
                 }
-                if (self.diff_base != null) {
-                    diffmode_mod.clearDiffBase(self);
-                    try self.setMessage("exited diffing mode", .{});
-                    try self.updatePreview();
-                    return;
-                }
                 if (self.fileFilterActive()) {
                     try self.clearFileFilter();
                     return;
@@ -3009,6 +3003,15 @@ pub const App = struct {
                     // Inside a worktree/submodule we drilled into: walk back out
                     // to the parent repository.
                     try self.requestReRootBack();
+                } else if (self.diff_base != null) {
+                    // Nothing left to back out of, so esc now exits diffing mode.
+                    // This comes AFTER the drill-downs above so that, while
+                    // diffing, esc first steps out of a branch's commit list (or
+                    // any other drill) one level at a time, rather than dropping
+                    // the whole mode on the first press.
+                    diffmode_mod.clearDiffBase(self);
+                    try self.setMessage("exited diffing mode", .{});
+                    try self.updatePreview();
                 } else {
                     // Top level: nothing to back out of. Esc does not quit.
                     try self.setMessage("press q to quit", .{});
@@ -10216,6 +10219,32 @@ test "esc never quits and walks back one level at a time" {
     try app.handleKey(esc);
     try std.testing.expectEqual(model.Focus.files, app.focus);
     try std.testing.expect(app.running);
+}
+
+test "esc steps out of a drill before exiting diffing mode" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    const esc = vaxis.Key{ .codepoint = vaxis.Key.escape };
+
+    // Diffing is active (a base is marked) AND we have drilled into a branch's
+    // commit list from the Branches panel.
+    try diffmode_mod.diffAgainstRef(&app, "main");
+    try std.testing.expect(app.diff_base != null);
+    app.focus = .branches;
+    app.branch_commits = &.{};
+    app.branch_commits_active = true;
+
+    // First esc steps out of the drill (back to the branch list) and KEEPS
+    // diffing mode — it must not drop the whole mode on the first press.
+    try app.handleKey(esc);
+    try std.testing.expect(!app.branch_commits_active);
+    try std.testing.expect(app.diff_base != null);
+
+    // Second esc, with nothing left to back out of, exits diffing.
+    try app.handleKey(esc);
+    try std.testing.expect(app.diff_base == null);
 }
 
 test "commit works from the staging view but not the generic diff view" {
