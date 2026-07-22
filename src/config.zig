@@ -49,7 +49,7 @@ pub const KeyMap = struct {
     commit: Binding = .{ .codepoint = 'c' },
     amend: Binding = .{ .codepoint = 'A' },
     cherry_pick: Binding = .{ .codepoint = 'c' },
-    reset_cherry_pick: Binding = .{ .codepoint = 'r', .ctrl = true },
+    reset_cherry_pick: Binding = .{ .codepoint = 'C' },
     tag_commit: Binding = .{ .codepoint = 'T' },
     open_pull_request: Binding = .{ .codepoint = 'G' },
     move_to_new_branch: Binding = .{ .codepoint = 'N' },

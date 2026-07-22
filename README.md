@@ -694,7 +694,7 @@ Selecting the Status panel shows an about screen with a live animation.
   selected one, mark each action (with range select to mark or reorder many
   at once), then run it as one rebase.
 - Cherry picking: copy commits to a clipboard (`c`), paste onto HEAD (`V`),
-  clear (`ctrl+r`).
+  clear (`C`).
 - Custom patch building (`ctrl+p`): toggle files into a patch (`space` in a
   commit's file list), then apply it to the working tree (forward or
   reverse), remove it from its source commit, or reset it.
@@ -851,7 +851,7 @@ essentials:
 - `space` / `n` / `N` (Commits/Reflog): checkout (detached) / branch from it
   / move commits to a new branch
 - `T` / `a` (Commits): tag the commit / change its author
-- `y` / `ctrl+r`: copy menu / clear the cherry pick selection
+- `y` / `C`: copy menu / clear the cherry pick selection
 - `i` (Commits): interactive rebase plan editor
 - `ctrl+l` (Commits): commit graph viewer (`j` and `k` move, `@` HEAD, `p`
   first parent, `H` and `L` pan, `a` toggle all branches, `ctrl+o` copy,
@@ -1009,7 +1009,7 @@ Key values may be a single character or one of `space`, `enter`, `tab`,
 `command_output = silent`; the view refreshes afterward):
 
 ```ini
-command.C = git commit --amend --no-edit
+command.E = git commit --amend --no-edit
 command.ctrl+t = ctags -R .
 ```
 

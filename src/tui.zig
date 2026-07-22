@@ -1541,7 +1541,7 @@ const help_lines = [_][]const u8{
     "  x              verify the commit's GPG signature (result in a dialog)",
     "  c              copy the commit (for cherry-pick)",
     "  V              paste — cherry-pick the copied commit onto HEAD",
-    "  ctrl+r         clear the cherry-pick copy selection",
+    "  C              clear the cherry-pick copy selection",
     "  y              copy menu: commit hash, subject or author",
     "  d              drop the commit (interactive rebase)",
     "  s              squash down (interactive rebase)",
