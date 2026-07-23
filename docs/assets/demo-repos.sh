@@ -181,5 +181,38 @@ cat > /tmp/zrecent/state/ziggity/recent <<'REOF'
 /tmp/zrecent/sandbox/raytracer-zig
 REOF
 
-echo "demo repos ready: /tmp/zdemo-commit, /tmp/zdemo-co/clone, /tmp/zdemo-fetch, /tmp/zhero/ziggity, /tmp/zdemo-auth, /tmp/zdemo-graph, /tmp/zrecent"
+# --- /tmp/zword: the word-level diff demo (word-diff.tape) ------------------
+# A small file with a few intra-line edits (a number, an enum tag, one word in
+# a string) so the diff shows changed *words* highlighted within otherwise
+# unchanged lines, not whole-line repaints.
+rm -rf /tmp/zword
+mkdir /tmp/zword
+cd /tmp/zword
+git init -q -b main
+git config user.email demo@ziggity.dev
+git config user.name "Demo"
+cat > config.zig <<'ZEOF'
+const timeout_seconds = 30;
+const max_retries = 3;
+pub fn connect(host: []const u8) !Conn {
+    return dial(host, timeout_seconds, .tcp);
+}
+pub fn shutdown() void {
+    log.info("closing all connections gracefully", .{});
+}
+ZEOF
+git add .
+git commit -q -m "Add connection config"
+cat > config.zig <<'ZEOF'
+const timeout_seconds = 45;
+const max_retries = 3;
+pub fn connect(host: []const u8) !Conn {
+    return dial(host, timeout_seconds, .quic);
+}
+pub fn shutdown() void {
+    log.info("closing all sockets gracefully", .{});
+}
+ZEOF
+
+echo "demo repos ready: /tmp/zdemo-commit, /tmp/zdemo-co/clone, /tmp/zdemo-fetch, /tmp/zhero/ziggity, /tmp/zdemo-auth, /tmp/zdemo-graph, /tmp/zrecent, /tmp/zword"
 echo "for credentials.tape, also start:  python3 /tmp/auth401.py &"

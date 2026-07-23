@@ -303,6 +303,20 @@ comparison, because comparing snapshots is usually what those mean. Press `W`
 again for the options: invert the direction, switch the dots, type an
 arbitrary ref, or exit.
 
+### Word-Level Diff Highlighting
+
+When a line changes, Ziggity does not just paint the whole old line red and the
+whole new line green and leave you to spot the difference. It compares the two
+lines word by word and gives only the parts that actually changed a stronger
+background, a dark red behind removed words and a dark green behind added ones,
+the way delta, GitHub and VS Code do. Change `30` to `45` on a long line and
+just `30` and `45` light up over the normal line color. The two-line `-`/`+`
+layout stays, so nothing is lost, but your eye goes straight to what moved.
+lazygit colors whole lines only. It is on by default (`highlight_word_diff`),
+and the two backgrounds are themeable (`word_add_bg`, `word_del_bg`).
+
+![Word-level diff highlighting](docs/screenshots/20-word-diff.png)
+
 ### History Navigation with Intent
 
 The commit graph (`ctrl+l`) is the real `git log --graph`, in git's own

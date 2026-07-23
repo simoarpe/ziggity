@@ -144,6 +144,11 @@ pub const Theme = struct {
     warning: u8 = 11,
     added: u8 = 2,
     removed: u8 = 9,
+    /// Backgrounds for the changed words inside a diff line (word-level
+    /// highlight): a dark green behind added words, a dark red behind removed
+    /// ones, so just the part that changed stands out over the line's colour.
+    word_add_bg: u8 = 22,
+    word_del_bg: u8 = 52,
     hunk: u8 = 14,
     header: u8 = 13,
     /// Commit short hashes in the log (the classic `git log --oneline` yellow).
@@ -259,6 +264,10 @@ pub const Config = struct {
     /// Colour the Conventional-Commits prefix (`type(scope)!:`) in the commit
     /// list — type in accent, scope muted, breaking `!` in the removed colour.
     highlight_conventional_commits: bool = true,
+    /// In a changed `-`/`+` line pair, emphasize (bold) just the words that
+    /// differ, delta/GitHub style, on top of the line-level colour. Disable for
+    /// plain whole-line diff colouring.
+    highlight_word_diff: bool = true,
     /// Run the repo's `prepare-commit-msg` hook when the commit dialog opens and
     /// seed the message fields from its output (e.g. a branch-derived ticket
     /// prefix). Matches interactive git; disable to skip the hook at open time.

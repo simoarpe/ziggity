@@ -1790,8 +1790,8 @@ pub const App = struct {
     /// stays under the cursor. Like `select_top_commit_pending`, it overrides the
     /// keep-by-hash restore (a reorder rewrites the moved commit's hash, so it
     /// could not be re-found anyway). Set when the reorder is requested and
-    /// applied only on success (a failed/conflicting rebase clears it), matching
-    /// how lazygit moves the selection only when the reorder actually lands.
+    /// applied only on success, so the selection moves only when the reorder
+    /// actually lands (a failed/conflicting rebase clears it).
     select_commit_pending: ?usize = null,
     remote_index: usize = 0,
     /// The Remotes tab is two-level (like the upstream): a list of remotes, and

@@ -93,6 +93,14 @@ index of those intentional differences.
   there.
   [Details](../README.md#diffs-the-way-review-tools-show-them)
 
+- **Word-level diff highlighting.** Within a changed `-`/`+` line pair, the
+  words that actually differ get a stronger background (dark red behind removed,
+  dark green behind added), delta and GitHub style, so a one-token change does
+  not read as two fully repainted lines. The two-line layout is kept. lazygit
+  colors whole lines only. On by default (`highlight_word_diff`); the two
+  backgrounds are themeable (`word_add_bg`, `word_del_bg`).
+  [Details](../README.md#word-level-diff-highlighting)
+
 - **First parent navigation in the commit graph.** `p` jumps to the current
   commit's first parent via a preloaded parent map, so walking the mainline
   of a merge heavy history is instant. Addresses lazygit issue

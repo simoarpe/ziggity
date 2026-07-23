@@ -19,6 +19,7 @@ pub const stash = @import("stash.zig");
 pub const staging = @import("staging.zig");
 pub const textmatch = @import("textmatch.zig");
 pub const tui = @import("tui.zig");
+pub const worddiff = @import("worddiff.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

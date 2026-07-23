@@ -14,9 +14,14 @@ const donut_mod = @import("donut.zig");
 const rebaseplan_mod = @import("rebaseplan.zig");
 const staging_mod = @import("staging.zig");
 const commitgraph_mod = @import("commitgraph.zig");
+const worddiff = @import("worddiff.zig");
 
 /// Active theme, set from config at startup and read by `styles()`.
 var ui_theme: config_mod.Theme = .{};
+
+/// Whether to emphasize the changed words within a `-`/`+` line pair (delta
+/// style). Set from config at startup; toggle off for plain line-level diffs.
+var word_diff_enabled: bool = true;
 
 const Event = union(enum) {
     key_press: vaxis.Key,
@@ -335,6 +340,8 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     const io = init.io;
     const allocator = init.gpa;
     ui_theme = app.config.theme;
+    word_diff_enabled = app.config.highlight_word_diff;
+    defer deinitWordCache();
 
     var tty_buffer: [1024]u8 = undefined;
     // Opening /dev/tty (+ switching it to raw mode) fails when there's no
@@ -3338,6 +3345,60 @@ var last_diff_scroll: usize = 0;
 var last_diff_hscroll: u16 = 0;
 var last_diff_spinner: bool = false;
 
+// Word-level (intra-line) diff emphasis, cached per diff text so `worddiff.build`
+// runs once per diff rather than every frame (scrolling a large diff stays cheap).
+// Keyed on slice identity + length; a tiny ring covers the main preview and both
+// staging panes at once. Freed at shutdown via `deinitWordCache`.
+const WordCacheEntry = struct {
+    addr: usize = 0,
+    len: usize = 0,
+    used: u64 = 0,
+    gpa: ?std.mem.Allocator = null,
+    lines: []worddiff.Emph = &.{},
+};
+var word_cache: [4]WordCacheEntry = .{ .{}, .{}, .{}, .{} };
+var word_clock: u64 = 0;
+var word_empty: [0]worddiff.Emph = .{};
+
+/// Per-line word-emphasis for `text`, computed once and cached. Best-effort: an
+/// allocation failure just yields no emphasis (diffs render as before).
+fn wordEmphasis(gpa: std.mem.Allocator, text: []const u8) []worddiff.Emph {
+    if (!word_diff_enabled or text.len == 0) return word_empty[0..];
+    const addr = @intFromPtr(text.ptr);
+    word_clock +%= 1;
+    for (&word_cache) |*e| {
+        if (e.gpa != null and e.addr == addr and e.len == text.len) {
+            e.used = word_clock;
+            return e.lines;
+        }
+    }
+    var victim: *WordCacheEntry = &word_cache[0];
+    for (&word_cache) |*e| {
+        if (e.gpa == null) {
+            victim = e;
+            break;
+        }
+        if (e.used < victim.used) victim = e;
+    }
+    if (victim.gpa) |g| worddiff.free(g, victim.lines);
+    const lines = worddiff.build(gpa, text) catch word_empty[0..];
+    victim.* = .{ .addr = addr, .len = text.len, .used = word_clock, .gpa = gpa, .lines = lines };
+    return lines;
+}
+
+fn emphFor(lines: []worddiff.Emph, idx: usize) worddiff.Emph {
+    return if (idx < lines.len) lines[idx] else .{};
+}
+
+/// Release the word-emphasis cache (module-level, so it outlives the render loop
+/// otherwise). Called from `run`'s teardown.
+pub fn deinitWordCache() void {
+    for (&word_cache) |*e| {
+        if (e.gpa) |g| worddiff.free(g, e.lines);
+        e.* = .{};
+    }
+}
+
 fn refreshOnDiffChange(vx: *vaxis.Vaxis, app: *const app_mod.App) void {
     const addr = @intFromPtr(app.diff.ptr);
     const spinner = app.previewSpinnerVisible();
@@ -3372,6 +3433,7 @@ fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
     }
 
     const text = app.diff;
+    const emph_lines = wordEmphasis(app.allocator, text);
     var lines = std.mem.splitScalar(u8, text, '\n');
     var skipped: usize = 0;
     while (skipped < app.main_scroll) : (skipped += 1) {
@@ -3396,7 +3458,8 @@ fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
                 sel_hi = if (abs_line == s.el) selScreenCol(s.ec, h_off, win.width) else win.width;
             }
         }
-        printAnsi(win, row, line, styles().normal, sel_lo, sel_hi, h_off);
+        const em = emphFor(emph_lines, abs_line);
+        printAnsiEmph(win, row, line, styles().normal, sel_lo, sel_hi, h_off, em.spans, if (em.added) ui_theme.word_add_bg else ui_theme.word_del_bg);
     }
 }
 
@@ -3429,6 +3492,7 @@ fn drawStagingPane(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
     const h_off: u16 = if (active) app.main_hscroll else 0;
     // Mouse text selection in this pane (if any), highlighted per column.
     const sel = app.diffSelectionRangeFor(pane);
+    const emph_lines = wordEmphasis(app.allocator, text);
     var lines = std.mem.splitScalar(u8, text, '\n');
     var skipped: usize = 0;
     while (skipped < scroll) : (skipped += 1) {
@@ -3460,8 +3524,10 @@ fn drawStagingPane(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
             }
         }
         // The staging diff is plain (--no-color) text; printAnsi renders it with
-        // `style` as the base and the selected column span highlighted.
-        printAnsi(win, row, line, style, sel_lo, sel_hi, h_off);
+        // `style` as the base, the selected column span highlighted, and the
+        // changed words within the line given a stronger background.
+        const em = emphFor(emph_lines, abs_line);
+        printAnsiEmph(win, row, line, style, sel_lo, sel_hi, h_off, em.spans, if (em.added) ui_theme.word_add_bg else ui_theme.word_del_bg);
     }
 }
 
@@ -3908,6 +3974,13 @@ fn drawDialogRow(win: vaxis.Window, app: *app_mod.App, win_row: u16, text: []con
 /// whose on-screen column falls in `[sel_lo, sel_hi)` get the selection
 /// background (mouse text selection); pass an empty range (0,0) for none.
 fn printAnsi(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, sel_lo: u16, sel_hi: u16, h_off: u16) void {
+    printAnsiEmph(win, row, line, base, sel_lo, sel_hi, h_off, &.{}, 0);
+}
+
+/// Like `printAnsi`, plus word-level emphasis: cells whose unscrolled column
+/// falls in `emph` get `emph_bg` as their background, to make the changed words
+/// in a diff line stand out. The mouse selection background takes precedence.
+fn printAnsiEmph(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, sel_lo: u16, sel_hi: u16, h_off: u16, emph: []const worddiff.Span, emph_bg: u8) void {
     if (row >= win.height) return;
     var style = base;
     var vis_col: u16 = 0; // column in the unscrolled line
@@ -3915,11 +3988,19 @@ fn printAnsi(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, s
     // Emit one cell of unscrolled column `vc`, shifted left by `h`; skip it if
     // it falls off the left (vc < h) or right edge.
     const emit = struct {
-        fn f(w: vaxis.Window, vc: u16, h: u16, r: u16, g: []const u8, width: u16, s: vaxis.Style, lo: u16, hi: u16) void {
+        fn f(w: vaxis.Window, vc: u16, h: u16, r: u16, g: []const u8, width: u16, s: vaxis.Style, lo: u16, hi: u16, em: []const worddiff.Span, ebg: u8) void {
             if (vc < h) return;
             const c = vc - h;
             if (c >= w.width) return;
             var cell_style = s;
+            // Word-level highlight background for a changed word...
+            for (em) |sp| {
+                if (vc >= sp.start and vc < sp.end) {
+                    cell_style.bg = .{ .index = ebg };
+                    break;
+                }
+            }
+            // ...but an active mouse text selection overrides it.
             if (c >= lo and c < hi) cell_style.bg = .{ .index = ui_theme.selected_bg };
             w.writeCell(c, r, .{ .char = .{ .grapheme = g, .width = @intCast(width) }, .style = cell_style });
         }
@@ -3947,14 +4028,14 @@ fn printAnsi(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, s
         if (byte == '\t') {
             var spaces: u8 = 0;
             while (spaces < 4 and vis_col < last_col) : (spaces += 1) {
-                emit(win, vis_col, h_off, row, " ", 1, style, sel_lo, sel_hi);
+                emit(win, vis_col, h_off, row, " ", 1, style, sel_lo, sel_hi, emph, emph_bg);
                 vis_col += 1;
             }
             i += 1;
             continue;
         }
         const dc = decodeCell(win, line, i);
-        emit(win, vis_col, h_off, row, dc.grapheme, dc.width, style, sel_lo, sel_hi);
+        emit(win, vis_col, h_off, row, dc.grapheme, dc.width, style, sel_lo, sel_hi, emph, emph_bg);
         vis_col += dc.width;
         i += dc.len;
     }
