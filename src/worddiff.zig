@@ -4,15 +4,20 @@
 //!
 //! `build` takes a full unified diff (git's ANSI-coloured preview text or the
 //! plain `--no-color` staging text), pairs each block of removed lines with the
-//! added lines that follow, and returns, per diff line, the visual-column spans
-//! to emphasize. Columns match `tui.printAnsi`'s rendering: ANSI stripped, tabs
-//! expanded to four columns, and the leading `+`/`-` marker counted as column 0
-//! (so content starts at column 1). Everything is best-effort: on any allocation
-//! failure or a pair too dissimilar to refine usefully, the line simply gets no
-//! spans and renders as before.
+//! added lines that follow, and returns, per diff line, the spans to emphasize.
+//!
+//! Spans are in CHARACTER ORDINALS, not visual columns: one unit per rendered
+//! codepoint, matching how `tui.printAnsiEmph` draws (one cell per codepoint via
+//! `decodeCell`). Counting characters rather than widths keeps the emphasis
+//! aligned through wide characters (CJK, emoji = 2 columns), combining marks and
+//! zero-width codepoints, since both sides step character by character whatever
+//! each one's on-screen width. ANSI is stripped, tabs expand to four, and the
+//! leading `+`/`-` marker is ordinal 0 (so content starts at ordinal 1).
+//! Everything is best-effort: on any allocation failure or a pair too dissimilar
+//! to refine usefully, the line simply gets no spans and renders as before.
 const std = @import("std");
 
-/// A half-open visual-column range `[start, end)` to emphasize on one line.
+/// A half-open character-ordinal range `[start, end)` to emphasize on one line.
 pub const Span = struct { start: u16, end: u16 };
 
 /// Per-line emphasis: which changed-word column spans to highlight, and whether
@@ -124,24 +129,46 @@ fn refinePair(gpa: std.mem.Allocator, old: []const u8, new: []const u8, out_old:
     };
 }
 
-const Tok = struct { start: u16, end: u16 };
+/// A token: `byte_start..byte_end` locates its text in the content (for equality
+/// comparison); `col_start..col_end` is its span in visual columns. The two
+/// differ whenever the content holds multibyte UTF-8 (e.g. an em dash), which
+/// takes several bytes but one screen column, so spans must track columns to
+/// line up with the renderer.
+const Tok = struct { col_start: u16, col_end: u16, byte_start: u32, byte_end: u32 };
 
 /// Split content into tokens: runs of word chars ([A-Za-z0-9_]), runs of
-/// whitespace, and every other byte on its own. Column == byte index (content is
-/// already tab-expanded and ANSI-free, so bytes map to visual columns for ASCII).
+/// whitespace, and every other codepoint on its own. Content is tab-expanded and
+/// ANSI-free; columns advance one per codepoint to match the renderer, which
+/// draws one cell per character.
 fn tokenize(gpa: std.mem.Allocator, s: []const u8) ![]Tok {
     var toks: std.ArrayList(Tok) = .empty;
     errdefer toks.deinit(gpa);
-    var i: usize = 0;
+    var i: usize = 0; // byte index
+    var col: u16 = 0; // visual column
     while (i < s.len) {
-        const start = i;
+        const byte_start = i;
+        const col_start = col;
         const class = charClass(s[i]);
         if (class == .word or class == .space) {
-            while (i < s.len and charClass(s[i]) == class) i += 1;
+            // A run of ASCII word/space (a multibyte lead byte is >= 0x80, so it
+            // classifies as punct and ends the run here).
+            while (i < s.len and charClass(s[i]) == class) {
+                i += 1;
+                col += 1;
+            }
         } else {
-            i += 1; // punctuation: one byte per token
+            // One codepoint (ASCII punctuation or a whole multibyte char) is one
+            // token and one column.
+            const l = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+            i += @min(@as(usize, l), s.len - i);
+            col += 1;
         }
-        try toks.append(gpa, .{ .start = @intCast(@min(start, std.math.maxInt(u16))), .end = @intCast(@min(i, std.math.maxInt(u16))) });
+        try toks.append(gpa, .{
+            .col_start = col_start,
+            .col_end = col,
+            .byte_start = @intCast(byte_start),
+            .byte_end = @intCast(i),
+        });
     }
     return toks.toOwnedSlice(gpa);
 }
@@ -187,7 +214,7 @@ fn lcsChanged(gpa: std.mem.Allocator, a_src: []const u8, b_src: []const u8, a: [
         if (tokEql(a_src, b_src, a[i], b[j])) {
             a_changed[i] = false;
             b_changed[j] = false;
-            shared += a[i].end - a[i].start;
+            shared += a[i].col_end - a[i].col_start;
             i += 1;
             j += 1;
         } else if (dp[(i + 1) * w + j] >= dp[i * w + (j + 1)]) {
@@ -200,7 +227,7 @@ fn lcsChanged(gpa: std.mem.Allocator, a_src: []const u8, b_src: []const u8, a: [
 }
 
 fn tokEql(a_src: []const u8, b_src: []const u8, a: Tok, b: Tok) bool {
-    return std.mem.eql(u8, a_src[a.start..a.end], b_src[b.start..b.end]);
+    return std.mem.eql(u8, a_src[a.byte_start..a.byte_end], b_src[b.byte_start..b.byte_end]);
 }
 
 /// Merge consecutive changed tokens into marker-offset (+1) visual-column spans.
@@ -213,10 +240,10 @@ fn spansFromChanged(gpa: std.mem.Allocator, toks: []const Tok, changed: []const 
             k += 1;
             continue;
         }
-        const start = toks[k].start;
-        var end = toks[k].end;
+        const start = toks[k].col_start;
+        var end = toks[k].col_end;
         k += 1;
-        while (k < toks.len and changed[k]) : (k += 1) end = toks[k].end;
+        while (k < toks.len and changed[k]) : (k += 1) end = toks[k].col_end;
         try spans.append(gpa, .{ .start = start + 1, .end = end + 1 }); // +1: leading marker
     }
     return spans.toOwnedSlice(gpa);
@@ -346,6 +373,39 @@ test "build pairs a -/+ block and offsets spans by the marker" {
     // "30" is at content col 16 -> visual col 17 (after the '-' marker).
     try testing.expectEqual(@as(u16, 17), lines[1].spans[0].start);
     try testing.expectEqual(@as(u16, 19), lines[1].spans[0].end);
+}
+
+test "refinePair counts a multibyte char as one column, not its bytes" {
+    const a = testing.allocator;
+    var old: []Span = &.{};
+    var new: []Span = &.{};
+    defer if (old.len > 0) a.free(old);
+    defer if (new.len > 0) a.free(new);
+    // An em dash (U+2014, 3 bytes, 1 column) precedes the inserted words. The
+    // insertion "new " sits at visual columns 2..6 -> spans 3..7 after the '+'
+    // marker; a byte-offset bug would push it right by the em dash's extra bytes.
+    refinePair(a, "# \u{2014} tail", "# \u{2014} new tail", &old, &new);
+    try testing.expectEqual(@as(usize, 0), old.len); // pure insertion: nothing removed
+    try testing.expectEqual(@as(usize, 1), new.len);
+    try testing.expectEqual(@as(u16, 5), new[0].start); // content col 4 (+1 marker)
+    try testing.expectEqual(@as(u16, 9), new[0].end); // "new " -> 4 cols
+}
+
+test "refinePair counts a wide (CJK) char as one ordinal, not two columns" {
+    const a = testing.allocator;
+    var old: []Span = &.{};
+    var new: []Span = &.{};
+    defer if (old.len > 0) a.free(old);
+    defer if (new.len > 0) a.free(new);
+    // A wide CJK char (U+4F60, renders 2 columns but is one character) precedes
+    // the change, counted as a single ordinal. Content ordinals: "你"=0, " "=1,
+    // "v1"=2..4 (one word token). "v1"->"v2" is the change, so the span is
+    // ordinals 2..4, +1 for the marker => 3..5, regardless of the CJK width.
+    refinePair(a, "\u{4F60} v1", "\u{4F60} v2", &old, &new);
+    try testing.expectEqual(@as(usize, 1), old.len);
+    try testing.expectEqual(@as(usize, 1), new.len);
+    try testing.expectEqual(@as(u16, 3), new[0].start);
+    try testing.expectEqual(@as(u16, 5), new[0].end);
 }
 
 test "build expands tabs so spans line up with the renderer" {

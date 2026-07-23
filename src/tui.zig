@@ -3977,25 +3977,32 @@ fn printAnsi(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, s
     printAnsiEmph(win, row, line, base, sel_lo, sel_hi, h_off, &.{}, 0);
 }
 
-/// Like `printAnsi`, plus word-level emphasis: cells whose unscrolled column
+/// Like `printAnsi`, plus word-level emphasis: cells whose character ordinal
 /// falls in `emph` get `emph_bg` as their background, to make the changed words
 /// in a diff line stand out. The mouse selection background takes precedence.
+///
+/// Emphasis is matched by character ordinal (`co`, one per rendered codepoint /
+/// tab-space), not visual column, so it stays aligned through wide characters
+/// (CJK, emoji), combining marks and zero-width codepoints: `worddiff` counts
+/// characters the same way this loop draws them, whatever each one's width.
 fn printAnsiEmph(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, sel_lo: u16, sel_hi: u16, h_off: u16, emph: []const worddiff.Span, emph_bg: u8) void {
     if (row >= win.height) return;
     var style = base;
     var vis_col: u16 = 0; // column in the unscrolled line
+    var char_ord: u16 = 0; // character ordinal (for emphasis matching)
     var i: usize = 0;
     // Emit one cell of unscrolled column `vc`, shifted left by `h`; skip it if
-    // it falls off the left (vc < h) or right edge.
+    // it falls off the left (vc < h) or right edge. `co` is the cell's character
+    // ordinal, matched against the emphasis spans.
     const emit = struct {
-        fn f(w: vaxis.Window, vc: u16, h: u16, r: u16, g: []const u8, width: u16, s: vaxis.Style, lo: u16, hi: u16, em: []const worddiff.Span, ebg: u8) void {
+        fn f(w: vaxis.Window, vc: u16, co: u16, h: u16, r: u16, g: []const u8, width: u16, s: vaxis.Style, lo: u16, hi: u16, em: []const worddiff.Span, ebg: u8) void {
             if (vc < h) return;
             const c = vc - h;
             if (c >= w.width) return;
             var cell_style = s;
             // Word-level highlight background for a changed word...
             for (em) |sp| {
-                if (vc >= sp.start and vc < sp.end) {
+                if (co >= sp.start and co < sp.end) {
                     cell_style.bg = .{ .index = ebg };
                     break;
                 }
@@ -4028,15 +4035,17 @@ fn printAnsiEmph(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Styl
         if (byte == '\t') {
             var spaces: u8 = 0;
             while (spaces < 4 and vis_col < last_col) : (spaces += 1) {
-                emit(win, vis_col, h_off, row, " ", 1, style, sel_lo, sel_hi, emph, emph_bg);
+                emit(win, vis_col, char_ord, h_off, row, " ", 1, style, sel_lo, sel_hi, emph, emph_bg);
                 vis_col += 1;
+                char_ord += 1;
             }
             i += 1;
             continue;
         }
         const dc = decodeCell(win, line, i);
-        emit(win, vis_col, h_off, row, dc.grapheme, dc.width, style, sel_lo, sel_hi, emph, emph_bg);
+        emit(win, vis_col, char_ord, h_off, row, dc.grapheme, dc.width, style, sel_lo, sel_hi, emph, emph_bg);
         vis_col += dc.width;
+        char_ord += 1;
         i += dc.len;
     }
 }
