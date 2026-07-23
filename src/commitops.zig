@@ -106,6 +106,14 @@ pub fn runRebaseRange(app: *App, action: RebaseAction, lo: usize, hi: usize) !vo
     defer app.allocator.free(todo);
 
     app.clearRange();
+    // Keep the cursor on the same commit after the block shifts one row (the
+    // cursor sits at an end of the range, so it moves with the block). Applied
+    // only on success; the guards above ensured the neighbour exists.
+    switch (action) {
+        .move_up => app.select_commit_pending = app.commit_index -| 1,
+        .move_down => app.select_commit_pending = app.commit_index + 1,
+        else => {},
+    }
     const count = hi - lo + 1;
     var run_buf: [96]u8 = undefined;
     const shown = std.fmt.bufPrint(&run_buf, "git rebase -i {s}", .{base_ref}) catch "git rebase -i";
@@ -355,6 +363,15 @@ pub fn runRebase(app: *App, action: RebaseAction, i: usize, message: ?[]const u8
 
     var run_buf: [96]u8 = undefined;
     const shown = std.fmt.bufPrint(&run_buf, "git rebase -i {s}", .{base_ref}) catch "git rebase -i";
+    // Keep the moved commit under the cursor: after the reorder lands, move_up
+    // puts it one row newer (smaller index), move_down one row older. Applied
+    // only on success (a conflicting rebase clears it), so a failed move leaves
+    // the cursor put. Guards above already ensured the neighbour exists.
+    switch (action) {
+        .move_up => app.select_commit_pending = i - 1,
+        .move_down => app.select_commit_pending = i + 1,
+        else => {},
+    }
     return app.requestMutation(
         .{ .rebase_todo = .{ .base_ref = base_ref, .todo = todo, .message = message } },
         .{ .gerund = "rebasing", .command = shown },

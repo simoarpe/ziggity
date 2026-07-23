@@ -1785,6 +1785,14 @@ pub const App = struct {
     /// usual "keep the previously-selected commit by hash" behaviour, which would
     /// otherwise leave the cursor on the now-older commit.
     select_top_commit_pending: bool = false,
+    /// Target Commits-panel index to land on after the next successful commits
+    /// reload, used by the reorder actions (ctrl+j/ctrl+k) so the moved commit
+    /// stays under the cursor. Like `select_top_commit_pending`, it overrides the
+    /// keep-by-hash restore (a reorder rewrites the moved commit's hash, so it
+    /// could not be re-found anyway). Set when the reorder is requested and
+    /// applied only on success (a failed/conflicting rebase clears it), matching
+    /// how lazygit moves the selection only when the reorder actually lands.
+    select_commit_pending: ?usize = null,
     remote_index: usize = 0,
     /// The Remotes tab is two-level (like the upstream): a list of remotes, and
     /// — when drilled in via <enter> — that remote's branches. `remotes_index`
@@ -2499,6 +2507,10 @@ pub const App = struct {
             self.commit_index = 0; // the newest commit (new HEAD)
             self.select_top_commit_pending = false;
         }
+        if (self.select_commit_pending) |idx| {
+            if (self.data.commits.len > 0) self.commit_index = @min(idx, self.data.commits.len - 1);
+            self.select_commit_pending = null;
+        }
         if (self.tree_view) self.rebuildTree(tree_path) catch {};
         self.updatePreview() catch {};
         self.setMessage("ready", .{}) catch {};
@@ -2643,6 +2655,12 @@ pub const App = struct {
         if (self.select_top_commit_pending and s.contains(.commits)) {
             self.commit_index = 0; // the newest commit (new HEAD)
             self.select_top_commit_pending = false;
+        }
+        if (s.contains(.commits)) {
+            if (self.select_commit_pending) |idx| {
+                if (self.data.commits.len > 0) self.commit_index = @min(idx, self.data.commits.len - 1);
+                self.select_commit_pending = null;
+            }
         }
         // Keep each panel's open drill current with the refreshed repo. Reload
         // the Branches sub-commits list first (it may collapse the drill if its
@@ -8767,9 +8785,14 @@ pub const App = struct {
                 if (git_mod.isRetryableLockError(raw)) {
                     if (job.dupe(gpa)) |dup| action = .{ .mutation = dup } else |_| {}
                 }
+                // A reorder that failed (e.g. a rebase conflict) must not move the
+                // cursor to where the commit *would* have gone. Keep the pending
+                // move only for a lock retry, which re-runs this same mutation.
+                if (std.meta.activeTag(action) != .mutation) self.select_commit_pending = null;
                 _ = try self.reportFailureOrLock("command failed", raw, action);
             }
         } else {
+            self.select_commit_pending = null;
             try self.reportFailure("command failed to start", "");
         }
         self.refreshViews(self.mutation_refresh);
@@ -12418,4 +12441,91 @@ test "dropRecentAt compacts the recent list around the removed index" {
     for (app.recent_repos) |p| a.free(p);
     a.free(app.recent_repos);
     app.recent_repos = &.{};
+}
+
+test "ctrl+k / ctrl+j defer the cursor move to the reorder's target index" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+
+    const mk = struct {
+        fn commits() [3]model.Commit {
+            return .{
+                .{ .hash = @constCast("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), .short_hash = @constCast("aaaaaaa"), .author = @constCast("S"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("a") },
+                .{ .hash = @constCast("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), .short_hash = @constCast("bbbbbbb"), .author = @constCast("S"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("b") },
+                .{ .hash = @constCast("cccccccccccccccccccccccccccccccccccccccc"), .short_hash = @constCast("ccccccc"), .author = @constCast("S"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("c") },
+            };
+        }
+    };
+
+    // The move queues a mutation and records its command into the git command
+    // log; testApp's git is never deinit'd, so free that log by hand.
+    const freeCmdLog = struct {
+        fn f(app: *App, a: std.mem.Allocator) void {
+            for (app.git.command_log.items) |e| a.free(e);
+            app.git.command_log.deinit(a);
+        }
+    }.f;
+
+    // move_up (ctrl+k): the middle commit (index 1) will land one row newer.
+    // The cursor is NOT moved now (that would be wrong if the rebase fails); a
+    // pending target is set, applied only when a successful reload lands.
+    {
+        var app = try testApp(allocator, &no_files);
+        defer deinitTestApp(&app);
+        defer freeCmdLog(&app, allocator);
+        var commits = mk.commits();
+        app.data.commits = &commits;
+        app.commits_tab = .commits;
+        app.data.state = .clean;
+        app.commit_index = 1;
+        try commitops_mod.rebaseSelectedCommit(&app, .move_up);
+        try std.testing.expectEqual(@as(?usize, 0), app.select_commit_pending);
+        try std.testing.expectEqual(@as(usize, 1), app.commit_index); // not moved yet
+    }
+
+    // move_down (ctrl+j): the middle commit will land one row older.
+    {
+        var app = try testApp(allocator, &no_files);
+        defer deinitTestApp(&app);
+        defer freeCmdLog(&app, allocator);
+        var commits = mk.commits();
+        app.data.commits = &commits;
+        app.commits_tab = .commits;
+        app.data.state = .clean;
+        app.commit_index = 1;
+        try commitops_mod.rebaseSelectedCommit(&app, .move_down);
+        try std.testing.expectEqual(@as(?usize, 2), app.select_commit_pending);
+        try std.testing.expectEqual(@as(usize, 1), app.commit_index); // not moved yet
+    }
+}
+
+test "a successful commits reload lands the cursor on the reorder's pending index" {
+    const allocator = std.testing.allocator;
+    const page = std.heap.page_allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer {
+        app.data.deinit(allocator);
+        deinitTestApp(&app);
+    }
+
+    // Three commits; a move_down of the middle one queued a pending landing at 2.
+    app.data.commits = try allocator.alloc(model.Commit, 3);
+    for (app.data.commits) |*c| {
+        c.* = .{ .hash = try allocator.dupe(u8, "old"), .short_hash = try allocator.dupe(u8, "old"), .author = try allocator.dupe(u8, "a"), .time = try allocator.dupe(u8, "t"), .refs = try allocator.dupe(u8, ""), .subject = try allocator.dupe(u8, "old") };
+    }
+    app.commit_index = 1;
+    app.select_commit_pending = 2;
+
+    // The reorder rewrote hashes, so restore-by-hash can't re-find the commit;
+    // the pending target is what lands the cursor on the moved commit.
+    var sd = ScopedData{ .scopes = ScopeSet.init(.{ .commits = true }) };
+    sd.data.commits = try page.alloc(model.Commit, 3);
+    for (sd.data.commits) |*c| {
+        c.* = .{ .hash = try page.dupe(u8, "new"), .short_hash = try page.dupe(u8, "new"), .author = try page.dupe(u8, "a"), .time = try page.dupe(u8, "t"), .refs = try page.dupe(u8, ""), .subject = try page.dupe(u8, "new") };
+    }
+    app.applyScopedLoad(sd, page);
+
+    try std.testing.expectEqual(@as(usize, 2), app.commit_index);
+    try std.testing.expect(app.select_commit_pending == null);
 }
