@@ -902,9 +902,10 @@ essentials:
   Local/Remotes/Tags · Commits/Reflog) or the staging side
 - `enter`: inspect in the main panel; on a commit, drill into its changed
   files; on a file, open the staging view
-- `enter` on a file opens the staging view: `j` and `k` by line, `v` range,
-  `space` stage the line(s) or hunk, `[` and `]` switch side, `\` split
-  view, `c` and `A` commit or amend, `esc` back
+- `enter` on a file opens the staging view: `j` and `k` by line, `J` and `K`
+  (or shift+arrows) jump to the next/previous hunk, `v` range, `space` stage
+  the line(s) or hunk, `[` and `]` switch side, `\` split view, `c` and `A`
+  commit or amend, `esc` back
 - `space`: stage or unstage a file · checkout a branch · apply a stash (by
   focus)
 - `e`: open the file under view in your editor (Files, a commit's files, the

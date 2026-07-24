@@ -3044,6 +3044,22 @@ pub const App = struct {
             if (km.new_branch.matches(key)) return self.startNewBranchFromCommit(); // n
         }
 
+        // In the staging view, shift+arrow (and J/K) jump by hunk rather than
+        // extending a range — the staging range is anchored with `v` instead, and
+        // shift+arrow does nothing else there. Handled before the list-panel
+        // range binding below so it takes precedence while staging.
+        if (self.staging_active) {
+            const km = self.config.keymap;
+            if (key.matches(vaxis.Key.down, .{ .shift = true }) or km.staging_next_hunk.matches(key)) {
+                staging_mod.moveStagingHunk(self, true);
+                return;
+            }
+            if (key.matches(vaxis.Key.up, .{ .shift = true }) or km.staging_prev_hunk.matches(key)) {
+                staging_mod.moveStagingHunk(self, false);
+                return;
+            }
+        }
+
         // shift+arrow extends a non-sticky range selection in a list panel.
         if (key.matches(vaxis.Key.down, .{ .shift = true })) return self.rangeMove(true);
         if (key.matches(vaxis.Key.up, .{ .shift = true })) return self.rangeMove(false);
@@ -12815,4 +12831,48 @@ test "issue #5: revert refreshes the branches scope so the ahead count updates" 
     try std.testing.expect(app.mutation_refresh.contains(.branches));
     try std.testing.expect(app.mutation_refresh.contains(.commits));
     try std.testing.expect(app.mutation_refresh.contains(.status));
+}
+
+test "issue #4: shift/J-K jump the staging cursor by hunk" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // Two hunks: header @@ at line 3 (hunk 0) and line 7 (hunk 1).
+    const diff =
+        "diff --git a/f b/f\n--- a/f\n+++ b/f\n" ++
+        "@@ -1,3 +1,4 @@\n a\n+X\n b\n" ++
+        "@@ -10,3 +11,4 @@\n y\n+Z\n w\n";
+    app.staging_diff = try allocator.dupe(u8, diff);
+    app.staging = try diff_mod.parse(allocator, app.staging_diff);
+    app.staging_path = try allocator.dupe(u8, "f");
+    app.staging_active = true;
+    app.staging_cursor = staging_mod.stagingFirstLine(&app);
+    try std.testing.expectEqual(@as(usize, 3), app.staging_cursor); // hunk 0 header
+
+    // Next hunk -> hunk 1 header (line 7).
+    staging_mod.moveStagingHunk(&app, true);
+    try std.testing.expectEqual(@as(usize, 7), app.staging_cursor);
+    // Already at the last hunk: next is a no-op.
+    staging_mod.moveStagingHunk(&app, true);
+    try std.testing.expectEqual(@as(usize, 7), app.staging_cursor);
+
+    // Previous from a header -> the earlier hunk's header (line 3).
+    staging_mod.moveStagingHunk(&app, false);
+    try std.testing.expectEqual(@as(usize, 3), app.staging_cursor);
+
+    // From a body line, "previous" snaps to that hunk's own header first.
+    app.staging_cursor = 5; // body of hunk 0
+    staging_mod.moveStagingHunk(&app, false);
+    try std.testing.expectEqual(@as(usize, 3), app.staging_cursor);
+    // At the first hunk's header: previous is a no-op.
+    staging_mod.moveStagingHunk(&app, false);
+    try std.testing.expectEqual(@as(usize, 3), app.staging_cursor);
+
+    // Hunk jump drops any in-progress range selection.
+    app.staging_anchor = 4;
+    staging_mod.moveStagingHunk(&app, true);
+    try std.testing.expectEqual(@as(?usize, null), app.staging_anchor);
+    try std.testing.expectEqual(@as(usize, 7), app.staging_cursor);
 }

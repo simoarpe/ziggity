@@ -145,6 +145,29 @@ pub fn moveStagingCursor(app: *App, delta: i8) void {
     scrollToStagingCursor(app);
 }
 
+/// Jump the cursor to the `@@` header of the previous or next hunk, so you can
+/// skip whole hunks instead of stepping line by line. From inside a hunk,
+/// "previous" lands on that hunk's own header first, then earlier ones. A no-op
+/// past the first/last hunk. Drops any in-progress range (this is navigation).
+pub fn moveStagingHunk(app: *App, forward: bool) void {
+    const parsed = app.staging orelse return;
+    if (parsed.hunks.len == 0) return;
+    const cur = stagingHunkAt(app, app.staging_cursor) orelse 0;
+    var target: usize = cur;
+    if (forward) {
+        if (cur + 1 >= parsed.hunks.len) return; // already at the last hunk
+        target = cur + 1;
+    } else if (app.staging_cursor > parsed.hunks[cur].start_line) {
+        target = cur; // from a body line, snap to this hunk's header
+    } else {
+        if (cur == 0) return; // already at the first hunk's header
+        target = cur - 1;
+    }
+    app.staging_anchor = null;
+    app.staging_cursor = parsed.hunks[target].start_line;
+    scrollToStagingCursor(app);
+}
+
 /// Move the line cursor to a mouse-clicked line. `pane` says which diff pane was
 /// clicked (`.main` = the active side, `.other` = the read-only side in a split
 /// view) and `line` is the line index within that pane's diff. Clicking the

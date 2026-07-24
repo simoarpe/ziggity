@@ -62,6 +62,10 @@ pub const KeyMap = struct {
     recent_repos: Binding = .{ .codepoint = 'r', .ctrl = true },
     // Toggle soft-wrapping of long lines in the diff panels (session-wide).
     toggle_wrap: Binding = .{ .codepoint = 'w', .ctrl = true },
+    // In the staging view: jump the cursor to the next / previous hunk header.
+    // shift+down / shift+up trigger these too (see the key handler).
+    staging_next_hunk: Binding = .{ .codepoint = 'J' },
+    staging_prev_hunk: Binding = .{ .codepoint = 'K' },
     // In the commit-graph viewer: jump the cursor to the current commit's first parent.
     graph_first_parent: Binding = .{ .codepoint = 'p' },
     // In the commit-graph viewer: jump the cursor to the current commit (HEAD).
