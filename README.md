@@ -389,6 +389,12 @@ deleted, picking it asks whether to drop it from the list (nothing on disk is
 touched). Remove the highlighted entry at any time with `d`; removing the last
 one just closes the switcher.
 
+<p align="center">
+  <img src="docs/screenshots/19-recent-repos.png" alt="The ctrl+r recent repositories switcher" width="900">
+</p>
+
+<p align="center"><i>ctrl+r lists the repos you have opened, aligned as name, branch and path. Enter switches in place; the current repo is left out.</i></p>
+
 ### Stash Without Losing Your Working Tree
 
 The stash menu has the variant that other tools skip: snapshot everything
