@@ -1425,8 +1425,29 @@ pub const Git = struct {
     }
 
     /// Undo the last history operation by resetting HEAD to its prior position.
+    ///
+    /// A plain commit or an amend folds your staged changes into the commit, so a
+    /// `--hard` reset would throw those changes away. Detect that from the reflog
+    /// subject and undo with `--soft` instead, which moves HEAD back but keeps the
+    /// index and working tree — the changes reappear staged rather than vanishing.
+    /// Every other operation (merge, rebase, reset, cherry-pick, revert, …) has no
+    /// such uncommitted work to preserve and restores its prior state with `--hard`.
     pub fn undoLastOperation(self: *Git) !ExecResult {
-        return self.exec(&.{ "reset", "--hard", "HEAD@{1}" });
+        const subject = self.reflogSubject() catch null;
+        defer if (subject) |s| self.allocator.free(s);
+        const mode: []const u8 = if (subject != null and undoKeepsChanges(subject.?)) "--soft" else "--hard";
+        return self.exec(&.{ "reset", mode, "HEAD@{1}" });
+    }
+
+    /// True when undoing the operation described by reflog subject `s` must keep
+    /// the working-tree changes it folded in (commit / amend / initial commit),
+    /// i.e. reset `--soft`. False for operations that only moved history
+    /// (`merge …`, `commit (merge)`, `commit (cherry-pick)`, `revert:`, `reset:`,
+    /// rebase, …), which reset `--hard`.
+    pub fn undoKeepsChanges(s: []const u8) bool {
+        return std.mem.startsWith(u8, s, "commit: ") or
+            std.mem.startsWith(u8, s, "commit (amend)") or
+            std.mem.startsWith(u8, s, "commit (initial)");
     }
 
     /// The body (message minus subject line) of a commit, trimmed. Empty if the
@@ -2432,4 +2453,19 @@ test "prepareCommitMsg runs a guarded hook and seeds the branch ticket" {
     const seed = (try git.prepareCommitMsg()) orelse return error.HookProducedNoSeed;
     defer a.free(seed);
     try std.testing.expectEqualStrings("PROJ-42:", seed);
+}
+
+test "undoKeepsChanges: only commit/amend/initial reset --soft (keep changes)" {
+    // These fold your staged work into the commit, so undo must keep it (--soft).
+    try std.testing.expect(Git.undoKeepsChanges("commit: second"));
+    try std.testing.expect(Git.undoKeepsChanges("commit (amend): second"));
+    try std.testing.expect(Git.undoKeepsChanges("commit (initial): first"));
+    // These only moved history, so undo restores cleanly (--hard).
+    try std.testing.expect(!Git.undoKeepsChanges("merge feature: Merge made by the 'ort' strategy."));
+    try std.testing.expect(!Git.undoKeepsChanges("commit (merge): resolve conflicts"));
+    try std.testing.expect(!Git.undoKeepsChanges("commit (cherry-pick): work on main"));
+    try std.testing.expect(!Git.undoKeepsChanges("revert: Revert \"second\""));
+    try std.testing.expect(!Git.undoKeepsChanges("reset: moving to HEAD~1"));
+    try std.testing.expect(!Git.undoKeepsChanges("rebase (finish): returning to refs/heads/main"));
+    try std.testing.expect(!Git.undoKeepsChanges(""));
 }

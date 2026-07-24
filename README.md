@@ -438,6 +438,8 @@ unstaged split, comes back byte for byte.
 - Mistyped an HTTPS password? The error tells you the host wants a token
   instead of silently reprompting forever.
 - `ctrl+z` undoes the last operation through the reflog, after confirmation.
+  Undoing a commit or an amend brings the changes back staged rather than
+  discarding them; other operations restore their prior state.
 
 Everything above is also collected in
 [`docs/ENHANCEMENTS_OVER_LAZYGIT.md`](docs/ENHANCEMENTS_OVER_LAZYGIT.md),
@@ -821,7 +823,8 @@ Selecting the Status panel shows an about screen with a live animation.
   masked token prompt feeds git for the session. No external helper needed,
   and a stale keychain entry cannot shadow what you type.
 - Safe undo of the last operation (`ctrl+z`, reflog reset after
-  confirmation).
+  confirmation); undoing a commit or amend keeps the changes staged instead
+  of losing them.
 - Recent repositories switcher (`ctrl+r`): jump to another repo you have
   opened before, without restarting (see below).
 - Find the fixup base for a staged change and make a `fixup!` (`ctrl+f`, via
