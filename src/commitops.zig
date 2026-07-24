@@ -40,12 +40,12 @@ pub fn revertSelectedCommit(app: *App) !void {
                 while (k <= b.hi) : (k += 1) try hashes.append(app.allocator, app.data.commits[k].hash);
                 const count = b.hi - b.lo + 1;
                 app.clearRange();
-                return app.requestMutation(.{ .revert_many = hashes.items }, .{ .gerund = "reverting", .command = "git revert", .refresh = App.Refresh.commits_files }, "reverted {d} commits", .{count});
+                return app.requestMutation(.{ .revert_many = hashes.items }, .{ .gerund = "reverting", .command = "git revert", .refresh = App.Refresh.commit }, "reverted {d} commits", .{count});
             }
         }
     }
     const commit = try commitForAction(app) orelse return;
-    return app.requestMutation(.{ .revert = commit.hash }, .{ .gerund = "reverting", .command = "git revert", .refresh = App.Refresh.commits_files }, "reverted {s}", .{commit.short_hash});
+    return app.requestMutation(.{ .revert = commit.hash }, .{ .gerund = "reverting", .command = "git revert", .refresh = App.Refresh.commit }, "reverted {s}", .{commit.short_hash});
 }
 
 pub fn rebaseSelectedCommit(app: *App, action: RebaseAction) !void {
@@ -317,7 +317,7 @@ pub fn discardFilesFromCommit(app: *App) !void {
     app.clearRange();
     return app.requestMutation(
         .{ .rebase_todo = .{ .base_ref = base_ref, .todo = todo, .message = null } },
-        .{ .gerund = "discarding from commit", .command = "git rebase -i", .refresh = App.Refresh.commits_files },
+        .{ .gerund = "discarding from commit", .command = "git rebase -i", .refresh = App.Refresh.commit },
         "discarded {d} file(s) from {s}",
         .{ count, commits[i].short_hash },
     );
@@ -450,7 +450,7 @@ pub fn createFixupCommit(app: *App) !void {
         try app.setMessage("stage changes to create a fixup commit", .{});
         return;
     }
-    return app.requestMutation(.{ .create_fixup = commit.hash }, .{ .gerund = "creating fixup", .command = "git commit --fixup", .refresh = App.Refresh.commits_files }, "created fixup! for {s}", .{commit.short_hash});
+    return app.requestMutation(.{ .create_fixup = commit.hash }, .{ .gerund = "creating fixup", .command = "git commit --fixup", .refresh = App.Refresh.commit }, "created fixup! for {s}", .{commit.short_hash});
 }
 
 /// Autosquash fixup!/squash! commits above (and including) the selected one.

@@ -8794,7 +8794,6 @@ pub const App = struct {
         pub const checkout = ScopeSet.init(.{ .files = true, .status = true, .commits = true, .branches = true });
         pub const branches = ScopeSet.init(.{ .branches = true });
         pub const branches_commits = ScopeSet.init(.{ .branches = true, .commits = true });
-        pub const commits_files = ScopeSet.init(.{ .files = true, .status = true, .commits = true });
         pub const tags = ScopeSet.init(.{ .tags = true });
         pub const remotes = ScopeSet.init(.{ .remotes = true });
         pub const stash = ScopeSet.init(.{ .files = true, .status = true, .stash = true });
@@ -12787,4 +12786,33 @@ test "issue #6: a panel number key cycles its tabs when already focused" {
     app.config.switch_tabs_with_panel_keys = false;
     try app.jumpPanel(.branches);
     try std.testing.expectEqual(BranchesTab.local, app.branches_tab);
+}
+
+test "issue #5: revert refreshes the branches scope so the ahead count updates" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    // revert records its command into the git log; testApp's git is never
+    // deinit'd, so free that log here.
+    defer {
+        for (app.git.command_log.items) |e| allocator.free(e);
+        app.git.command_log.deinit(allocator);
+    }
+
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), .short_hash = @constCast("aaaaaaa"), .author = @constCast("S"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("a") },
+    };
+    app.data.commits = &commits;
+    app.commits_tab = .commits;
+    app.commit_index = 0;
+
+    try commitops_mod.revertSelectedCommit(&app);
+    // A revert creates a new (unpushed) commit, so its refresh must include the
+    // branches scope — otherwise the Branches panel's ahead/behind count stays
+    // stale until the next full refresh.
+    try std.testing.expect(app.mutation_requested != null);
+    try std.testing.expect(app.mutation_refresh.contains(.branches));
+    try std.testing.expect(app.mutation_refresh.contains(.commits));
+    try std.testing.expect(app.mutation_refresh.contains(.status));
 }
