@@ -1473,7 +1473,7 @@ const help_lines = [_][]const u8{
     "Global",
     "  q, ctrl+c      quit",
     "  R              refresh",
-    "  1-5            jump to a panel (Status, Files, Branches, Commits, Stash)",
+    "  1-5            jump to a panel; press again to cycle that panel's tabs",
     "  h, left        focus the panel on the left",
     "  l, right       focus the panel on the right",
     "  j, down        move the selection down",

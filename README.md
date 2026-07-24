@@ -841,7 +841,7 @@ essentials:
 
 | Key | Action |
 |---|---|
-| `1`–`5` | Focus Status / Files / Branches / Commits / Stash |
+| `1`–`5` | Focus Status / Files / Branches / Commits / Stash (press again to cycle that panel's tabs) |
 | `h` `l` / arrows | Move focus between side panels |
 | `j` `k` / arrows | Move selection |
 | `tab` | Focus the Diff panel (and back) |
@@ -889,7 +889,10 @@ essentials:
   title and footer show the hint)
 - `z`: maximize the Diff panel to full screen; the side panels hide and the
   diff fills the terminal; press `z` again or `esc` to restore the layout
-- `1`–`5`: focus status / files / branches / commits / stash
+- `1`–`5`: focus status / files / branches / commits / stash; pressing the
+  number of the already-focused panel cycles its tabs (so `3` walks
+  Local/Remotes/Tags), the same way `]` does. Turn this off with
+  `switch_tabs_with_panel_keys = false`.
 - `[` / `]`: switch panel tabs (Files/Worktrees/Submodules ·
   Local/Remotes/Tags · Commits/Reflog) or the staging side
 - `enter`: inspect in the main panel; on a commit, drill into its changed
@@ -948,6 +951,22 @@ essentials:
   a prompt, leave a panel); never quits, only `q` does
 
 </details>
+
+### Cycle Tabs with the Panel Key
+
+The Branches, Files and Commits panels each have tabs (`[` and `]` switch
+them). You can also walk those tabs with the panel's own number key: press it
+once to focus the panel, then press it again to move to the next tab. So `3`
+goes Branches, then Local, Remotes, Tags; `4` goes Commits, then Reflog and
+Divergence; `2` walks Files, Worktrees and Submodules. The key still jumps
+straight to the panel from anywhere else, so nothing is lost. It is on by
+default and can be turned off with `switch_tabs_with_panel_keys = false`.
+
+<p align="center">
+  <img src="docs/assets/ziggity-tabs.gif" alt="Pressing a panel number key repeatedly cycles its tabs" width="900">
+</p>
+
+<p align="center"><i>Pressing 3 repeatedly walks Local, Remotes and Tags; 4 walks Commits, Reflog and Divergence.</i></p>
 
 ## Configuration
 

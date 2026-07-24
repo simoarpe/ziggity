@@ -3138,11 +3138,11 @@ pub const App = struct {
                     try self.setMessage("press q to quit", .{});
                 }
             },
-            .focus_status => try self.setFocus(.status),
-            .focus_files => try self.setFocus(.files),
-            .focus_branches => try self.setFocus(.branches),
-            .focus_commits => try self.setFocus(.commits),
-            .focus_stash => try self.setFocus(.stash),
+            .focus_status => try self.jumpPanel(.status),
+            .focus_files => try self.jumpPanel(.files),
+            .focus_branches => try self.jumpPanel(.branches),
+            .focus_commits => try self.jumpPanel(.commits),
+            .focus_stash => try self.jumpPanel(.stash),
             .focus_main => try self.descendOrOpenCommitFiles(),
             // `[` / `]` cycle a multi-dimensional panel: the Branches/Commits
             // tabs, or the staged/unstaged side of the staging view.
@@ -5543,6 +5543,25 @@ pub const App = struct {
             return staging_mod.openStaging(self);
         }
         return self.enterMain();
+    }
+
+    /// Panels whose number key can cycle tabs (`[`/`]` switch them).
+    fn panelHasTabs(focus: model.Focus) bool {
+        return switch (focus) {
+            .files, .branches, .commits => true,
+            else => false,
+        };
+    }
+
+    /// A panel number key (1-5): focus the panel, or — when it is already the
+    /// focused panel and `switch_tabs_with_panel_keys` is on — advance to its
+    /// next tab, so the key walks the tabs the way `]` does. The same key still
+    /// jumps to the panel from anywhere else. (Issue #6.)
+    fn jumpPanel(self: *App, target: model.Focus) !void {
+        if (self.config.switch_tabs_with_panel_keys and self.focus == target and panelHasTabs(target)) {
+            return self.cycleTab(.next);
+        }
+        return self.setFocus(target);
     }
 
     const TabDirection = enum { prev, next };
@@ -12730,4 +12749,42 @@ test "wrap: mouse selection across wrapped rows maps and copies correctly" {
     try app.copyDiffSelection();
     // Visual cols [3,15) of "0123456789abcdefghij" = "3456789abcde".
     try std.testing.expectEqualStrings("3456789abcde", app.clipboard_request.?);
+}
+
+test "issue #6: a panel number key cycles its tabs when already focused" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    try std.testing.expect(app.config.switch_tabs_with_panel_keys); // default on
+    app.focus = .branches;
+    app.branches_tab = .local;
+
+    // Already on Branches: pressing its number cycles Local -> Remotes -> Tags -> Local.
+    try app.jumpPanel(.branches);
+    try std.testing.expectEqual(BranchesTab.remotes, app.branches_tab);
+    try app.jumpPanel(.branches);
+    try std.testing.expectEqual(BranchesTab.tags, app.branches_tab);
+    try app.jumpPanel(.branches);
+    try std.testing.expectEqual(BranchesTab.local, app.branches_tab);
+
+    // A different panel's key focuses that panel without cycling this one.
+    app.branches_tab = .remotes;
+    try app.jumpPanel(.commits);
+    try std.testing.expectEqual(model.Focus.commits, app.focus);
+    try std.testing.expectEqual(BranchesTab.remotes, app.branches_tab);
+
+    // Files cycles too: Files -> Worktrees -> Submodules.
+    app.focus = .files;
+    app.files_tab = .files;
+    try app.jumpPanel(.files);
+    try std.testing.expectEqual(FilesTab.worktrees, app.files_tab);
+
+    // With the option off, the number key only ever focuses (never cycles).
+    app.focus = .branches;
+    app.branches_tab = .local;
+    app.config.switch_tabs_with_panel_keys = false;
+    try app.jumpPanel(.branches);
+    try std.testing.expectEqual(BranchesTab.local, app.branches_tab);
 }

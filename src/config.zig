@@ -276,6 +276,12 @@ pub const Config = struct {
     /// toggles it at runtime for the session. When off, long lines truncate and
     /// `H`/`L` pan horizontally.
     wrap_diff: bool = false,
+    /// Pressing a panel's number key (1-5) while that panel is already focused
+    /// cycles to its next tab, so `3` walks Local -> Remotes -> Tags, `4` walks
+    /// Commits -> Reflog -> Divergence, and `2` walks Files -> Worktrees ->
+    /// Submodules — the same keys still jump to the panel from elsewhere. Disable
+    /// to make a number key only ever focus its panel.
+    switch_tabs_with_panel_keys: bool = true,
     /// Run the repo's `prepare-commit-msg` hook when the commit dialog opens and
     /// seed the message fields from its output (e.g. a branch-derived ticket
     /// prefix). Matches interactive git; disable to skip the hook at open time.

@@ -235,5 +235,29 @@ git add .
 git commit -q -m "Add release notes"
 sed -i.bak 's/while fixing a number/while improving a number/' notes.md && rm -f notes.md.bak
 
-echo "demo repos ready: /tmp/zdemo-commit, /tmp/zdemo-co/clone, /tmp/zdemo-fetch, /tmp/zhero/ziggity, /tmp/zdemo-auth, /tmp/zdemo-graph, /tmp/zrecent, /tmp/zword, /tmp/zwrap"
+# --- /tmp/ztabs: the panel-key tab cycling demo (tabs.tape) -----------------
+# A repo with local branches, a remote and tags, so the Branches panel's tabs
+# (Local / Remotes / Tags) each have content to show as `3` cycles them.
+rm -rf /tmp/ztabs
+mkdir -p /tmp/ztabs/origin.git
+cd /tmp/ztabs/origin.git
+git init -q --bare -b main
+cd /tmp/ztabs
+git clone -q origin.git repo
+cd repo
+git config user.email demo@ziggity.dev
+git config user.name "Demo"
+printf '# aurora\nA tiny expression evaluator.\n' > README.md
+git add .
+git commit -q -m "Initial project skeleton"
+git commit -q --allow-empty -m "Add the tokenizer"
+git commit -q --allow-empty -m "Add the parser"
+git commit -q --allow-empty -m "Wire up the CLI"
+git branch feature/login-form
+git branch fix/lexer-panic
+git tag v0.1.0
+git tag v0.2.0
+git push -q origin main --tags 2>/dev/null || true
+
+echo "demo repos ready: /tmp/zdemo-commit, /tmp/zdemo-co/clone, /tmp/zdemo-fetch, /tmp/zhero/ziggity, /tmp/zdemo-auth, /tmp/zdemo-graph, /tmp/zrecent, /tmp/zword, /tmp/zwrap, /tmp/ztabs"
 echo "for credentials.tape, also start:  python3 /tmp/auth401.py &"
