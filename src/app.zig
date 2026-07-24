@@ -12696,3 +12696,38 @@ test "wrap: visual-row count and ctrl+w re-anchor" {
     try std.testing.expect(!app.wrap_diff);
     try std.testing.expectEqual(@as(usize, 3), app.main_scroll);
 }
+
+test "wrap: mouse selection across wrapped rows maps and copies correctly" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    defer deinitWrapCache();
+
+    // One 20-char source line; wrap it to 10 columns so it spans two rows.
+    allocator.free(app.diff);
+    app.diff = try allocator.dupe(u8, "0123456789abcdefghij\n");
+    app.wrap_diff = true;
+
+    // Panel rect: content starts at (1,1); content width 10 (w-2), height 8.
+    const r: PanelRect = .{ .focus = .main, .x = 0, .y = 0, .w = 12, .h = 10 };
+
+    // Drag from row 1 col 4 (visual col 3 of the line) to row 2 col 6 (the second
+    // wrapped row: vis_start 10 + screen col 5 = visual col 15).
+    const a = app.diffPointFor(.main, r, 4, 1);
+    const b = app.diffPointFor(.main, r, 6, 2);
+    try std.testing.expectEqual(@as(usize, 0), a.line);
+    try std.testing.expectEqual(@as(usize, 3), a.col);
+    try std.testing.expectEqual(@as(usize, 0), b.line); // same source line, next row
+    try std.testing.expectEqual(@as(usize, 15), b.col);
+
+    app.diff_sel_active = true;
+    app.diff_sel_pane = .main;
+    app.diff_sel_anchor_line = a.line;
+    app.diff_sel_anchor_col = a.col;
+    app.diff_sel_head_line = b.line;
+    app.diff_sel_head_col = b.col;
+    try app.copyDiffSelection();
+    // Visual cols [3,15) of "0123456789abcdefghij" = "3456789abcde".
+    try std.testing.expectEqualStrings("3456789abcde", app.clipboard_request.?);
+}
