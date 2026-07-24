@@ -1492,7 +1492,7 @@ const help_lines = [_][]const u8{
     "  ctrl+z         undo the last operation (reflog reset)",
     "  ctrl+r         switch to a recently opened repository",
     "  ctrl+o         copy the selected hash, branch or tag to the clipboard",
-    "  o              open the selected commit or branch on its remote host",
+    "  o              open the commit/branch on its host (GitHub/GitLab/Codeberg)",
     "  W              mark the selected ref as the diff base (the marked row",
     "                 shows a diamond), then select any other ref to compare. W",
     "                 again opens the options: invert the direction, switch the",

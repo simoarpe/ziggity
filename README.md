@@ -828,7 +828,8 @@ Selecting the Status panel shows an about screen with a live animation.
   blame).
 - Mouse text selection with automatic copy in the diff panel and the read
   only dialogs (OSC 52); copy a hash, branch or tag (`ctrl+o`); open a commit
-  or branch on its remote host (`o`).
+  or branch on its remote host (`o`), with the right URL shape for GitHub,
+  GitLab and Codeberg.
 - Command log overlay (`@`), themeable colors, fully remappable keys, and
   user defined custom commands.
 
@@ -867,7 +868,8 @@ essentials:
 - `ctrl+w`: toggle soft-wrapping of long lines in the diff panels (see below)
 - `@`: command log (recent git commands ziggity ran)
 - `ctrl+o`: copy the selected hash, branch or tag to the system clipboard
-- `o`: open the selected commit or branch on its remote host
+- `o`: open the selected commit or branch on its remote host in the browser
+  (GitHub, GitLab and Codeberg URL styles are handled)
 - `W`: diffing mode. Marks the selected ref as the base; select another to
   diff, `W` again for options (invert, switch the dots, arbitrary ref, exit;
   esc also exits)
