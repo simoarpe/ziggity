@@ -1580,7 +1580,7 @@ const help_lines = [_][]const u8{
     "  F              force-checkout (discards changes)",
     "  T              tag the branch",
     "  N              move commits onto a new branch",
-    "  G              open the pull request page",
+    "  G              open the new pull/merge request page",
     "  s              branch sort menu",
     "",
     "Remotes tab — the remotes list",

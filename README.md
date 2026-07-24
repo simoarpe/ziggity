@@ -933,7 +933,8 @@ essentials:
 - `ctrl+l` (Commits): commit graph viewer (`j` and `k` move, `@` HEAD, `p`
   first parent, `H` and `L` pan, `a` toggle all branches, `ctrl+o` copy,
   `enter` jump, `esc` close; mouse scroll, drag and click)
-- `G` (Commits): open the PR page · `B`: mark a `rebase --onto` base
+- `G` (Commits): open the new pull/merge request page (GitHub, GitLab,
+  Codeberg, Bitbucket) · `B`: mark a `rebase --onto` base
 - `W`: diff the selected commit or branch against another marked ref
 - `/` (Commits): filter the log · `b` (Commits): bisect menu
 - `ctrl+p`: custom patch menu; `space` in a commit's files adds a file to the

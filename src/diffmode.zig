@@ -184,17 +184,23 @@ fn openPrForBranch(app: *App, branch: []const u8) !void {
     try app.setMessage("opening {s}", .{url});
 }
 
-/// Build the host's new-pull-request URL for `branch`. GitLab and Bitbucket use
-/// their own paths; everything else (GitHub, Gitea, …) uses the GitHub-style
-/// compare URL, matching the rest of the web-URL handling.
+/// Build the host's new-pull-request (merge-request) URL for `branch`. Each
+/// forge exposes it as a compare-style page that pre-fills the source branch and
+/// defaults the target to the repo's default branch:
+///   - GitHub:          `/compare/<branch>?expand=1`
+///   - GitLab:          `/-/merge_requests/new?...source_branch=<branch>`
+///   - Codeberg/Gitea:  `/compare/<branch>` (Forgejo's compare page is the
+///                      new-PR form; it defaults the base and ignores `expand`)
+///   - Bitbucket:       `/pull-requests/new?source=<branch>`
 fn pullRequestUrl(allocator: std.mem.Allocator, base: []const u8, branch: []const u8) ![]u8 {
-    if (std.mem.indexOf(u8, base, "gitlab") != null) {
-        return std.fmt.allocPrint(allocator, "{s}/-/merge_requests/new?merge_request%5Bsource_branch%5D={s}", .{ base, branch });
-    }
     if (std.mem.indexOf(u8, base, "bitbucket") != null) {
         return std.fmt.allocPrint(allocator, "{s}/pull-requests/new?source={s}", .{ base, branch });
     }
-    return std.fmt.allocPrint(allocator, "{s}/compare/{s}?expand=1", .{ base, branch });
+    return switch (forgeOf(base)) {
+        .gitlab => std.fmt.allocPrint(allocator, "{s}/-/merge_requests/new?merge_request%5Bsource_branch%5D={s}", .{ base, branch }),
+        .gitea => std.fmt.allocPrint(allocator, "{s}/compare/{s}", .{ base, branch }),
+        .github => std.fmt.allocPrint(allocator, "{s}/compare/{s}?expand=1", .{ base, branch }),
+    };
 }
 
 /// The remote whose web host we open: the current branch's upstream remote,
@@ -275,6 +281,11 @@ test "pullRequestUrl picks the host's new-request path" {
     const bb = try pullRequestUrl(a, "https://bitbucket.org/o/r", "wip");
     defer a.free(bb);
     try std.testing.expectEqualStrings("https://bitbucket.org/o/r/pull-requests/new?source=wip", bb);
+
+    // Codeberg/Gitea: the compare page is the new-PR form (no GitHub `expand`).
+    const cb = try pullRequestUrl(a, "https://codeberg.org/o/r", "feature/x");
+    defer a.free(cb);
+    try std.testing.expectEqualStrings("https://codeberg.org/o/r/compare/feature/x", cb);
 }
 
 test "commitWebUrl uses each forge's commit path" {
