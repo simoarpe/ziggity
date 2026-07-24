@@ -476,8 +476,9 @@ binaries for macOS, Linux, and Windows. No Zig toolchain required.
 #### macOS / Linux
 
 Grab the archive for your platform from the releases page: `aarch64-macos` or
-`x86_64-macos` for macOS, `x86_64-linux-musl` or `aarch64-linux-musl` for
-Linux (the musl builds are fully static and run on any distro), then:
+`x86_64-macos` for macOS, `x86_64-linux-musl`, `aarch64-linux-musl` or
+`riscv64-linux-musl` for Linux (the musl builds are fully static and run on
+any distro), then:
 
 ```sh
 # set VERSION to the latest release and pick your OS/arch (see the releases page)
