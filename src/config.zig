@@ -60,6 +60,8 @@ pub const KeyMap = struct {
     // Open the recent-repositories switcher: jump to another repo opened earlier
     // in this or a past session, without restarting.
     recent_repos: Binding = .{ .codepoint = 'r', .ctrl = true },
+    // Toggle soft-wrapping of long lines in the diff panels (session-wide).
+    toggle_wrap: Binding = .{ .codepoint = 'w', .ctrl = true },
     // In the commit-graph viewer: jump the cursor to the current commit's first parent.
     graph_first_parent: Binding = .{ .codepoint = 'p' },
     // In the commit-graph viewer: jump the cursor to the current commit (HEAD).
@@ -268,6 +270,12 @@ pub const Config = struct {
     /// differ, delta/GitHub style, on top of the line-level colour. Disable for
     /// plain whole-line diff colouring.
     highlight_word_diff: bool = true,
+    /// Soft-wrap long lines in the diff panels to the view width instead of
+    /// truncating them (so prose/markdown paragraphs stay fully visible rather
+    /// than running off the right edge). This is the initial state; `ctrl+w`
+    /// toggles it at runtime for the session. When off, long lines truncate and
+    /// `H`/`L` pan horizontally.
+    wrap_diff: bool = false,
     /// Run the repo's `prepare-commit-msg` hook when the commit dialog opens and
     /// seed the message fields from its output (e.g. a branch-derived ticket
     /// prefix). Matches interactive git; disable to skip the hook at open time.

@@ -23,6 +23,18 @@ var ui_theme: config_mod.Theme = .{};
 /// style). Set from config at startup; toggle off for plain line-level diffs.
 var word_diff_enabled: bool = true;
 
+/// Scratch for the Diff panel title with the soft-wrap indicator appended, so
+/// the current wrap state is always visible in the header (not just a transient
+/// message). Module-level so the title outlives the frame flush.
+var main_title_wrap_buf: [128]u8 = undefined;
+var split_title_buf: [64]u8 = undefined;
+
+/// Append the wrap indicator to a Diff-panel title when wrapping is on.
+fn titleWithWrap(app: *const app_mod.App, title: []const u8, buf: []u8) []const u8 {
+    if (!app.wrap_diff) return title;
+    return std.fmt.bufPrint(buf, "{s}  \u{21A9} wrap", .{title}) catch title;
+}
+
 const Event = union(enum) {
     key_press: vaxis.Key,
     mouse: vaxis.Mouse,
@@ -342,6 +354,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     ui_theme = app.config.theme;
     word_diff_enabled = app.config.highlight_word_diff;
     defer deinitWordCache();
+    defer app_mod.deinitWrapCache();
 
     var tty_buffer: [1024]u8 = undefined;
     // Opening /dev/tty (+ switching it to raw mode) fails when there's no
@@ -354,6 +367,8 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
         .kitty_keyboard_flags = .{ .report_events = true },
     });
     defer vx.deinit(allocator, tty.writer());
+    // Measure grapheme widths for wrapping exactly as the renderer does.
+    app_mod.wrap_width_method = vx.screen.width_method;
 
     var loop: vaxis.Loop(Event) = .init(io, &tty, &vx);
     try loop.start();
@@ -1178,18 +1193,20 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         const scroll: ScrollInfo = .{ .len = app.mainContentLines(), .pos = app.main_scroll };
         // In the single-pane staging view, `[`/`]` switch the unstaged/staged
         // side, so show them as a highlighted tab strip.
+        const wrap_tag: []const u8 = if (app.wrap_diff) "\u{21A9} wrap" else "";
+        const title_shown = titleWithWrap(app, main_title, &main_title_wrap_buf);
         const main = if (app.staging_active and !app.staging_patch_mode) blk: {
             const staging_tabs = [_][]const u8{ "Unstaged", "Staged" };
-            break :blk tabbedPanel(root, side_w, 0, main_w, body_h, null, &staging_tabs, @as(usize, if (app.staging_staged_view) 1 else 0), "", app.focus == .main, scroll);
+            break :blk tabbedPanel(root, side_w, 0, main_w, body_h, null, &staging_tabs, @as(usize, if (app.staging_staged_view) 1 else 0), wrap_tag, app.focus == .main, scroll);
         } else if (app.diff_base != null) blk: {
             // Diffing mode: the title carries the whole state (base..selected),
             // so draw it in the warning colour — the same "a mode is active"
             // signal the commit-filter indicator uses.
             const frame = panelBorder(root, side_w, 0, main_w, body_h, app.focus == .main, scroll);
             if (main_w >= 4 and body_h >= 3)
-                _ = drawTitleSpan(frame.raw, main_w, 2, main_title, styles().warning);
+                _ = drawTitleSpan(frame.raw, main_w, 2, title_shown, styles().warning);
             break :blk frame.inner;
-        } else panel(root, side_w, 0, main_w, body_h, main_title, app.focus == .main, scroll);
+        } else panel(root, side_w, 0, main_w, body_h, title_shown, app.focus == .main, scroll);
         app.main_view_height = main.height;
         app.main_view_width = main.width;
         if (app.showAboutSplash()) drawAbout(main, app) else {
@@ -1464,6 +1481,7 @@ const help_lines = [_][]const u8{
     "  tab            focus the Diff panel (tab again returns)",
     "  H              scroll the focused panel left (long rows)",
     "  L              scroll the focused panel right (long rows)",
+    "  ctrl+w         wrap long lines in the diff panels instead of scrolling",
     "  [              previous tab (or staging side)",
     "  ]              next tab (or staging side)",
     "  enter          inspect the selection in the main panel",
@@ -3432,42 +3450,78 @@ fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
         return;
     }
 
-    const text = app.diff;
+    // Preview text carries git's own ANSI colors (--color=always); `styles().normal`
+    // is just the reset/base printAnsi falls back to.
+    drawDiffContent(win, app, app.diff, .main);
+}
+
+/// The mouse text-selection's visual-column range on source `line`, or null when
+/// the line is outside the selection. `end` is unbounded (maxInt) for lines
+/// before the last, so a whole wrapped line stays selected across its rows.
+const SelCols = struct { start: usize, end: usize };
+fn selColsFor(sel: anytype, line: usize) ?SelCols {
+    const s = sel orelse return null;
+    if (line < s.sl or line > s.el) return null;
+    return .{
+        .start = if (line == s.sl) s.sc else 0,
+        .end = if (line == s.el) s.ec else std.math.maxInt(usize),
+    };
+}
+
+/// Intersect a selection column range with a segment's visual window
+/// `[vis_start, vis_end)`, returning the on-screen `[lo, hi)` (relative to the
+/// segment start). Empty (0,0) when nothing on this segment is selected.
+fn segSel(cols: ?SelCols, vis_start: u16, vis_end: u16) struct { lo: u16, hi: u16 } {
+    const c = cols orelse return .{ .lo = 0, .hi = 0 };
+    const lo = @max(c.start, @as(usize, vis_start));
+    const hi = @min(c.end, @as(usize, vis_end));
+    if (lo >= hi) return .{ .lo = 0, .hi = 0 };
+    return .{ .lo = @intCast(lo - vis_start), .hi = @intCast(hi - vis_start) };
+}
+
+fn wordBg(em: worddiff.Emph) u8 {
+    return if (em.added) ui_theme.word_add_bg else ui_theme.word_del_bg;
+}
+
+/// The main-preview diff renderer, in both truncate and soft-wrap modes. Git
+/// colors each line itself (`--color=always`), so the base is always the reset.
+/// In wrap mode one source line spans several rows via `diffwrap`; in truncate
+/// mode it is one row shifted by `main_hscroll`. Word emphasis and mouse
+/// selection are mapped onto each rendered segment.
+fn drawDiffContent(win: vaxis.Window, app: *const app_mod.App, text: []const u8, pane: app_mod.SelPane) void {
+    const base = styles().normal;
     const emph_lines = wordEmphasis(app.allocator, text);
+    const sel = app.diffSelectionRangeFor(pane);
+
+    if (app.wrap_diff) {
+        const rows = app_mod.wrapRowsFor(app.allocator, text, win.width);
+        var screen_row: u16 = 0;
+        while (screen_row < win.height) : (screen_row += 1) {
+            const vidx = app.main_scroll + screen_row;
+            if (vidx >= rows.len) break;
+            const wr = rows[vidx];
+            const line = text[wr.start..wr.end];
+            const em = emphFor(emph_lines, wr.line);
+            const sg = segSel(selColsFor(sel, wr.line), wr.vis_start, wr.vis_end);
+            printAnsiEmph(win, screen_row, line, base, sg.lo, sg.hi, wr.vis_start, em.spans, wordBg(em), wr.vis_end - wr.vis_start);
+        }
+        return;
+    }
+
+    const h_off = app.main_hscroll;
     var lines = std.mem.splitScalar(u8, text, '\n');
     var skipped: usize = 0;
     while (skipped < app.main_scroll) : (skipped += 1) {
         if (lines.next() == null) return;
     }
-
-    const sel = app.diffSelectionRangeFor(.main);
-    const h_off = app.main_hscroll;
-
     var row: u16 = 0;
     while (row < win.height) : (row += 1) {
         const line = lines.next() orelse break;
         const abs_line = app.main_scroll + row;
-        // Preview text carries git's own ANSI colors (--color=always). The mouse
-        // text selection (if any) highlights columns on this line; selection
-        // columns are text columns, shifted into screen space by `h_off`.
-        var sel_lo: u16 = 0;
-        var sel_hi: u16 = 0;
-        if (sel) |s| {
-            if (abs_line >= s.sl and abs_line <= s.el) {
-                sel_lo = if (abs_line == s.sl) selScreenCol(s.sc, h_off, win.width) else 0;
-                sel_hi = if (abs_line == s.el) selScreenCol(s.ec, h_off, win.width) else win.width;
-            }
-        }
         const em = emphFor(emph_lines, abs_line);
-        printAnsiEmph(win, row, line, styles().normal, sel_lo, sel_hi, h_off, em.spans, if (em.added) ui_theme.word_add_bg else ui_theme.word_del_bg);
+        const sg = segSel(selColsFor(sel, abs_line), h_off, h_off +| win.width);
+        printAnsiEmph(win, row, line, base, sg.lo, sg.hi, h_off, em.spans, wordBg(em), std.math.maxInt(u16));
     }
-}
-
-/// Map a text column to an on-screen column for the selection highlight: shift
-/// left by the horizontal offset (saturating) and clamp to the panel width.
-fn selScreenCol(text_col: usize, h_off: u16, width: u16) u16 {
-    const shifted = text_col -| h_off;
-    return @intCast(@min(shifted, width));
 }
 
 /// Render one side of the staging diff. The plain (--no-color) text is colorized
@@ -3489,10 +3543,42 @@ fn drawStagingPane(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
     const scroll: usize = if (active) app.main_scroll else 0;
     // Only the active pane scrolls horizontally; the read-only side stays at the
     // left so both halves of a split stay legible.
-    const h_off: u16 = if (active) app.main_hscroll else 0;
-    // Mouse text selection in this pane (if any), highlighted per column.
+    const h_off: u16 = if (active and !app.wrap_diff) app.main_hscroll else 0;
     const sel = app.diffSelectionRangeFor(pane);
     const emph_lines = wordEmphasis(app.allocator, text);
+
+    // The plain (--no-color) line's base style: diff colour plus the patch-builder
+    // and line-cursor highlight backgrounds, which span all of a wrapped line.
+    const baseOf = struct {
+        fn f(a: *const app_mod.App, line: []const u8, abs_line: usize, act: bool, hs: usize, he: usize) vaxis.Style {
+            var style = diffStyle(line);
+            if (a.staging_patch_mode and abs_line < a.patch_work_included.len and
+                a.patch_work_included[abs_line] and line.len > 0 and (line[0] == '+' or line[0] == '-'))
+            {
+                style.bg = .{ .index = 22 };
+            }
+            if (act and abs_line >= hs and abs_line < he) style.bg = .{ .index = 8 };
+            return style;
+        }
+    }.f;
+
+    if (app.wrap_diff) {
+        const rows = app_mod.wrapRowsFor(app.allocator, text, win.width);
+        var screen_row: u16 = 0;
+        while (screen_row < win.height) : (screen_row += 1) {
+            const vidx = scroll + screen_row;
+            if (vidx >= rows.len) break;
+            const wr = rows[vidx];
+            const line = text[wr.start..wr.end];
+            const base = baseOf(app, line, wr.line, active, hl_start, hl_end);
+            if (std.meta.activeTag(base.bg) != .default) fillRow(win, screen_row, base);
+            const em = emphFor(emph_lines, wr.line);
+            const sg = segSel(selColsFor(sel, wr.line), wr.vis_start, wr.vis_end);
+            printAnsiEmph(win, screen_row, line, base, sg.lo, sg.hi, wr.vis_start, em.spans, wordBg(em), wr.vis_end - wr.vis_start);
+        }
+        return;
+    }
+
     var lines = std.mem.splitScalar(u8, text, '\n');
     var skipped: usize = 0;
     while (skipped < scroll) : (skipped += 1) {
@@ -3502,32 +3588,11 @@ fn drawStagingPane(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
     while (row < win.height) : (row += 1) {
         const line = lines.next() orelse break;
         const abs_line = scroll + row;
-        var style = diffStyle(line);
-        // Patch builder: add/remove lines included in the patch get a green
-        // background so the selection is visible at a glance.
-        if (app.staging_patch_mode and abs_line < app.patch_work_included.len and
-            app.patch_work_included[abs_line] and line.len > 0 and (line[0] == '+' or line[0] == '-'))
-        {
-            style.bg = .{ .index = 22 };
-            fillRow(win, row, style);
-        }
-        if (active and abs_line >= hl_start and abs_line < hl_end) {
-            style.bg = .{ .index = 8 };
-            fillRow(win, row, style);
-        }
-        var sel_lo: u16 = 0;
-        var sel_hi: u16 = 0;
-        if (sel) |s| {
-            if (abs_line >= s.sl and abs_line <= s.el) {
-                sel_lo = if (abs_line == s.sl) selScreenCol(s.sc, h_off, win.width) else 0;
-                sel_hi = if (abs_line == s.el) selScreenCol(s.ec, h_off, win.width) else win.width;
-            }
-        }
-        // The staging diff is plain (--no-color) text; printAnsi renders it with
-        // `style` as the base, the selected column span highlighted, and the
-        // changed words within the line given a stronger background.
+        const base = baseOf(app, line, abs_line, active, hl_start, hl_end);
+        if (std.meta.activeTag(base.bg) != .default) fillRow(win, row, base);
         const em = emphFor(emph_lines, abs_line);
-        printAnsiEmph(win, row, line, style, sel_lo, sel_hi, h_off, em.spans, if (em.added) ui_theme.word_add_bg else ui_theme.word_del_bg);
+        const sg = segSel(selColsFor(sel, abs_line), h_off, h_off +| win.width);
+        printAnsiEmph(win, row, line, base, sg.lo, sg.hi, h_off, em.spans, wordBg(em), std.math.maxInt(u16));
     }
 }
 
@@ -3543,8 +3608,15 @@ fn drawStagingSplit(root: vaxis.Window, app: *app_mod.App, x: u16, y: u16, w: u1
     // The active pane scrolls with main_scroll; the read-only one shows the top.
     const unstaged_pos: usize = if (unstaged_active) app.main_scroll else 0;
     const staged_pos: usize = if (unstaged_active) 0 else app.main_scroll;
-    const left = panel(root, x, y, left_w, h, "Unstaged", focused and unstaged_active, .{ .len = app_mod.diffLineCount(unstaged_text), .pos = unstaged_pos });
-    const right = panel(root, x + left_w, y, w - left_w, h, "Staged", focused and !unstaged_active, .{ .len = app_mod.diffLineCount(staged_text), .pos = staged_pos });
+    // Scrollbar length is visual rows when wrapping, source lines otherwise.
+    const rowsOf = struct {
+        fn f(a: *app_mod.App, text: []const u8, panel_w: u16) usize {
+            if (!a.wrap_diff) return app_mod.diffLineCount(text);
+            return app_mod.wrapRowsFor(a.allocator, text, panel_w -| 2).len;
+        }
+    }.f;
+    const left = panel(root, x, y, left_w, h, titleWithWrap(app, "Unstaged", &main_title_wrap_buf), focused and unstaged_active, .{ .len = rowsOf(app, unstaged_text, left_w), .pos = unstaged_pos });
+    const right = panel(root, x + left_w, y, w - left_w, h, titleWithWrap(app, "Staged", &split_title_buf), focused and !unstaged_active, .{ .len = rowsOf(app, staged_text, w - left_w), .pos = staged_pos });
     app.main_view_height = if (unstaged_active) left.height else right.height;
     app.main_view_width = if (unstaged_active) left.width else right.width;
     // The active side (`staging_diff`) is the `.main` selection pane; the
@@ -3735,13 +3807,13 @@ fn footerHints(c: FooterCtx) []const u8 {
         .stash => "space apply  g pop  d drop  r rename  w patch  enter view" ++ global,
         .main => if (c.fullscreen)
             (if (c.main_file)
-                "enter stage  j/k scroll  H/L pan  e edit  PgUp/PgDn page  drag select  ^o copy all  z exit full  esc back" ++ global
+                "enter stage  j/k scroll  H/L pan  ^w wrap  e edit  PgUp/PgDn page  drag select  ^o copy all  z exit full  esc back" ++ global
             else
-                "j/k scroll  H/L pan  PgUp/PgDn page  drag select  ^o copy all  z exit full  esc back" ++ global)
+                "j/k scroll  H/L pan  ^w wrap  PgUp/PgDn page  drag select  ^o copy all  z exit full  esc back" ++ global)
         else if (c.main_file)
-            "enter stage  j/k scroll  H/L pan  e edit  PgUp/PgDn page  drag select  ^o copy all  z full  esc back" ++ global
+            "enter stage  j/k scroll  H/L pan  ^w wrap  e edit  PgUp/PgDn page  drag select  ^o copy all  z full  esc back" ++ global
         else
-            "j/k scroll  H/L pan  PgUp/PgDn page  drag select  ^o copy all  z full  esc back" ++ global,
+            "j/k scroll  H/L pan  ^w wrap  PgUp/PgDn page  drag select  ^o copy all  z full  esc back" ++ global,
     };
 }
 
@@ -3974,7 +4046,7 @@ fn drawDialogRow(win: vaxis.Window, app: *app_mod.App, win_row: u16, text: []con
 /// whose on-screen column falls in `[sel_lo, sel_hi)` get the selection
 /// background (mouse text selection); pass an empty range (0,0) for none.
 fn printAnsi(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, sel_lo: u16, sel_hi: u16, h_off: u16) void {
-    printAnsiEmph(win, row, line, base, sel_lo, sel_hi, h_off, &.{}, 0);
+    printAnsiEmph(win, row, line, base, sel_lo, sel_hi, h_off, &.{}, 0, std.math.maxInt(u16));
 }
 
 /// Like `printAnsi`, plus word-level emphasis: cells whose character ordinal
@@ -3985,7 +4057,7 @@ fn printAnsi(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, s
 /// tab-space), not visual column, so it stays aligned through wide characters
 /// (CJK, emoji), combining marks and zero-width codepoints: `worddiff` counts
 /// characters the same way this loop draws them, whatever each one's width.
-fn printAnsiEmph(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, sel_lo: u16, sel_hi: u16, h_off: u16, emph: []const worddiff.Span, emph_bg: u8) void {
+fn printAnsiEmph(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, sel_lo: u16, sel_hi: u16, h_off: u16, emph: []const worddiff.Span, emph_bg: u8, max_cols: u16) void {
     if (row >= win.height) return;
     var style = base;
     var vis_col: u16 = 0; // column in the unscrolled line
@@ -4012,7 +4084,9 @@ fn printAnsiEmph(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Styl
             w.writeCell(c, r, .{ .char = .{ .grapheme = g, .width = @intCast(width) }, .style = cell_style });
         }
     }.f;
-    const last_col: usize = @as(usize, h_off) + win.width;
+    // Draw at most `max_cols` cells past `h_off` (a wrapped segment's width), and
+    // never past the panel edge.
+    const last_col: usize = @as(usize, h_off) + @min(win.width, max_cols);
     while (i < line.len and vis_col < last_col) {
         const byte = line[i];
         if (byte == 0x1b) {
@@ -4391,8 +4465,10 @@ test "footer hints have no key contradictions per stage" {
     // Patch line view advertises the patch menu to apply/reset the selection.
     try std.testing.expect(has(footerHints(.{ .staging_patch = true }), "^p patch"));
 
-    // The Diff panel advertises horizontal scrolling (H/L) for long lines.
+    // The Diff panel advertises horizontal scrolling (H/L) and the wrap toggle.
     try std.testing.expect(has(footerHints(.{ .focus = .main }), "H/L"));
+    try std.testing.expect(has(footerHints(.{ .focus = .main }), "^w wrap"));
+    try std.testing.expect(has(footerHints(.{ .focus = .main, .fullscreen = true }), "^w wrap"));
 
     // `e edit` is advertised wherever editing the file works: Files, the
     // staging and patch views, a commit's file list, and the Diff panel of a

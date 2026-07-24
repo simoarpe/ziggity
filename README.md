@@ -317,6 +317,29 @@ and the two backgrounds are themeable (`word_add_bg`, `word_del_bg`).
 
 ![Word-level diff highlighting](docs/screenshots/20-word-diff.png)
 
+### Wrap Long Lines On Demand
+
+Code lines are short, so by default the diff panels truncate anything past the
+right edge and `H`/`L` pan across it. Prose is the opposite: a markdown or
+documentation paragraph is one very long line, and the word that changed can sit
+off screen, invisible, until you scroll sideways to hunt for it. Press `ctrl+w`
+and every diff panel soft-wraps to the view width instead, so the whole
+paragraph, and the change inside it, is right there. The word-level highlight
+travels onto the wrapped rows, correctly aligned through wide characters, emoji
+and tabs. Wrapping is session-wide and toggles instantly; it starts off and can
+default on with `wrap_diff = true`. While it is on the Diff panel title shows a
+`↩ wrap` marker, so the current state is always visible.
+
+<p align="center">
+  <img src="docs/assets/ziggity-wrap.gif" alt="ctrl+w toggles soft-wrapping of long diff lines" width="900">
+</p>
+
+<p align="center"><i>The same prose diff, truncated then wrapped with ctrl+w. The changed word was off screen; now it is not, and it keeps its highlight.</i></p>
+
+This is the one place lazygit and Ziggity agree it matters: lazygit wraps its
+staging view by default for exactly this reason. Ziggity extends it to every
+diff panel (preview, staging, fullscreen) behind one toggle.
+
 ### History Navigation with Intent
 
 The commit graph (`ctrl+l`) is the real `git log --graph`, in git's own
@@ -835,6 +858,7 @@ essentials:
   section for the current panel
 - `ctrl+z`: undo the last operation (reflog reset, after confirmation)
 - `ctrl+r`: switch to a recently opened repository (see below)
+- `ctrl+w`: toggle soft-wrapping of long lines in the diff panels (see below)
 - `@`: command log (recent git commands ziggity ran)
 - `ctrl+o`: copy the selected hash, branch or tag to the system clipboard
 - `o`: open the selected commit or branch on its remote host

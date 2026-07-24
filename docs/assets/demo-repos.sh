@@ -214,5 +214,26 @@ pub fn shutdown() void {
 }
 ZEOF
 
-echo "demo repos ready: /tmp/zdemo-commit, /tmp/zdemo-co/clone, /tmp/zdemo-fetch, /tmp/zhero/ziggity, /tmp/zdemo-auth, /tmp/zdemo-graph, /tmp/zrecent, /tmp/zword"
+# --- /tmp/zwrap: the line-wrapping demo (wrap.tape) -------------------------
+# A markdown file with long prose paragraphs and a one-word edit deep inside
+# one of them, so the diff has long -/+ lines that run off the right edge when
+# truncating and reflow into the view when wrapping (ctrl+w).
+rm -rf /tmp/zwrap
+mkdir /tmp/zwrap
+cd /tmp/zwrap
+git init -q -b main
+git config user.email demo@ziggity.dev
+git config user.name "Demo"
+cat > notes.md <<'ZEOF'
+# Release notes
+
+Ziggity is a fast terminal user interface for Git written in Zig that follows the workflow lazygit made popular while fixing a number of everyday interactions so they are quicker, more efficient, and more predictable, all delivered in one tiny native binary with no runtime and no libgit2.
+
+Long paragraphs of prose like this one, common in markdown and documentation diffs, run off the right edge when lines are truncated, so the part that actually changed can sit off screen and stay invisible until you scroll sideways to hunt for it.
+ZEOF
+git add .
+git commit -q -m "Add release notes"
+sed -i.bak 's/while fixing a number/while improving a number/' notes.md && rm -f notes.md.bak
+
+echo "demo repos ready: /tmp/zdemo-commit, /tmp/zdemo-co/clone, /tmp/zdemo-fetch, /tmp/zhero/ziggity, /tmp/zdemo-auth, /tmp/zdemo-graph, /tmp/zrecent, /tmp/zword, /tmp/zwrap"
 echo "for credentials.tape, also start:  python3 /tmp/auth401.py &"

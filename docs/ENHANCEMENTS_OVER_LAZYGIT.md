@@ -101,6 +101,15 @@ index of those intentional differences.
   backgrounds are themeable (`word_add_bg`, `word_del_bg`).
   [Details](../README.md#word-level-diff-highlighting)
 
+- **Soft-wrap long lines in every diff panel.** `ctrl+w` wraps long diff lines
+  to the view width instead of truncating them, so a prose/markdown paragraph
+  and the change inside it stay visible without sideways scrolling; the word
+  highlight travels onto the wrapped rows, aligned through wide chars, emoji and
+  tabs. lazygit wraps its staging view only (`wrapLinesInStagingView`); Ziggity
+  covers the preview, staging and fullscreen behind one session-wide toggle,
+  starting off and defaulting on with `wrap_diff = true`.
+  [Details](../README.md#wrap-long-lines-on-demand)
+
 - **First parent navigation in the commit graph.** `p` jumps to the current
   commit's first parent via a preloaded parent map, so walking the mainline
   of a merge heavy history is instant. Addresses lazygit issue

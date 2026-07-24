@@ -21,6 +21,7 @@ const git_mod = @import("git.zig");
 const model = @import("model.zig");
 const patch_mod = @import("patch.zig");
 const recentrepos = @import("recentrepos.zig");
+const diffwrap = @import("diffwrap.zig");
 const staging_mod = @import("staging.zig");
 const textmatch = @import("textmatch.zig");
 
@@ -1613,6 +1614,69 @@ pub fn diffMaxVisibleWidth(text: []const u8) u16 {
     return @max(max, col);
 }
 
+// ---- Soft-wrap layout cache (diff panels) --------------------------------
+//
+// `diffwrap.build` runs once per (diff text, content width) and is reused across
+// frames and across the render/scroll/mouse code, so wrapping a large diff and
+// scrolling it stays cheap. A small ring covers the preview and both staging
+// panes at once. Freed at shutdown via `deinitWrapCache`.
+
+/// Grapheme width method the terminal uses, mirrored from vaxis so the wrap
+/// layout measures columns exactly like the renderer. Set once in `tui.run`.
+pub var wrap_width_method: vaxis.gwidth.Method = .wcwidth;
+
+fn wrapCellWidth(g: []const u8) u16 {
+    return vaxis.gwidth.gwidth(g, wrap_width_method);
+}
+
+const WrapCacheEntry = struct {
+    addr: usize = 0,
+    len: usize = 0,
+    width: u16 = 0,
+    used: u64 = 0,
+    gpa: ?std.mem.Allocator = null,
+    rows: []diffwrap.Row = &.{},
+};
+var wrap_cache: [3]WrapCacheEntry = .{ .{}, .{}, .{} };
+var wrap_clock: u64 = 0;
+var wrap_empty: [0]diffwrap.Row = .{};
+
+/// Visual rows for `text` wrapped to `content_width`, computed once and cached.
+/// Best-effort: an allocation failure yields no rows (the caller then treats the
+/// content as one row per line).
+pub fn wrapRowsFor(gpa: std.mem.Allocator, text: []const u8, content_width: u16) []diffwrap.Row {
+    if (text.len == 0 or content_width == 0) return wrap_empty[0..];
+    const addr = @intFromPtr(text.ptr);
+    wrap_clock +%= 1;
+    for (&wrap_cache) |*e| {
+        if (e.gpa != null and e.addr == addr and e.len == text.len and e.width == content_width) {
+            e.used = wrap_clock;
+            return e.rows;
+        }
+    }
+    var victim: *WrapCacheEntry = &wrap_cache[0];
+    for (&wrap_cache) |*e| {
+        if (e.gpa == null) {
+            victim = e;
+            break;
+        }
+        if (e.used < victim.used) victim = e;
+    }
+    if (victim.gpa) |g| g.free(victim.rows);
+    const rows = diffwrap.build(gpa, text, content_width, &wrapCellWidth) catch wrap_empty[0..];
+    victim.* = .{ .addr = addr, .len = text.len, .width = content_width, .used = wrap_clock, .gpa = gpa, .rows = rows };
+    return rows;
+}
+
+/// Release the wrap-layout cache (module-level, so it otherwise outlives the
+/// render loop). Called from `tui.run`'s teardown.
+pub fn deinitWrapCache() void {
+    for (&wrap_cache) |*e| {
+        if (e.gpa) |g| g.free(e.rows);
+        e.* = .{};
+    }
+}
+
 /// Remove `len` bytes at `pos` from `buf`, shifting the tail down. Never grows,
 /// so no allocation is needed.
 fn deleteRange(buf: *std.ArrayList(u8), pos: usize, len: usize) void {
@@ -1955,10 +2019,18 @@ pub const App = struct {
     /// loop; drives the branches panel's "time ago" recency column.
     now_unix: i64 = 0,
     commits_tab: CommitsTab = .commits,
+    // When wrapping is on, `main_scroll` counts VISUAL rows (wrapped segments)
+    // rather than source lines; the two are identical when wrapping is off (one
+    // segment per line), so the field's meaning is consistent either way.
     main_scroll: usize = 0,
+    /// Soft-wrap long diff lines to the view width instead of truncating them.
+    /// Initialized from `config.wrap_diff`; `ctrl+w` toggles it for the session
+    /// and it applies to every diff panel (preview, staging, fullscreen).
+    wrap_diff: bool = false,
     /// Horizontal scroll offset (cells) of the main diff / active staging pane,
     /// so lines wider than the panel can be read with H/L. Reset to 0 whenever
-    /// the main view is reset to the top (see `resetMainView`).
+    /// the main view is reset to the top (see `resetMainView`). Unused (pinned to
+    /// 0) while `wrap_diff` is on, since nothing overflows horizontally then.
     main_hscroll: u16 = 0,
     /// Last-rendered inner width of the main diff / active staging pane, used to
     /// bound the horizontal offset.
@@ -2359,6 +2431,7 @@ pub const App = struct {
             .allocator = allocator,
             .git = git,
             .config = cfg,
+            .wrap_diff = cfg.wrap_diff,
         };
         app.files_tree = .{ .collapsed = std.BufSet.init(allocator) };
         app.commit_tree = .{ .collapsed = std.BufSet.init(allocator) };
@@ -3168,6 +3241,7 @@ pub const App = struct {
             },
             .undo => try self.startUndoConfirm(),
             .recent_repos => try self.openRecentRepos(),
+            .toggle_wrap => try self.toggleWrapDiff(),
             .copy_to_clipboard => try self.requestClipboardCopy(),
             .open_browser => try diffmode_mod.openSelectionInBrowser(self),
             // W: with no base yet and a ref under the cursor, mark it right away
@@ -3428,7 +3502,7 @@ pub const App = struct {
                     if (self.selPaneAt(c, rw)) |pane| {
                         if (self.paneText(pane).len > 0) {
                             const r = self.paneRectFor(pane).?;
-                            const pt = diffPointAt(r, self.paneScroll(pane), self.paneHScroll(pane), c, rw);
+                            const pt = self.diffPointFor(pane, r, c, rw);
                             // Remember if a real selection was on screen, so a
                             // click that clears it doesn't also grab focus.
                             self.diff_sel_had_span = self.diff_sel_active and
@@ -3450,7 +3524,7 @@ pub const App = struct {
                 },
                 .drag => if (self.diff_sel_active) {
                     if (self.paneRectFor(self.diff_sel_pane)) |r| {
-                        const pt = diffPointAt(r, self.paneScroll(self.diff_sel_pane), self.paneHScroll(self.diff_sel_pane), c, rw);
+                        const pt = self.diffPointFor(self.diff_sel_pane, r, c, rw);
                         self.diff_sel_head_line = pt.line;
                         self.diff_sel_head_col = pt.col;
                         self.diff_sel_dragged = true;
@@ -3789,19 +3863,30 @@ pub const App = struct {
     /// Map an absolute screen cell to a position in a pane's content: the line
     /// index (accounting for `scroll`) and the visible column, both clamped to
     /// the pane's inner content area.
-    fn diffPointAt(r: PanelRect, scroll: usize, h_off: u16, col: u16, row: u16) DiffPoint {
+    /// Map a mouse cell in `pane`'s rectangle to a source `(line, visual col)`.
+    /// Selection anchors are stored in source coordinates, so this is where the
+    /// wrap layout is consulted: a screen row maps through the wrapped visual rows
+    /// to its source line and the segment's starting column. In truncate mode it
+    /// is the direct `scroll + row` / `col + h_off` mapping.
+    fn diffPointFor(self: *const App, pane: SelPane, r: PanelRect, col: u16, row: u16) DiffPoint {
         const content_top = r.y + 1;
         const content_left = r.x + 1;
         const content_h = r.h -| 2;
         const content_w = r.w -| 2;
-        const rel_row: u16 = if (row <= content_top)
-            0
-        else
-            @min(row - content_top, content_h -| 1);
-        // Add the horizontal offset so the selection tracks the underlying text
-        // column, not the on-screen column, when the pane is scrolled right.
+        const rel_row: u16 = if (row <= content_top) 0 else @min(row - content_top, content_h -| 1);
         const screen_col: usize = if (col <= content_left) 0 else @min(col - content_left, content_w);
-        return .{ .line = scroll + rel_row, .col = screen_col + h_off };
+
+        if (self.wrap_diff) {
+            const text = self.paneText(pane);
+            const rows = wrapRowsFor(self.allocator, text, content_w);
+            const vidx = self.paneScroll(pane) + rel_row;
+            if (vidx < rows.len) {
+                const wr = rows[vidx];
+                return .{ .line = wr.line, .col = @as(usize, wr.vis_start) + screen_col };
+            }
+            return .{ .line = diffLineCount(text) -| 1, .col = screen_col };
+        }
+        return .{ .line = self.paneScroll(pane) + rel_row, .col = screen_col + self.paneHScroll(pane) };
     }
 
     /// Normalized (start <= end) selection for `pane`, clamped to its content.
@@ -5797,16 +5882,64 @@ pub const App = struct {
     /// where the last line sits on the bottom row, so the panel can't scroll on
     /// into empty space. Zero when the content fits the view.
     pub fn maxMainScroll(self: *const App) usize {
-        const text = if (self.staging_active) self.staging_diff else self.diff;
-        const lines = diffLineCount(text);
         const height: usize = if (self.main_view_height == 0) 20 else self.main_view_height;
-        return lines -| height;
+        return self.mainVisualRows() -| height;
     }
 
-    /// Total displayed lines of the main panel's current content (the active
-    /// staging diff or the preview) — for sizing the scrollbar.
+    /// The main panel's current content (active staging diff or the preview).
+    pub fn activeMainText(self: *const App) []const u8 {
+        return if (self.staging_active) self.staging_diff else self.diff;
+    }
+
+    /// Total displayed rows of the main panel: source lines when truncating, or
+    /// wrapped visual rows when `wrap_diff` is on. `main_scroll` is an index into
+    /// these, so the two models share one scroll field. Drives the scrollbar and
+    /// the scroll clamp.
+    pub fn mainVisualRows(self: *const App) usize {
+        const text = self.activeMainText();
+        if (!self.wrap_diff) return diffLineCount(text);
+        const width: u16 = if (self.main_view_width == 0) 80 else self.main_view_width;
+        return wrapRowsFor(self.allocator, text, width).len;
+    }
+
+    /// Alias kept for the scrollbar call site.
     pub fn mainContentLines(self: *const App) usize {
-        return diffLineCount(if (self.staging_active) self.staging_diff else self.diff);
+        return self.mainVisualRows();
+    }
+
+    /// The source line currently at the top of the main view, under the *current*
+    /// wrap mode (so a toggle can re-anchor to the same line).
+    fn topSourceLine(self: *const App) usize {
+        const text = self.activeMainText();
+        if (!self.wrap_diff) return self.main_scroll;
+        const width: u16 = if (self.main_view_width == 0) 80 else self.main_view_width;
+        const rows = wrapRowsFor(self.allocator, text, width);
+        if (self.main_scroll < rows.len) return rows[self.main_scroll].line;
+        return diffLineCount(text) -| 1;
+    }
+
+    /// The visual-row index where source line `line` first appears, under the
+    /// *current* wrap mode (the inverse of `topSourceLine`).
+    fn firstVisualRowOfLine(self: *const App, line: usize) usize {
+        if (!self.wrap_diff) return line;
+        const text = self.activeMainText();
+        const width: u16 = if (self.main_view_width == 0) 80 else self.main_view_width;
+        const rows = wrapRowsFor(self.allocator, text, width);
+        for (rows, 0..) |r, idx| {
+            if (r.line >= line) return idx;
+        }
+        return rows.len -| 1;
+    }
+
+    /// `ctrl+w`: flip soft-wrap for every diff panel, session-wide, keeping the
+    /// same source line pinned to the top so the view does not jump.
+    fn toggleWrapDiff(self: *App) !void {
+        const top_line = self.topSourceLine();
+        self.wrap_diff = !self.wrap_diff;
+        self.main_hscroll = 0; // meaningless while wrapping
+        self.main_scroll = self.firstVisualRowOfLine(top_line);
+        self.main_scroll = @min(self.main_scroll, self.maxMainScroll());
+        if (self.wrap_diff) try self.setMessage("line wrap: on", .{}) else try self.setMessage("line wrap: off", .{});
     }
 
     fn scrollMain(self: *App, amount: isize) !void {
@@ -5833,6 +5966,7 @@ pub const App = struct {
     /// Largest horizontal offset that still keeps the widest line's end at (or
     /// before) the panel's right edge. Zero when the content already fits.
     pub fn maxMainHScroll(self: *const App) u16 {
+        if (self.wrap_diff) return 0; // nothing overflows horizontally while wrapping
         const view: u16 = if (self.main_view_width == 0) 80 else self.main_view_width;
         return self.mainContentWidth() -| view;
     }
@@ -12528,4 +12662,37 @@ test "a successful commits reload lands the cursor on the reorder's pending inde
 
     try std.testing.expectEqual(@as(usize, 2), app.commit_index);
     try std.testing.expect(app.select_commit_pending == null);
+}
+
+test "wrap: visual-row count and ctrl+w re-anchor" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    defer deinitWrapCache(); // free the module cache this test populated
+
+    // Six source lines; line 1 is long (32 cols) and wraps. A short view height so
+    // scrolling (and thus re-anchoring) is meaningful.
+    allocator.free(app.diff);
+    app.diff = try allocator.dupe(u8, "l0\n0123456789 0123456789 0123456789\nl2\nl3\nl4\nl5\n");
+    app.main_view_width = 12;
+    app.main_view_height = 2;
+
+    // Truncate mode: one row per source line.
+    try std.testing.expect(!app.wrap_diff);
+    try std.testing.expectEqual(@as(usize, 6), app.mainVisualRows());
+
+    // Put source line 3 (after the long one) at the top, then toggle wrap on.
+    app.main_scroll = 3;
+    try app.toggleWrapDiff();
+    try std.testing.expect(app.wrap_diff);
+    // The long line now wraps, so there are more visual rows than source lines.
+    try std.testing.expect(app.mainVisualRows() > 6);
+    // ...and source line 3 is still pinned to the top.
+    try std.testing.expectEqual(@as(usize, 3), app.topSourceLine());
+
+    // Toggling back restores the source-line scroll model, still on line 3.
+    try app.toggleWrapDiff();
+    try std.testing.expect(!app.wrap_diff);
+    try std.testing.expectEqual(@as(usize, 3), app.main_scroll);
 }
