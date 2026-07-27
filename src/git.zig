@@ -1554,8 +1554,35 @@ pub const Git = struct {
         // `-- <pathspec>` must come last.
         const literal = try literalPathspec(self.allocator, path);
         defer self.allocator.free(literal);
+
+        // A file staged for deletion is gone from the index, so a pathspec-limited
+        // `git stash push` can't match it: it fails with "did not match any files"
+        // and, worse, `--include-untracked` records a spurious full stash first.
+        // Unstage the deletion so it becomes an ordinary unstaged deletion, which
+        // stashes cleanly — popping the entry restores the file the same way
+        // regardless of which side the deletion sat on.
+        if (try self.pathStagedForDeletion(literal)) {
+            var unstaged = try self.exec(&.{ "restore", "--staged", "--", literal });
+            if (!unstaged.ok()) return unstaged; // caller owns and reports it
+            unstaged.deinit(self.allocator);
+        }
+
         if (message) |m| return self.exec(&.{ "stash", "push", "--include-untracked", "-m", m, "--", literal });
         return self.exec(&.{ "stash", "push", "--include-untracked", "--", literal });
+    }
+
+    /// True when `pathspec` (a single-file `:(literal)…` spec) is staged for
+    /// deletion — a `D` in the index (first) column of porcelain status. Such a
+    /// file no longer exists in the index, so a pathspec-limited stash can't
+    /// match it. Any error answers false and lets the stash surface the real
+    /// problem. An unmerged `DD` is excluded (that is a conflict, not a plain
+    /// staged deletion).
+    fn pathStagedForDeletion(self: *Git, pathspec: []const u8) !bool {
+        var res = try self.exec(&.{ "status", "--porcelain", "--", pathspec });
+        defer res.deinit(self.allocator);
+        if (!res.ok()) return false;
+        const s = res.stdout;
+        return s.len >= 2 and s[0] == 'D' and s[1] != 'D';
     }
 
     /// Stash the working state — tracked, staged, AND untracked — into a new
@@ -2461,6 +2488,75 @@ test "stashFile treats the selected path as a literal pathspec" {
     defer status.deinit(a);
     try std.testing.expect(status.ok());
     try std.testing.expectEqualStrings("", status.stdout);
+}
+
+test "stashFile stashes a staged deletion without leaving a bogus stash" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    try env.put("HOME", dir_path);
+    try env.put("GIT_CONFIG_GLOBAL", "/dev/null");
+    try env.put("GIT_CONFIG_SYSTEM", "/dev/null");
+
+    // gone.txt is staged for deletion (git rm); keep.txt stays dirty and must
+    // not be swept into the single-file stash.
+    const setup =
+        \\set -e
+        \\git init -q
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf gone > gone.txt
+        \\printf keep > keep.txt
+        \\git add gone.txt keep.txt
+        \\git commit -qm init
+        \\printf keepmod > keep.txt
+        \\git rm -q gone.txt
+    ;
+    var sh = [_][]const u8{ "sh", "-c", setup };
+    const setup_result = try std.process.run(a, tio, .{
+        .argv = &sh,
+        .cwd = .{ .path = dir_path },
+        .environ_map = &env,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+    defer a.free(setup_result.stdout);
+    defer a.free(setup_result.stderr);
+    switch (setup_result.term) {
+        .exited => |code| if (code != 0) return error.SetupFailed,
+        else => return error.SetupFailed,
+    }
+
+    var git = try Git.initAt(a, tio, &env, dir_path);
+    defer git.deinit();
+
+    var stashed = try git.stashFile("gone.txt", null);
+    defer stashed.deinit(a);
+    try std.testing.expect(stashed.ok());
+
+    // Exactly one stash entry (no spurious extra), and the deletion left the
+    // working tree — gone.txt is restored, keep.txt is still dirty.
+    var list = try git.exec(&.{ "stash", "list" });
+    defer list.deinit(a);
+    try std.testing.expect(list.ok());
+    var lines: usize = 0;
+    var it = std.mem.tokenizeScalar(u8, list.stdout, '\n');
+    while (it.next()) |_| lines += 1;
+    try std.testing.expectEqual(@as(usize, 1), lines);
+
+    var status = try git.exec(&.{ "status", "--porcelain=v1" });
+    defer status.deinit(a);
+    try std.testing.expect(status.ok());
+    try std.testing.expectEqualStrings(" M keep.txt\n", status.stdout);
 }
 
 test "stashKeeping restores the same working state it stashed" {
