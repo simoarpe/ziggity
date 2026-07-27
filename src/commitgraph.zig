@@ -128,13 +128,13 @@ pub fn handleKey(app: *App, key: anytype) !void {
         if (lines > 0) app.commit_graph_sel = @min(app.commit_graph_sel + 10, lines - 1);
         return ensureCursorVisible(app);
     }
-    // H / L pan the graph horizontally when it's wider than the dialog (the
-    // renderer clamps the pan to the content width).
-    if (km.scroll_left.matches(key)) {
+    // H / L (or shift+arrows) pan the graph horizontally when it's wider than
+    // the dialog (the renderer clamps the pan to the content width).
+    if (km.scroll_left.matches(key) or key.matches(vaxis.Key.left, .{ .shift = true })) {
         app.commit_graph_hscroll -|= app_mod.horizontal_scroll_step;
         return;
     }
-    if (km.scroll_right.matches(key)) {
+    if (km.scroll_right.matches(key) or key.matches(vaxis.Key.right, .{ .shift = true })) {
         app.commit_graph_hscroll +|= app_mod.horizontal_scroll_step;
         return;
     }
