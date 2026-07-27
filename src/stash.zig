@@ -1,6 +1,6 @@
 //! Stash-panel actions: opening the Stash menu (save variants) and the
 //! apply/pop/drop operations on the selected stash entry. Free functions over
-//! `*App`; they route through the shared scoped-mutation machinery.
+//! `*App`; mutating actions route through the shared background mutation queue.
 const std = @import("std");
 const app_mod = @import("app.zig");
 
@@ -11,14 +11,20 @@ pub fn startStashMenu(self: *App) !void {
         try self.setMessage("nothing to stash", .{});
         return;
     }
-    // git cannot stash while intent-to-add (`git add -N`) files are present —
-    // every menu option but "staged only" would fail with a cryptic error — so
-    // explain it up front instead of opening a menu that mostly cannot work.
-    if (self.hasIntentToAddFiles()) return self.explainIntentToAddStash();
+    // git cannot stash while intent-to-add (`git add -N`) files are present,
+    // except that `stash --staged` can still work when there is a real staged
+    // change too. If staged-only cannot do useful work, explain up front;
+    // otherwise let the menu open and the async failure path explains any
+    // unsupported variant the user chooses.
+    if (self.hasIntentToAddFiles() and !self.hasStagedFiles()) return self.explainIntentToAddStash();
     self.focus = .files;
     self.mode = .menu;
     self.active_menu = .{ .title = "Stash", .items = &app_mod.stash_menu, .index = 0 };
-    try self.setMessage("stash changes", .{});
+    if (self.hasIntentToAddFiles()) {
+        try self.setMessage("intent-to-add present; staged-only stash can still work", .{});
+    } else {
+        try self.setMessage("stash changes", .{});
+    }
 }
 
 pub fn applySelectedStash(self: *App) !void {
@@ -26,7 +32,7 @@ pub fn applySelectedStash(self: *App) !void {
         try self.setMessage("no stash entry selected", .{});
         return;
     };
-    return self.runMutationScoped(try self.git.stashApply(entry.index), App.Refresh.stash_apply, "applied {s}", .{entry.selector});
+    return self.requestMutation(.{ .stash_apply = entry.index }, .{ .gerund = "applying stash", .command = "git stash apply", .refresh = App.Refresh.stash }, "applied {s}", .{entry.selector});
 }
 
 pub fn popSelectedStash(self: *App) !void {
@@ -34,7 +40,7 @@ pub fn popSelectedStash(self: *App) !void {
         try self.setMessage("no stash entry selected", .{});
         return;
     };
-    return self.runMutationScoped(try self.git.stashPop(entry.index), App.Refresh.stash, "popped {s}", .{entry.selector});
+    return self.requestMutation(.{ .stash_pop = entry.index }, .{ .gerund = "popping stash", .command = "git stash pop", .refresh = App.Refresh.stash }, "popped {s}", .{entry.selector});
 }
 
 /// Write the selected stash's diff to `stash-<index>.patch` in the repo root,
@@ -76,9 +82,8 @@ pub fn dropSelectedStash(self: *App) !void {
             }
             if (indices.items.len > 0) {
                 const n = indices.items.len;
-                const res = try self.git.stashDropMany(indices.items);
                 self.clearRange();
-                return self.runMutationScoped(res, App.Refresh.stash, "dropped {d} stash entries", .{n});
+                return self.requestMutation(.{ .stash_drop_many = indices.items }, .{ .gerund = "dropping stash", .command = "git stash drop", .refresh = App.Refresh.stash }, "dropped {d} stash entries", .{n});
             }
         }
     }
@@ -86,5 +91,5 @@ pub fn dropSelectedStash(self: *App) !void {
         try self.setMessage("no stash entry selected", .{});
         return;
     };
-    return self.runMutationScoped(try self.git.stashDrop(entry.index), App.Refresh.stash, "dropped {s}", .{entry.selector});
+    return self.requestMutation(.{ .stash_drop = entry.index }, .{ .gerund = "dropping stash", .command = "git stash drop", .refresh = App.Refresh.stash }, "dropped {s}", .{entry.selector});
 }

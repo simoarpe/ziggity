@@ -1292,6 +1292,15 @@ pub const Mutation = union(enum) {
     submodule_bulk: git_mod.Git.SubmoduleBulk,
     new_branch_from: struct { name: []const u8, start: []const u8 },
     move_to_new_branch: struct { name: []const u8, original: []const u8 },
+    stash_all: ?[]const u8,
+    stash_untracked: ?[]const u8,
+    stash_staged: ?[]const u8,
+    stash_file: struct { path: []const u8, message: ?[]const u8 },
+    stash_keep: ?[]const u8,
+    stash_apply: usize,
+    stash_pop: usize,
+    stash_drop: usize,
+    stash_drop_many: []const usize,
     rename_stash: struct { index: usize, hash: []const u8, message: []const u8 },
     undo,
     merge: []const u8,
@@ -1314,6 +1323,13 @@ pub const Mutation = union(enum) {
     /// first as the baseline, then the per-path `add` (`git add`) / `reset`
     /// (`git reset`) overrides are applied on top.
     stage_batch: struct { all: ?bool = null, add: []const []const u8, reset: []const []const u8 },
+
+    pub fn isStashCreate(self: Mutation) bool {
+        return switch (self) {
+            .stash_all, .stash_untracked, .stash_staged, .stash_file, .stash_keep => true,
+            else => false,
+        };
+    }
 
     /// Worker-thread entry point: run the mutation on a throwaway page-allocator
     /// `Git`. The wgit's command log (mutations are recorded) is page-allocated
@@ -1356,6 +1372,19 @@ pub const Mutation = union(enum) {
             .submodule_bulk => |op| wgit.bulkSubmodule(op),
             .new_branch_from => |x| wgit.newBranchFrom(x.name, x.start),
             .move_to_new_branch => |x| wgit.moveCommitsToNewBranch(x.name, x.original),
+            .stash_all => |m| wgit.stashAll(m),
+            .stash_untracked => |m| wgit.stashIncludingUntracked(m),
+            .stash_staged => |m| wgit.stashStaged(m),
+            .stash_file => |x| wgit.stashFile(x.path, x.message),
+            .stash_keep => |m| (try wgit.stashKeeping(m)) orelse git_mod.ExecResult{
+                .stdout = try gpa.dupe(u8, "No local changes to save\n"),
+                .stderr = try gpa.alloc(u8, 0),
+                .term = .{ .exited = 0 },
+            },
+            .stash_apply => |idx| wgit.stashApply(idx),
+            .stash_pop => |idx| wgit.stashPop(idx),
+            .stash_drop => |idx| wgit.stashDrop(idx),
+            .stash_drop_many => |indices| wgit.stashDropMany(indices),
             .rename_stash => |x| wgit.renameStash(x.index, x.hash, x.message),
             .undo => wgit.undoLastOperation(),
             .merge => |b| wgit.mergeBranch(b),
@@ -1417,6 +1446,15 @@ pub const Mutation = union(enum) {
             .submodule_bulk => |op| .{ .submodule_bulk = op },
             .new_branch_from => |x| .{ .new_branch_from = .{ .name = try gpa.dupe(u8, x.name), .start = try gpa.dupe(u8, x.start) } },
             .move_to_new_branch => |x| .{ .move_to_new_branch = .{ .name = try gpa.dupe(u8, x.name), .original = try gpa.dupe(u8, x.original) } },
+            .stash_all => |m| .{ .stash_all = try dupeOptStr(gpa, m) },
+            .stash_untracked => |m| .{ .stash_untracked = try dupeOptStr(gpa, m) },
+            .stash_staged => |m| .{ .stash_staged = try dupeOptStr(gpa, m) },
+            .stash_file => |x| .{ .stash_file = .{ .path = try gpa.dupe(u8, x.path), .message = try dupeOptStr(gpa, x.message) } },
+            .stash_keep => |m| .{ .stash_keep = try dupeOptStr(gpa, m) },
+            .stash_apply => |idx| .{ .stash_apply = idx },
+            .stash_pop => |idx| .{ .stash_pop = idx },
+            .stash_drop => |idx| .{ .stash_drop = idx },
+            .stash_drop_many => |indices| .{ .stash_drop_many = try gpa.dupe(usize, indices) },
             .rename_stash => |x| .{ .rename_stash = .{ .index = x.index, .hash = try gpa.dupe(u8, x.hash), .message = try gpa.dupe(u8, x.message) } },
             .undo => .undo,
             .merge => |b| .{ .merge = try gpa.dupe(u8, b) },
@@ -1458,6 +1496,12 @@ pub const Mutation = union(enum) {
                 gpa.free(x.name);
                 gpa.free(x.original);
             },
+            .stash_all, .stash_untracked, .stash_staged, .stash_keep => |m| freeOptStr(gpa, m),
+            .stash_file => |x| {
+                gpa.free(x.path);
+                freeOptStr(gpa, x.message);
+            },
+            .stash_drop_many => |indices| gpa.free(indices),
             .rename_stash => |x| {
                 gpa.free(x.hash);
                 gpa.free(x.message);
@@ -1507,7 +1551,7 @@ pub const Mutation = union(enum) {
                 freeStrList(gpa, b.add);
                 freeStrList(gpa, b.reset);
             },
-            .amend, .undo, .fast_forward_current, .bisect_skip, .bisect_reset, .amend_continue_rebase, .submodule_bulk => {},
+            .amend, .undo, .fast_forward_current, .bisect_skip, .bisect_reset, .amend_continue_rebase, .submodule_bulk, .stash_apply, .stash_pop, .stash_drop => {},
         }
     }
 
@@ -1520,6 +1564,14 @@ pub const Mutation = union(enum) {
         }
         while (n < items.len) : (n += 1) out[n] = try gpa.dupe(u8, items[n]);
         return out;
+    }
+
+    fn dupeOptStr(gpa: std.mem.Allocator, value: ?[]const u8) !?[]const u8 {
+        return if (value) |s| try gpa.dupe(u8, s) else null;
+    }
+
+    fn freeOptStr(gpa: std.mem.Allocator, value: ?[]const u8) void {
+        if (value) |s| gpa.free(s);
     }
 
     fn freeStrList(gpa: std.mem.Allocator, items: []const []const u8) void {
@@ -4557,6 +4609,13 @@ pub const App = struct {
         return false;
     }
 
+    pub fn hasStagedFiles(self: *const App) bool {
+        for (self.data.files) |f| {
+            if (f.has_staged) return true;
+        }
+        return false;
+    }
+
     /// A stash failed and the tree has intent-to-add files: almost certainly
     /// the cause (git can't stash them). Gate on the error text too so an
     /// unrelated failure isn't misattributed.
@@ -4564,6 +4623,13 @@ pub const App = struct {
         if (!self.hasIntentToAddFiles()) return false;
         return std.mem.indexOf(u8, stderr, "not uptodate") != null or
             std.mem.indexOf(u8, stderr, "Cannot save the current worktree state") != null;
+    }
+
+    fn stashNoChangesMessage(job: Mutation, output: []const u8) ?[]const u8 {
+        if (!job.isStashCreate()) return null;
+        if (std.mem.indexOf(u8, output, "No local changes to save") != null) return "nothing to stash";
+        if (std.mem.indexOf(u8, output, "No staged changes") != null) return "nothing staged to stash";
+        return null;
     }
 
     /// Explain, plainly, why git cannot stash while intent-to-add files are
@@ -4580,13 +4646,13 @@ pub const App = struct {
         }
         try w.writeAll(
             "\nThat is a half-added state: git knows their names but not their\n" ++
-            "contents, and git refuses to stash while any file is like this. So no\n" ++
-            "stash can run right now. This is a git limitation, not a ziggity one.\n\n" ++
-            "Your files are safe on disk and nothing changed. To continue, close\n" ++
-            "this (enter), then do ONE of these:\n\n" ++
-            "  - press  a  to stage them normally  (then stash works), or\n" ++
-            "  - run  git rm --cached <path>  in a terminal to untrack them instead\n" ++
-            "    (the file stays on disk, just no longer half-added).",
+                "contents, and git refuses to stash while any file is like this. So no\n" ++
+                "stash can run right now. This is a git limitation, not a ziggity one.\n\n" ++
+                "Your files are safe on disk and nothing changed. To continue, close\n" ++
+                "this (enter), then do ONE of these:\n\n" ++
+                "  - press  a  to stage them normally  (then stash works), or\n" ++
+                "  - run  git rm --cached <path>  in a terminal to untrack them instead\n" ++
+                "    (the file stays on disk, just no longer half-added).",
         );
         try self.reportFailure("cannot stash: files are half-added (git add -N)", aw.written());
     }
@@ -6889,33 +6955,23 @@ pub const App = struct {
             .stash_message => {
                 const stash_kind = self.pending_stash_kind;
                 const msg: ?[]const u8 = if (value.len > 0) value else null;
-                // Run while `value`/`input_buffer` are still valid, then clean up.
-                // `keep` returns null when the tree is clean (nothing snapshotted).
-                const outcome: ?git_mod.ExecResult = switch (stash_kind) {
-                    .all => try self.git.stashAll(msg),
-                    .untracked => try self.git.stashIncludingUntracked(msg),
-                    .staged => try self.git.stashStaged(msg),
-                    .file => if (self.stash_path_owned) |path| try self.git.stashFile(path, msg) else null,
-                    .keep => try self.git.stashKeeping(msg),
-                };
                 self.mode = .normal;
                 self.text_prompt_kind = null;
-                self.input_buffer.clearRetainingCapacity();
-                self.clearOwned(&self.stash_path_owned);
-                const result = outcome orelse {
-                    try self.setMessage("nothing to stash", .{});
-                    return;
+                defer self.input_buffer.clearRetainingCapacity();
+                defer self.clearOwned(&self.stash_path_owned);
+
+                const mutation: Mutation = switch (stash_kind) {
+                    .all => .{ .stash_all = msg },
+                    .untracked => .{ .stash_untracked = msg },
+                    .staged => .{ .stash_staged = msg },
+                    .file => if (self.stash_path_owned) |path|
+                        .{ .stash_file = .{ .path = path, .message = msg } }
+                    else {
+                        try self.setMessage("nothing to stash", .{});
+                        return;
+                    },
+                    .keep => .{ .stash_keep = msg },
                 };
-                // git's stash cannot handle intent-to-add files and fails with a
-                // cryptic "not uptodate" error. Detect that and explain it plainly
-                // instead (no stash variant can work while those files are present).
-                if (!result.ok() and self.stashHitIntentToAdd(result.stderr)) {
-                    var mutable = result;
-                    defer mutable.deinit(self.allocator);
-                    try self.explainIntentToAddStash();
-                    self.refreshViews(Refresh.stash);
-                    return;
-                }
                 const label: []const u8 = switch (stash_kind) {
                     .all => "stashed all changes",
                     .untracked => "stashed (incl. untracked)",
@@ -6923,7 +6979,7 @@ pub const App = struct {
                     .file => "stashed file",
                     .keep => "stashed (working tree kept)",
                 };
-                return self.runMutationScoped(result, Refresh.stash, "{s}", .{label});
+                return self.requestMutation(mutation, .{ .gerund = "stashing", .command = "git stash push", .refresh = Refresh.stash }, "{s}", .{label});
             },
             else => {},
         }
@@ -8814,7 +8870,6 @@ pub const App = struct {
         pub const tags = ScopeSet.init(.{ .tags = true });
         pub const remotes = ScopeSet.init(.{ .remotes = true });
         pub const stash = ScopeSet.init(.{ .files = true, .status = true, .stash = true });
-        pub const stash_apply = ScopeSet.init(.{ .files = true, .status = true });
         pub const worktrees = ScopeSet.init(.{ .worktrees = true });
         // Adding a worktree also creates a branch, so refresh both lists.
         pub const worktree_add = ScopeSet.init(.{ .worktrees = true, .branches = true });
@@ -8926,7 +8981,12 @@ pub const App = struct {
                     .clear_copied => self.clearCopiedCommits(),
                 }
                 const line = if (self.mutation_echo) firstLine(mutable.stdout) else "";
-                try self.reportSuccess(if (line.len > 0) line else self.mutation_msg, mutable.stdout);
+                if (stashNoChangesMessage(job, mutable.stdout)) |msg| {
+                    self.dismissOpFrame();
+                    try self.setMessage("{s}", .{msg});
+                } else {
+                    try self.reportSuccess(if (line.len > 0) line else self.mutation_msg, mutable.stdout);
+                }
                 // A checkout — or creating a branch, which checks it out —
                 // changed the current branch, so move the Branches selection
                 // onto it once the refreshed branch list lands.
@@ -8948,17 +9008,26 @@ pub const App = struct {
             } else {
                 const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
                 const raw = if (stderr.len > 0) mutable.stderr else mutable.stdout;
-                // On a leftover lock, offer to delete it and re-queue this same
-                // mutation (its meta fields are still set). Dupe only then.
-                var action: RetryAction = .none;
-                if (git_mod.isRetryableLockError(raw)) {
-                    if (job.dupe(gpa)) |dup| action = .{ .mutation = dup } else |_| {}
+                if (stashNoChangesMessage(job, raw)) |msg| {
+                    self.select_commit_pending = null;
+                    self.dismissOpFrame();
+                    try self.setMessage("{s}", .{msg});
+                } else if (job.isStashCreate() and self.stashHitIntentToAdd(raw)) {
+                    self.select_commit_pending = null;
+                    try self.explainIntentToAddStash();
+                } else {
+                    // On a leftover lock, offer to delete it and re-queue this same
+                    // mutation (its meta fields are still set). Dupe only then.
+                    var action: RetryAction = .none;
+                    if (git_mod.isRetryableLockError(raw)) {
+                        if (job.dupe(gpa)) |dup| action = .{ .mutation = dup } else |_| {}
+                    }
+                    // A reorder that failed (e.g. a rebase conflict) must not move the
+                    // cursor to where the commit *would* have gone. Keep the pending
+                    // move only for a lock retry, which re-runs this same mutation.
+                    if (std.meta.activeTag(action) != .mutation) self.select_commit_pending = null;
+                    _ = try self.reportFailureOrLock("command failed", raw, action);
                 }
-                // A reorder that failed (e.g. a rebase conflict) must not move the
-                // cursor to where the commit *would* have gone. Keep the pending
-                // move only for a lock retry, which re-runs this same mutation.
-                if (std.meta.activeTag(action) != .mutation) self.select_commit_pending = null;
-                _ = try self.reportFailureOrLock("command failed", raw, action);
             }
         } else {
             self.select_commit_pending = null;
@@ -10405,6 +10474,19 @@ test "intent-to-add stash failure is detected, not misattributed" {
     app.mode = .normal;
     try stash_mod.startStashMenu(&app);
     try std.testing.expectEqual(Mode.menu, app.mode);
+    app.closeMenu();
+
+    // If an intent-to-add file exists alongside a real staged change, the
+    // staged-only stash variant is still valid, so the menu remains reachable.
+    var mixed = [_]model.FileStatus{
+        .{ .path = @constCast("f.py"), .short_status = .{ ' ', 'A' }, .has_staged = false, .has_unstaged = true, .tracked = false, .added = true, .deleted = false, .conflict = false },
+        .{ .path = @constCast("g.py"), .short_status = .{ 'M', ' ' }, .has_staged = true, .has_unstaged = false, .tracked = true, .added = false, .deleted = false, .conflict = false },
+    };
+    app.data.files = &mixed;
+    app.mode = .normal;
+    try stash_mod.startStashMenu(&app);
+    try std.testing.expectEqual(Mode.menu, app.mode);
+    try std.testing.expect(std.mem.indexOf(u8, app.message, "staged-only") != null);
     app.closeMenu();
 }
 
@@ -11879,6 +11961,145 @@ test "slow mutation queues off-thread, marks busy, and refuses a second op" {
     try std.testing.expectEqualStrings("operation in progress...", app.message);
 
     app.mutation_active = false;
+}
+
+test "stash message prompt queues stash creation off-thread" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    app.mode = .text_prompt;
+    app.text_prompt_kind = .stash_message;
+    app.pending_stash_kind = .all;
+    try app.input_buffer.appendSlice(allocator, "wip message");
+
+    try app.submitTextPrompt();
+
+    try std.testing.expectEqual(Mode.normal, app.mode);
+    try std.testing.expect(app.text_prompt_kind == null);
+    try std.testing.expectEqual(@as(usize, 0), app.input_buffer.items.len);
+    try std.testing.expect(app.foregroundBusy());
+    try std.testing.expectEqualStrings("stashing", app.mutation_gerund);
+    try std.testing.expectEqualStrings("stashing...", app.message);
+    try std.testing.expectEqualStrings("stashed all changes", app.mutation_msg);
+    try std.testing.expect(app.mutation_refresh.contains(.files));
+    try std.testing.expect(app.mutation_refresh.contains(.status));
+    try std.testing.expect(app.mutation_refresh.contains(.stash));
+    switch (app.mutation_requested.?) {
+        .stash_all => |msg| try std.testing.expectEqualStrings("wip message", msg.?),
+        else => try std.testing.expect(false),
+    }
+}
+
+test "stash selected file prompt copies the path into the queued mutation" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    app.mode = .text_prompt;
+    app.text_prompt_kind = .stash_message;
+    app.pending_stash_kind = .file;
+    app.stash_path_owned = try allocator.dupe(u8, "src/[id].zig");
+
+    try app.submitTextPrompt();
+
+    try std.testing.expectEqual(Mode.normal, app.mode);
+    try std.testing.expect(app.stash_path_owned == null);
+    try std.testing.expect(app.foregroundBusy());
+    switch (app.mutation_requested.?) {
+        .stash_file => |x| {
+            try std.testing.expectEqualStrings("src/[id].zig", x.path);
+            try std.testing.expect(x.message == null);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "stash panel apply pop and drop queue off-thread mutations" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    var stashes = [_]model.StashEntry{
+        .{ .selector = @constCast("stash@{0}"), .hash = @constCast("0000"), .time = @constCast("now"), .message = @constCast("top"), .index = 0 },
+        .{ .selector = @constCast("stash@{1}"), .hash = @constCast("1111"), .time = @constCast("now"), .message = @constCast("older"), .index = 1 },
+    };
+    app.data.stash = &stashes;
+    app.focus = .stash;
+    app.stash_index = 1;
+
+    try stash_mod.applySelectedStash(&app);
+    try std.testing.expect(app.foregroundBusy());
+    try std.testing.expectEqualStrings("applying stash", app.mutation_gerund);
+    try std.testing.expect(app.mutation_refresh.contains(.stash));
+    switch (app.mutation_requested.?) {
+        .stash_apply => |idx| try std.testing.expectEqual(@as(usize, 1), idx),
+        else => try std.testing.expect(false),
+    }
+    app.mutation_requested.?.deinit(page_alloc);
+    app.mutation_requested = null;
+    page_alloc.free(app.mutation_msg);
+    app.mutation_msg = &.{};
+
+    try stash_mod.popSelectedStash(&app);
+    try std.testing.expect(app.foregroundBusy());
+    try std.testing.expectEqualStrings("popping stash", app.mutation_gerund);
+    switch (app.mutation_requested.?) {
+        .stash_pop => |idx| try std.testing.expectEqual(@as(usize, 1), idx),
+        else => try std.testing.expect(false),
+    }
+    app.mutation_requested.?.deinit(page_alloc);
+    app.mutation_requested = null;
+    page_alloc.free(app.mutation_msg);
+    app.mutation_msg = &.{};
+
+    app.range_anchor = 0;
+    app.range_sticky = true;
+    app.range_key = app.activeListKey();
+    try stash_mod.dropSelectedStash(&app);
+    try std.testing.expect(app.foregroundBusy());
+    try std.testing.expect(!app.rangeActive());
+    switch (app.mutation_requested.?) {
+        .stash_drop_many => |indices| {
+            try std.testing.expectEqual(@as(usize, 2), indices.len);
+            try std.testing.expectEqual(@as(usize, 0), indices[0]);
+            try std.testing.expectEqual(@as(usize, 1), indices[1]);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "stash create completion reports no-op stash output plainly" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    page_alloc.free(app.mutation_msg);
+    app.mutation_msg = try page_alloc.dupe(u8, "stashed all changes");
+    app.mutation_refresh = App.Refresh.stash;
+    app.mutation_active = true;
+
+    const job = Mutation{ .stash_all = null };
+    const result = git_mod.ExecResult{
+        .stdout = try page_alloc.dupe(u8, "No local changes to save\n"),
+        .stderr = try page_alloc.alloc(u8, 0),
+        .term = .{ .exited = 0 },
+    };
+    try app.completeMutation(job, result, page_alloc);
+
+    try std.testing.expect(!app.foregroundBusy());
+    try std.testing.expectEqual(Mode.normal, app.mode);
+    try std.testing.expectEqualStrings("nothing to stash", app.message);
 }
 
 test "input gate ignores mutating keys while a foreground op runs" {

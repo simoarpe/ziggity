@@ -1586,12 +1586,15 @@ pub const Git = struct {
         pushed.deinit(self.allocator);
 
         // Restore the working tree + index from the stash we just made (keeping
-        // it). `--index` preserves the staged/unstaged split; if it can't, a
-        // plain apply still restores the files.
-        var applied = try self.exec(&.{ "stash", "apply", "--index" });
+        // it). Apply the exact hash we just created rather than implicit
+        // `refs/stash`, so another stash created between the push/apply steps
+        // cannot make us restore the wrong entry. `--index` preserves the
+        // staged/unstaged split; if it can't, a plain apply still restores the
+        // files.
+        var applied = try self.exec(&.{ "stash", "apply", "--index", after });
         if (applied.ok()) return applied;
         applied.deinit(self.allocator);
-        return try self.exec(&.{ "stash", "apply" });
+        return try self.exec(&.{ "stash", "apply", after });
     }
 
     /// The top stash commit hash (`refs/stash`), or "" when there is no stash.
@@ -2458,6 +2461,70 @@ test "stashFile treats the selected path as a literal pathspec" {
     defer status.deinit(a);
     try std.testing.expect(status.ok());
     try std.testing.expectEqualStrings("", status.stdout);
+}
+
+test "stashKeeping restores the same working state it stashed" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    try env.put("HOME", dir_path);
+    try env.put("GIT_CONFIG_GLOBAL", "/dev/null");
+    try env.put("GIT_CONFIG_SYSTEM", "/dev/null");
+
+    const setup =
+        \\set -e
+        \\git init -q
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf base > tracked.txt
+        \\git add tracked.txt
+        \\git commit -qm init
+        \\printf staged > tracked.txt
+        \\git add tracked.txt
+        \\printf unstaged > tracked.txt
+        \\printf scratch > untracked.txt
+    ;
+    var sh = [_][]const u8{ "sh", "-c", setup };
+    const setup_result = try std.process.run(a, tio, .{
+        .argv = &sh,
+        .cwd = .{ .path = dir_path },
+        .environ_map = &env,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+    defer a.free(setup_result.stdout);
+    defer a.free(setup_result.stderr);
+    switch (setup_result.term) {
+        .exited => |code| if (code != 0) return error.SetupFailed,
+        else => return error.SetupFailed,
+    }
+
+    var git = try Git.initAt(a, tio, &env, dir_path);
+    defer git.deinit();
+
+    var kept = (try git.stashKeeping("keep")) orelse return error.ExpectedStash;
+    defer kept.deinit(a);
+    try std.testing.expect(kept.ok());
+
+    var status = try git.exec(&.{ "status", "--porcelain=v1" });
+    defer status.deinit(a);
+    try std.testing.expect(status.ok());
+    try std.testing.expect(std.mem.indexOf(u8, status.stdout, "MM tracked.txt\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status.stdout, "?? untracked.txt\n") != null);
+
+    var stash_list = try git.exec(&.{ "stash", "list" });
+    defer stash_list.deinit(a);
+    try std.testing.expect(stash_list.ok());
+    try std.testing.expect(std.mem.indexOf(u8, stash_list.stdout, "keep") != null);
 }
 
 test "prepareCommitMsg runs a guarded hook and seeds the branch ticket" {
