@@ -5090,12 +5090,13 @@ pub const App = struct {
             if (n > 0) self.recent_sel = @min(self.recent_sel + 10, n - 1);
             return self.recentEnsureVisible();
         }
-        // H / L pan horizontally so long paths can be read (clamped by the renderer).
-        if (km.scroll_left.matches(key)) {
+        // H / L (or shift+arrows) pan horizontally so long paths can be read
+        // (clamped by the renderer).
+        if (km.scroll_left.matches(key) or key.matches(vaxis.Key.left, .{ .shift = true })) {
             self.recent_hscroll -|= horizontal_scroll_step;
             return;
         }
-        if (km.scroll_right.matches(key)) {
+        if (km.scroll_right.matches(key) or key.matches(vaxis.Key.right, .{ .shift = true })) {
             self.recent_hscroll +|= horizontal_scroll_step;
             return;
         }

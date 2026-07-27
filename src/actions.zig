@@ -301,9 +301,10 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     if (keymap.left.matches(key) or key.matches(vaxis.Key.left, .{})) return .focus_left;
     if (keymap.right.matches(key) or key.matches(vaxis.Key.right, .{})) return .focus_right;
 
-    // Horizontal scrolling (H/L) of the focused panel for rows wider than it.
-    if (keymap.scroll_left.matches(key)) return .scroll_left;
-    if (keymap.scroll_right.matches(key)) return .scroll_right;
+    // Horizontal scrolling (H/L, or shift+arrows) of the focused panel for rows
+    // wider than it.
+    if (keymap.scroll_left.matches(key) or key.matches(vaxis.Key.left, .{ .shift = true })) return .scroll_left;
+    if (keymap.scroll_right.matches(key) or key.matches(vaxis.Key.right, .{ .shift = true })) return .scroll_right;
 
     // Toggle the staging view's single/split layout (only acts in that view).
     if (keymap.staging_split.matches(key)) return .toggle_staging_split;
