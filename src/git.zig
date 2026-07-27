@@ -62,6 +62,10 @@ fn stripCommentLines(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
     return allocator.dupe(u8, std.mem.trim(u8, out.items, " \t\r\n"));
 }
 
+fn literalPathspec(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, ":(literal){s}", .{path});
+}
+
 /// Run a process like `std.process.run`, but retry briefly on a transient git
 /// lock error instead of surfacing it. Returns the last result either way; the
 /// returned stdout/stderr are owned by `allocator`. Used for every git command
@@ -1544,10 +1548,14 @@ pub const Git = struct {
     pub fn stashFile(self: *Git, path: []const u8, message: ?[]const u8) !ExecResult {
         // `--include-untracked` so a selected *untracked* file can be stashed too:
         // a bare `stash push -- <path>` errors ("pathspec did not match any
-        // file(s) known to git") on a path git doesn't yet track. The pathspec
-        // still limits the stash to just this one file. `-- <path>` must come last.
-        if (message) |m| return self.exec(&.{ "stash", "push", "--include-untracked", "-m", m, "--", path });
-        return self.exec(&.{ "stash", "push", "--include-untracked", "--", path });
+        // file(s) known to git") on a path git doesn't yet track. Prefix the
+        // pathspec with `:(literal)` so Git doesn't treat characters like `*`,
+        // `?`, `[`, or a leading `:(...)` as pathspec syntax for a selected file.
+        // `-- <pathspec>` must come last.
+        const literal = try literalPathspec(self.allocator, path);
+        defer self.allocator.free(literal);
+        if (message) |m| return self.exec(&.{ "stash", "push", "--include-untracked", "-m", m, "--", literal });
+        return self.exec(&.{ "stash", "push", "--include-untracked", "--", literal });
     }
 
     /// Stash the working state — tracked, staged, AND untracked — into a new
@@ -2395,6 +2403,61 @@ test "stripCommentLines drops comments and trims surrounding blanks" {
     const empty = try stripCommentLines(a, "# all comments\n#\n");
     defer a.free(empty);
     try std.testing.expectEqualStrings("", empty);
+}
+
+test "stashFile treats the selected path as a literal pathspec" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    try env.put("HOME", dir_path);
+    try env.put("GIT_CONFIG_GLOBAL", "/dev/null");
+    try env.put("GIT_CONFIG_SYSTEM", "/dev/null");
+
+    const setup =
+        \\set -e
+        \\git init -q
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf base > tracked.txt
+        \\git add tracked.txt
+        \\git commit -qm init
+        \\printf magic > ':(glob)bad.txt'
+    ;
+    var sh = [_][]const u8{ "sh", "-c", setup };
+    const setup_result = try std.process.run(a, tio, .{
+        .argv = &sh,
+        .cwd = .{ .path = dir_path },
+        .environ_map = &env,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+    defer a.free(setup_result.stdout);
+    defer a.free(setup_result.stderr);
+    switch (setup_result.term) {
+        .exited => |code| if (code != 0) return error.SetupFailed,
+        else => return error.SetupFailed,
+    }
+
+    var git = try Git.initAt(a, tio, &env, dir_path);
+    defer git.deinit();
+
+    var stashed = try git.stashFile(":(glob)bad.txt", null);
+    defer stashed.deinit(a);
+    try std.testing.expect(stashed.ok());
+
+    var status = try git.exec(&.{ "status", "--porcelain=v1", "-z", "--untracked-files=all" });
+    defer status.deinit(a);
+    try std.testing.expect(status.ok());
+    try std.testing.expectEqualStrings("", status.stdout);
 }
 
 test "prepareCommitMsg runs a guarded hook and seeds the branch ticket" {
