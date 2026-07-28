@@ -410,6 +410,24 @@ pub const Git = struct {
         return self.exec(&.{ "apply", "--whitespace=nowarn", "--", p });
     }
 
+    /// Discard a staging-view selection by reverse-applying its patch (built
+    /// against the current file state — the working tree on the unstaged side,
+    /// the index on the staged side). On the unstaged side the change is dropped
+    /// from the working tree only; on the staged side `--index` drops it from
+    /// both the index and the working tree, so the change is gone entirely —
+    /// mirroring how `space` acts on whichever side is active. Destructive.
+    pub fn discardStagingPatch(self: *Git, patch: []const u8, staged: bool) !ExecResult {
+        const p = try self.writeTempPatch(patch);
+        defer {
+            std.Io.Dir.deleteFile(.cwd(), self.io, p) catch {};
+            self.allocator.free(p);
+        }
+        if (staged) {
+            return self.exec(&.{ "apply", "--reverse", "--index", "--whitespace=nowarn", "--", p });
+        }
+        return self.exec(&.{ "apply", "--reverse", "--whitespace=nowarn", "--", p });
+    }
+
     /// Remove a built patch's changes from its source commit: rebase with the
     /// caller's `edit` todo to stop at the source, reverse-apply the patch to
     /// the index and tree, amend, then continue. If the patch fails to apply
@@ -2557,6 +2575,82 @@ test "stashFile stashes a staged deletion without leaving a bogus stash" {
     defer status.deinit(a);
     try std.testing.expect(status.ok());
     try std.testing.expectEqualStrings(" M keep.txt\n", status.stdout);
+}
+
+test "discardStagingPatch reverse-applies to the working tree and to the index" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    try env.put("HOME", dir_path);
+    try env.put("GIT_CONFIG_GLOBAL", "/dev/null");
+    try env.put("GIT_CONFIG_SYSTEM", "/dev/null");
+
+    const setup =
+        \\set -e
+        \\git init -q
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf 'a\nb\nc\n' > f.txt
+        \\git add f.txt
+        \\git commit -qm init
+    ;
+    var sh = [_][]const u8{ "sh", "-c", setup };
+    const setup_result = try std.process.run(a, tio, .{
+        .argv = &sh,
+        .cwd = .{ .path = dir_path },
+        .environ_map = &env,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+    defer a.free(setup_result.stdout);
+    defer a.free(setup_result.stderr);
+    switch (setup_result.term) {
+        .exited => |code| if (code != 0) return error.SetupFailed,
+        else => return error.SetupFailed,
+    }
+
+    var git = try Git.initAt(a, tio, &env, dir_path);
+    defer git.deinit();
+
+    var fbuf: [200]u8 = undefined;
+    const file_path = try std.fmt.bufPrint(&fbuf, "{s}/f.txt", .{dir_path});
+
+    // Unstaged side: an unstaged change, discarded via the `git diff` patch,
+    // reverse-applied to the working tree — the file returns to HEAD, index clean.
+    try std.Io.Dir.writeFile(.cwd(), tio, .{ .sub_path = file_path, .data = "a\nB\nc\n" });
+    const unstaged_diff = try git.output(&.{ "diff", "--", "f.txt" });
+    defer a.free(unstaged_diff);
+    var d1 = try git.discardStagingPatch(unstaged_diff, false);
+    defer d1.deinit(a);
+    try std.testing.expect(d1.ok());
+    var st1 = try git.exec(&.{ "status", "--porcelain=v1" });
+    defer st1.deinit(a);
+    try std.testing.expectEqualStrings("", st1.stdout);
+
+    // Staged side: a staged change, discarded via the `git diff --cached` patch
+    // with `--index`, reverse-applied to both index and working tree — gone from
+    // both, so the tree is clean again.
+    try std.Io.Dir.writeFile(.cwd(), tio, .{ .sub_path = file_path, .data = "a\nB\nc\n" });
+    var add = try git.exec(&.{ "add", "f.txt" });
+    defer add.deinit(a);
+    try std.testing.expect(add.ok());
+    const staged_diff = try git.output(&.{ "diff", "--cached", "--", "f.txt" });
+    defer a.free(staged_diff);
+    var d2 = try git.discardStagingPatch(staged_diff, true);
+    defer d2.deinit(a);
+    try std.testing.expect(d2.ok());
+    var st2 = try git.exec(&.{ "status", "--porcelain=v1" });
+    defer st2.deinit(a);
+    try std.testing.expectEqualStrings("", st2.stdout);
 }
 
 test "stashKeeping restores the same working state it stashed" {

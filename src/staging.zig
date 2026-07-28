@@ -257,6 +257,73 @@ pub fn applyStagingSelection(app: *App) !void {
     try loadStaging(app, true);
 }
 
+/// `d` in the staging view: discard the change under the cursor instead of
+/// staging it. Selection works exactly like `space` — on a `@@` header the
+/// whole hunk goes, otherwise the selected line(s). The active side decides the
+/// target: on the unstaged side the change is dropped from the working tree; on
+/// the staged side it is dropped from both the index and the working tree, so it
+/// is gone entirely. Destructive and immediate (no confirmation), like `space`.
+pub fn discardStagingSelection(app: *App) !void {
+    const parsed = app.staging orelse return;
+    if (parsed.hunks.len == 0) {
+        try app.setMessage("no changes to discard", .{});
+        return;
+    }
+    const hunk_index = stagingHunkAt(app, app.staging_cursor) orelse {
+        try app.setMessage("move the cursor onto a change", .{});
+        return;
+    };
+    const hunk = parsed.hunks[hunk_index];
+    const whole_hunk = app.staging_cursor == hunk.start_line;
+
+    // The discard patch is oriented against the current file state (the working
+    // tree on the unstaged side, the index on the staged side), which already
+    // holds the additions — the orientation `buildLinePatch` produces with
+    // `reverse = true`. Reverse-applying it then removes the change; the whole
+    // hunk is copied verbatim.
+    const patch = if (whole_hunk)
+        try diff_mod.buildHunkPatch(app.allocator, app.staging_diff, parsed, hunk_index)
+    else blk: {
+        const lo_abs = @min(app.staging_anchor orelse app.staging_cursor, app.staging_cursor);
+        const hi_abs = @max(app.staging_anchor orelse app.staging_cursor, app.staging_cursor);
+        const body_first = hunk.start_line + 1;
+        const lo = (@max(lo_abs, body_first)) - body_first;
+        const hi = (@min(hi_abs, hunk.end_line - 1)) - body_first;
+        break :blk diff_mod.buildLinePatch(app.allocator, app.staging_diff, parsed, hunk_index, lo, hi, true) catch |err| switch (err) {
+            error.EmptySelection => {
+                try app.setMessage("selection contains no change", .{});
+                return;
+            },
+            error.NoNewlineHunk => {
+                try app.setMessage("discard the whole hunk for no-newline changes (enter on @@)", .{});
+                return;
+            },
+            error.InvalidHunk => {
+                try app.setMessage("could not build patch for this hunk", .{});
+                return;
+            },
+            else => return err,
+        };
+    };
+    defer app.allocator.free(patch);
+
+    var result = try app.git.discardStagingPatch(patch, app.staging_staged_view);
+    defer result.deinit(app.allocator);
+    if (!result.ok()) {
+        const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
+        try app.setMessage("discard failed: {s}", .{if (stderr.len > 0) stderr else "git apply error"});
+        return;
+    }
+    const scope = if (whole_hunk) "hunk" else "selection";
+    try app.setMessage("discarded {s}", .{scope});
+    app.staging_anchor = null;
+    // Discarding rewrites the working tree (and, on the staged side, the index),
+    // so refresh the file list and reload the staging diff. Keep the cursor put
+    // so repeated `d` keeps discarding whatever shifts into its position.
+    app.refreshFiles() catch {};
+    try loadStaging(app, true);
+}
+
 pub fn closeStaging(app: *App) !void {
     if (app.staging_patch_mode) return patch_mod.closePatchLineView(app);
     clearStaging(app);

@@ -3110,6 +3110,15 @@ pub const App = struct {
                 staging_mod.moveStagingHunk(self, false);
                 return;
             }
+            // `d` discards the line/hunk under the cursor, mirroring `space` but
+            // throwing the change away instead of staging it. Only in the real
+            // staging view (the custom-patch line view has no discard notion) and
+            // not while another git op is running, since this really mutates.
+            if (!self.staging_patch_mode and km.discard.matches(key)) {
+                if (self.foregroundBusy()) return self.setMessage("operation in progress...", .{});
+                try staging_mod.discardStagingSelection(self);
+                return;
+            }
         }
 
         // shift+arrow extends a non-sticky range selection in a list panel.

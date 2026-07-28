@@ -547,8 +547,8 @@ quit.
 - **The whole workflow**: status, files, branches, commits, and stash panels
   with diff previews and a footer that follows context.
 - **Staging down to the line**: `enter` a file to stage single lines or
-  hunks, with an optional split view showing unstaged and staged side by
-  side.
+  hunks, or `d` to discard them, with an optional split view showing unstaged
+  and staged side by side.
 - **Full interactive rebase**: drop, squash, fixup, edit, reword and move per
   commit, a plan editor (`i`), cherry picking, custom patch building,
   autosquash, and `rebase --onto` from a marked base.
@@ -578,6 +578,10 @@ Moon palette, at one shared resolution.
 
 `enter` a file to open the staging view. Stage or unstage single lines or
 whole hunks (`space`), with an optional split showing both sides at once.
+Press `d` to discard instead of stage: it uses the same selection as `space`,
+so `d` on a line throws that line away and `d` on a `@@` header throws away the
+whole hunk. On the staged side `d` drops the change from the index as well, so
+it is gone for good.
 
 ![Line level staging view](docs/screenshots/02-staging.png)
 
@@ -667,7 +671,8 @@ Selecting the Status panel shows an about screen with a live animation.
 - Staging by hunk and line: `enter` opens a staging view to stage or unstage
   single lines (`v` for a range) or whole hunks (`tab` switches the unstaged
   and staged sides; `\` toggles the split view, see
-  [Staging layout](#staging-layout-staging_split)).
+  [Staging layout](#staging-layout-staging_split)). `d` discards the selected
+  line(s) or hunk instead of staging them.
 - Directory tree view (`` ` ``) for working tree files **and** a commit's or
   branch's file list: a `/` root, collapsible folders (`enter`), single child
   chains compressed to `a/b/c`. Selecting a folder shows the combined diff
@@ -905,8 +910,8 @@ essentials:
   files; on a file, open the staging view
 - `enter` on a file opens the staging view: `j` and `k` by line, `J` and `K`
   (or shift+arrows) jump to the next/previous hunk, `v` range, `space` stage
-  the line(s) or hunk, `[` and `]` switch side, `\` split view, `c` and `A`
-  commit or amend, `esc` back
+  the line(s) or hunk, `d` discard the line(s) or hunk instead, `[` and `]`
+  switch side, `\` split view, `c` and `A` commit or amend, `esc` back
 - `space`: stage or unstage a file · checkout a branch · apply a stash (by
   focus)
 - `e`: open the file under view in your editor (Files, a commit's files, the
