@@ -2484,6 +2484,7 @@ pub const App = struct {
             .git = git,
             .config = cfg,
             .wrap_diff = cfg.wrap_diff,
+            .tree_view = cfg.show_file_tree,
         };
         app.files_tree = .{ .collapsed = std.BufSet.init(allocator) };
         app.commit_tree = .{ .collapsed = std.BufSet.init(allocator) };
@@ -5381,7 +5382,9 @@ pub const App = struct {
         self.stash_index = 0;
         self.main_scroll = 0;
         self.main_hscroll = 0;
-        self.tree_view = false;
+        // Switching repos returns the file lists to the configured default view
+        // (tree or flat), matching a fresh launch rather than forcing flat.
+        self.tree_view = self.config.show_file_tree;
 
         self.data.deinit(a);
         self.data = .{};

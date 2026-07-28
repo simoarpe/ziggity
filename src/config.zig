@@ -286,6 +286,11 @@ pub const Config = struct {
     /// Submodules — the same keys still jump to the panel from elsewhere. Disable
     /// to make a number key only ever focus its panel.
     switch_tabs_with_panel_keys: bool = true,
+    /// Open the file lists (the working-tree Files panel and a commit's or
+    /// branch's changed files) in directory-tree mode instead of a flat list,
+    /// so you don't have to press `` ` `` on every launch. This is the initial
+    /// state; `` ` `` still toggles it at runtime for the session.
+    show_file_tree: bool = false,
     /// Run the repo's `prepare-commit-msg` hook when the commit dialog opens and
     /// seed the message fields from its output (e.g. a branch-derived ticket
     /// prefix). Matches interactive git; disable to skip the hook at open time.
@@ -398,6 +403,10 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "expand_focused_side_panel")) {
             if (parseBool(value)) |on| self.expand_focused_side_panel = on;
+            return;
+        }
+        if (std.mem.eql(u8, key, "show_file_tree")) {
+            if (parseBool(value)) |on| self.show_file_tree = on;
             return;
         }
         if (std.mem.eql(u8, key, "staging_split")) {
@@ -609,6 +618,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
         \\expand_focused_side_panel = true
         \\expanded_side_panel_weight = 3
         \\staging_split = on
+        \\show_file_tree = true
     );
     try std.testing.expectEqual(StagingSplitMode.on, cfg.staging_split);
     try std.testing.expectEqual(ResultDialog.always, cfg.result_dialog); // valid set; bad value ignored
@@ -621,6 +631,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     try std.testing.expect(!cfg.skip_confirm.merge_branch); // untouched
     try std.testing.expect(cfg.expand_focused_side_panel);
     try std.testing.expectEqual(@as(u8, 3), cfg.expanded_side_panel_weight);
+    try std.testing.expect(cfg.show_file_tree);
 }
 
 test "config parser stores custom commands bound to keys" {

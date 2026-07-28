@@ -676,7 +676,8 @@ Selecting the Status panel shows an about screen with a live animation.
 - Directory tree view (`` ` ``) for working tree files **and** a commit's or
   branch's file list: a `/` root, collapsible folders (`enter`), single child
   chains compressed to `a/b/c`. Selecting a folder shows the combined diff
-  beneath it; in the Files panel `space` stages the whole folder.
+  beneath it; in the Files panel `space` stages the whole folder. Set
+  `show_file_tree = true` to start in tree mode on every launch.
 - Live fuzzy path filtering (smart case subsequence) with recent filter
   recall, plus a status filter (staged, unstaged, tracked, untracked).
 - Discard a file, or a whole folder in tree view (`d` on a directory), via a
@@ -1040,6 +1041,11 @@ fetch_interval_secs = 60
 expand_focused_side_panel = false  # focused list panel expands, others shrink
 expanded_side_panel_weight = 2     # how much bigger the focused panel gets
 staging_split = auto               # staging layout: off | on | auto (default)
+
+# Open the file lists (the Files panel and a commit's or branch's changed
+# files) in directory-tree mode instead of a flat list, so you don't have to
+# press ` on every launch. Default off; ` still toggles it at runtime.
+show_file_tree = false
 
 # Editor for `e`. With nothing set, auto detected from git core.editor, then
 # $GIT_EDITOR, $VISUAL, $EDITOR, falling back to vim. See "Editor" below.
