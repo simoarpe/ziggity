@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <b>1.9 MB</b> binary · <b>3.4 ms</b> startup · <b>7 MB</b> memory when idle · no runtime, no toolchain, just <code>git</code>
+  <b>1.9 MB</b> binary · <b>3.6 ms</b> startup · <b>8 MB</b> memory when idle · no runtime, no toolchain, just <code>git</code>
 </p>
 
 Ziggity puts your whole Git workflow in one terminal window: stage single
@@ -161,27 +161,27 @@ tiny native binary.
 Ziggity compiles to a single static binary with no runtime, no garbage
 collector, and no library dependencies beyond the `git` you already have.
 Measured on an Apple M1 Max running macOS 26.5.1, against lazygit 0.62.2 from
-Homebrew, both opening the same repository (ziggity's own: 363 commits, 153
-tracked files, 20 refs, a working checkout with build output on disk) at the
+Homebrew, both opening the same repository (ziggity's own: 359 commits, 156
+tracked files, 21 refs, a working checkout with build output on disk) at the
 same terminal size, median of seven runs:
 
-| | ziggity 0.13.0 | lazygit 0.62.2 |
+| | ziggity 0.14.0-dev | lazygit 0.62.2 |
 |---|---|---|
 | Binary size | **1.9 MB** | 17.6 MB |
 | Dynamic libraries linked | **1** | 4 |
-| Process startup, median of 30 runs | **3.4 ms** | 19.7 ms |
-| Git subprocesses to load the repo | **18** | 25 |
+| Process startup, median of 30 runs | **3.6 ms** | 21.2 ms |
+| Git subprocesses to load the repo | **16** | 25 |
 | Peak git processes running in parallel | **11** | 9 |
 | Network during load | **none** | `git fetch --all` |
-| Resident memory once settled | **7 MB** | 37 MB |
-| Peak resident memory while loading | 54 MB | **37 MB** |
-| Git subprocesses over 10 s idle | **26** | 39 |
-| Own CPU time over 10 s | **70 ms** | 580 ms |
-| Total CPU including git children | **0.56 s** | 0.96 s |
+| Resident memory once settled | **8 MB** | 36 MB |
+| Peak resident memory while loading | **8 MB** | 36 MB |
+| Git subprocesses over 10 s idle | **22** | 40 |
+| Own CPU time over 10 s | **40 ms** | 250 ms |
+| Total CPU including git children | **0.48 s** | 0.73 s |
 
-Ziggity settles at about a fifth of lazygit's memory but peaks higher while
-its eleven loaders are in flight, and both tools fetch: lazygit during load,
-ziggity about three seconds later off the interface thread. The whole table
+Ziggity holds about a fifth of lazygit's memory and stays flat there from the
+first paint, and both tools fetch: lazygit during load, ziggity about three
+seconds later off the interface thread. The whole table
 comes out of one command, [`docs/bench`](docs/bench/), so you can re-run it
 rather than take it on trust. [docs/comparison.md](docs/comparison.md) has the
 methodology behind every row, the subprocess log, and the honest case point by

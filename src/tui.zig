@@ -56,10 +56,18 @@ const Event = union(enum) {
     graph_done,
 };
 
-/// A network op run off the UI loop. Allocations use the page allocator (which
-/// is thread-safe and independent of the main gpa), so there is no cross-thread
-/// allocator race with the rest of the app.
-const async_allocator = std.heap.page_allocator;
+/// A network op run off the UI loop. Allocations use the SMP allocator, which is
+/// thread-safe, so a worker thread and the UI thread can share it with no
+/// cross-thread allocator race.
+///
+/// It must not be the page allocator. The startup fan-out makes a few thousand
+/// tiny allocations (per commit: a hash, an author, a subject, and so on), and
+/// the page allocator rounds each one up to a whole page, 16 KiB on Apple
+/// silicon. On this repository that is 3098 allocations holding about 300 KB of
+/// strings, which the page allocator would inflate to roughly 48 MB of resident
+/// memory for as long as the load is in flight, against the 8 MB the process
+/// uses in total.
+const async_allocator = std.heap.smp_allocator;
 
 const AsyncJob = struct {
     io: std.Io,

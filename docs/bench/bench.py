@@ -29,6 +29,10 @@ import pty
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 
+# Seconds of the run treated as the load phase, where memory is sampled finely.
+# Both tools have finished their fan-out and settled well inside this.
+LOAD_WINDOW = 3.0
+
 
 # --------------------------------------------------------------------------
 # environment
@@ -162,12 +166,20 @@ def run_tui(binary, repo, seconds, shimbin, real_git, workdir, label):
                 break
     threading.Thread(target=drain, daemon=True).start()
 
+    # RSS is sampled finely while the repository loads and coarsely afterwards.
+    # A transient during the load can be narrower than 100 ms, so a flat 100 ms
+    # sampler steps straight over it and reports a peak that never happened.
+    # Sampling that fast for the whole window would cost enough CPU to disturb
+    # the rows below it, hence the two rates.
     rss = []
-    while time.perf_counter() - t_start < seconds and p.poll() is None:
+    while True:
+        elapsed = time.perf_counter() - t_start
+        if elapsed >= seconds or p.poll() is not None:
+            break
         v = ps_field(p.pid, "rss=")
         if v:
             rss.append(int(v) / 1024.0)          # KiB -> MiB
-        time.sleep(0.1)
+        time.sleep(0.005 if elapsed < LOAD_WINDOW else 0.1)
 
     alive = p.poll() is None
     cpu_self = cpu_seconds(p.pid) if alive else None

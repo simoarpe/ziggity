@@ -54,9 +54,14 @@ and takes the high water mark.
 that load phase. Both tools fetch eventually. The row is about whether you
 wait for it before the interface is usable.
 
-**Resident memory** is RSS sampled every 100 ms. "Settled" is the last reading
-of the window; "peak" is the highest. The two differ sharply for ziggity and
-barely at all for lazygit, which is why both are reported.
+**Resident memory** is RSS, sampled every 5 ms for the first three seconds and
+every 100 ms after that. "Settled" is the last reading of the window; "peak" is
+the highest. Both are reported because a tool can settle low and still spike
+while it loads. The fine sampling is there to catch exactly that: a transient
+narrower than 100 ms is invisible to a flat 100 ms sampler, which then reports
+a peak that never happened. Sampling that fast for the whole window would cost
+enough CPU to disturb the CPU rows, which is why the rate drops once both tools
+have settled.
 
 **CPU** is split in two. "Own" is the tool's process alone, from `ps`. "Total"
 adds every git child's CPU, summed from the shim log. Both tools do most of
@@ -74,22 +79,25 @@ and does not touch the counts, memory or CPU, but it makes any wall clock
 "time until usable" number meaningless. There is deliberately no such row.
 
 **CPU is the noisy row.** Across seven runs on an idle machine, lazygit's own
-CPU ranged from 350 ms to 960 ms and ziggity's from 50 ms to 80 ms. The
-medians are stable and the gap between the tools is consistent, but treat a
-single CPU figure as approximate. Everything else is tight: resident memory
-varied by under half a megabyte, and binary size, library count, startup and
-peak parallelism were effectively constant.
+CPU ranged from 240 ms to 280 ms and ziggity's from 30 ms to 40 ms. On a
+machine doing anything else both spread several times wider than that, so
+treat a single CPU figure as approximate; the medians are stable and the gap
+between the tools is consistent either way. Resident memory moves by a
+megabyte or two between runs. Binary size, library count, startup and peak
+parallelism are effectively constant.
 
-**Repository state matters, more than you would expect.** The numbers depend
-on commits, refs, worktrees, modified files, and on what is sitting untracked
-in the working tree. Registering an extra git worktree adds calls and shifts
-the load count. Build output matters most of all: measured on a working
-checkout with `.zig-cache`, `zig-out` and `zig-pkg` present, ziggity's peak
-memory is around 54 MB, and on a pristine clone of the same history it is
-around 9 MB. The published table uses a working checkout, since that is what a
-repository people actually work in looks like, but it means peak memory is not
-comparable against a bare clone. Say which state you measured, as the table's
-preamble does.
+**Repository state matters.** The numbers depend on commits, refs, worktrees
+and modified files. Registering an extra git worktree adds calls and shifts the
+load count, and a repository with real uncommitted work in it behaves
+differently from a clean one. The published table says which state it was
+measured in, and yours should too.
+
+Untracked build output is the one thing that costs nothing. `.zig-cache`,
+`zig-out` and `zig-pkg` are gitignored, and git prunes an ignored directory
+rather than descending into it, so `status` returns in about 20 ms however
+large they grow. A working checkout and a pristine clone of the same history
+measure the same, which means you can benchmark in the tree you actually work
+in.
 
 **Both tools must be comparable.** lazygit is measured as installed. If yours
 differs in version from the published table, the columns are not comparable.
