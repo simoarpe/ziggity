@@ -5,9 +5,6 @@ diverges to behave better. The full write up, with measurements and animated
 demos, lives in [comparison.md](comparison.md). This page stays as the short
 form index of those intentional differences.
 
-> Note: these notes reference lazygit for comparison. That is fine here; the
-> "no lazygit in the source" rule applies to `src/` only, not to docs.
-
 ## The list, in short
 
 - **Small and fast.** A 1.8 MB static binary against 17.6 MB, about 3 ms of
