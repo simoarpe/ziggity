@@ -375,9 +375,10 @@ In `src/tui.zig`:
 
 ## Sponsor
 
-Ziggity is free and open source, built in spare time. If it saves you some
-of yours, you can support its development on Ko-fi. No pressure, no paywalled
-features, just a tip jar that helps keep the work going.
+Ziggity is free and open source, and it will stay that way. There is a Ko-fi
+if you ever feel like buying me a coffee. Anything that comes in goes into
+maintenance: fixing bugs, keeping up with new Zig and Git releases, and
+answering issues.
 
 <p align="center">
   <a href="https://ko-fi.com/simoarpe">
@@ -387,7 +388,8 @@ features, just a tip jar that helps keep the work going.
 
 <p align="center"><a href="https://ko-fi.com/simoarpe">ko-fi.com/simoarpe</a></p>
 
-You can also help for free: star the repo, report bugs, and tell a friend. 💛
+There is no obligation at all. Starring the repo, filing a good bug report,
+or mentioning it to someone helps just as much. 💛
 
 ## License
 
