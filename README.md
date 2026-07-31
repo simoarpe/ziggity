@@ -148,22 +148,31 @@ tiny native binary.
 
 Ziggity compiles to a single static binary with no runtime, no garbage
 collector, and no library dependencies beyond the `git` you already have.
-Measured on an Apple Silicon laptop against lazygit 0.62.2, same repository,
-same terminal:
+Measured on an Apple M1 Max running macOS 26.5.1, against lazygit 0.62.2 from
+Homebrew, both opening the same repository (ziggity's own: 363 commits, 153
+tracked files, 20 refs) at the same terminal size, median of three runs:
 
-| | ziggity 0.3.0 | lazygit 0.62.2 |
+| | ziggity 0.13.0 | lazygit 0.62.2 |
 |---|---|---|
-| Binary size | **1.8 MB** | 17.6 MB |
-| Process startup, median of 30 runs | **2.9 ms** | 19.2 ms |
-| Resident memory after opening a repo | **3 MB** | 18 MB |
-| Git subprocesses to load the repo | **26** | 38 |
+| Binary size | **1.9 MB** | 17.6 MB |
+| Dynamic libraries linked | **1** | 4 |
+| Process startup, median of 30 runs | **3.1 ms** | 20.2 ms |
+| Git subprocesses to load the repo | **16** | 25 |
 | Peak git processes running in parallel | **11** | 9 |
-| CPU time to open the repo and idle 10 s | **50 ms** | 140 ms |
-| Network fetch at startup | none | `git fetch --all` |
+| Network during load | **none** | `git fetch --all` |
+| Resident memory once settled | **8 MB** | 35 MB |
+| Peak resident memory while loading | 55 MB | **35 MB** |
+| Git subprocesses over 10 s idle | **22** | 40 |
+| Own CPU time over 10 s | **60 ms** | 490 ms |
+| Total CPU including git children | **530 ms** | 1.0 s |
 
-Run the same checks yourself; numbers will vary by machine, the gap will not.
-[docs/comparison.md](docs/comparison.md) has the methodology behind every row,
-the subprocess log, and the honest case point by point, with demos:
+Ziggity settles at about a quarter of lazygit's memory but peaks higher while
+its eleven loaders are in flight, and both tools fetch: lazygit during load,
+ziggity about three seconds later off the interface thread. Run the same
+checks yourself; numbers will vary by machine and by repository size, the
+shape will not. [docs/comparison.md](docs/comparison.md) has the methodology
+behind every row, the subprocess log, and the honest case point by point,
+with demos:
 
 - [Small and Fast](docs/comparison.md#small-and-fast)
 - [Nothing Blocks, Ever](docs/comparison.md#nothing-blocks-ever)

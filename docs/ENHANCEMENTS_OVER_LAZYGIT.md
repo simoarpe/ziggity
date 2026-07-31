@@ -7,12 +7,15 @@ form index of those intentional differences.
 
 ## The list, in short
 
-- **Small and fast.** A 1.8 MB static binary against 17.6 MB, about 3 ms of
-  process startup against about 19 ms, roughly 3 MB resident against 18 MB,
-  26 git subprocesses to load a repo against 38, and about a third of the
-  CPU over the same window, measured on the same machine and repository.
-  Eleven panel loaders fan out in parallel, the log loads incrementally,
-  previews are cached, and startup never touches the network.
+- **Small and fast.** A 1.9 MB static binary against 17.6 MB, one linked
+  dynamic library against four, about 3 ms of process startup against about
+  20 ms, 16 git subprocesses to load a repo against 25, 8 MB resident once
+  settled against 35 MB, and about half the total CPU over a ten second
+  window (an eighth of it in its own process), measured on the same machine
+  and repository. Eleven panel loaders fan out in parallel, the log loads
+  incrementally, previews are cached, and loading never touches the network.
+  Ziggity does peak higher during load, 55 MB against a flat 35 MB, before
+  releasing most of it.
   [Details](comparison.md#small-and-fast)
 
 - **Nothing blocks, ever.** Fetch, pull, push and slow multistep actions run
