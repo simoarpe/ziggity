@@ -165,16 +165,22 @@ Run the same checks yourself; numbers will vary by machine, the gap will not.
 [docs/comparison.md](docs/comparison.md) has the methodology behind every row,
 the subprocess log, and the honest case point by point, with demos:
 
-| | |
-|---|---|
-| [Small and Fast](docs/comparison.md#small-and-fast) | [Diffs the Way Review Tools Show Them](docs/comparison.md#diffs-the-way-review-tools-show-them) |
-| [Nothing Blocks, Ever](docs/comparison.md#nothing-blocks-ever) | [Word-Level Diff Highlighting](docs/comparison.md#word-level-diff-highlighting) |
-| [Copy Text Straight from the Screen](docs/comparison.md#copy-text-straight-from-the-screen) | [Wrap Long Lines On Demand](docs/comparison.md#wrap-long-lines-on-demand) |
-| [The Mouse Works Everywhere](docs/comparison.md#the-mouse-works-everywhere) | [History Navigation with Intent](docs/comparison.md#history-navigation-with-intent) |
-| [At Home in Any Terminal](docs/comparison.md#at-home-in-any-terminal) | [Two Histories Side by Side](docs/comparison.md#two-histories-side-by-side) |
-| [Checkout by Name That Lands on a Real Branch](docs/comparison.md#checkout-by-name-that-lands-on-a-real-branch) | [Jump Between Repositories](docs/comparison.md#jump-between-repositories) |
-| [A Commit Editor That Nudges the 50/72 Rule](docs/comparison.md#a-commit-editor-that-nudges-the-5072-rule) | [Stash Without Losing Your Working Tree](docs/comparison.md#stash-without-losing-your-working-tree) |
-| [A Force Push That Never Dead Ends](docs/comparison.md#a-force-push-that-never-dead-ends) | [Small Courtesies](docs/comparison.md#small-courtesies) |
+- [Small and Fast](docs/comparison.md#small-and-fast)
+- [Nothing Blocks, Ever](docs/comparison.md#nothing-blocks-ever)
+- [Copy Text Straight from the Screen](docs/comparison.md#copy-text-straight-from-the-screen)
+- [The Mouse Works Everywhere](docs/comparison.md#the-mouse-works-everywhere)
+- [At Home in Any Terminal](docs/comparison.md#at-home-in-any-terminal)
+- [Checkout by Name That Lands on a Real Branch](docs/comparison.md#checkout-by-name-that-lands-on-a-real-branch)
+- [A Commit Editor That Nudges the 50/72 Rule](docs/comparison.md#a-commit-editor-that-nudges-the-5072-rule)
+- [A Force Push That Never Dead Ends](docs/comparison.md#a-force-push-that-never-dead-ends)
+- [Diffs the Way Review Tools Show Them](docs/comparison.md#diffs-the-way-review-tools-show-them)
+- [Word-Level Diff Highlighting](docs/comparison.md#word-level-diff-highlighting)
+- [Wrap Long Lines On Demand](docs/comparison.md#wrap-long-lines-on-demand)
+- [History Navigation with Intent](docs/comparison.md#history-navigation-with-intent)
+- [Two Histories Side by Side](docs/comparison.md#two-histories-side-by-side)
+- [Jump Between Repositories](docs/comparison.md#jump-between-repositories)
+- [Stash Without Losing Your Working Tree](docs/comparison.md#stash-without-losing-your-working-tree)
+- [Small Courtesies](docs/comparison.md#small-courtesies)
 
 ## Features
 
