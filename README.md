@@ -26,6 +26,12 @@ and in the places where the two tools differ, the difference is deliberate.
 [docs/comparison.md](docs/comparison.md) explains exactly where and why.
 
 <p align="center">
+  <img src="docs/assets/ziggity-donut.gif" alt="Ziggity, the about splash with a spinning donut" width="900">
+</p>
+
+<p align="center"><i>The Status panel about splash. Yes, the donut spins.</i></p>
+
+<p align="center">
   <img src="docs/screenshots/01-overview.png" alt="Ziggity, the main view" width="900">
 </p>
 
