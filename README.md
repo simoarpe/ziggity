@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <b>1.9 MB</b> binary · <b>3.4 ms</b> startup · <b>7 MB</b> resident · no dependency beyond <code>git</code>
+  <b>1.9 MB</b> binary · <b>3.4 ms</b> startup · <b>7 MB</b> memory when idle · no runtime, no toolchain, just <code>git</code>
 </p>
 
 Ziggity puts your whole Git workflow in one terminal window: stage single
