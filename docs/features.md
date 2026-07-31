@@ -99,11 +99,7 @@ Selecting the Status panel shows an about screen with a live animation.
 
 ![About screen](screenshots/11-about-splash.png)
 
-<p align="center">
-  <img src="assets/ziggity-donut.gif" alt="Ziggity, the about splash with a spinning donut" width="900">
-</p>
-
-<p align="center"><i>The Status panel about splash. Yes, the donut spins.</i></p>
+The animation itself is in the [README](../README.md).
 
 ## Full feature list
 
