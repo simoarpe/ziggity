@@ -76,7 +76,7 @@ brew install ziggity
 Upgrade with `brew upgrade ziggity`. Unlike a downloaded binary, a Homebrew
 install is not quarantined, so it runs on macOS without a Gatekeeper prompt.
 
-### Manual Installation
+### Prebuilt Binaries
 
 Every [release](https://github.com/simoarpe/ziggity/releases) ships static
 binaries for macOS, Linux, and Windows. No Zig toolchain required.
@@ -162,7 +162,8 @@ Ziggity compiles to a single static binary with no runtime, no garbage
 collector, and no library dependencies beyond the `git` you already have.
 Measured on an Apple M1 Max running macOS 26.5.1, against lazygit 0.62.2 from
 Homebrew, both opening the same repository (ziggity's own: 363 commits, 153
-tracked files, 20 refs) at the same terminal size, median of three runs:
+tracked files, 20 refs, a working checkout with build output on disk) at the
+same terminal size, median of seven runs:
 
 | | ziggity 0.13.0 | lazygit 0.62.2 |
 |---|---|---|
@@ -234,10 +235,10 @@ point, with demos:
   reflog, and undoing a commit or amend returns the changes staged instead of
   dropping them. The stash menu can snapshot everything, untracked files
   included, and still leave your working tree untouched.
-- **Explicit and configurable**: plain `git` subprocesses, no libgit2, fully
-  remappable keys, themeable colors, custom commands, `ctrl+r` to switch
-  between repositories you have opened, and an in-app prompt for HTTPS
-  credentials so nothing takes over your terminal.
+- **Explicit and configurable**: fully remappable keys, themeable colors,
+  custom commands, `ctrl+r` to switch between repositories you have opened,
+  and an in-app prompt for HTTPS credentials so nothing takes over your
+  terminal.
 
 <p align="center">
   <img src="docs/screenshots/02-staging.png" alt="Line level staging view" width="900">
@@ -279,7 +280,7 @@ essentials:
 | `v` · `shift+arrows` · `*` | Start range · extend range · select branch commits |
 | `i` · `ctrl+p` · `ctrl+l` | Rebase plan · custom patch · commit graph |
 | `f` · `p` · `P` | Fetch · pull · push |
-| `z` · `@` · `?` · `q` | Undo · command log · help · quit |
+| `ctrl+z` · `@` · `?` · `q` | Undo · command log · help · quit |
 
 Every key, including the panel key tab cycling, is in
 [docs/keybindings.md](docs/keybindings.md).

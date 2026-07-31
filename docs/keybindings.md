@@ -20,7 +20,7 @@ the written reference. Every binding is remappable, see
 | `v` · `shift+arrows` · `*` | Start range · extend range · select branch commits |
 | `i` · `ctrl+p` · `ctrl+l` | Rebase plan · custom patch · commit graph |
 | `f` · `p` · `P` | Fetch · pull · push |
-| `z` · `@` · `?` · `q` | Undo · command log · help · quit |
+| `ctrl+z` · `@` · `?` · `q` | Undo · command log · help · quit |
 
 ## Full keybinding reference
 
