@@ -156,23 +156,23 @@ tracked files, 20 refs) at the same terminal size, median of three runs:
 |---|---|---|
 | Binary size | **1.9 MB** | 17.6 MB |
 | Dynamic libraries linked | **1** | 4 |
-| Process startup, median of 30 runs | **3.1 ms** | 20.2 ms |
-| Git subprocesses to load the repo | **16** | 25 |
+| Process startup, median of 30 runs | **3.4 ms** | 19.7 ms |
+| Git subprocesses to load the repo | **18** | 25 |
 | Peak git processes running in parallel | **11** | 9 |
 | Network during load | **none** | `git fetch --all` |
-| Resident memory once settled | **8 MB** | 35 MB |
-| Peak resident memory while loading | 55 MB | **35 MB** |
-| Git subprocesses over 10 s idle | **22** | 40 |
-| Own CPU time over 10 s | **60 ms** | 490 ms |
-| Total CPU including git children | **530 ms** | 1.0 s |
+| Resident memory once settled | **7 MB** | 37 MB |
+| Peak resident memory while loading | 54 MB | **37 MB** |
+| Git subprocesses over 10 s idle | **26** | 39 |
+| Own CPU time over 10 s | **70 ms** | 580 ms |
+| Total CPU including git children | **0.56 s** | 0.96 s |
 
-Ziggity settles at about a quarter of lazygit's memory but peaks higher while
+Ziggity settles at about a fifth of lazygit's memory but peaks higher while
 its eleven loaders are in flight, and both tools fetch: lazygit during load,
-ziggity about three seconds later off the interface thread. Run the same
-checks yourself; numbers will vary by machine and by repository size, the
-shape will not. [docs/comparison.md](docs/comparison.md) has the methodology
-behind every row, the subprocess log, and the honest case point by point,
-with demos:
+ziggity about three seconds later off the interface thread. The whole table
+comes out of one command, [`docs/bench`](docs/bench/), so you can re-run it
+rather than take it on trust. [docs/comparison.md](docs/comparison.md) has the
+methodology behind every row, the subprocess log, and the honest case point by
+point, with demos:
 
 - [Small and Fast](docs/comparison.md#small-and-fast)
 - [Nothing Blocks, Ever](docs/comparison.md#nothing-blocks-ever)
