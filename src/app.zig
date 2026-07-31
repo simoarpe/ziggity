@@ -2799,6 +2799,13 @@ pub const App = struct {
         if (self.commits_tab == .divergence and
             (s.contains(.commits) or s.contains(.status) or s.contains(.branches)))
             self.loadDivergenceTab();
+        // The branch "Log" preview (`git log --date=relative`, keyed by branch
+        // name) bakes in both the branch's commits and git's "N ago" dates, so a
+        // cached copy goes stale as the branch moves or time passes. Drop the
+        // branch previews whenever the branch data refreshes — after a commit,
+        // fetch, pull, push, reset, … — so the log regenerates with the current
+        // commits and freshly computed relative dates instead of a frozen snapshot.
+        if (s.contains(.branches)) self.preview_cache.invalidatePrefix(self.allocator, "b:");
         self.updatePreview() catch {};
     }
 
@@ -11885,6 +11892,36 @@ test "scoped refresh replaces only the loaded views" {
     // ...and the unrelated Commits view was left untouched.
     try std.testing.expectEqual(@as(usize, 1), app.data.commits.len);
     try std.testing.expectEqualStrings("keep me", app.data.commits[0].subject);
+}
+
+test "a branches refresh drops the cached branch log preview, keeps commit previews" {
+    const allocator = std.testing.allocator;
+    const page = std.heap.page_allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer {
+        app.data.deinit(allocator);
+        deinitTestApp(&app);
+    }
+    app.focus = .branches;
+
+    // Warm two previews: the branch "Log" (`b:`), whose git-rendered commit set
+    // and `--date=relative` "N ago" dates go stale as the branch moves or time
+    // passes, and an immutable commit diff (`c:`) that must survive a refresh.
+    try app.preview_cache.put(allocator, "b:main", "cached branch log");
+    try app.preview_cache.put(allocator, "c:3:deadbeef", "cached commit diff");
+    try std.testing.expect(app.preview_cache.get("b:main") != null);
+
+    // A branches-scope refresh — what a commit / fetch / pull / push triggers —
+    // must drop the branch preview so it regenerates with the current commits and
+    // freshly computed relative dates, while leaving the immutable commit preview.
+    var sd = ScopedData{ .scopes = ScopeSet.init(.{ .branches = true }) };
+    sd.data.branches = try page.alloc(model.Branch, 1);
+    sd.data.branches[0] = .{ .name = try page.dupe(u8, "main"), .current = true };
+    app.applyScopedLoad(sd, page);
+
+    try std.testing.expect(app.preview_cache.get("b:main") == null);
+    try std.testing.expect(app.preview_cache.get("c:3:deadbeef") != null);
 }
 
 test "select_top_commit_pending lands the cursor on the new top commit after a reload" {
