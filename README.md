@@ -205,28 +205,39 @@ point, with demos:
 
 ## Features
 
-- **The whole workflow**: status, files, branches, commits, and stash panels
-  with diff previews and a footer that follows context.
-- **Staging down to the line**: `enter` a file to stage single lines or
-  hunks, or `d` to discard them, with an optional split view showing unstaged
+- **Staging down to the line**: open a file and stage single lines or whole
+  hunks. `d` discards at the same granularity, so one bad line goes away
+  without touching the rest of the file, and a split view can show unstaged
   and staged side by side.
-- **Full interactive rebase**: drop, squash, fixup, edit, reword and move per
-  commit, a plan editor (`i`), cherry picking, custom patch building,
-  autosquash, and `rebase --onto` from a marked base.
-- **History and inspection**: the real `git log --graph` DAG (`ctrl+l`) with
-  first parent jumps, ref against ref diffing (`W`) with reverse and merge
-  base modes, GPG signature verification (`x`), and log filtering (`/`).
-- **Multi selection**: `v` or `shift+arrows` select a range in any list to
-  act on many files, commits, branches, or stashes at once; `*` selects a
-  branch's own commits.
-- **Stays in sync**: a quiet background `git fetch` keeps the incoming
-  commit count current on its own; slow and network operations run off the
-  interface thread while navigation stays live.
-- **Thoughtful touches**: `prepare-commit-msg` prefill, stash naming, a keep
-  everything snapshot, per stash patch export, and bracketed paste so a
-  pasted multiline message never submits early.
-- **Lightweight and explicit**: one small binary, plain `git` subprocesses,
-  no libgit2, fully remappable keys, themeable colors, custom commands.
+- **Interactive rebase you compose first**: mark drop, squash, fixup, edit
+  and reword across a range of commits in a plan editor, then run the lot as
+  one rebase. Cherry picking, autosquash, custom patch building and
+  `rebase --onto` from a marked base are all there.
+- **History and diffing**: the real `git log --graph` DAG in git's own
+  colors, first parent jumps for walking a merge heavy history, and branch
+  comparisons that default to the merge base, the same diff a pull request
+  shows.
+- **A real commit editor**: a summary line and multiline body, a live count
+  nudging the 50/72 rule, and your repository's `prepare-commit-msg` hook run
+  on open, so a branch ticket prefix finally lands in a terminal UI.
+- **Range select anywhere**: `v` or `shift+arrows` mark a range in any list,
+  then one key acts on every file, commit, branch or stash in it; `*` selects
+  a branch's own commits.
+- **Stays current on its own**: a quiet background fetch keeps the incoming
+  commit count accurate, and commit hashes stay red until they reach the
+  remote, so what is safe to rewrite is visible at a glance.
+- **The mouse works everywhere**: click a panel or row to focus and select,
+  click a line in the staging view to land the cursor there rather than
+  walking down hunk by hunk, and scroll every list, dialog and the graph.
+  Selected text copies over SSH too, through OSC 52.
+- **Undo and recovery**: `ctrl+z` walks the last operation back through the
+  reflog, and undoing a commit or amend returns the changes staged instead of
+  dropping them. The stash menu can snapshot everything, untracked files
+  included, and still leave your working tree untouched.
+- **Explicit and configurable**: plain `git` subprocesses, no libgit2, fully
+  remappable keys, themeable colors, custom commands, `ctrl+r` to switch
+  between repositories you have opened, and an in-app prompt for HTTPS
+  credentials so nothing takes over your terminal.
 
 <p align="center">
   <img src="docs/screenshots/02-staging.png" alt="Line level staging view" width="900">

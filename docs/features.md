@@ -265,5 +265,12 @@ The animation itself is in the [README](../README.md).
   only dialogs (OSC 52); copy a hash, branch or tag (`ctrl+o`); open a commit
   or branch on its remote host (`o`), with the right URL shape for GitHub,
   GitLab and Codeberg.
+- Terminal integration: bracketed paste, so a pasted multiline commit message
+  never submits early; focus events, which pause animations and background
+  refreshes when the window loses focus; and the kitty keyboard protocol
+  where available. Colors stay within the standard ANSI palette and a curated
+  256 color set, so the interface is readable on a stock terminal as well as
+  a truecolor one (see
+  [comparison.md](comparison.md#at-home-in-any-terminal)).
 - Command log overlay (`@`), themeable colors, fully remappable keys, and
   user defined custom commands.
