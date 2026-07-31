@@ -14,10 +14,22 @@
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey">
 </p>
 
+<p align="center">
+  <b>1.9 MB</b> binary · <b>3.4 ms</b> startup · <b>7 MB</b> resident · no dependency beyond <code>git</code>
+</p>
+
 Ziggity puts your whole Git workflow in one terminal window: stage single
 lines, commit, branch, rebase interactively, and read history without ever
-reaching for the mouse. Every list has a live diff preview, every action is a
-keystroke, and nothing ever blocks the interface.
+reaching for the mouse. Every list has a live diff preview and every action is
+a keystroke.
+
+Nothing in it ever blocks. Fetch, pull, push and the slow multistep actions
+(merge, rebase, autosquash, bisect) run off the interface thread while
+navigation stays live, and you are never dropped back to the raw terminal with
+a "press enter to return" screen. Checkout by name tracks a remote branch in
+one step, a rejected push tries the safe force before the blunt one, branch
+diffs default to the merge base view a pull request shows, and dragging over
+the diff copies the exact text to your clipboard.
 
 It follows the workflow that [lazygit](https://github.com/jesseduffield/lazygit)
 made popular, and it owes that project a lot. It is not a port, though. Ziggity
