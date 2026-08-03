@@ -987,6 +987,11 @@ pub const WorktreeSnapshot = struct {
     status: model.StatusSummary,
     porcelain: []u8,
     state: model.RepoState,
+    /// HEAD's commit hash at snapshot time (empty on an unborn branch), so the
+    /// apply step can notice history moving under it (an external commit/rebase)
+    /// and refresh the branch/commit views, which the working-tree-only idle
+    /// refresh otherwise never reloads.
+    head: []u8,
 
     /// Worker-thread entry point. `gpa` is the page allocator; everything
     /// returned is owned by it. Borrows `root`/`environ` read-only from the
@@ -1006,12 +1011,15 @@ pub const WorktreeSnapshot = struct {
         var status = try wgit.loadStatusSummary();
         errdefer status.deinit(gpa);
         const porcelain = try wgit.statusPorcelain();
-        return .{ .status = status, .porcelain = porcelain, .state = wgit.detectState() };
+        errdefer gpa.free(porcelain);
+        const head = try wgit.headHash();
+        return .{ .status = status, .porcelain = porcelain, .state = wgit.detectState(), .head = head };
     }
 
     pub fn deinit(self: *WorktreeSnapshot, gpa: std.mem.Allocator) void {
         self.status.deinit(gpa);
         gpa.free(self.porcelain);
+        gpa.free(self.head);
         self.* = undefined;
     }
 };
@@ -2389,6 +2397,11 @@ pub const App = struct {
     /// refreshed synchronously, so they never appear here and never race.
     pending_scopes: ScopeSet = ScopeSet.initEmpty(),
     scoped_load_active: bool = false,
+    /// HEAD's commit hash as of the last working-tree snapshot. When a later
+    /// snapshot sees a different hash, history moved out from under us (e.g. a
+    /// commit or rebase in another terminal), so the branch/commit views are
+    /// refreshed even though the idle refresh itself only reloads the worktree.
+    last_head: []u8 = &.{},
 
     // Async slow mutations (merge/rebase/bisect/…) run off the UI loop like the
     // network ops: `mutation_requested` is a built job the loop starts (page-
@@ -2569,6 +2582,7 @@ pub const App = struct {
         self.allocator.free(self.preview_desired_key);
         self.allocator.free(self.preview_inflight_key);
         self.allocator.free(self.preview_shown_key);
+        self.allocator.free(self.last_head);
         if (self.preview_wanted) |job| job.deinit(page_alloc);
         if (self.mutation_requested) |job| job.deinit(page_alloc);
         page_alloc.free(self.mutation_msg);
@@ -2881,6 +2895,24 @@ pub const App = struct {
         self.restoreFileSelection(selected_path);
         self.clampSelections();
         if (self.tree_view) try self.rebuildTree(tree_path);
+
+        // History can move without any Ziggity action — an external commit,
+        // rebase, or `git pull` in another terminal. This refresh only reloads
+        // the working tree, so the Commits panel and the (cached) branch "Log"
+        // preview would keep showing stale commits until a manual full refresh.
+        // When HEAD's hash changes between snapshots, queue a branch + commit
+        // reload so those views self-correct; the branches refresh also drops the
+        // stale branch-log preview. Skip the first snapshot (empty `last_head`),
+        // whose branch/commit data the initial load already brought in.
+        if (snap.head.len > 0 and self.last_head.len > 0 and !std.mem.eql(u8, snap.head, self.last_head))
+            self.refreshViews(Refresh.branches_commits);
+        if (!std.mem.eql(u8, snap.head, self.last_head)) {
+            if (self.allocator.dupe(u8, snap.head)) |dup| {
+                self.allocator.free(self.last_head);
+                self.last_head = dup;
+            } else |_| {}
+        }
+
         const content = self.contentFocus();
         if (content == .files or content == .status) {
             self.updatePreview() catch |err| {
@@ -5353,6 +5385,8 @@ pub const App = struct {
         self.preview_loading = false;
         if (self.preview_wanted) |job| job.deinit(page_alloc);
         self.preview_wanted = null;
+        a.free(self.last_head);
+        self.last_head = &.{};
         a.free(self.diff);
         self.diff = a.dupe(u8, "") catch &.{};
 
@@ -10847,6 +10881,7 @@ test "background worktree snapshot applies on the UI thread and honors generatio
         .status = .{ .current_branch = try page.dupe(u8, "main"), .upstream = null },
         .porcelain = try page.dupe(u8, " M hello.txt\x00"),
         .state = .clean,
+        .head = try page.dupe(u8, "abc123"),
     };
     try app.applyWorktreeSnapshot(snap, app.refresh_generation, page);
     try std.testing.expectEqualStrings("main", app.data.current_branch);
@@ -10860,10 +10895,53 @@ test "background worktree snapshot applies on the UI thread and honors generatio
         .status = .{ .current_branch = try page.dupe(u8, "feature"), .upstream = null },
         .porcelain = try page.dupe(u8, ""),
         .state = .clean,
+        .head = try page.dupe(u8, "def456"),
     };
     try app.applyWorktreeSnapshot(stale, app.refresh_generation - 1, page);
     try std.testing.expectEqualStrings("main", app.data.current_branch);
     try std.testing.expectEqual(@as(usize, 1), app.data.files.len);
+}
+
+test "an external HEAD move between snapshots reloads the branch and commit views" {
+    const allocator = std.testing.allocator;
+    const page = std.heap.page_allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer {
+        app.data.deinit(allocator);
+        deinitTestApp(&app);
+    }
+
+    const snapshot = struct {
+        fn make(p: std.mem.Allocator, head: []const u8) !WorktreeSnapshot {
+            return .{
+                .status = .{ .current_branch = try p.dupe(u8, "main"), .upstream = null },
+                .porcelain = try p.dupe(u8, ""),
+                .state = .clean,
+                .head = try p.dupe(u8, head),
+            };
+        }
+    }.make;
+
+    // The first snapshot only records the baseline HEAD; the initial load already
+    // brought in branches/commits, so nothing is queued.
+    try app.applyWorktreeSnapshot(try snapshot(page, "1111111"), app.refresh_generation, page);
+    try std.testing.expect(!app.pending_scopes.contains(.branches));
+    try std.testing.expect(!app.pending_scopes.contains(.commits));
+
+    // Same HEAD again: history did not move, so still nothing to reload.
+    try app.applyWorktreeSnapshot(try snapshot(page, "1111111"), app.refresh_generation, page);
+    try std.testing.expect(!app.pending_scopes.contains(.branches));
+    try std.testing.expect(!app.pending_scopes.contains(.commits));
+
+    // HEAD moved out from under us (an external commit / rebase): the branch and
+    // commit views are queued for reload so their stale cached logs regenerate,
+    // while the worktree-only refresh scopes stay untouched.
+    try app.applyWorktreeSnapshot(try snapshot(page, "2222222"), app.refresh_generation, page);
+    try std.testing.expect(app.pending_scopes.contains(.branches));
+    try std.testing.expect(app.pending_scopes.contains(.commits));
+    try std.testing.expect(!app.pending_scopes.contains(.files));
+    try std.testing.expect(!app.pending_scopes.contains(.status));
 }
 
 test "clipboard copy picks the focused panel's identifier" {
@@ -12312,6 +12390,7 @@ fn deinitTestApp(app: *App) void {
     app.allocator.free(app.preview_desired_key);
     app.allocator.free(app.preview_inflight_key);
     app.allocator.free(app.preview_shown_key);
+    app.allocator.free(app.last_head);
     if (app.preview_wanted) |job| job.deinit(page_alloc);
     if (app.mutation_requested) |job| job.deinit(page_alloc);
     page_alloc.free(app.mutation_msg);

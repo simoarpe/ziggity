@@ -653,6 +653,16 @@ pub const Git = struct {
         return std.fmt.allocPrint(self.allocator, "detached@{s}", .{trimmed});
     }
 
+    /// HEAD's full commit hash, or an empty string on an unborn branch (a fresh
+    /// repo with no commits). Cheap enough to run on every background refresh so
+    /// history moves (an external commit/rebase) can be noticed. Owned.
+    pub fn headHash(self: *Git) ![]u8 {
+        var result = try self.exec(&.{ "rev-parse", "HEAD" });
+        defer result.deinit(self.allocator);
+        if (!result.ok()) return self.allocator.dupe(u8, "");
+        return self.allocator.dupe(u8, std.mem.trim(u8, result.stdout, " \t\r\n"));
+    }
+
     const AheadBehind = struct {
         ahead: usize,
         behind: usize,
