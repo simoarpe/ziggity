@@ -110,8 +110,9 @@ the written reference. Every binding is remappable, see
 - `a`: stage all (or unstage all) · `s` (Files): stash menu
 - `d` / `D`: discard menu for the file / discard all (confirmed)
 - `c` · `w` (Files): commit · commit `--no-verify`
-- `i` / `y` / `ctrl+f` (Files): add to `.gitignore` / copy path / make a
-  `fixup!`
+- `i` / `y` / `ctrl+f` (Files): ignore or exclude the file (a menu: add to the
+  shared `.gitignore`, or to the local, uncommitted `.git/info/exclude`) / copy
+  path / make a `fixup!`
 - `r` (Stash): rename the selected stash
 - `e` / `x` / `u` (Remotes): edit URL / remove remote / set upstream
 - `m`: merge and rebase actions (continue, amend and continue, abort) while

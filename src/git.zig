@@ -1135,10 +1135,11 @@ pub const Git = struct {
     }
 
     /// Append `path` to the repo's `.gitignore`, creating it if absent.
-    pub fn ignoreFile(self: *Git, path: []const u8) !ExecResult {
-        const gi = try std.fmt.allocPrint(self.allocator, "{s}/.gitignore", .{self.root});
-        defer self.allocator.free(gi);
-        const existing = std.Io.Dir.readFileAlloc(.cwd(), self.io, gi, self.allocator, .limited(1 << 20)) catch |err| switch (err) {
+    /// Append `path` as its own line to the ignore file at `abs_file` (an
+    /// absolute path), creating it if absent and skipping an exact-line
+    /// duplicate. Ensures a trailing newline first so entries never run together.
+    fn appendIgnoreEntry(self: *Git, abs_file: []const u8, path: []const u8) !ExecResult {
+        const existing = std.Io.Dir.readFileAlloc(.cwd(), self.io, abs_file, self.allocator, .limited(1 << 20)) catch |err| switch (err) {
             error.FileNotFound => try self.allocator.dupe(u8, ""),
             else => return err,
         };
@@ -1151,8 +1152,33 @@ pub const Git = struct {
         const needs_nl = existing.len > 0 and existing[existing.len - 1] != '\n';
         const updated = try std.fmt.allocPrint(self.allocator, "{s}{s}{s}\n", .{ existing, if (needs_nl) "\n" else "", path });
         defer self.allocator.free(updated);
-        try std.Io.Dir.writeFile(.cwd(), self.io, .{ .sub_path = gi, .data = updated });
+        try std.Io.Dir.writeFile(.cwd(), self.io, .{ .sub_path = abs_file, .data = updated });
         return self.successResult();
+    }
+
+    /// Add `path` to the repo's `.gitignore` (shared and committed with the team).
+    pub fn ignoreFile(self: *Git, path: []const u8) !ExecResult {
+        const gi = try std.fmt.allocPrint(self.allocator, "{s}/.gitignore", .{self.root});
+        defer self.allocator.free(gi);
+        return self.appendIgnoreEntry(gi, path);
+    }
+
+    /// Add `path` to `.git/info/exclude` — a local, per-repo ignore list that is
+    /// never committed. `--git-path` resolves the file to the right place,
+    /// including a linked worktree's shared copy.
+    pub fn excludeFile(self: *Git, path: []const u8) !ExecResult {
+        var pr = try self.exec(&.{ "rev-parse", "--git-path", "info/exclude" });
+        defer pr.deinit(self.allocator);
+        if (!pr.ok()) return pr; // caller owns and reports the error
+        const rel = std.mem.trim(u8, pr.stdout, " \t\r\n");
+        // `--git-path` is relative to the repo root (exec's cwd); make it absolute
+        // so the write does not depend on the process's working directory.
+        const excl = if (std.fs.path.isAbsolute(rel))
+            try self.allocator.dupe(u8, rel)
+        else
+            try std.fs.path.join(self.allocator, &.{ self.root, rel });
+        defer self.allocator.free(excl);
+        return self.appendIgnoreEntry(excl, path);
     }
 
     pub fn checkout(self: *Git, branch_name: []const u8) !ExecResult {
@@ -2661,6 +2687,76 @@ test "discardStagingPatch reverse-applies to the working tree and to the index" 
     var st2 = try git.exec(&.{ "status", "--porcelain=v1" });
     defer st2.deinit(a);
     try std.testing.expectEqualStrings("", st2.stdout);
+}
+
+test "excludeFile appends to .git/info/exclude, dedupes, and hides the file" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    try env.put("HOME", dir_path);
+    try env.put("GIT_CONFIG_GLOBAL", "/dev/null");
+    try env.put("GIT_CONFIG_SYSTEM", "/dev/null");
+
+    const setup =
+        \\set -e
+        \\git init -q
+        \\git config user.email t@t
+        \\git config user.name t
+        \\printf secret > secret.txt
+    ;
+    var sh = [_][]const u8{ "sh", "-c", setup };
+    const setup_result = try std.process.run(a, tio, .{
+        .argv = &sh,
+        .cwd = .{ .path = dir_path },
+        .environ_map = &env,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+    defer a.free(setup_result.stdout);
+    defer a.free(setup_result.stderr);
+    switch (setup_result.term) {
+        .exited => |code| if (code != 0) return error.SetupFailed,
+        else => return error.SetupFailed,
+    }
+
+    var git = try Git.initAt(a, tio, &env, dir_path);
+    defer git.deinit();
+
+    // secret.txt is untracked and visible before excluding.
+    var before = try git.exec(&.{ "status", "--porcelain=v1" });
+    defer before.deinit(a);
+    try std.testing.expectEqualStrings("?? secret.txt\n", before.stdout);
+
+    var r1 = try git.excludeFile("secret.txt");
+    defer r1.deinit(a);
+    try std.testing.expect(r1.ok());
+    // Excluding again must not duplicate the entry.
+    var r2 = try git.excludeFile("secret.txt");
+    defer r2.deinit(a);
+    try std.testing.expect(r2.ok());
+
+    // The local exclude file holds exactly one entry, and git now hides the file.
+    const excl_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}/.git/info/exclude", .{tmp.sub_path});
+    const excl = try std.Io.Dir.readFileAlloc(.cwd(), tio, excl_path, a, .limited(1 << 20));
+    defer a.free(excl);
+    var count: usize = 0;
+    var it = std.mem.tokenizeScalar(u8, excl, '\n');
+    while (it.next()) |line| {
+        if (std.mem.eql(u8, std.mem.trim(u8, line, " \t\r"), "secret.txt")) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
+
+    var after = try git.exec(&.{ "status", "--porcelain=v1" });
+    defer after.deinit(a);
+    try std.testing.expectEqualStrings("", after.stdout);
 }
 
 test "stashKeeping restores the same working state it stashed" {

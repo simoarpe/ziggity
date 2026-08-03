@@ -506,6 +506,15 @@ pub const MenuAction = enum {
     sort_branches_date,
     sort_branches_recency,
     sort_branches_alpha,
+    ignore_add_gitignore,
+    ignore_add_exclude,
+};
+
+/// The Files `i` menu: add the selected path to the shared, committed
+/// `.gitignore`, or to the local, uncommitted `.git/info/exclude`.
+pub const ignore_menu = [_]MenuItem{
+    .{ .label = "Add to .gitignore", .action = .ignore_add_gitignore },
+    .{ .label = "Add to .git/info/exclude", .action = .ignore_add_exclude },
 };
 
 /// The `s` branch-sort menu on the local Branches tab.
@@ -3387,11 +3396,12 @@ pub const App = struct {
             .start_commit => try commits_mod.startCommitPrompt(self, false),
             .commit_no_verify => try commits_mod.startCommitPrompt(self, true),
             .ignore_file => {
-                const file = self.selectedFile() orelse {
+                if (self.selectedFile() == null) {
                     try self.setMessage("no file selected", .{});
                     return;
-                };
-                return self.runMutationFiles(try self.git.ignoreFile(file.path), "added {s} to .gitignore", .{file.path});
+                }
+                self.mode = .menu;
+                self.active_menu = .{ .title = "Ignore or exclude file", .items = &ignore_menu, .index = 0 };
             },
             .copy_file_info => {
                 const file = self.selectedFile() orelse {
@@ -7811,6 +7821,15 @@ pub const App = struct {
                 if (self.clipboard_request) |old| self.allocator.free(old);
                 self.clipboard_request = try self.allocator.dupe(u8, text);
                 try self.setMessage("copied to clipboard: {s}", .{text});
+            },
+            .ignore_add_gitignore, .ignore_add_exclude => {
+                const file = self.selectedFile() orelse {
+                    try self.setMessage("no file selected", .{});
+                    return;
+                };
+                if (action == .ignore_add_exclude)
+                    return self.runMutationFiles(try self.git.excludeFile(file.path), "added {s} to .git/info/exclude", .{file.path});
+                return self.runMutationFiles(try self.git.ignoreFile(file.path), "added {s} to .gitignore", .{file.path});
             },
         }
     }

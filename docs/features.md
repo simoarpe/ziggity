@@ -120,8 +120,9 @@ The animation itself is in the [README](../README.md).
 - Live fuzzy path filtering (smart case subsequence) with recent filter
   recall, plus a status filter (staged, unstaged, tracked, untracked).
 - Discard a file, or a whole folder in tree view (`d` on a directory), via a
-  menu (all, or unstaged only), or discard everything (`D`, confirmed). Add
-  to `.gitignore` (`i`), copy a path (`y`).
+  menu (all, or unstaged only), or discard everything (`D`, confirmed). Ignore
+  or exclude a file (`i`): a menu adds it to the shared, committed `.gitignore`
+  or the local, uncommitted `.git/info/exclude`. Copy a path (`y`).
 - Scoped periodic refresh for external changes, plus a full refresh when the
   terminal regains focus.
 

@@ -1533,7 +1533,7 @@ const help_lines = [_][]const u8{
     "  w              commit with --no-verify (skip hooks)",
     "  A              amend the last commit",
     "  e              open the file in your editor",
-    "  i              add the file to .gitignore",
+    "  i              ignore (.gitignore) or exclude (.git/info/exclude) the file",
     "  y              copy the file path to the clipboard",
     "  ctrl+f         make a fixup! for the staged change's base commit",
     "  d              discard menu",
@@ -3801,7 +3801,7 @@ fn footerHints(c: FooterCtx) []const u8 {
     }
     if (c.focus == .files) {
         return switch (c.files_tab) {
-            .files => "space stage  a all  c/w commit/no-verify  A amend  e edit  d discard  i ignore  y copy  ^f fixup-base  s stash  / filter  ` tree  enter hunks  [/] tabs" ++ global,
+            .files => "space stage  a all  c/w commit/no-verify  A amend  e edit  d discard  i ignore/exclude  y copy  ^f fixup-base  s stash  / filter  ` tree  enter hunks  [/] tabs" ++ global,
             .worktrees => "space/enter switch  n new  o editor  d remove  [/] tabs" ++ global,
             .submodules => "enter enter  space update  n add  e edit-url  d remove  b bulk  [/] tabs" ++ global,
         };
