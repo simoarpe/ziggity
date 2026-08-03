@@ -175,13 +175,32 @@ fn openPrForBranch(app: *App, branch: []const u8) !void {
     };
     defer app.allocator.free(base);
 
-    const url = try pullRequestUrl(app.allocator, base, branch);
+    // If the branch already has a pull/merge request (from the `gh`/`glab`
+    // background lookup), open *that* directly; otherwise open the create page.
+    const url = if (app.branchPr(branch)) |pr|
+        try existingPrUrl(app.allocator, base, pr.number)
+    else
+        try pullRequestUrl(app.allocator, base, branch);
     defer app.allocator.free(url);
     app.git.openUrl(url) catch {
         try app.setMessage("failed to launch the browser", .{});
         return;
     };
     try app.setMessage("opening {s}", .{url});
+}
+
+/// The host's page for an existing pull/merge request `number`. GitLab nests
+/// MRs under `/-/merge_requests/`, Gitea/Codeberg use `/pulls/`, GitHub `/pull/`,
+/// and Bitbucket `/pull-requests/`.
+fn existingPrUrl(allocator: std.mem.Allocator, base: []const u8, number: u32) ![]u8 {
+    if (std.mem.indexOf(u8, base, "bitbucket") != null) {
+        return std.fmt.allocPrint(allocator, "{s}/pull-requests/{d}", .{ base, number });
+    }
+    return switch (forgeOf(base)) {
+        .gitlab => std.fmt.allocPrint(allocator, "{s}/-/merge_requests/{d}", .{ base, number }),
+        .gitea => std.fmt.allocPrint(allocator, "{s}/pulls/{d}", .{ base, number }),
+        .github => std.fmt.allocPrint(allocator, "{s}/pull/{d}", .{ base, number }),
+    };
 }
 
 /// Build the host's new-pull-request (merge-request) URL for `branch`. Each
@@ -286,6 +305,25 @@ test "pullRequestUrl picks the host's new-request path" {
     const cb = try pullRequestUrl(a, "https://codeberg.org/o/r", "feature/x");
     defer a.free(cb);
     try std.testing.expectEqualStrings("https://codeberg.org/o/r/compare/feature/x", cb);
+}
+
+test "existingPrUrl points at each host's PR/MR page by number" {
+    const a = std.testing.allocator;
+    const gh = try existingPrUrl(a, "https://github.com/o/r", 42);
+    defer a.free(gh);
+    try std.testing.expectEqualStrings("https://github.com/o/r/pull/42", gh);
+
+    const gl = try existingPrUrl(a, "https://gitlab.com/o/r", 7);
+    defer a.free(gl);
+    try std.testing.expectEqualStrings("https://gitlab.com/o/r/-/merge_requests/7", gl);
+
+    const gt = try existingPrUrl(a, "https://codeberg.org/o/r", 3);
+    defer a.free(gt);
+    try std.testing.expectEqualStrings("https://codeberg.org/o/r/pulls/3", gt);
+
+    const bb = try existingPrUrl(a, "https://bitbucket.org/o/r", 9);
+    defer a.free(bb);
+    try std.testing.expectEqualStrings("https://bitbucket.org/o/r/pull-requests/9", bb);
 }
 
 test "commitWebUrl uses each forge's commit path" {

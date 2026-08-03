@@ -54,6 +54,7 @@ const Event = union(enum) {
     repo_load_done,
     scoped_load_done,
     graph_done,
+    pr_status_done,
 };
 
 /// A network op run off the UI loop. Allocations use the SMP allocator, which is
@@ -263,6 +264,22 @@ fn bgFetchWorker(fr: *BgFetchRun) void {
     _ = fr.loop.tryPostEvent(.bg_fetch_done) catch false;
 }
 
+/// A background pull/merge-request status fetch (via the `gh`/`glab` CLI), run
+/// off the UI loop so the network call never blocks navigation. Posts
+/// `.pr_status_done`; the result is applied on the UI thread.
+const PrStatusRun = struct {
+    io: std.Io,
+    loop: *vaxis.Loop(Event),
+    root: []u8,
+    environ: *std.process.Environ.Map,
+    result: ?app_mod.PrStatusSnapshot = null,
+};
+
+fn prStatusWorker(pr: *PrStatusRun) void {
+    pr.result = app_mod.PrStatusSnapshot.load(async_allocator, pr.io, pr.environ, pr.root);
+    _ = pr.loop.tryPostEvent(.pr_status_done) catch false;
+}
+
 /// A slow git mutation (merge/rebase/bisect/…) run off the UI loop on a
 /// page-allocator Git. Posts `.mutation_done` so the loop can surface the
 /// result and refresh on the UI thread.
@@ -442,6 +459,13 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     var bg_fetch_future: ?std.Io.Future(void) = null;
     defer if (bg_fetch_future) |*f| f.cancel(io);
 
+    var pr_status_run: PrStatusRun = undefined;
+    var pr_status_future: ?std.Io.Future(void) = null;
+    defer if (pr_status_future) |*f| {
+        f.cancel(io);
+        if (pr_status_run.result) |*r| r.deinit(async_allocator);
+    };
+
     var mutation_run: MutationRun = undefined;
     var mutation_future: ?std.Io.Future(void) = null;
     defer if (mutation_future) |*f| {
@@ -495,7 +519,11 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             .winsize => |ws| try vx.resize(allocator, tty.writer(), ws),
             .refresh_tick => try app.handleRefreshTick(),
             .anim_tick => app.advanceDonut(io),
-            .fetch_tick => app.bg_fetch_requested = true,
+            .fetch_tick => {
+                app.bg_fetch_requested = true;
+                // Refresh PR status on the same cadence as the background fetch.
+                app.requestPrStatus();
+            },
             .bg_fetch_done => {
                 if (bg_fetch_future) |*f| {
                     f.await(io);
@@ -503,6 +531,14 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     // New remote-tracking refs: refresh the status summary
                     // (ahead/behind) and the branch list (its arrows).
                     app.refreshViews(app_mod.ScopeSet.init(.{ .files = true, .branches = true }));
+                }
+            },
+            .pr_status_done => {
+                if (pr_status_future) |*f| {
+                    f.await(io);
+                    pr_status_future = null;
+                    app.applyPrStatus(pr_status_run.result, async_allocator);
+                    pr_status_run.result = null;
                 }
             },
             .focus_in => try app.handleFocusIn(),
@@ -619,6 +655,12 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             if (bg_fetch_future) |*f| {
                 f.await(io);
                 bg_fetch_future = null;
+            }
+            if (pr_status_future) |*f| {
+                f.await(io);
+                pr_status_future = null;
+                if (pr_status_run.result) |*r| r.deinit(async_allocator);
+                pr_status_run.result = null;
             }
             if (scoped_load_future) |*f| {
                 f.await(io);
@@ -744,6 +786,14 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             app.bg_fetch_requested = false;
             bg_fetch_run = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ };
             bg_fetch_future = io.concurrent(bgFetchWorker, .{&bg_fetch_run}) catch null;
+        }
+
+        // Start a queued background PR-status fetch (via `gh`/`glab`) off the
+        // loop. Independent of `git fetch`, and single-in-flight.
+        if (pr_status_future == null and app.pr_status_requested) {
+            app.pr_status_requested = false;
+            pr_status_run = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ };
+            pr_status_future = io.concurrent(prStatusWorker, .{&pr_status_run}) catch null;
         }
 
         // Flush any pending stage/unstage toggles into a coalesced off-thread
@@ -1592,7 +1642,7 @@ const help_lines = [_][]const u8{
     "  F              force-checkout (discards changes)",
     "  T              tag the branch",
     "  N              move commits onto a new branch",
-    "  G              open the new pull/merge request page",
+    "  G              open the branch's pull/merge request, else the new-PR page",
     "  s              branch sort menu",
     "",
     "Remotes tab — the remotes list",
@@ -1642,7 +1692,7 @@ const help_lines = [_][]const u8{
     "  F              create a fixup! commit",
     "  S              autosquash the fixups above",
     "  B              mark a base, then rebase a branch onto it",
-    "  G              open the new pull/merge request page",
+    "  G              open the branch's pull/merge request, else the new-PR page",
     "  /              filter the log by message, author or path (esc clears)",
     "  b              bisect menu (start, then mark good/bad/skip/reset)",
     "  ctrl+p         custom patch menu (apply, remove from commit, reset)",
@@ -2617,7 +2667,7 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
         if (app.branches_tab == .local) {
             if (branch.upstream_gone) {
                 end = printSpan(win, row, end, " ", base);
-                _ = printSpan(win, row, end, "(gone)", withFg(base, ui_theme.unstaged));
+                end = printSpan(win, row, end, "(gone)", withFg(base, ui_theme.unstaged));
             } else if (branch.upstream) |upstream| {
                 if (!upstreamIsDefault(branch.name, upstream)) {
                     end = printSpan(win, row, end, " ", base);
@@ -2626,7 +2676,28 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
                     end = printSpan(win, row, end, upstream, dimmed(base));
                 }
                 end = printSpan(win, row, end, " ", base);
-                _ = drawBranchStatus(win, row, end, base, true, branch.ahead, branch.behind);
+                end = drawBranchStatus(win, row, end, base, true, branch.ahead, branch.behind);
+            }
+
+            // Pull/merge request status (from `gh`/`glab`), after the sync
+            // status: a state-coloured "#<number> - <State>" — green Open,
+            // yellow Draft, purple Merged, red Closed — so the PR reads clearly.
+            if (app.branchPr(branch.name)) |pr| {
+                var pbuf: [32]u8 = undefined;
+                const word = switch (pr.state) {
+                    .open => "Open",
+                    .draft => "Draft",
+                    .merged => "Merged",
+                    .closed => "Closed",
+                };
+                const label = std.fmt.bufPrint(&pbuf, " #{d} - {s}", .{ pr.number, word }) catch "";
+                const fg = switch (pr.state) {
+                    .open => ui_theme.staged,
+                    .draft => ui_theme.warning,
+                    .merged => ui_theme.header,
+                    .closed => ui_theme.unstaged,
+                };
+                end = printSpan(win, row, end, label, withFg(base, fg));
             }
         }
     }

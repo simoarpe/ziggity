@@ -64,6 +64,13 @@ staging_split = auto               # staging layout: off | on | auto (default)
 # press ` on every launch. Default off; ` still toggles it at runtime.
 show_file_tree = false
 
+# Show each local branch's pull/merge request status in the Branches panel as a
+# state coloured #<number>, fetched in the background via the host CLI (gh for
+# GitHub, glab for GitLab, which already hold your auth). On by default: it
+# activates when the tool is installed and authenticated and the remote is
+# GitHub or GitLab, and stays silent otherwise. Set false to disable it.
+pr_status = true
+
 # Editor for `e`. With nothing set, auto detected from git core.editor, then
 # $GIT_EDITOR, $VISUAL, $EDITOR, falling back to vim. See "Editor" below.
 editor_preset =                    # vim | nvim | nano | emacs | micro | helix | vscode | sublime | zed | ...

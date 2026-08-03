@@ -20,6 +20,7 @@ const filetree = @import("filetree.zig");
 const git_mod = @import("git.zig");
 const model = @import("model.zig");
 const patch_mod = @import("patch.zig");
+const prstatus = @import("prstatus.zig");
 const recentrepos = @import("recentrepos.zig");
 const diffwrap = @import("diffwrap.zig");
 const staging_mod = @import("staging.zig");
@@ -1029,6 +1030,76 @@ pub const WorktreeSnapshot = struct {
         self.status.deinit(gpa);
         gpa.free(self.porcelain);
         gpa.free(self.head);
+        self.* = undefined;
+    }
+};
+
+/// One background fetch of the repo's open/merged pull (GitHub) or merge
+/// (GitLab) requests, run off the UI loop. It shells out to the host's own CLI
+/// (`gh` / `glab`), which already carry the user's auth, so ziggity never
+/// touches a token. A missing/unauthenticated tool, an unsupported host, or a
+/// failed command all yield an empty result (no indicators) rather than an
+/// error — the feature is silent when it cannot run.
+pub const PrStatusSnapshot = struct {
+    entries: []prstatus.PrEntry,
+
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8) PrStatusSnapshot {
+        return .{ .entries = loadEntries(gpa, io, environ, root) catch &.{} };
+    }
+
+    fn loadEntries(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8) ![]prstatus.PrEntry {
+        const url = originUrl(gpa, io, environ, root) catch return &.{};
+        defer gpa.free(url);
+        const host = prstatus.hostFromUrl(url);
+        const argv: []const []const u8 = switch (host) {
+            .github => &.{ "gh", "pr", "list", "--state", "all", "--limit", "200", "--json", "number,headRefName,state,isDraft,isCrossRepository" },
+            .gitlab => &.{ "glab", "mr", "list", "--output", "json", "--per-page", "100" },
+            .unsupported => return &.{},
+        };
+        const result = std.process.run(gpa, io, .{
+            .argv = argv,
+            .cwd = .{ .path = root },
+            .environ_map = environ,
+            .stdout_limit = .limited(4 * 1024 * 1024),
+            .stderr_limit = .limited(256 * 1024),
+        }) catch return &.{}; // tool not installed, etc.
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        const ok = switch (result.term) {
+            .exited => |code| code == 0,
+            else => false,
+        };
+        if (!ok or result.stdout.len == 0) return &.{}; // not authenticated, no repo, etc.
+        return switch (host) {
+            .github => prstatus.parseGitHub(gpa, result.stdout) catch &.{},
+            .gitlab => prstatus.parseGitLab(gpa, result.stdout) catch &.{},
+            .unsupported => &.{},
+        };
+    }
+
+    /// `git remote get-url origin`, trimmed and owned by `gpa`. Run directly (not
+    /// via the Git wrapper) so this throwaway path records nothing and owns no
+    /// command log. Errors when there is no origin.
+    fn originUrl(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8) ![]u8 {
+        const r = try std.process.run(gpa, io, .{
+            .argv = &.{ "git", "--no-optional-locks", "remote", "get-url", "origin" },
+            .cwd = .{ .path = root },
+            .environ_map = environ,
+            .stdout_limit = .limited(64 * 1024),
+            .stderr_limit = .limited(64 * 1024),
+        });
+        defer gpa.free(r.stderr);
+        defer gpa.free(r.stdout);
+        const ok = switch (r.term) {
+            .exited => |code| code == 0,
+            else => false,
+        };
+        if (!ok) return error.NoOrigin;
+        return gpa.dupe(u8, std.mem.trim(u8, r.stdout, " \t\r\n"));
+    }
+
+    pub fn deinit(self: *PrStatusSnapshot, gpa: std.mem.Allocator) void {
+        prstatus.deinitEntries(gpa, self.entries);
         self.* = undefined;
     }
 };
@@ -2344,6 +2415,12 @@ pub const App = struct {
     /// Set by the ticker when a periodic background fetch is due; the loop starts
     /// it (off-thread) when no other network op is in flight.
     bg_fetch_requested: bool = false,
+    /// Open pull/merge requests keyed by head branch name, from the host CLI
+    /// (`gh`/`glab`) — drives the Branches panel PR indicator. Keys owned.
+    /// Empty when the feature is off, the tool is absent, or the host is
+    /// unsupported. `pr_status_requested` queues an off-thread refresh.
+    pr_status: std.StringHashMapUnmanaged(prstatus.PrInfo) = .{},
+    pr_status_requested: bool = false,
     /// Set on terminal focus-gain to restart the ticker's fetch countdown, so a
     /// focus-triggered fetch resets the interval (rather than firing again soon).
     fetch_timer_reset: std.atomic.Value(bool) = .init(false),
@@ -2592,6 +2669,8 @@ pub const App = struct {
         self.allocator.free(self.preview_inflight_key);
         self.allocator.free(self.preview_shown_key);
         self.allocator.free(self.last_head);
+        self.clearPrStatus();
+        self.pr_status.deinit(self.allocator);
         if (self.preview_wanted) |job| job.deinit(page_alloc);
         if (self.mutation_requested) |job| job.deinit(page_alloc);
         page_alloc.free(self.mutation_msg);
@@ -2663,6 +2742,8 @@ pub const App = struct {
         if (self.tree_view) self.rebuildTree(tree_path) catch {};
         self.updatePreview() catch {};
         self.setMessage("ready", .{}) catch {};
+        // Kick a first PR-status fetch (off-thread) now that branches are loaded.
+        self.requestPrStatus();
     }
 
     /// Fast, scoped reload of just the working tree (status + file list), the
@@ -2830,6 +2911,40 @@ pub const App = struct {
         // commits and freshly computed relative dates instead of a frozen snapshot.
         if (s.contains(.branches)) self.preview_cache.invalidatePrefix(self.allocator, "b:");
         self.updatePreview() catch {};
+    }
+
+    /// Queue an off-thread PR-status refresh, if the feature is enabled. The loop
+    /// runs it when no other network op is in flight (see the tui event loop).
+    pub fn requestPrStatus(self: *App) void {
+        if (self.config.pr_status) self.pr_status_requested = true;
+    }
+
+    /// Replace the PR-status map from a fresh snapshot (keys re-owned by the app
+    /// allocator); a null snapshot just clears it. Frees the snapshot.
+    pub fn applyPrStatus(self: *App, snap_opt: ?PrStatusSnapshot, gpa: std.mem.Allocator) void {
+        self.clearPrStatus();
+        var snap = snap_opt orelse return;
+        defer snap.deinit(gpa);
+        for (snap.entries) |e| {
+            const key = self.allocator.dupe(u8, e.head) catch continue;
+            const gop = self.pr_status.getOrPut(self.allocator, key) catch {
+                self.allocator.free(key);
+                continue;
+            };
+            if (gop.found_existing) self.allocator.free(key); // parser already dedupes; be safe
+            gop.value_ptr.* = e.info;
+        }
+    }
+
+    fn clearPrStatus(self: *App) void {
+        var it = self.pr_status.keyIterator();
+        while (it.next()) |k| self.allocator.free(k.*);
+        self.pr_status.clearRetainingCapacity();
+    }
+
+    /// The pull/merge request for a local branch by name, if the CLI reported one.
+    pub fn branchPr(self: *const App, name: []const u8) ?prstatus.PrInfo {
+        return self.pr_status.get(name);
     }
 
     /// True while a foreground git operation is in progress, during which the
@@ -5397,6 +5512,7 @@ pub const App = struct {
         self.preview_wanted = null;
         a.free(self.last_head);
         self.last_head = &.{};
+        self.clearPrStatus();
         a.free(self.diff);
         self.diff = a.dupe(u8, "") catch &.{};
 
@@ -8752,6 +8868,8 @@ pub const App = struct {
         // loads off-thread and the rest via the scoped loader, so a full refresh
         // no longer stalls the UI on a big repo.
         self.refreshViews(Refresh.all);
+        // A network sync can also change PR/MR state on the host — refresh it.
+        self.requestPrStatus();
     }
 
     /// Paint the operation dialog's "running" frame for a slow op before it
@@ -10963,6 +11081,42 @@ test "an external HEAD move between snapshots reloads the branch and commit view
     try std.testing.expect(!app.pending_scopes.contains(.status));
 }
 
+test "applyPrStatus stores PRs by branch and re-apply replaces them" {
+    const allocator = std.testing.allocator;
+    const page = std.heap.page_allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    const snap = struct {
+        fn make(p: std.mem.Allocator, entries: []const prstatus.PrEntry) !PrStatusSnapshot {
+            const dup = try p.alloc(prstatus.PrEntry, entries.len);
+            for (entries, 0..) |e, i| dup[i] = .{ .head = try p.dupe(u8, e.head), .info = e.info };
+            return .{ .entries = dup };
+        }
+    }.make;
+
+    app.applyPrStatus(try snap(page, &.{
+        .{ .head = @constCast("feature"), .info = .{ .number = 42, .state = .open } },
+        .{ .head = @constCast("wip"), .info = .{ .number = 7, .state = .draft } },
+    }), page);
+    try std.testing.expectEqual(@as(u32, 42), app.branchPr("feature").?.number);
+    try std.testing.expectEqual(prstatus.PrState.open, app.branchPr("feature").?.state);
+    try std.testing.expectEqual(prstatus.PrState.draft, app.branchPr("wip").?.state);
+    try std.testing.expect(app.branchPr("nope") == null);
+
+    // Re-applying replaces the whole set: "feature" updates, "wip" is gone.
+    app.applyPrStatus(try snap(page, &.{
+        .{ .head = @constCast("feature"), .info = .{ .number = 42, .state = .merged } },
+    }), page);
+    try std.testing.expectEqual(prstatus.PrState.merged, app.branchPr("feature").?.state);
+    try std.testing.expect(app.branchPr("wip") == null);
+
+    // A null snapshot clears everything.
+    app.applyPrStatus(null, page);
+    try std.testing.expect(app.branchPr("feature") == null);
+}
+
 test "clipboard copy picks the focused panel's identifier" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -12410,6 +12564,8 @@ fn deinitTestApp(app: *App) void {
     app.allocator.free(app.preview_inflight_key);
     app.allocator.free(app.preview_shown_key);
     app.allocator.free(app.last_head);
+    app.clearPrStatus();
+    app.pr_status.deinit(app.allocator);
     if (app.preview_wanted) |job| job.deinit(page_alloc);
     if (app.mutation_requested) |job| job.deinit(page_alloc);
     page_alloc.free(app.mutation_msg);

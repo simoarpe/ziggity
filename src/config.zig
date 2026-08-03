@@ -291,6 +291,13 @@ pub const Config = struct {
     /// so you don't have to press `` ` `` on every launch. This is the initial
     /// state; `` ` `` still toggles it at runtime for the session.
     show_file_tree: bool = false,
+    /// Show each local branch's pull/merge request status in the Branches panel,
+    /// fetched in the background via the host CLI (`gh` for GitHub, `glab` for
+    /// GitLab). On by default: it activates automatically when the CLI is
+    /// installed and authenticated and the remote is GitHub/GitLab, and stays
+    /// silent otherwise (no tool, unsupported host, or not logged in). Set false
+    /// to disable the background lookup entirely.
+    pr_status: bool = true,
     /// Run the repo's `prepare-commit-msg` hook when the commit dialog opens and
     /// seed the message fields from its output (e.g. a branch-derived ticket
     /// prefix). Matches interactive git; disable to skip the hook at open time.
@@ -407,6 +414,10 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "show_file_tree")) {
             if (parseBool(value)) |on| self.show_file_tree = on;
+            return;
+        }
+        if (std.mem.eql(u8, key, "pr_status")) {
+            if (parseBool(value)) |on| self.pr_status = on;
             return;
         }
         if (std.mem.eql(u8, key, "staging_split")) {
@@ -619,6 +630,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
         \\expanded_side_panel_weight = 3
         \\staging_split = on
         \\show_file_tree = true
+        \\pr_status = false
     );
     try std.testing.expectEqual(StagingSplitMode.on, cfg.staging_split);
     try std.testing.expectEqual(ResultDialog.always, cfg.result_dialog); // valid set; bad value ignored
@@ -632,6 +644,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     try std.testing.expect(cfg.expand_focused_side_panel);
     try std.testing.expectEqual(@as(u8, 3), cfg.expanded_side_panel_weight);
     try std.testing.expect(cfg.show_file_tree);
+    try std.testing.expect(!cfg.pr_status); // default true, overridden to false
 }
 
 test "config parser stores custom commands bound to keys" {

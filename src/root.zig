@@ -15,6 +15,7 @@ pub const git = @import("git.zig");
 pub const log = @import("log.zig");
 pub const model = @import("model.zig");
 pub const patch = @import("patch.zig");
+pub const prstatus = @import("prstatus.zig");
 pub const stash = @import("stash.zig");
 pub const staging = @import("staging.zig");
 pub const textmatch = @import("textmatch.zig");

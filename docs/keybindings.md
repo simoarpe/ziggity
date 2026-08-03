@@ -86,7 +86,8 @@ the written reference. Every binding is remappable, see
 - `g` / `F` (Branches Local): reset to the branch / force checkout
 - `T` / `N` (Branches Local): tag the branch / move its commits to a new
   branch
-- `G` / `s` (Branches Local): open the PR page / branch sort menu
+- `G` / `s` (Branches Local): open the branch's pull/merge request if it has
+  one, otherwise the create page / branch sort menu
 - `space` (Remotes/Tags): check out the remote branch or tag
 - `n` / `P` / `g` / `d` (Tags): new tag / push to a remote / reset onto it /
   delete
@@ -101,8 +102,9 @@ the written reference. Every binding is remappable, see
 - `ctrl+l` (Commits): commit graph viewer (`j` and `k` move, `@` HEAD, `p`
   first parent, `H` and `L` pan, `a` toggle all branches, `ctrl+o` copy,
   `enter` jump, `esc` close; mouse scroll, drag and click)
-- `G` (Commits): open the new pull/merge request page (GitHub, GitLab,
-  Codeberg, Bitbucket) · `B`: mark a `rebase --onto` base
+- `G` (Commits): open the current branch's pull/merge request if it has one,
+  otherwise the create page (GitHub, GitLab, Codeberg, Bitbucket) · `B`: mark a
+  `rebase --onto` base
 - `W`: diff the selected commit or branch against another marked ref
 - `/` (Commits): filter the log · `b` (Commits): bisect menu
 - `ctrl+p`: custom patch menu; `space` in a commit's files adds a file to the

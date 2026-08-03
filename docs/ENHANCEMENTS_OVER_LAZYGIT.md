@@ -135,6 +135,13 @@ form index of those intentional differences.
   complete and the staged and unstaged split survives byte for byte.
   [Details](comparison.md#stash-without-losing-your-working-tree)
 
+- **Pull request status for GitHub and GitLab.** Each local branch shows its
+  PR/MR as a state coloured `#<number> - <State>`, fetched in the background via
+  the host CLI (`gh` or `glab`), and `G` opens the branch's own PR when it has
+  one.
+  Lazygit shows this only for GitHub via `gh`; ziggity adds GitLab via `glab`
+  on the same mechanism, with no extra token handling.
+
 - **Small courtesies.** One remote skips the remote prompt on tag push. Any
   stash exports to a `git apply` ready patch. A commit with thousands of
   binary files previews instantly instead of freezing the panel. `ctrl+z`

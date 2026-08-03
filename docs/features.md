@@ -135,7 +135,16 @@ The animation itself is in the [README](../README.md).
 - Branch actions (Local tab): new (`n`), rename (`R`), delete (`d`), merge
   (`M`), rebase (`r`), fast forward (`f`), checkout by name (`c`), reset
   (`g`), force checkout (`F`), tag (`T`), move commits to a new branch (`N`),
-  open the pull request page (`G`), sort menu (`s`).
+  open the pull request (`G`, the branch's own PR/MR if it has one, else the
+  create page), sort menu (`s`).
+- Pull/merge request status per branch: after the sync status, each local
+  branch shows its PR/MR as a state coloured `#<number> - <State>` (green Open,
+  yellow Draft, purple Merged, red Closed). Fork PRs are ignored so they never
+  false-match a same-named local branch. Fetched in the background via the host
+  CLI (`gh` for GitHub, `glab` for GitLab), which already hold your auth, so no
+  token is stored. On by
+  default and silent when the tool is absent, the host is unsupported, or you
+  are not logged in; disable with `pr_status = false`.
 - Tags tab: checkout (`space`, detached), create (`n`, lightweight or
   annotated; overwrite prompts for `--force`), push to a remote (`P`), reset
   onto it (`g`), delete (`d`, local, remote, or both). One remote skips the
