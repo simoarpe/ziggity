@@ -24,6 +24,10 @@
   <b>1.9 MB</b> binary · <b>3.6 ms</b> startup · <b>8 MB</b> memory when idle · no runtime, no toolchain, just <code>git</code>
 </p>
 
+<p align="center">
+  <img src="docs/assets/ziggity-donut.gif" alt="Ziggity, the about splash with a spinning donut" width="900">
+</p>
+
 Ziggity keeps your entire Git workflow in one terminal window. Stage individual
 lines, commit, branch, rebase interactively, inspect history, and review
 changes with live diff previews. Every action is a keystroke. 
@@ -44,9 +48,16 @@ a port. It is written from scratch in Zig, talks directly to your existing
 they improve the user experience. See
 [docs/comparison.md](docs/comparison.md) for a detailed comparison.
 
-<p align="center">
-  <img src="docs/assets/ziggity-donut.gif" alt="Ziggity, the about splash with a spinning donut" width="900">
-</p>
+## Why Ziggity?
+
+- ⚡ 1.9 MB standalone binary
+- 🚀 Starts in ~3.6 ms
+- 🔄 Non-blocking Git operations
+- 🖱️ First-class keyboard and mouse interaction
+- 🐙 Uses your existing `git` installation
+- 🧩 No libgit2 dependency
+- ⚙️ Written entirely in Zig
+- 💻 Runs on macOS, Linux, and Windows
 
 <p align="center"><i>The Status panel about splash. Yes, the donut spins.</i></p>
 
@@ -158,7 +169,7 @@ export PATH="$PWD/zig-out/bin:$PATH"
 Run `ziggity` inside any Git repository. Press `?` for the keybindings
 overlay (it opens scrolled to the panel you are on), and `q` to quit.
 
-## Why Ziggity
+## Design Philosophy
 
 If lazygit already works for you, great: it is an excellent tool. Ziggity
 exists because a few everyday interactions could be quicker, more efficient,
