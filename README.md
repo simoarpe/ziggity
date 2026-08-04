@@ -64,6 +64,7 @@ they improve the user experience. See
 - 🧩 No libgit2 dependency
 - ⚙️ Written entirely in Zig
 - 💻 Runs on macOS, Linux, and Windows
+- 📱 Even on Android, in Termux
 
 <p align="center">
   <img src="docs/screenshots/01-overview.png" alt="Ziggity, the main view" width="900">
