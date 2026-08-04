@@ -17,7 +17,7 @@
 <p align="center">
   <img alt="Zig 0.16" src="https://img.shields.io/badge/Zig-0.16.0-f7a41d">
   <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue">
-  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20Android-lightgrey">
 </p>
 
 <p align="center">
@@ -97,7 +97,8 @@ install is not quarantined, so it runs on macOS without a Gatekeeper prompt.
 ### Prebuilt Binaries
 
 Every [release](https://github.com/simoarpe/ziggity/releases) ships static
-binaries for macOS, Linux, and Windows. No Zig toolchain required.
+binaries for macOS, Linux, Windows, and Android (Termux). No Zig toolchain
+required.
 
 #### macOS / Linux
 
@@ -130,6 +131,30 @@ Download `ziggity-v0.16.0-x86_64-windows-gnu.zip`, unzip it, and put
 
 > **Note:** Windows builds are cross compiled and not yet smoke tested on
 > Windows. Treat them as experimental for now.
+
+#### Android (Termux)
+
+Ziggity runs on Android inside [Termux](https://termux.dev). The binary is a
+static aarch64 ELF with no libc, so it needs no NDK and no root; Termux supplies
+the terminal and `git`.
+
+```sh
+# In Termux:
+pkg install git
+# Download the Android build (set VERSION from the releases page):
+curl -LO https://github.com/simoarpe/ziggity/releases/download/$VERSION/ziggity-$VERSION-aarch64-linux-android.tar.gz
+tar -xzf ziggity-$VERSION-aarch64-linux-android.tar.gz
+# Move it into Termux's own bin; Android forbids exec from shared storage.
+mv ziggity $PREFIX/bin/ && chmod +x $PREFIX/bin/ziggity
+cd ~/some-git-repo && ziggity
+```
+
+Everything works as on desktop Linux. Optional extras use Termux's tools when
+present: `o`/`G` open links via `termux-open-url` (from `pkg install
+termux-api`), and PR status needs `gh`/`glab` installed and authenticated.
+
+> **Note:** verified in Termux on an emulator; treat as experimental until it
+> has more real-device mileage.
 
 #### Verify the Download (Optional)
 

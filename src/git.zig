@@ -1331,10 +1331,20 @@ pub const Git = struct {
     /// Open `url` in the user's default browser via the platform opener. Returns
     /// quickly; the browser launch is fire-and-forget.
     pub fn openUrl(self: *Git, url: []const u8) !void {
-        const opener = if (builtin.os.tag == .macos) "open" else "xdg-open";
+        // Termux (Android) has no `xdg-open`; it ships `termux-open-url`, which
+        // hands the URL to the system browser. Detected at runtime from the
+        // `TERMUX_VERSION` env var Termux sets, so the same Linux binary opens
+        // links on a desktop and on a phone.
+        const opener = if (builtin.os.tag == .macos)
+            "open"
+        else if (self.environ.get("TERMUX_VERSION") != null)
+            "termux-open-url"
+        else
+            "xdg-open";
         const result = try std.process.run(self.allocator, self.io, .{
             .argv = &.{ opener, url },
             .cwd = .{ .path = self.root },
+            .environ_map = self.environ,
             .stdout_limit = .limited(4096),
             .stderr_limit = .limited(4096),
         });

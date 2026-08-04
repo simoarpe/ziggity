@@ -31,6 +31,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        // Strip debug info from release builds so the shipped binaries stay
+        // small (a few MB, not ~10). Debug builds keep it for backtraces.
+        .strip = optimize != .Debug,
         .imports = &.{
             .{ .name = "ziggity", .module = lib_mod },
             .{ .name = "vaxis", .module = vaxis_mod },
