@@ -197,6 +197,21 @@ or add `zig-out/bin` to your `PATH` (e.g. in `~/.zshrc` or `~/.bashrc`):
 export PATH="$PWD/zig-out/bin:$PATH"
 ```
 
+#### Cross-compile for another target
+
+Zig cross-compiles to any target with `-Dtarget=<arch>-<os>-<abi>`, no extra
+toolchain required. For example, the Android (Termux) binary:
+
+```sh
+zig build -Dtarget=aarch64-linux-android -Doptimize=ReleaseSafe
+# static ARM64 binary at ./zig-out/bin/ziggity, ready to sideload into Termux
+```
+
+The same works for every release target: `x86_64-linux-musl`,
+`aarch64-linux-musl`, `riscv64-linux-musl`, `aarch64-macos`, `x86_64-macos`,
+`x86_64-windows-gnu`. The musl and Android Linux builds are fully static (no
+libc), so each runs on any device of that architecture.
+
 ## Quick Start
 
 Run `ziggity` inside any Git repository. Press `?` for the keybindings
