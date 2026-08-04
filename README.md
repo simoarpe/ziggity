@@ -138,6 +138,12 @@ Ziggity runs on Android inside [Termux](https://termux.dev). The binary is a
 static aarch64 ELF with no libc, so it needs no NDK and no root; Termux supplies
 the terminal and `git`.
 
+<p align="center">
+  <img src="docs/screenshots/22-android-termux.png" alt="Ziggity running in Termux on Android" width="320">
+</p>
+
+<p align="center"><i>The full TUI, spinning donut and all, in Termux on Android.</i></p>
+
 ```sh
 # In Termux:
 pkg install git
