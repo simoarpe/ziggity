@@ -28,7 +28,6 @@ Ziggity keeps your entire Git workflow in one terminal window. Stage individual
 lines, commit, branch, rebase interactively, inspect history, and review
 changes with live diff previews. Every action is a keystroke. 
 Any text can be selected and copied with the mouse. 
-So you can work the way that feels most natural.
 
 Long running Git operations never block the interface. Fetch, pull, push,
 merge, rebase, autosquash, and bisect run in the background while navigation
