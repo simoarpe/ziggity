@@ -28,6 +28,8 @@
   <img src="docs/assets/ziggity-donut.gif" alt="Ziggity, the about splash with a spinning donut" width="900">
 </p>
 
+<p align="center"><i>The Status panel about splash. Yes, the donut spins.</i></p>
+
 Ziggity keeps your entire Git workflow in one terminal window. Stage individual
 lines, commit, branch, rebase interactively, inspect history, and review
 changes with live diff previews. Every action is a keystroke. 
@@ -58,8 +60,6 @@ they improve the user experience. See
 - 🧩 No libgit2 dependency
 - ⚙️ Written entirely in Zig
 - 💻 Runs on macOS, Linux, and Windows
-
-<p align="center"><i>The Status panel about splash. Yes, the donut spins.</i></p>
 
 <p align="center">
   <img src="docs/screenshots/01-overview.png" alt="Ziggity, the main view" width="900">
