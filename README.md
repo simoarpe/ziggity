@@ -9,6 +9,12 @@
 </p>
 
 <p align="center">
+  <b>Fast with the keyboard.</b><br>
+  <b>Natural with the mouse.</b><br>
+  <b>No compromises.</b>
+</p>
+
+<p align="center">
   <img alt="Zig 0.16" src="https://img.shields.io/badge/Zig-0.16.0-f7a41d">
   <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue">
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey">
@@ -18,24 +24,26 @@
   <b>1.9 MB</b> binary · <b>3.6 ms</b> startup · <b>8 MB</b> memory when idle · no runtime, no toolchain, just <code>git</code>
 </p>
 
-Ziggity puts your whole Git workflow in one terminal window: stage single
-lines, commit, branch, rebase interactively, and read history without ever
-reaching for the mouse. Every list has a live diff preview and every action is
-a keystroke.
+Ziggity keeps your entire Git workflow in one terminal window. Stage individual
+lines, commit, branch, rebase interactively, inspect history, and review
+changes with live diff previews. Every action is a keystroke. 
+Any text can be selected and copied with the mouse. 
+So you can work the way that feels most natural.
 
-Nothing in it ever blocks. Fetch, pull, push and the slow multistep actions
-(merge, rebase, autosquash, bisect) run off the interface thread while
-navigation stays live, and you are never dropped back to the raw terminal with
-a "press enter to return" screen. Checkout by name tracks a remote branch in
-one step, a rejected push tries the safe force before the blunt one, branch
-diffs default to the merge base view a pull request shows, and dragging over
-the diff copies the exact text to your clipboard.
+Long running Git operations never block the interface. Fetch, pull, push,
+merge, rebase, autosquash, and bisect run in the background while navigation
+remains responsive. Ziggity also includes thoughtful defaults that remove
+friction from everyday workflows: checking out a remote branch tracks it
+automatically, rejected pushes try the safe force (`force-with-lease`) before the
+blunt one, branch diffs default to the merge base used by pull requests, and 
+dragging over a diff copies exactly the selected text to your clipboard.
 
-It follows the workflow that [lazygit](https://github.com/jesseduffield/lazygit)
-made popular, and it owes that project a lot. It is not a port, though. Ziggity
-is written from scratch in Zig, drives plain `git` subprocesses (no libgit2),
-and in the places where the two tools differ, the difference is deliberate.
-[docs/comparison.md](docs/comparison.md) explains exactly where and why.
+Inspired by the workflow that
+[Lazygit](https://github.com/jesseduffield/lazygit) made popular, Ziggity is not
+a port. It is written from scratch in Zig, talks directly to your existing
+`git` installation (no libgit2), and deliberately makes different choices where
+they improve the user experience. See
+[docs/comparison.md](docs/comparison.md) for a detailed comparison.
 
 <p align="center">
   <img src="docs/assets/ziggity-donut.gif" alt="Ziggity, the about splash with a spinning donut" width="900">
