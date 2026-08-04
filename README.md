@@ -148,7 +148,8 @@ the terminal and `git`.
 ```sh
 # In Termux:
 pkg install git
-# Download the Android build (set VERSION from the releases page):
+# set VERSION to the latest release (see the releases page)
+VERSION=v0.16.0
 curl -LO https://github.com/simoarpe/ziggity/releases/download/$VERSION/ziggity-$VERSION-aarch64-linux-android.tar.gz
 tar -xzf ziggity-$VERSION-aarch64-linux-android.tar.gz
 # Move it into Termux's own bin; Android forbids exec from shared storage.
