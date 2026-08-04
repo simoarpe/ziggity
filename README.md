@@ -50,6 +50,10 @@ a port. It is written from scratch in Zig, talks directly to your existing
 they improve the user experience. See
 [docs/comparison.md](docs/comparison.md) for a detailed comparison.
 
+[Features](docs/features.md) ·
+[Keybindings](docs/keybindings.md) · [Configuration](docs/configuration.md) ·
+[Comparison with lazygit](docs/comparison.md)
+
 ## Why Ziggity?
 
 - ⚡ 1.9 MB standalone binary
@@ -66,10 +70,6 @@ they improve the user experience. See
 </p>
 
 <p align="center"><i>Status, Files, Branches, Commits and Stash panels with a live diff preview and a footer that follows context.</i></p>
-
-**Documentation:** [Features](docs/features.md) ·
-[Keybindings](docs/keybindings.md) · [Configuration](docs/configuration.md) ·
-[Comparison with lazygit](docs/comparison.md)
 
 ## Installation
 
