@@ -397,6 +397,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
 
     var loop: vaxis.Loop(Event) = .init(io, &tty, &vx);
     try loop.start();
+    try loop.installResizeHandler();
     defer loop.stop();
 
     var refresh_ticker: RefreshTicker = .{ .io = io, .loop = &loop, .app = app };
