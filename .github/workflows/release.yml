@@ -41,15 +41,19 @@ jobs:
           mkdir -p dist
 
           # <arch>-<os>-<abi>. musl → fully static Linux binaries that run on
-          # any distro; windows-gnu → self-contained (no MSVC needed).
+          # any distro; windows-gnu → self-contained (no MSVC needed);
+          # linux-android → static aarch64 binary for Termux on Android (no libc,
+          # so it needs no NDK). See the README "Android (Termux)" section.
           # NOTE: the Windows build compiles and libvaxis supports Windows, but
-          # it hasn't been smoke-tested on a real Windows box yet.
+          # it hasn't been smoke-tested on a real Windows box yet. The Android
+          # binary has been verified in Termux on an emulator.
           targets=(
             aarch64-macos
             x86_64-macos
             x86_64-linux-musl
             aarch64-linux-musl
             riscv64-linux-musl
+            aarch64-linux-android
             x86_64-windows-gnu
           )
 

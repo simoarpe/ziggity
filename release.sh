@@ -136,12 +136,13 @@ set_version() {
 }
 
 # ── helper: point the README install snippets at the just-released tag ────
-# Two spots reference a concrete version: the `VERSION=vX.Y.Z` line in the
-# macOS/Linux snippet, and the `ziggity-<...>-x86_64-windows-gnu.zip` filename
-# in the Windows section (which may still hold the `<version>` placeholder).
-# Both are rewritten to the release tag so a fresh clone's README always shows a
-# real, downloadable version. Idempotent, and a no-op (with a warning) if the
-# patterns ever drift.
+# Concrete versions live in: every `VERSION=vX.Y.Z` line (the macOS/Linux and
+# the Android/Termux snippets each have one), and the
+# `ziggity-<...>-x86_64-windows-gnu.zip` filename in the Windows section (which
+# may still hold the `<version>` placeholder). All are rewritten to the release
+# tag — the `VERSION=` sed matches every such line — so a fresh clone's README
+# always shows a real, downloadable version. Idempotent, and a no-op (with a
+# warning) if the patterns ever drift.
 update_readme() {
   local tag="$1" tmp   # tag is like v0.4.0
   [ -f "$README" ] || { warn "$README not found — skipping README version bump"; return 0; }
