@@ -110,7 +110,7 @@ any distro), then:
 
 ```sh
 # set VERSION to the latest release and pick your OS/arch (see the releases page)
-VERSION=v0.16.0
+VERSION=v0.17.0
 curl -LO https://github.com/simoarpe/ziggity/releases/download/$VERSION/ziggity-$VERSION-aarch64-macos.tar.gz
 tar -xzf ziggity-$VERSION-aarch64-macos.tar.gz
 sudo mv ziggity /usr/local/bin/      # or any directory on your PATH
@@ -126,7 +126,7 @@ xattr -d com.apple.quarantine /usr/local/bin/ziggity
 
 #### Windows
 
-Download `ziggity-v0.16.0-x86_64-windows-gnu.zip`, unzip it, and put
+Download `ziggity-v0.17.0-x86_64-windows-gnu.zip`, unzip it, and put
 `ziggity.exe` in a folder on your `PATH`. Requires
 [Git for Windows](https://git-scm.com/download/win).
 
@@ -149,7 +149,7 @@ the terminal and `git`.
 # In Termux:
 pkg install git
 # set VERSION to the latest release (see the releases page)
-VERSION=v0.16.0
+VERSION=v0.17.0
 curl -LO https://github.com/simoarpe/ziggity/releases/download/$VERSION/ziggity-$VERSION-aarch64-linux-android.tar.gz
 tar -xzf ziggity-$VERSION-aarch64-linux-android.tar.gz
 # Move it into Termux's own bin; Android forbids exec from shared storage.
