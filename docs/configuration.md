@@ -70,7 +70,8 @@ show_file_tree = false
 # activates when the tool is installed and authenticated and the remote is
 # GitHub or GitLab, and stays silent otherwise. Set false to disable it.
 pr_status = true
-branch_sort_order = date           # Local Branches panel ordering: date (default) | recency | alphabetical
+# Local Branches panel ordering: date (default) | recency | alphabetical
+branch_sort_order = date
 
 # Editor for `e`. With nothing set, auto detected from git core.editor, then
 # $GIT_EDITOR, $VISUAL, $EDITOR, falling back to vim. See "Editor" below.
