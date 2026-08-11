@@ -19,11 +19,37 @@ It prints the markdown table ready to paste. Useful flags:
 python3 docs/bench/bench.py --reps 7            # more repetitions, steadier medians
 python3 docs/bench/bench.py --repo ~/some/repo  # measure against a different repository
 python3 docs/bench/bench.py --json out.json     # full per run detail as well
+python3 docs/bench/bench.py --website-json docs/bench/website-metrics.json
 python3 docs/bench/bench.py --window 30         # hold each tool open longer
 ```
 
 Needs a C compiler, python3, git, and lazygit on `PATH` for the comparison
 column. Works on macOS and Linux.
+
+## Website metrics snapshot
+
+`website-metrics.json` is the small, display-ready benchmark snapshot consumed
+by the standalone Ziggity website. It keeps the website static while making the
+numbers refreshable from this repository.
+
+Refresh it after running a representative benchmark:
+
+```sh
+zig build -Doptimize=ReleaseSafe
+python3 docs/bench/bench.py --reps 7 --website-json docs/bench/website-metrics.json
+```
+
+Then sync the website repository from the website repo:
+
+```sh
+cd ../ziggity-website
+npm run metrics:sync -- --source ../ziggity
+```
+
+Do not treat every local benchmark run as publishable truth. The numbers move
+with machine load, repository state, terminal behavior, and lazygit version.
+Update `website-metrics.json` only from a run you are comfortable presenting
+publicly.
 
 ## How each row is measured
 

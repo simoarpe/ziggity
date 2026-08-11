@@ -325,6 +325,96 @@ def markdown_table(res, window):
     return "\n".join(out)
 
 
+def website_metrics_snapshot(res, window):
+    """Curated metrics consumed by the website.
+
+    The full benchmark JSON is intentionally detailed and noisy. The website
+    needs a small stable snapshot with display-ready values and copy.
+    """
+    a, b = res["ziggity"], res["lazygit"]
+    aa, ba = a["agg"], b["agg"]
+    display_window = window_label(window)
+
+    def net(agg):
+        return "fetch all" if agg["fetch_during_load"] >= 1 else "none"
+
+    return {
+        "schema_version": 1,
+        "source": {
+            "repository": "simoarpe/ziggity",
+            "benchmark_path": "docs/bench",
+            "measurement_notes": "docs/comparison.md",
+            "ziggity_version": res["ziggity_version"],
+            "lazygit_version": res["lazygit_version"],
+            "window_seconds": display_window,
+        },
+        "quick_stats": [
+            {
+                "value": mib(a["size_bytes"]),
+                "label": "binary",
+                "detail": "single native executable",
+            },
+            {
+                "value": f"{a['startup']['median_ms']:.1f} ms",
+                "label": "startup",
+                "detail": "median version command",
+            },
+            {
+                "value": f"{aa['rss_settled_mib']:.0f} MB",
+                "label": "idle memory",
+                "detail": "flat after first paint",
+            },
+            {
+                "value": "0",
+                "label": "runtime deps",
+                "detail": "just the git on PATH",
+            },
+        ],
+        "comparison": {
+            "caption": (
+                "Measured on the Ziggity repo against "
+                f"lazygit {res['lazygit_version']}."
+            ),
+            "rows": [
+                {
+                    "metric": "Binary size",
+                    "ziggity": mib(a["size_bytes"]),
+                    "lazygit": mib(b["size_bytes"]),
+                },
+                {
+                    "metric": "Startup",
+                    "ziggity": f"{a['startup']['median_ms']:.1f} ms",
+                    "lazygit": f"{b['startup']['median_ms']:.1f} ms",
+                },
+                {
+                    "metric": "Git subprocesses to load repo",
+                    "ziggity": f"{aa['git_procs_to_load']:.0f}",
+                    "lazygit": f"{ba['git_procs_to_load']:.0f}",
+                },
+                {
+                    "metric": "Network during load",
+                    "ziggity": net(aa),
+                    "lazygit": net(ba),
+                },
+                {
+                    "metric": "Resident memory once settled",
+                    "ziggity": f"{aa['rss_settled_mib']:.0f} MB",
+                    "lazygit": f"{ba['rss_settled_mib']:.0f} MB",
+                },
+                {
+                    "metric": f"Own CPU over {display_window} s",
+                    "ziggity": f"{aa['cpu_self_sec'] * 1000:.0f} ms",
+                    "lazygit": f"{ba['cpu_self_sec'] * 1000:.0f} ms",
+                },
+            ],
+        },
+    }
+
+
+def window_label(window):
+    return int(window) if float(window).is_integer() else window
+
+
 def version_of(binary):
     r = subprocess.run([binary, "--version"], capture_output=True, text=True)
     m = re.search(r"\d+\.\d+\.\d+", r.stdout + r.stderr)
@@ -346,6 +436,8 @@ def main():
     ap.add_argument("--reps", type=int, default=3,
                     help="repetitions per tool; rows are medians (default: 3)")
     ap.add_argument("--json", default=None, help="also write full results here")
+    ap.add_argument("--website-json", default=None,
+                    help="write the curated website metrics snapshot here")
     args = ap.parse_args()
 
     ziggity = find("ziggity", args.ziggity)
@@ -395,6 +487,12 @@ def main():
         with open(args.json, "w") as f:
             json.dump(res, f, indent=2)
         print(f"full results: {args.json}", file=sys.stderr)
+
+    if args.website_json:
+        with open(args.website_json, "w") as f:
+            json.dump(website_metrics_snapshot(res, args.window), f, indent=2)
+            f.write("\n")
+        print(f"website metrics: {args.website_json}", file=sys.stderr)
 
     print()
     print(markdown_table(res, args.window))
