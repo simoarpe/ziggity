@@ -72,6 +72,11 @@ show_file_tree = false
 pr_status = true
 # Local Branches panel ordering: date (default) | recency | alphabetical
 branch_sort_order = date
+# Files panel ordering. `name` (default) sorts by path, so a file keeps its
+# place as its git status changes and staging a long list never scrambles the
+# cursor. `status` groups by state instead: staged, then unstaged, then
+# untracked, and by path within each group.
+file_sort_order = name             # name (default) | status
 
 # Editor for `e`. With nothing set, auto detected from git core.editor, then
 # $GIT_EDITOR, $VISUAL, $EDITOR, falling back to vim. See "Editor" below.

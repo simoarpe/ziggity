@@ -2725,6 +2725,7 @@ pub const App = struct {
         self.data = gpa_data;
         self.refresh_generation +%= 1;
         self.preview_cache.clearAll(self.allocator);
+        self.applyFileSort();
         self.restoreSelections(sel_keys);
         self.clampSelections();
         if (self.select_current_branch_pending) {
@@ -2761,6 +2762,7 @@ pub const App = struct {
         errdefer model.deinitFileStatuses(self.allocator, files);
         self.data.replaceFiles(self.allocator, files);
         files = &.{};
+        self.applyFileSort();
         self.data.state = self.git.detectState();
         // This file list is newer than any in-flight background snapshot.
         self.refresh_generation +%= 1;
@@ -2847,6 +2849,7 @@ pub const App = struct {
         if (s.contains(.files)) {
             if (model.dupeFiles(a, src.files)) |f| {
                 self.data.replaceFiles(a, f);
+                self.applyFileSort();
                 self.data.state = src.state;
             } else |_| {}
         }
@@ -3011,6 +3014,7 @@ pub const App = struct {
         status = .{};
         self.data.replaceFiles(self.allocator, files);
         files = &.{};
+        self.applyFileSort();
         self.data.state = snap.state;
         // Only working-tree file diffs can have changed; commit/branch/stash
         // previews stay valid, so drop just the "f:" entries.
@@ -9379,6 +9383,15 @@ pub const App = struct {
         restoreSelKey(self.data.tags, &self.tag_index, keys.tag, tagKey);
         restoreSelKey(self.data.worktrees, &self.worktree_index, keys.worktree, worktreeKey);
         restoreSelKey(self.data.submodules, &self.submodule_index, keys.submodule, submoduleKey);
+    }
+
+    /// Re-order `data.files` to the configured `file_sort_order`. The list arrives
+    /// name-sorted from `parseStatus` (the stable default), so this only does work
+    /// when `status` grouping is chosen. Call after any `data.files` update and
+    /// before restoring the file selection, so the cursor index tracks the order.
+    fn applyFileSort(self: *App) void {
+        if (self.config.file_sort_order == .status)
+            model.sortFiles(self.data.files, .status);
     }
 
     fn restoreFileSelection(self: *App, selected_path: ?[]const u8) void {

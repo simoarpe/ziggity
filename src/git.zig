@@ -1772,18 +1772,13 @@ pub fn parseStatus(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Fil
     }
 
     const result = try files.toOwnedSlice(allocator);
-    // Order the list by path, not by git's porcelain grouping. Porcelain lists
-    // untracked files in a separate block after the tracked changes, so staging
-    // an untracked file promotes it into the tracked block and it jumps position
-    // (dragging the cursor with it). A stable path order keeps every file put as
-    // its status changes, so pressing space down a long list of new files no
-    // longer scrambles the cursor. This matches lazygit's default (sort by name).
-    std.mem.sort(model.FileStatus, result, {}, fileLessByPath);
+    // Order by path, not by git's porcelain grouping (which lists untracked
+    // files in a separate block, so staging one would promote it into the
+    // tracked block and jump the cursor). Path order is the stable default and
+    // the safe base regardless of the configured `file_sort_order`: the UI
+    // re-groups to `status` on top of this when asked.
+    model.sortFiles(result, .name);
     return result;
-}
-
-fn fileLessByPath(_: void, a: model.FileStatus, b: model.FileStatus) bool {
-    return std.mem.lessThan(u8, a.path, b.path);
 }
 
 pub fn parseBranches(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Branch {

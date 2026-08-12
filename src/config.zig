@@ -325,6 +325,10 @@ pub const Config = struct {
     fetch_interval_secs: u16 = 60,
     /// Local Branches panel ordering: `date` (default), `recency`, or `alphabetical`.
     branch_sort_order: model.BranchSortOrder = .date,
+    /// Files panel ordering: `name` (default, by path — a file keeps its place as
+    /// its status changes, so staging a long list never scrambles the cursor) or
+    /// `status` (grouped: staged, then unstaged, then untracked, then by path).
+    file_sort_order: model.FileSortOrder = .name,
     skip_confirm: ConfirmSkips = .{},
     keymap: KeyMap = .{},
     theme: Theme = .{},
@@ -444,6 +448,10 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "branch_sort_order")) {
             if (std.meta.stringToEnum(model.BranchSortOrder, value)) |v| self.branch_sort_order = v;
+            return;
+        }
+        if (std.mem.eql(u8, key, "file_sort_order")) {
+            if (std.meta.stringToEnum(model.FileSortOrder, value)) |v| self.file_sort_order = v;
             return;
         }
         if (std.mem.eql(u8, key, "editor_preset")) {
@@ -626,6 +634,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
         \\skip_confirm.bogus = true
         \\result_dialog = nonsense
         \\branch_sort_order = recency
+        \\file_sort_order = status
         \\expand_focused_side_panel = true
         \\expanded_side_panel_weight = 3
         \\staging_split = on
@@ -636,6 +645,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     try std.testing.expectEqual(ResultDialog.always, cfg.result_dialog); // valid set; bad value ignored
     try std.testing.expectEqual(CommandOutput.silent, cfg.command_output);
     try std.testing.expectEqual(model.BranchSortOrder.recency, cfg.branch_sort_order);
+    try std.testing.expectEqual(model.FileSortOrder.status, cfg.file_sort_order); // default name, overridden
     cfg.applyBytes("staging_split = auto");
     try std.testing.expectEqual(StagingSplitMode.auto, cfg.staging_split);
     try std.testing.expect(cfg.skip_confirm.discard_all);

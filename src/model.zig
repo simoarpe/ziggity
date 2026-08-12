@@ -5,6 +5,39 @@ const std = @import("std");
 /// `alphabetical` = by name.
 pub const BranchSortOrder = enum { date, recency, alphabetical };
 
+/// How the working-tree Files panel is ordered: `name` = by path (stable, so a
+/// file keeps its place as its git status changes), `status` = grouped by state
+/// (staged, then unstaged, then untracked) and then by path.
+pub const FileSortOrder = enum { name, status };
+
+/// Sort `files` in place per `order`. `name` gives a stable path order so
+/// staging a file never moves it; `status` groups by state first, then path.
+pub fn sortFiles(files: []FileStatus, order: FileSortOrder) void {
+    switch (order) {
+        .name => std.mem.sort(FileStatus, files, {}, fileLessByPath),
+        .status => std.mem.sort(FileStatus, files, {}, fileLessByStatus),
+    }
+}
+
+fn fileLessByPath(_: void, a: FileStatus, b: FileStatus) bool {
+    return std.mem.lessThan(u8, a.path, b.path);
+}
+
+/// Status group for the `status` order: staged first, then tracked unstaged
+/// changes, then untracked.
+fn fileStatusRank(f: FileStatus) u8 {
+    if (f.has_staged) return 0;
+    if (f.tracked) return 1;
+    return 2;
+}
+
+fn fileLessByStatus(_: void, a: FileStatus, b: FileStatus) bool {
+    const ra = fileStatusRank(a);
+    const rb = fileStatusRank(b);
+    if (ra != rb) return ra < rb;
+    return std.mem.lessThan(u8, a.path, b.path);
+}
+
 /// Whether an interrupted merge or rebase is in progress (conflicts pending).
 pub const RepoState = enum {
     clean,
@@ -759,4 +792,27 @@ test "file display filter follows status filter semantics" {
     try std.testing.expect(FileDisplayFilter.tracked.matches(staged_untracked));
     try std.testing.expect(!FileDisplayFilter.untracked.matches(staged_untracked));
     try std.testing.expect(FileDisplayFilter.untracked.matches(untracked));
+}
+
+test "sortFiles orders by name, and by status group then name" {
+    var files = [_]FileStatus{
+        .{ .path = @constCast("z_untracked.txt"), .short_status = .{ '?', '?' }, .has_staged = false, .has_unstaged = true, .tracked = false, .added = false, .deleted = false, .conflict = false },
+        .{ .path = @constCast("a_staged.txt"), .short_status = .{ 'A', ' ' }, .has_staged = true, .has_unstaged = false, .tracked = true, .added = true, .deleted = false, .conflict = false },
+        .{ .path = @constCast("m_unstaged.txt"), .short_status = .{ ' ', 'M' }, .has_staged = false, .has_unstaged = true, .tracked = true, .added = false, .deleted = false, .conflict = false },
+        .{ .path = @constCast("b_untracked.txt"), .short_status = .{ '?', '?' }, .has_staged = false, .has_unstaged = true, .tracked = false, .added = false, .deleted = false, .conflict = false },
+    };
+
+    // `.name`: pure path order, regardless of git status.
+    sortFiles(&files, .name);
+    try std.testing.expectEqualStrings("a_staged.txt", files[0].path);
+    try std.testing.expectEqualStrings("b_untracked.txt", files[1].path);
+    try std.testing.expectEqualStrings("m_unstaged.txt", files[2].path);
+    try std.testing.expectEqualStrings("z_untracked.txt", files[3].path);
+
+    // `.status`: staged, then tracked-unstaged, then untracked; path within group.
+    sortFiles(&files, .status);
+    try std.testing.expectEqualStrings("a_staged.txt", files[0].path); // staged
+    try std.testing.expectEqualStrings("m_unstaged.txt", files[1].path); // tracked unstaged
+    try std.testing.expectEqualStrings("b_untracked.txt", files[2].path); // untracked (b < z)
+    try std.testing.expectEqualStrings("z_untracked.txt", files[3].path); // untracked
 }
