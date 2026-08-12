@@ -1771,7 +1771,19 @@ pub fn parseStatus(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Fil
         try files.append(allocator, file);
     }
 
-    return files.toOwnedSlice(allocator);
+    const result = try files.toOwnedSlice(allocator);
+    // Order the list by path, not by git's porcelain grouping. Porcelain lists
+    // untracked files in a separate block after the tracked changes, so staging
+    // an untracked file promotes it into the tracked block and it jumps position
+    // (dragging the cursor with it). A stable path order keeps every file put as
+    // its status changes, so pressing space down a long list of new files no
+    // longer scrambles the cursor. This matches lazygit's default (sort by name).
+    std.mem.sort(model.FileStatus, result, {}, fileLessByPath);
+    return result;
+}
+
+fn fileLessByPath(_: void, a: model.FileStatus, b: model.FileStatus) bool {
+    return std.mem.lessThan(u8, a.path, b.path);
 }
 
 pub fn parseBranches(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Branch {
@@ -2187,12 +2199,16 @@ test "parse porcelain status including rename" {
         std.testing.allocator.free(files);
     }
 
+    // The list is sorted by path (new.txt < scratch.txt < src/main.zig),
+    // regardless of git's porcelain grouping.
     try std.testing.expectEqual(@as(usize, 3), files.len);
-    try std.testing.expectEqualSlices(u8, "src/main.zig", files[0].path);
-    try std.testing.expect(files[0].has_unstaged);
-    try std.testing.expect(files[1].isRename());
-    try std.testing.expectEqualSlices(u8, "old.txt", files[1].previous_path.?);
-    try std.testing.expect(!files[2].tracked);
+    try std.testing.expectEqualSlices(u8, "new.txt", files[0].path);
+    try std.testing.expect(files[0].isRename());
+    try std.testing.expectEqualSlices(u8, "old.txt", files[0].previous_path.?);
+    try std.testing.expectEqualSlices(u8, "scratch.txt", files[1].path);
+    try std.testing.expect(!files[1].tracked);
+    try std.testing.expectEqualSlices(u8, "src/main.zig", files[2].path);
+    try std.testing.expect(files[2].has_unstaged);
 }
 
 test "parse porcelain status handles merge/rebase conflict codes" {
@@ -2203,13 +2219,15 @@ test "parse porcelain status handles merge/rebase conflict codes" {
         for (files) |*file| file.deinit(std.testing.allocator);
         std.testing.allocator.free(files);
     }
+    // Sorted by path: addadd, both, deldel, plain, us-added.
     try std.testing.expectEqual(@as(usize, 5), files.len);
-    try std.testing.expect(files[0].conflict and files[0].has_unstaged); // UU
-    try std.testing.expectEqualSlices(u8, "both.txt", files[0].path);
-    try std.testing.expect(files[1].conflict); // AA
-    try std.testing.expect(files[2].conflict); // DD
-    try std.testing.expect(files[3].conflict); // UA
-    try std.testing.expect(!files[4].conflict); // plain modification
+    try std.testing.expectEqualSlices(u8, "addadd.txt", files[0].path);
+    try std.testing.expect(files[0].conflict); // AA
+    try std.testing.expectEqualSlices(u8, "both.txt", files[1].path);
+    try std.testing.expect(files[1].conflict and files[1].has_unstaged); // UU
+    try std.testing.expect(files[2].conflict); // DD deldel.txt
+    try std.testing.expect(!files[3].conflict); // plain.txt, a plain modification
+    try std.testing.expect(files[4].conflict); // UA us-added.txt
 }
 
 test "parse branches handles rebase/detached pseudo-entry as current" {
