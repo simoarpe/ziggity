@@ -43,6 +43,24 @@ pub fn loadStaging(app: *App, keep_cursor: bool) !void {
     return loadStagingSide(app, keep_cursor, true);
 }
 
+/// Reload the staging view after a stage/unstage/discard edit. Unlike opening a
+/// file, this does NOT auto-flip to the other side when the current side empties:
+/// staging a whole side should leave you where you are, not jump you into the
+/// other section (where a reflexive `space` would undo what you just staged).
+/// Only when the file is fully clean — nothing left on either side — is there
+/// nothing to stage, so the view closes back to the Files panel.
+pub fn reloadStagingAfterEdit(app: *App) !void {
+    try loadStagingSide(app, true, false);
+    if (app.staging_diff.len == 0) {
+        // Current side is empty; if the other side is empty too the file is
+        // fully clean, so leave the staging view instead of sitting on a blank
+        // pane. Otherwise stay put (the empty side shows its "no changes" hint).
+        const other = app.git.rawFileDiff(app.staging_path, !app.staging_staged_view, app.config.diff_context) catch return;
+        defer app.allocator.free(other);
+        if (other.len == 0) return closeStaging(app);
+    }
+}
+
 /// Reload the staging diff. `allow_flip` auto-switches to the other side when
 /// the active one is empty — wanted on open / after staging (so a fully-staged
 /// file shows the staged side rather than a blank pane), but NOT when the user
@@ -252,9 +270,9 @@ pub fn applyStagingSelection(app: *App) !void {
     app.staging_anchor = null;
     // Staging a line only touches the index — scoped (fast) reload. Keep the
     // cursor where it is so repeated space keeps staging the lines that shift up
-    // into its position.
+    // into its position, and don't flip to the other side when this one empties.
     app.refreshFiles() catch {};
-    try loadStaging(app, true);
+    try reloadStagingAfterEdit(app);
 }
 
 /// `d` in the staging view: discard the change under the cursor instead of
@@ -319,9 +337,10 @@ pub fn discardStagingSelection(app: *App) !void {
     app.staging_anchor = null;
     // Discarding rewrites the working tree (and, on the staged side, the index),
     // so refresh the file list and reload the staging diff. Keep the cursor put
-    // so repeated `d` keeps discarding whatever shifts into its position.
+    // so repeated `d` keeps discarding whatever shifts into its position, and
+    // don't flip to the other side when this one empties.
     app.refreshFiles() catch {};
-    try loadStaging(app, true);
+    try reloadStagingAfterEdit(app);
 }
 
 pub fn closeStaging(app: *App) !void {
