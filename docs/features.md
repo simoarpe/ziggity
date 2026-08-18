@@ -30,10 +30,20 @@ status; `enter` opens the commit's changed files.
 
 ![Commits panel with diff preview](screenshots/03-commits.png)
 
-`ctrl+l` opens the real `git log --graph` DAG in git's own colors. By default
-it shows the current branch **and its upstream**, so the commits you are
+The Commits panel draws an **inline commit graph** to the left of each commit
+(a `git log --graph`-style DAG, one row per commit, in each author's color), so
+merges and branch topology read at a glance. It's on by default; set
+`commit_graph = focused` to show it only while the Commits panel is active, or
+`off` to hide it. The log is `--topo-order` by default for clean lanes (like
+lazygit); ziggity refreshes git's commit-graph cache in the background on
+startup so this stays fast even on huge repos. Set `log_order = date` for git's
+native order.
+
+`ctrl+l` opens the full-screen `git log --graph` DAG in git's own colors. By
+default it shows the current branch **and its upstream**, so the commits you are
 behind by are visible right away; `a` toggles all branches. Jump to HEAD with
 `@`, or to a commit's first parent with `p`. `space` resets the current branch
+to the commit under the cursor. `space` resets the current branch
 to the commit under the cursor (soft / mixed / hard) — handy for rewinding to
 the last merge; the hint only appears for a commit on the current branch, since
 that is the only valid `git reset` target.

@@ -10,6 +10,7 @@ const rebaseplan_mod = @import("rebaseplan.zig");
 const conflicts_mod = @import("conflicts.zig");
 const fixupbase_mod = @import("fixupbase.zig");
 const commitgraph_mod = @import("commitgraph.zig");
+const graphlanes_mod = @import("graphlanes.zig");
 const config_mod = @import("config.zig");
 const diffmode_mod = @import("diffmode.zig");
 const credentials_mod = @import("credentials.zig");
@@ -1127,6 +1128,7 @@ const RepoLoadCtx = struct {
     root: []u8,
     git_dir: []const u8,
     branch_sort: model.BranchSortOrder,
+    log_order: model.LogOrder,
     untracked: git_mod.Git.UntrackedFiles,
     commit_limit: usize,
 
@@ -1145,7 +1147,7 @@ const RepoLoadCtx = struct {
     stash: ?[]model.StashEntry = null,
 
     fn git(self: *const RepoLoadCtx) git_mod.Git {
-        return .{ .allocator = self.gpa, .io = self.io, .environ = self.environ, .root = self.root, .git_dir = @constCast(self.git_dir), .branch_sort = self.branch_sort, .untracked_files = self.untracked };
+        return .{ .allocator = self.gpa, .io = self.io, .environ = self.environ, .root = self.root, .git_dir = @constCast(self.git_dir), .branch_sort = self.branch_sort, .log_order = self.log_order, .untracked_files = self.untracked };
     }
 };
 
@@ -1202,8 +1204,17 @@ fn loadStashW(ctx: *RepoLoadCtx) void {
 /// instead of the sum of them all. The result is page-owned; the UI thread
 /// deep-copies it into the gpa (see `App.applyRepoLoad`). `root`/`environ` are
 /// borrowed read-only.
-pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, git_dir: []const u8, branch_sort: model.BranchSortOrder, untracked: git_mod.Git.UntrackedFiles, commit_limit: usize) ?model.RepoData {
-    var ctx = RepoLoadCtx{ .gpa = gpa, .io = io, .environ = environ, .root = root, .git_dir = git_dir, .branch_sort = branch_sort, .untracked = untracked, .commit_limit = commit_limit };
+pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, git_dir: []const u8, branch_sort: model.BranchSortOrder, log_order: model.LogOrder, untracked: git_mod.Git.UntrackedFiles, commit_limit: usize, write_commit_graph: bool) ?model.RepoData {
+    var ctx = RepoLoadCtx{ .gpa = gpa, .io = io, .environ = environ, .root = root, .git_dir = git_dir, .branch_sort = branch_sort, .log_order = log_order, .untracked = untracked, .commit_limit = commit_limit };
+
+    // Once per session (the initial load), refresh git's commit-graph cache
+    // before loading commits so `--topo-order` is fast — off the UI thread.
+    if (write_commit_graph) {
+        var g = ctx.git();
+        g.ensureCommitGraph();
+        for (g.command_log.items) |e| gpa.free(e);
+        g.command_log.deinit(gpa);
+    }
 
     // Ordered slowest-first (status/files/commits/branches are the heavy ones on
     // a big repo) so that when the concurrency limit is reached, it's the cheap
@@ -1275,8 +1286,8 @@ pub const ScopedData = struct {
 /// Worker-thread entry: load just the requested views on a throwaway
 /// page-allocator `Git`. `filters` are applied to the commits load so an active
 /// Commits filter is preserved. Borrows `root`/`environ`/filter strings.
-pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, git_dir: []const u8, scopes: ScopeSet, filters: LogFilters, branch_sort: model.BranchSortOrder, untracked: git_mod.Git.UntrackedFiles, commit_limit: usize) ScopedData {
-    var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root, .git_dir = @constCast(git_dir), .branch_sort = branch_sort, .untracked_files = untracked };
+pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, git_dir: []const u8, scopes: ScopeSet, filters: LogFilters, branch_sort: model.BranchSortOrder, log_order: model.LogOrder, untracked: git_mod.Git.UntrackedFiles, commit_limit: usize) ScopedData {
+    var wgit = git_mod.Git{ .allocator = gpa, .io = io, .environ = environ, .root = root, .git_dir = @constCast(git_dir), .branch_sort = branch_sort, .log_order = log_order, .untracked_files = untracked };
     // Borrowed filter strings (owned by the caller's run struct); wgit only
     // reads them and we never call clearLogFilters, so nothing is freed here.
     wgit.log_grep = @constCast(filters.grep);
@@ -2023,6 +2034,10 @@ pub const App = struct {
     commit_index: usize = 0,
     reflog_index: usize = 0,
     divergence_index: usize = 0,
+    /// The inline commit-graph pipe sets for `data.commits`, rebuilt whenever the
+    /// commit list changes (see `rebuildInlineGraph`). Null when the graph is off
+    /// or the list is empty. Drawn as a prefix in the Commits panel.
+    inline_graph: ?graphlanes_mod.Graph = null,
     // The Divergence tab's commits (ahead ↑ / behind ↓ vs upstream), loaded
     // synchronously when you switch to the tab. Owned here (not in `data`), so
     // it's decoupled from the async refresh machinery; freed on deinit.
@@ -2610,6 +2625,7 @@ pub const App = struct {
 
         const cfg = try config_mod.Config.load(allocator, io, env_map, git.root);
         git.branch_sort = cfg.branch_sort_order;
+        git.log_order = cfg.log_order;
         var app = App{
             .allocator = allocator,
             .git = git,
@@ -2647,6 +2663,7 @@ pub const App = struct {
         self.stage_pending.deinit(self.allocator);
         rebaseplan_mod.free(self);
         commitgraph_mod.deinit(self);
+        if (self.inline_graph) |*g| g.deinit();
         self.data.deinit(self.allocator);
         model.deinitCommitFiles(self.allocator, self.commit_files);
         model.deinitCommitFiles(self.allocator, self.branch_files);
@@ -2758,6 +2775,7 @@ pub const App = struct {
         self.refresh_generation +%= 1;
         self.preview_cache.clearAll(self.allocator);
         self.applyFileSort();
+        self.rebuildInlineGraph(); // the whole commit list was replaced
         self.restoreSelections(sel_keys);
         self.clampSelections();
         if (self.select_current_branch_pending) {
@@ -2897,6 +2915,7 @@ pub const App = struct {
         }
         if (s.contains(.commits)) {
             if (model.dupeCommits(a, src.commits)) |c| self.data.replaceCommits(a, c) else |_| {}
+            self.rebuildInlineGraph();
         }
         if (s.contains(.reflog)) {
             if (model.dupeCommits(a, src.reflog)) |c| self.data.replaceReflog(a, c) else |_| {}
@@ -5611,6 +5630,7 @@ pub const App = struct {
         };
         errdefer new_git.deinit();
         new_git.branch_sort = self.config.branch_sort_order;
+        new_git.log_order = self.config.log_order;
 
         // Last fallible step before the (infallible) swap.
         if (push) try self.repo_stack.append(self.allocator, try self.allocator.dupe(u8, self.git.root));
@@ -9467,6 +9487,28 @@ pub const App = struct {
             model.sortFiles(self.data.files, .status);
     }
 
+    /// Whether the inline commit graph should be drawn right now: always in `on`
+    /// mode, only while the Commits panel is the active context in `focused`
+    /// mode, never in `off`.
+    pub fn inlineGraphVisible(self: *const App) bool {
+        return switch (self.config.commit_graph) {
+            .off => false,
+            .on => true,
+            .focused => self.contentFocus() == .commits,
+        };
+    }
+
+    /// Recompute the inline commit-graph pipe sets for the current `data.commits`
+    /// (call after the commit list changes). A no-op when the graph is disabled;
+    /// on a build failure the graph is simply dropped for this refresh.
+    pub fn rebuildInlineGraph(self: *App) void {
+        if (self.inline_graph) |*g| g.deinit();
+        self.inline_graph = null;
+        if (self.config.commit_graph == .off) return;
+        if (self.data.commits.len == 0) return;
+        self.inline_graph = graphlanes_mod.build(self.allocator, self.data.commits) catch null;
+    }
+
     fn restoreFileSelection(self: *App, selected_path: ?[]const u8) void {
         const path = selected_path orelse return;
         for (self.data.files, 0..) |file, idx| {
@@ -12726,6 +12768,7 @@ fn testApp(allocator: std.mem.Allocator, files: []model.FileStatus) !App {
 }
 
 fn deinitTestApp(app: *App) void {
+    if (app.inline_graph) |*g| g.deinit();
     app.allocator.free(app.diff);
     app.allocator.free(app.message);
     app.allocator.free(app.file_filter);

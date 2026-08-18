@@ -14,6 +14,7 @@ const donut_mod = @import("donut.zig");
 const rebaseplan_mod = @import("rebaseplan.zig");
 const staging_mod = @import("staging.zig");
 const commitgraph_mod = @import("commitgraph.zig");
+const graphlanes_mod = @import("graphlanes.zig");
 const worddiff = @import("worddiff.zig");
 
 /// Active theme, set from config at startup and read by `styles()`.
@@ -308,13 +309,17 @@ const RepoLoadRun = struct {
     git_dir: []const u8,
     environ: *std.process.Environ.Map,
     branch_sort: model.BranchSortOrder = .date,
+    log_order: model.LogOrder = .topo,
     untracked: git_mod.Git.UntrackedFiles = .all,
     commit_limit: usize = app_mod.commit_load_batch,
+    // Set once, for the initial load: refresh git's commit-graph so topo-order
+    // stays fast. Left false for subsequent refreshes.
+    write_commit_graph: bool = false,
     result: ?model.RepoData = null,
 };
 
 fn repoLoadWorker(rl: *RepoLoadRun) void {
-    rl.result = app_mod.loadRepoDataAsync(async_allocator, rl.io, rl.environ, rl.root, rl.git_dir, rl.branch_sort, rl.untracked, rl.commit_limit);
+    rl.result = app_mod.loadRepoDataAsync(async_allocator, rl.io, rl.environ, rl.root, rl.git_dir, rl.branch_sort, rl.log_order, rl.untracked, rl.commit_limit, rl.write_commit_graph);
     _ = rl.loop.tryPostEvent(.repo_load_done) catch false;
 }
 
@@ -333,6 +338,7 @@ const ScopedLoadRun = struct {
     author: ?[]u8 = null,
     path: ?[]u8 = null,
     branch_sort: model.BranchSortOrder = .date,
+    log_order: model.LogOrder = .topo,
     untracked: git_mod.Git.UntrackedFiles = .all,
     commit_limit: usize = app_mod.commit_load_batch,
     result: ?app_mod.ScopedData = null,
@@ -352,7 +358,7 @@ fn scopedLoadWorker(sr: *ScopedLoadRun) void {
         .grep = sr.grep,
         .author = sr.author,
         .path = sr.path,
-    }, sr.branch_sort, sr.untracked, sr.commit_limit);
+    }, sr.branch_sort, sr.log_order, sr.untracked, sr.commit_limit);
     _ = sr.loop.tryPostEvent(.scoped_load_done) catch false;
 }
 
@@ -482,7 +488,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     // Load the repo off-thread: the loop's initial winsize event
     // paints the skeleton with "Loading…" placeholders right away, and the
     // panels fill in when `repo_load_done` lands — no startup freeze, no flash.
-    var repo_load_run: RepoLoadRun = .{ .io = io, .loop = &loop, .root = app.git.root, .git_dir = app.git.git_dir, .environ = app.git.environ, .branch_sort = app.git.branch_sort, .untracked = app.git.untracked_files, .commit_limit = app.commit_limit };
+    var repo_load_run: RepoLoadRun = .{ .io = io, .loop = &loop, .root = app.git.root, .git_dir = app.git.git_dir, .environ = app.git.environ, .branch_sort = app.git.branch_sort, .log_order = app.git.log_order, .untracked = app.git.untracked_files, .commit_limit = app.commit_limit, .write_commit_graph = true };
     var repo_load_future: ?std.Io.Future(void) = null;
     defer if (repo_load_future) |*f| {
         f.cancel(io);
@@ -685,7 +691,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             // On a successful switch the app marks an initial load pending; start
             // it against the new root. (A failed switch leaves the app unchanged.)
             if (app.initial_load_pending) {
-                repo_load_run = .{ .io = io, .loop = &loop, .root = app.git.root, .git_dir = app.git.git_dir, .environ = app.git.environ, .branch_sort = app.git.branch_sort, .untracked = app.git.untracked_files, .commit_limit = app.commit_limit };
+                repo_load_run = .{ .io = io, .loop = &loop, .root = app.git.root, .git_dir = app.git.git_dir, .environ = app.git.environ, .branch_sort = app.git.branch_sort, .log_order = app.git.log_order, .untracked = app.git.untracked_files, .commit_limit = app.commit_limit };
                 repo_load_future = io.concurrent(repoLoadWorker, .{&repo_load_run}) catch blk: {
                     app.applyRepoLoad(null, async_allocator);
                     break :blk null;
@@ -831,7 +837,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     .grep = if (filters.grep) |g| async_allocator.dupe(u8, g) catch null else null,
                     .author = if (filters.author) |x| async_allocator.dupe(u8, x) catch null else null,
                     .path = if (filters.path) |p| async_allocator.dupe(u8, p) catch null else null,
-                    .branch_sort = app.git.branch_sort,
+                    .branch_sort = app.git.branch_sort, .log_order = app.git.log_order,
                     .untracked = app.git.untracked_files,
                     .commit_limit = app.commit_limit,
                     .result = null,
@@ -3053,25 +3059,10 @@ fn drawCommitFileTree(win: vaxis.Window, app: *const app_mod.App, files: []const
     }
 }
 
-/// A curated 256-colour palette for author initials: mid-tone, distinct hues
-/// spread around the wheel, chosen to stay legible on dark or light backgrounds.
-/// Using indexed colours (not truecolor) means the initials render on every
-/// terminal with 256-colour support — i.e. all the mainstream ones — whereas a
-/// 24-bit value is dropped by non-truecolor terminals (macOS Terminal.app, the
-/// Linux console) and would leave every author the same default colour.
-const author_palette = [_]u8{
-    33,  39,  43,  80,  78,  113, 149, 186,
-    178, 208, 209, 203, 168, 170, 141, 111,
-};
-
-/// The 256-colour palette index for an author name: the md5 of the name selects
-/// a fixed slot in `author_palette`, so each author always maps to the same
-/// distinct colour across sessions.
+/// The 256-colour palette index for an author name lives in `model` now (shared
+/// with the inline commit graph); `model.author_palette` documents the palette.
 fn authorColorIndex(name: []const u8) u8 {
-    var digest: [16]u8 = undefined;
-    std.crypto.hash.Md5.hash(name, &digest, .{});
-    const slot = std.mem.readInt(u32, digest[0..4], .little) % author_palette.len;
-    return author_palette[slot];
+    return model.authorColorIndex(name);
 }
 
 /// A stable colour for an author name, for the Commits-panel initials.
@@ -3180,9 +3171,27 @@ fn printCommitSubject(win: vaxis.Window, row: u16, col: u16, subject: []const u8
 
 /// Render a commit list (`commits`, `selected` index) into `panel` — shared by
 /// the Commits panel and the Branches-panel sub-commits drill.
+/// Encode one codepoint and draw it with `fg`/`bold` over `base` (keeping the
+/// row's background), returning the advanced column.
+fn drawGraphCodepoint(win: vaxis.Window, row: u16, col: u16, cp: u21, base: vaxis.Style, fg: u8, bold: bool) u16 {
+    var buf: [4]u8 = undefined;
+    const len = std.unicode.utf8Encode(cp, &buf) catch return col;
+    var st = base;
+    st.fg = .{ .index = fg };
+    if (bold) st.bold = true;
+    return printSpan(win, row, col, buf[0..len], st);
+}
+
 fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const model.Commit, selected: usize, panel_focus: model.Focus) void {
     const start = app.listScroll(panel_focus);
     const focused = app.focus == panel_focus;
+    // The inline commit graph is drawn only for the main Commits list (not the
+    // reflog/divergence tabs or the Branches sub-commits drill).
+    const graph = if (panel_focus == .commits and app.commits_tab == .commits and app.inlineGraphVisible())
+        app.inline_graph
+    else
+        null;
+    const sel_hash: []const u8 = if (graph != null and commits.len > 0) commits[@min(selected, commits.len - 1)].hash else "";
     var row: u16 = 0;
     var idx = start;
     while (idx < commits.len and row < win.height) : ({
@@ -3226,6 +3235,21 @@ fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const m
             .pushed, .none => ui_theme.hash,
         };
         var col: u16 = 0;
+        // Inline commit graph prefix: render this commit's pipe row (two columns
+        // per lane) before the hash/subject. The selected commit's lanes light up
+        // bold-white, driven by `sel_hash`/the previous row's hash.
+        if (graph) |g| {
+            if (idx < g.sets.len) {
+                var cells: [graphlanes_mod.max_lanes]graphlanes_mod.RenderCell = undefined;
+                const prev_hash: []const u8 = if (idx > 0) commits[idx - 1].hash else "";
+                const n = graphlanes_mod.renderRow(g.sets[idx], sel_hash, prev_hash, &cells);
+                for (cells[0..n]) |gc| {
+                    col = drawGraphCodepoint(win, row, col, gc.a, base, gc.a_fg, gc.a_bold);
+                    col = drawGraphCodepoint(win, row, col, gc.b, base, gc.b_fg, gc.b_bold);
+                }
+                col = printSpan(win, row, col, " ", base); // gap before the hash
+            }
+        }
         // On the Divergence tab, lead the row with ↑ (ahead, to push) / ↓
         // (behind, to pull) so which side each commit is on reads at a glance.
         if (commit.divergence != .none) {
@@ -4885,7 +4909,7 @@ test "author colour is a stable per-author indexed colour" {
     // terminals too.
     try std.testing.expect(std.meta.activeTag(a1) == .index);
     // Drawn from the curated palette.
-    try std.testing.expect(std.mem.indexOfScalar(u8, &author_palette, a1.index) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, &model.author_palette, a1.index) != null);
     // Deterministic: the same author yields the same colour.
     try std.testing.expectEqual(a1.index, a2.index);
     // Different authors (almost always) differ — these two do.

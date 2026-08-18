@@ -10,6 +10,42 @@ pub const BranchSortOrder = enum { date, recency, alphabetical };
 /// (staged, then unstaged, then untracked) and then by path.
 pub const FileSortOrder = enum { name, status };
 
+/// Whether the inline commit graph is drawn in the Commits panel: `off` never,
+/// `focused` only while the Commits panel is focused, `on` always.
+pub const CommitGraphMode = enum { off, focused, on };
+
+/// Ordering of the HEAD commit log: `date` (git default, reverse-chronological),
+/// `topo` (keeps a branch's commits contiguous — a readable graph), or
+/// `author_date`. `date` uses git's native default order (fastest, no flag).
+pub const LogOrder = enum { date, topo, author_date };
+
+/// The `git log` order flag for a `LogOrder`, or null to use git's native
+/// default (reverse-chronological) — the fast path, no whole-DAG walk.
+pub fn logOrderFlag(order: LogOrder) ?[]const u8 {
+    return switch (order) {
+        .date => null,
+        .topo => "--topo-order",
+        .author_date => "--author-date-order",
+    };
+}
+
+/// Palette of 256-colour indices authors are hashed into. Shared by the Commits
+/// panel initials, the `ctrl+l` graph viewer, and the inline commit graph so an
+/// author always shows in the same colour everywhere.
+pub const author_palette = [_]u8{
+    33,  39,  43,  80,  78,  113, 149, 186,
+    178, 208, 209, 203, 168, 170, 141, 111,
+};
+
+/// A stable palette index for an author name (MD5 of the name, mod palette size),
+/// so each author always maps to the same colour.
+pub fn authorColorIndex(name: []const u8) u8 {
+    var digest: [16]u8 = undefined;
+    std.crypto.hash.Md5.hash(name, &digest, .{});
+    const slot = std.mem.readInt(u32, digest[0..4], .little) % author_palette.len;
+    return author_palette[slot];
+}
+
 /// Sort `files` in place per `order`. `name` gives a stable path order so
 /// staging a file never moves it; `status` groups by state first, then path.
 pub fn sortFiles(files: []FileStatus, order: FileSortOrder) void {
@@ -252,8 +288,16 @@ pub const Commit = struct {
     time: []u8,
     refs: []u8,
     subject: []u8,
+    /// Full parent hashes (from `%P`): `parents[0]` is the first parent;
+    /// `len > 1` marks a merge; `len == 0` a root commit. Owned. Used by the
+    /// inline commit graph.
+    parents: [][]u8 = &.{},
     status: CommitStatus = .none,
     divergence: Divergence = .none,
+
+    pub fn isMerge(self: Commit) bool {
+        return self.parents.len > 1;
+    }
 
     pub fn deinit(self: *Commit, allocator: std.mem.Allocator) void {
         allocator.free(self.hash);
@@ -262,6 +306,8 @@ pub const Commit = struct {
         allocator.free(self.time);
         allocator.free(self.refs);
         allocator.free(self.subject);
+        for (self.parents) |p| allocator.free(p);
+        allocator.free(self.parents);
         self.* = undefined;
     }
 };
@@ -567,7 +613,18 @@ fn dupeCommit(a: std.mem.Allocator, c: Commit) std.mem.Allocator.Error!Commit {
     const refs = try a.dupe(u8, c.refs);
     errdefer a.free(refs);
     const subject = try a.dupe(u8, c.subject);
-    return .{ .hash = hash, .short_hash = short_hash, .author = author, .time = time, .refs = refs, .subject = subject, .status = c.status, .divergence = c.divergence };
+    errdefer a.free(subject);
+    const parents = try a.alloc([]u8, c.parents.len);
+    var filled: usize = 0;
+    errdefer {
+        for (parents[0..filled]) |p| a.free(p);
+        a.free(parents);
+    }
+    for (c.parents, 0..) |p, i| {
+        parents[i] = try a.dupe(u8, p);
+        filled = i + 1;
+    }
+    return .{ .hash = hash, .short_hash = short_hash, .author = author, .time = time, .refs = refs, .subject = subject, .parents = parents, .status = c.status, .divergence = c.divergence };
 }
 
 fn dupeStash(a: std.mem.Allocator, s: StashEntry) std.mem.Allocator.Error!StashEntry {

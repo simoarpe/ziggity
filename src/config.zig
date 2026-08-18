@@ -330,6 +330,14 @@ pub const Config = struct {
     /// its status changes, so staging a long list never scrambles the cursor) or
     /// `status` (grouped: staged, then unstaged, then untracked, then by path).
     file_sort_order: model.FileSortOrder = .name,
+    /// Inline commit graph in the Commits panel: `on` (default, always drawn),
+    /// `focused` (only while the Commits panel is focused), or `off`.
+    commit_graph: model.CommitGraphMode = .on,
+    /// HEAD log ordering: `topo` (default — keeps a branch's commits contiguous
+    /// for clean graph lanes, matching lazygit; ziggity writes git's commit-graph
+    /// in the background so this stays fast even on huge repos), `date` (git's
+    /// native reverse-chronological order), or `author_date`.
+    log_order: model.LogOrder = .topo,
     skip_confirm: ConfirmSkips = .{},
     keymap: KeyMap = .{},
     theme: Theme = .{},
@@ -449,6 +457,14 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "branch_sort_order")) {
             if (std.meta.stringToEnum(model.BranchSortOrder, value)) |v| self.branch_sort_order = v;
+            return;
+        }
+        if (std.mem.eql(u8, key, "commit_graph")) {
+            if (std.meta.stringToEnum(model.CommitGraphMode, value)) |v| self.commit_graph = v;
+            return;
+        }
+        if (std.mem.eql(u8, key, "log_order")) {
+            if (std.meta.stringToEnum(model.LogOrder, value)) |v| self.log_order = v;
             return;
         }
         if (std.mem.eql(u8, key, "file_sort_order")) {
@@ -627,6 +643,8 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     try std.testing.expectEqual(StagingSplitMode.auto, cfg.staging_split); // auto by default
     try std.testing.expect(!cfg.skip_confirm.discard_all);
     try std.testing.expect(!cfg.skip_confirm.amend); // amend confirms by default
+    try std.testing.expectEqual(model.CommitGraphMode.on, cfg.commit_graph); // graph on by default
+    try std.testing.expectEqual(model.LogOrder.topo, cfg.log_order); // topo order by default
 
     cfg.applyBytes(
         \\result_dialog = always
@@ -638,12 +656,16 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
         \\result_dialog = nonsense
         \\branch_sort_order = recency
         \\file_sort_order = status
+        \\commit_graph = focused
+        \\log_order = date
         \\expand_focused_side_panel = true
         \\expanded_side_panel_weight = 3
         \\staging_split = on
         \\show_file_tree = true
         \\pr_status = false
     );
+    try std.testing.expectEqual(model.CommitGraphMode.focused, cfg.commit_graph);
+    try std.testing.expectEqual(model.LogOrder.date, cfg.log_order);
     try std.testing.expectEqual(StagingSplitMode.on, cfg.staging_split);
     try std.testing.expectEqual(ResultDialog.always, cfg.result_dialog); // valid set; bad value ignored
     try std.testing.expectEqual(CommandOutput.silent, cfg.command_output);

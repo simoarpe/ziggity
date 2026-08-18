@@ -78,6 +78,19 @@ branch_sort_order = date
 # untracked, and by path within each group.
 file_sort_order = name             # name (default) | status
 
+# Inline commit graph in the Commits panel: a `git log --graph`-style DAG drawn
+# one row per commit, in each author's colour, so merges and branch topology
+# read at a glance without opening the ctrl+l overlay. `on` (default) always
+# draws it, `focused` only while the Commits panel is the active panel (handy on
+# a narrow side panel), `off` never.
+commit_graph = on                  # on (default) | focused | off
+# HEAD log ordering. `topo` (default) keeps a branch's commits contiguous so the
+# graph lanes stay clean (matching lazygit). It relies on git's commit-graph
+# cache to stay fast on huge repos, which ziggity refreshes in the background on
+# startup. `date` is git's native reverse-chronological order; `author_date`
+# orders by author date.
+log_order = topo                   # topo (default) | date | author_date
+
 # Editor for `e`. With nothing set, auto detected from git core.editor, then
 # $GIT_EDITOR, $VISUAL, $EDITOR, falling back to vim. See "Editor" below.
 editor_preset =                    # vim | nvim | nano | emacs | micro | helix | vscode | sublime | zed | ...

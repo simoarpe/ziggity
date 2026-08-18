@@ -107,6 +107,8 @@ pub const Git = struct {
     log_grep: ?[]u8 = null,
     log_author: ?[]u8 = null,
     log_path: ?[]u8 = null,
+    /// How `loadCommits` orders the HEAD log (date / topo / author-date).
+    log_order: model.LogOrder = .topo,
     /// How `loadBranches` orders the local branch list.
     branch_sort: model.BranchSortOrder = .date,
     /// Which untracked files `git status` lists. Mirrors git's own
@@ -835,6 +837,17 @@ pub const Git = struct {
         };
     }
 
+    /// Best-effort: write git's commit-graph cache (commit generation numbers)
+    /// so `--topo-order` logs stay fast on large repos — the same cache a
+    /// gc/fetch-maintained repo already has, which is why lazygit's topo default
+    /// is snappy there. It's a pure cache under `.git/objects/info`, incremental
+    /// (cheap when already current), and any failure (read-only repo, old git,
+    /// shallow clone) is silently ignored. Runs off the UI thread.
+    pub fn ensureCommitGraph(self: *Git) void {
+        var res = self.exec(&.{ "commit-graph", "write", "--reachable" }) catch return;
+        res.deinit(self.allocator);
+    }
+
     pub fn loadCommits(self: *Git, ref_name: []const u8, limit: usize) ![]model.Commit {
         const limit_arg = try std.fmt.allocPrint(self.allocator, "-{d}", .{limit});
         defer self.allocator.free(limit_arg);
@@ -845,10 +858,14 @@ pub const Git = struct {
             "log",
             ref_name,
             "--date=relative",
-            "--pretty=format:%H%x00%h%x00%an%x00%cr%x00%D%x00%s",
+            // %P (parent hashes) feeds the inline commit graph.
+            "--pretty=format:%H%x00%h%x00%an%x00%cr%x00%D%x00%P%x00%s",
             "--no-show-signature",
             limit_arg,
         });
+        // Commit ordering (date / topo / author-date) — topo keeps a branch's
+        // commits contiguous so the inline graph's lanes stay readable.
+        if (model.logOrderFlag(self.log_order)) |flag| try argv.append(self.allocator, flag);
 
         // Optional Commits-list filters. The --grep/--author args own their
         // formatted strings until the command runs.
@@ -2079,7 +2096,18 @@ pub fn parseCommits(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Co
         const author = fields.next() orelse "";
         const time = fields.next() orelse "";
         const refs = fields.next() orelse "";
+        const parents_raw = fields.next() orelse "";
         const subject = fields.next() orelse "";
+
+        // %P is a space-separated list of full parent hashes (empty for a root).
+        var parents: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (parents.items) |p| allocator.free(p);
+            parents.deinit(allocator);
+        }
+        var pit = std.mem.tokenizeScalar(u8, parents_raw, ' ');
+        while (pit.next()) |p| try parents.append(allocator, try allocator.dupe(u8, p));
+
         var item = model.Commit{
             .hash = try allocator.dupe(u8, hash),
             .short_hash = try allocator.dupe(u8, short_hash),
@@ -2087,6 +2115,7 @@ pub fn parseCommits(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Co
             .time = try allocator.dupe(u8, time),
             .refs = try allocator.dupe(u8, refs),
             .subject = try allocator.dupe(u8, subject),
+            .parents = try parents.toOwnedSlice(allocator),
         };
         errdefer item.deinit(allocator);
         try commits.append(allocator, item);
@@ -2390,9 +2419,11 @@ test "parse tags captures name and optional subject" {
 }
 
 test "parse commits handles optional refs and subjects" {
+    // Fields: %H %h %an %cr %D %P %s. The first commit has one parent (the
+    // second); the second is a root (empty %P).
     const input =
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\x00aaaaaaa\x00Sam\x002 hours ago\x00HEAD -> main, origin/main\x00Initial commit\n" ++
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\x00bbbbbbb\x00Lee\x00yesterday\x00\x00Follow up\n";
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\x00aaaaaaa\x00Sam\x002 hours ago\x00HEAD -> main, origin/main\x00bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\x00Initial commit\n" ++
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\x00bbbbbbb\x00Lee\x00yesterday\x00\x00\x00Follow up\n";
     const commits = try parseCommits(std.testing.allocator, input);
     defer {
         for (commits) |*commit| commit.deinit(std.testing.allocator);
@@ -2404,8 +2435,11 @@ test "parse commits handles optional refs and subjects" {
     try std.testing.expectEqualSlices(u8, "Sam", commits[0].author);
     try std.testing.expectEqualSlices(u8, "HEAD -> main, origin/main", commits[0].refs);
     try std.testing.expectEqualSlices(u8, "Initial commit", commits[0].subject);
+    try std.testing.expectEqual(@as(usize, 1), commits[0].parents.len);
+    try std.testing.expectEqualSlices(u8, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", commits[0].parents[0]);
     try std.testing.expectEqualSlices(u8, "", commits[1].refs);
     try std.testing.expectEqualSlices(u8, "Follow up", commits[1].subject);
+    try std.testing.expectEqual(@as(usize, 0), commits[1].parents.len);
 }
 
 test "parse stash entries extracts selector index" {
