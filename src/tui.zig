@@ -2221,6 +2221,7 @@ fn drawConfirmPopup(root: vaxis.Window, app: *app_mod.App) void {
     const text = app.confirmationText(&app.confirm_text_buf);
     const title = switch (app.pending_confirmation orelse .discard_all) {
         .discard_all => "Discard all changes",
+        .amend => "Amend last commit",
         .merge_branch => "Merge branch",
         .rebase_branch => "Rebase branch",
         .delete_tag => "Delete tag",

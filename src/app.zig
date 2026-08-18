@@ -182,6 +182,10 @@ pub const TextPromptKind = enum {
 
 pub const Confirmation = enum {
     discard_all,
+    /// Offered before amending the last commit with the staged changes — it
+    /// rewrites HEAD and is awkward to undo. Skipped when `skip_confirm.amend`
+    /// is set.
+    amend,
     merge_branch,
     rebase_branch,
     delete_tag,
@@ -5909,6 +5913,7 @@ pub const App = struct {
     pub fn confirmationText(self: *const App, buf: []u8) []const u8 {
         return switch (self.pending_confirmation orelse return "No pending action.") {
             .discard_all => "Discard all working tree changes? This cannot be undone.",
+            .amend => "Amend the last commit with the staged changes?",
             .merge_branch => blk: {
                 if (self.selectedBranch()) |branch| {
                     break :blk std.fmt.bufPrint(buf, "Merge {s} into {s}?", .{ branch.name, self.data.current_branch }) catch "Merge the selected branch into the current one?";
@@ -8143,6 +8148,7 @@ pub const App = struct {
         self.pending_confirmation = null;
         switch (pending) {
             .discard_all => return self.runMutationFiles(try self.git.discardAll(), "discarded all changes", .{}),
+            .amend => return self.requestMutation(.amend, .{ .gerund = "amending", .command = "git commit --amend", .refresh = Refresh.commit }, "amended last commit", .{}),
             .merge_branch => {
                 const branch = self.selectedBranch() orelse {
                     try self.setMessage("no branch selected", .{});
@@ -10141,6 +10147,28 @@ test "rebase plan drives the Commits panel scroll and scrollbar, not the log" {
     try std.testing.expectEqual(@as(usize, 4), app.listScroll(.commits));
 
     rebaseplan_mod.cancel(&app);
+}
+
+test "amending the last commit asks first, but only with staged changes" {
+    const allocator = std.testing.allocator;
+    var staged = [_]model.FileStatus{.{ .path = @constCast("g.py"), .short_status = .{ 'M', ' ' }, .has_staged = true, .has_unstaged = false, .tracked = true, .added = false, .deleted = false, .conflict = false }};
+    var app = try testApp(allocator, &staged);
+    defer deinitTestApp(&app);
+
+    // Clean repo + staged changes: amend confirms first (matching lazygit)
+    // instead of rewriting HEAD outright.
+    try commits_mod.amendLastCommit(&app);
+    try std.testing.expect(app.pending_confirmation != null and app.pending_confirmation.? == .amend);
+    try std.testing.expect(app.mode == .confirmation);
+
+    // Nothing staged: nothing to fold in, so no prompt — just a hint message.
+    var none = [_]model.FileStatus{};
+    app.data.files = &none;
+    app.pending_confirmation = null;
+    app.mode = .normal;
+    try commits_mod.amendLastCommit(&app);
+    try std.testing.expect(app.pending_confirmation == null);
+    try std.testing.expect(app.mode != .confirmation);
 }
 
 test "a amends the selected commit's author via a rebase exec todo" {

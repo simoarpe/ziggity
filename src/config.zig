@@ -230,6 +230,7 @@ pub const CommandOutput = enum { show, silent };
 /// Set via `skip_confirm.<name> = true` in the config.
 pub const ConfirmSkips = struct {
     discard_all: bool = false,
+    amend: bool = false,
     merge_branch: bool = false,
     rebase_branch: bool = false,
     delete_tag: bool = false,
@@ -625,11 +626,13 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     try std.testing.expectEqual(model.BranchSortOrder.date, cfg.branch_sort_order);
     try std.testing.expectEqual(StagingSplitMode.auto, cfg.staging_split); // auto by default
     try std.testing.expect(!cfg.skip_confirm.discard_all);
+    try std.testing.expect(!cfg.skip_confirm.amend); // amend confirms by default
 
     cfg.applyBytes(
         \\result_dialog = always
         \\command_output = silent
         \\skip_confirm.discard_all = true
+        \\skip_confirm.amend = true
         \\skip_confirm.undo = yes
         \\skip_confirm.bogus = true
         \\result_dialog = nonsense
@@ -649,6 +652,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     cfg.applyBytes("staging_split = auto");
     try std.testing.expectEqual(StagingSplitMode.auto, cfg.staging_split);
     try std.testing.expect(cfg.skip_confirm.discard_all);
+    try std.testing.expect(cfg.skip_confirm.amend);
     try std.testing.expect(cfg.skip_confirm.undo);
     try std.testing.expect(!cfg.skip_confirm.merge_branch); // untouched
     try std.testing.expect(cfg.expand_focused_side_panel);

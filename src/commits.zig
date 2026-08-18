@@ -165,7 +165,10 @@ pub fn amendLastCommit(app: *App) !void {
         try app.setMessage("stage changes to amend into the last commit", .{});
         return;
     }
-    return app.requestMutation(.amend, .{ .gerund = "amending", .command = "git commit --amend", .refresh = App.Refresh.commit }, "amended last commit", .{});
+    // Confirm first (amend rewrites HEAD and is awkward to undo); the accept
+    // path runs the actual `git commit --amend`. `skip_confirm.amend` bypasses
+    // the prompt for anyone who wants the old instant behaviour back.
+    return app.requestConfirmation(.amend, "confirm amend last commit", .{});
 }
 
 pub fn handleCommitPromptKey(app: *App, key: vaxis.Key) !void {
