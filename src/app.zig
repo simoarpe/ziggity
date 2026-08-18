@@ -2149,6 +2149,23 @@ pub const App = struct {
     /// recorded for mouse selection stay valid after the draw call returns
     /// (a stack buffer would dangle when the selection is copied between frames).
     confirm_text_buf: [1024]u8 = undefined,
+    /// Scroll offset for the discard-all confirmation's file list (the only
+    /// confirmation with a scrollable body — it lists every file `D` will wipe
+    /// so a change hidden below a short Files panel can't be discarded unseen).
+    /// Reset to 0 when a confirmation opens; clamped during render.
+    confirm_scroll: usize = 0,
+    /// The discard-all list's visible row count, recorded during render so the
+    /// key and wheel handlers can clamp `confirm_scroll` without re-deriving the
+    /// popup layout.
+    confirm_list_view_h: u16 = 0,
+    /// Horizontal pan (`H`/`L` or shift+arrows) for the discard-all list, so a
+    /// path wider than the popup can be read in full. Clamped during render.
+    confirm_hscroll: u16 = 0,
+    /// App-owned backing for the discard-all list's rendered rows. Like
+    /// `confirm_text_buf`, the row slices are recorded for mouse selection and
+    /// must outlive the draw call, so they cannot live in a stack buffer. Sized
+    /// for a tall popup; any rows past its capacity draw unselectable.
+    discard_rows_buf: [8192]u8 = undefined,
     branches_tab: BranchesTab = .local,
     files_tab: FilesTab = .files,
     /// In-process re-root: a pending request to switch the whole app to another
@@ -4239,6 +4256,13 @@ pub const App = struct {
                 // The wheel scrolls the view only; the cursor stays put.
                 const max_scroll = self.commit_graph_lines -| self.commit_graph_view_h;
                 self.commit_graph_scroll = if (down) @min(self.commit_graph_scroll + lines, max_scroll) else self.commit_graph_scroll -| lines;
+                return true;
+            },
+            .confirmation => {
+                // Only the discard-all prompt scrolls; elsewhere the list is
+                // empty so max_scroll is 0 and the wheel does nothing.
+                const max_scroll = self.data.files.len -| self.confirm_list_view_h;
+                self.confirm_scroll = if (down) @min(self.confirm_scroll + lines, max_scroll) else self.confirm_scroll -| lines;
                 return true;
             },
             // .recent_repos handles the wheel in `handleMouse` (it moves the
@@ -8120,6 +8144,7 @@ pub const App = struct {
     }
 
     fn handleConfirmationKey(self: *App, key: vaxis.Key) !void {
+        const km = self.config.keymap;
         if (self.isEnterKey(key) or key.matches('y', .{})) {
             try self.confirmPendingAction();
             return;
@@ -8136,6 +8161,24 @@ pub const App = struct {
             }
             try self.setMessage("cancelled", .{});
             return;
+        }
+        // The discard-all prompt has a scrollable file list; j/k and the arrows
+        // move it. Other confirmations have no list (view height 0), so these are
+        // harmless no-ops there.
+        const max_scroll = self.data.files.len -| self.confirm_list_view_h;
+        if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+            self.confirm_scroll = @min(self.confirm_scroll + 1, max_scroll);
+        } else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+            self.confirm_scroll -|= 1;
+        } else if (key.matches(vaxis.Key.page_down, .{})) {
+            self.confirm_scroll = @min(self.confirm_scroll + self.confirm_list_view_h, max_scroll);
+        } else if (key.matches(vaxis.Key.page_up, .{})) {
+            self.confirm_scroll -|= self.confirm_list_view_h;
+        } else if (km.scroll_left.matches(key) or key.matches(vaxis.Key.left, .{ .shift = true })) {
+            // H / L pan a path wider than the popup (render clamps the range).
+            self.confirm_hscroll -|= horizontal_scroll_step;
+        } else if (km.scroll_right.matches(key) or key.matches(vaxis.Key.right, .{ .shift = true })) {
+            self.confirm_hscroll +|= horizontal_scroll_step;
         }
     }
 
@@ -8316,6 +8359,9 @@ pub const App = struct {
     /// is irrelevant when skipping, since the action sets its own message.
     pub fn requestConfirmation(self: *App, kind: Confirmation, comptime prompt_fmt: []const u8, prompt_args: anytype) !void {
         self.pending_confirmation = kind;
+        self.confirm_scroll = 0; // a fresh prompt starts at the top of its list
+        self.confirm_hscroll = 0;
+
         if (self.shouldSkipConfirm(kind)) return self.confirmPendingAction();
         self.mode = .confirmation;
         try self.setMessage(prompt_fmt, prompt_args);
@@ -10147,6 +10193,46 @@ test "rebase plan drives the Commits panel scroll and scrollbar, not the log" {
     try std.testing.expectEqual(@as(usize, 4), app.listScroll(.commits));
 
     rebaseplan_mod.cancel(&app);
+}
+
+test "discard-all confirmation scrolls its file list and clamps at both ends" {
+    const allocator = std.testing.allocator;
+    var files = [_]model.FileStatus{
+        .{ .path = @constCast("a.zig"), .short_status = .{ 'M', ' ' }, .has_staged = true, .has_unstaged = false, .tracked = true, .added = false, .deleted = false, .conflict = false },
+        .{ .path = @constCast("b.zig"), .short_status = .{ ' ', 'M' }, .has_staged = false, .has_unstaged = true, .tracked = true, .added = false, .deleted = false, .conflict = false },
+        .{ .path = @constCast("c.txt"), .short_status = .{ '?', '?' }, .has_staged = false, .has_unstaged = true, .tracked = false, .added = false, .deleted = false, .conflict = false },
+    };
+    var app = try testApp(allocator, &files);
+    defer deinitTestApp(&app);
+
+    app.pending_confirmation = .discard_all;
+    app.mode = .confirmation;
+    app.confirm_list_view_h = 1; // as a one-row list window would record
+    app.confirm_scroll = 0;
+
+    const j = vaxis.Key{ .codepoint = 'j' };
+    const k = vaxis.Key{ .codepoint = 'k' };
+    // 3 files, 1 visible -> scroll stops at 2 (the last row reachable).
+    for (0..8) |_| try app.handleConfirmationKey(j);
+    try std.testing.expectEqual(@as(usize, 2), app.confirm_scroll);
+    for (0..8) |_| try app.handleConfirmationKey(k);
+    try std.testing.expectEqual(@as(usize, 0), app.confirm_scroll);
+
+    // H/L pan the horizontal offset (render clamps the upper bound; the handler
+    // just saturates at 0 on the low end).
+    const l = vaxis.Key{ .codepoint = 'L' };
+    const hkey = vaxis.Key{ .codepoint = 'H' };
+    try app.handleConfirmationKey(l);
+    try std.testing.expectEqual(@as(u16, horizontal_scroll_step), app.confirm_hscroll);
+    for (0..8) |_| try app.handleConfirmationKey(hkey);
+    try std.testing.expectEqual(@as(u16, 0), app.confirm_hscroll);
+
+    // Opening a prompt starts back at the top-left.
+    app.confirm_scroll = 2;
+    app.confirm_hscroll = 12;
+    try app.requestConfirmation(.discard_all, "confirm discard all changes", .{});
+    try std.testing.expectEqual(@as(usize, 0), app.confirm_scroll);
+    try std.testing.expectEqual(@as(u16, 0), app.confirm_hscroll);
 }
 
 test "graph reset target: only a commit on the current branch's log" {

@@ -2221,6 +2221,12 @@ fn drawMenuPopup(root: vaxis.Window, app: *const app_mod.App) void {
 }
 
 fn drawConfirmPopup(root: vaxis.Window, app: *app_mod.App) void {
+    // The discard-all prompt lists every file it will wipe, scrollable when the
+    // list is longer than the popup — so nothing gets discarded unseen.
+    if (app.pending_confirmation == .discard_all and app.data.files.len > 0)
+        return drawDiscardConfirmPopup(root, app);
+    app.confirm_list_view_h = 0; // no scrollable body on the other prompts
+
     const st = styles();
     // Use the App-owned buffer (not a stack one) so the rows recorded for mouse
     // selection below stay valid when the selection is copied between frames.
@@ -2266,6 +2272,91 @@ fn drawConfirmPopup(root: vaxis.Window, app: *app_mod.App) void {
     // with the mouse (drag to select, release to copy), like the other popups.
     for (lines[0..shown], 0..) |ln, idx| drawDialogRow(win, app, @intCast(idx), ln, st.normal);
     print(win, win.height -| 1, 0, "(y/enter) confirm   (n/esc) cancel", st.bottom_accent);
+}
+
+/// The discard-all confirmation: a header warning, the scrollable list of every
+/// file `D` will discard (status code + path), and a footer. The count lives in
+/// the title so it stays visible while scrolling.
+fn drawDiscardConfirmPopup(root: vaxis.Window, app: *app_mod.App) void {
+    const st = styles();
+    const files = app.data.files;
+    const nfiles = files.len;
+
+    var title_buf: [48]u8 = undefined;
+    const title = std.fmt.bufPrint(&title_buf, "Discard all changes ({d} {s})", .{ nfiles, if (nfiles == 1) "file" else "files" }) catch "Discard all changes";
+
+    const warn = "This cannot be undone.";
+    // Reserve width for the widest possible footer (both hints present).
+    const footer_full = "j/k scroll   H/L pan   (y/enter) confirm   (n/esc) cancel";
+
+    // `max_row_w` is the widest "  XY path" row; the popup width fits that (and
+    // the warning/footer), capped to the screen — anything wider pans with H/L.
+    var max_row_w: usize = 0;
+    for (files) |f| max_row_w = @max(max_row_w, f.path.len + 5);
+    const longest: usize = @max(@max(warn.len, footer_full.len), max_row_w);
+    const w: u16 = @intCast(@min(@as(usize, root.width -| 2), longest + 4));
+
+    // Height: header + N rows + footer + border, clamped to the screen.
+    const h: u16 = @intCast(@min(@as(usize, root.height -| 2), nfiles + 4));
+    const win_h: usize = @as(usize, h) -| 2; // inside the border
+    const view_h: u16 = @intCast(win_h -| 2); // minus header + footer rows
+    app.confirm_list_view_h = view_h;
+
+    const max_scroll = nfiles -| view_h;
+    if (app.confirm_scroll > max_scroll) app.confirm_scroll = max_scroll;
+    const scrollable = nfiles > view_h;
+
+    const scroll_info: ?ScrollInfo = if (scrollable) .{ .len = nfiles, .pos = app.confirm_scroll } else null;
+    const win = popup(root, w, h, title, scroll_info);
+
+    // Clamp the horizontal pan to the widest row that overflows the popup.
+    const max_hscroll: u16 = @intCast(max_row_w -| win.width);
+    if (app.confirm_hscroll > max_hscroll) app.confirm_hscroll = max_hscroll;
+    const h_off = app.confirm_hscroll;
+    const pannable = max_hscroll > 0;
+
+    // Record the rows for mouse selection (drag to select, release to copy),
+    // like the other confirmation popups. The recorded slices live in an
+    // App-owned buffer so they stay valid until the selection is copied.
+    const px0: u16 = (root.width - w) / 2;
+    const py0: u16 = (root.height - h) / 2;
+    app.beginDialogGrid(px0 + 1, py0 + 1, win.height);
+
+    print(win, 0, 0, warn, st.warning);
+
+    var used: usize = 0;
+    var row: u16 = 1;
+    var i: usize = app.confirm_scroll;
+    while (i < nfiles and row <= view_h) : (i += 1) {
+        const f = files[i];
+        // git's two-column XY status (e.g. "M ", " M", "??") before the path.
+        if (std.fmt.bufPrint(app.discard_rows_buf[used..], "  {c}{c} {s}", .{ f.short_status[0], f.short_status[1], f.path })) |line| {
+            used += line.len;
+            // setDialogRow + printAnsi (not drawDialogRow) so the horizontal pan
+            // applies while the drag-selection highlight stays correct.
+            app.setDialogRow(row, line);
+            const sel = app.dialogRowSelection(row);
+            const lo: u16 = if (sel) |s| s.lo else 0;
+            const hi: u16 = if (sel) |s| s.hi else 0;
+            printAnsi(win, row, line, st.normal, lo, hi, h_off);
+        } else |_| {
+            // Buffer exhausted (a very tall popup with long paths): still show
+            // the path, just not selectable.
+            print(win, row, 0, f.path, st.normal);
+        }
+        row += 1;
+    }
+
+    // Footer hints reflect which motions actually apply right now.
+    const footer = if (scrollable and pannable)
+        "j/k scroll   H/L pan   (y/enter) confirm   (n/esc) cancel"
+    else if (scrollable)
+        "j/k scroll   (y/enter) confirm   (n/esc) cancel"
+    else if (pannable)
+        "H/L pan   (y/enter) confirm   (n/esc) cancel"
+    else
+        "(y/enter) confirm   (n/esc) cancel";
+    print(win, win.height -| 1, 0, footer, st.bottom_accent);
 }
 
 /// Content size and scroll position for a panel's scrollbar. `len` is the total

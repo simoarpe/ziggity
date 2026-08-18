@@ -120,6 +120,13 @@ form index of those intentional differences.
   in the DAG and rewind straight to it. The hint appears only for a commit on
   the current branch, the sole valid `git reset` target.
 
+- **Discard-all lists every file first.** The `D` confirmation shows the full
+  set of files it will wipe (staged, unstaged and untracked), scrollable with
+  `j`/`k` and the wheel when the list is long and pannable with `H`/`L` when a
+  path is wider than the popup, so a change hidden below a short Files panel
+  can't be discarded unseen. lazygit's prompt caps the preview at the first
+  three paths plus a "and N more" summary.
+
 - **A Divergence tab and push state everywhere.** The current branch versus
   its upstream, outgoing above incoming, with history editing keys disabled
   there; commit hashes are tinted red until they reach the remote. The
