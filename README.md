@@ -15,9 +15,14 @@
 </p>
 
 <p align="center">
+  <a href="https://ziggity.dev"><img alt="Website" src="https://img.shields.io/badge/website-ziggity.dev-f7a41d"></a>
   <img alt="Zig 0.16" src="https://img.shields.io/badge/Zig-0.16.0-f7a41d">
   <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue">
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20Android-lightgrey">
+</p>
+
+<p align="center">
+  <b><a href="https://ziggity.dev">ziggity.dev</a></b>
 </p>
 
 <p align="center">
@@ -50,7 +55,7 @@ a port. It is written from scratch in Zig, talks directly to your existing
 they improve the user experience. See
 [docs/comparison.md](docs/comparison.md) for a detailed comparison.
 
-[Features](docs/features.md) ·
+[Website](https://ziggity.dev) · [Features](docs/features.md) ·
 [Keybindings](docs/keybindings.md) · [Configuration](docs/configuration.md) ·
 [Comparison with lazygit](docs/comparison.md)
 
