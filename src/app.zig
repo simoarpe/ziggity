@@ -10149,6 +10149,32 @@ test "rebase plan drives the Commits panel scroll and scrollbar, not the log" {
     rebaseplan_mod.cancel(&app);
 }
 
+test "graph reset target: only a commit on the current branch's log" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), .short_hash = @constCast("aaaaaaa"), .author = @constCast("S"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("head") },
+        .{ .hash = @constCast("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), .short_hash = @constCast("bbbbbbb"), .author = @constCast("S"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("merge") },
+    };
+    app.data.commits = &commits;
+
+    // Three rows: two current-branch commits, one off-branch, one connector.
+    app.commit_graph = @constCast("* aaaaaaa head\n* bbbbbbb merge\n* ffffff0 offbranch\n|\\\n");
+    defer app.commit_graph = null; // a literal — must not reach deinit's free path
+
+    app.commit_graph_sel = 0; // aaaaaaa -> log index 0
+    try std.testing.expectEqual(@as(?usize, 0), commitgraph_mod.cursorCommitIndex(&app));
+    app.commit_graph_sel = 1; // bbbbbbb (the "merge") -> log index 1
+    try std.testing.expectEqual(@as(?usize, 1), commitgraph_mod.cursorCommitIndex(&app));
+    app.commit_graph_sel = 2; // ffffff0 is not in the current-branch log -> no reset
+    try std.testing.expect(commitgraph_mod.cursorCommitIndex(&app) == null);
+    app.commit_graph_sel = 3; // a connector row has no commit
+    try std.testing.expect(commitgraph_mod.cursorCommitIndex(&app) == null);
+}
+
 test "amending the last commit asks first, but only with staged changes" {
     const allocator = std.testing.allocator;
     var staged = [_]model.FileStatus{.{ .path = @constCast("g.py"), .short_status = .{ 'M', ' ' }, .has_staged = true, .has_unstaged = false, .tracked = true, .added = false, .deleted = false, .conflict = false }};

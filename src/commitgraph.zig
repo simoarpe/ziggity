@@ -7,6 +7,7 @@
 const std = @import("std");
 
 const app_mod = @import("app.zig");
+const commitops_mod = @import("commitops.zig");
 const model = @import("model.zig");
 
 const App = app_mod.App;
@@ -146,8 +147,42 @@ pub fn handleKey(app: *App, key: anytype) !void {
     if (km.graph_first_parent.matches(key)) return goToFirstParent(app);
     // `@` jumps the cursor to the current commit (HEAD).
     if (km.graph_goto_head.matches(key)) return goToHead(app);
+    // space resets the current branch to the commit under the cursor
+    // (soft/mixed/hard) — offered only for a commit on the current branch.
+    if (km.select.matches(key)) return resetToSelected(app);
     // enter jumps the Commits-panel selection to the row under the cursor.
     if (app.isEnterKey(key)) return jumpToSelected(app);
+}
+
+/// The index in the current branch's log (`app.data.commits`) of the commit on
+/// the cursor row, or null when the row is a connector or the commit is not on
+/// the current branch. `git reset` moves the current branch's HEAD, so a target
+/// that is not reachable from HEAD would repoint the branch onto an unrelated
+/// line — never what "reset to there" means — hence off-branch rows have no
+/// reset. The footer uses this to show the `space reset` hint only when it
+/// applies. (Limited to the loaded log window, like `enter` navigation.)
+pub fn cursorCommitIndex(app: *App) ?usize {
+    const short = cursorHash(app) orelse return null;
+    for (app.data.commits, 0..) |c, i| {
+        if (std.mem.startsWith(u8, c.short_hash, short) or std.mem.startsWith(u8, c.hash, short)) return i;
+    }
+    return null;
+}
+
+/// space on a current-branch commit: point the Commits panel at it and open the
+/// soft/mixed/hard reset menu (which resets HEAD to `selectedCommit()`). The
+/// menu is the confirmation. Off-branch rows are rejected (the footer hides the
+/// hint there, so this only guards a stray keypress).
+fn resetToSelected(app: *App) !void {
+    const idx = cursorCommitIndex(app) orelse {
+        try app.setMessage("reset only applies to a commit on the current branch", .{});
+        return;
+    };
+    app.commit_index = idx;
+    app.commits_tab = .commits;
+    app.focus = .commits;
+    close(app); // leave the viewer before showing the reset menu
+    try commitops_mod.startCommitResetMenu(app);
 }
 
 /// `@`: move the cursor to the current commit (HEAD) and recentre on it. HEAD is

@@ -1310,7 +1310,13 @@ fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
     const win = popup(root, w, h, title, null);
 
     const footer_row: u16 = win.height -| 1;
-    print(win, footer_row, 0, "j/k move  @ current  p parent  H/L pan  a all/current  ^o copy hash  enter go-to  esc close", st.bottom_accent);
+    // `space reset` appears only when the cursor sits on a current-branch commit
+    // (a valid `git reset` target); it is hidden on connector and off-branch rows.
+    const footer = if (commitgraph_mod.cursorCommitIndex(app) != null)
+        "j/k move  @ current  p parent  H/L pan  a all/current  ^o copy hash  enter go-to  space reset  esc close"
+    else
+        "j/k move  @ current  p parent  H/L pan  a all/current  ^o copy hash  enter go-to  esc close";
+    print(win, footer_row, 0, footer, st.bottom_accent);
 
     if (app.commit_graph_loading or app.commit_graph == null) {
         var sbuf: [48]u8 = undefined;

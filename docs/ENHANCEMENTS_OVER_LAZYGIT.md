@@ -115,6 +115,11 @@ form index of those intentional differences.
   [#3974](https://github.com/jesseduffield/lazygit/issues/3974).
   [Details](comparison.md#history-navigation-with-intent)
 
+- **Reset from the commit graph.** `space` on a graph row resets the current
+  branch to that commit (soft / mixed / hard), so you can spot the last merge
+  in the DAG and rewind straight to it. The hint appears only for a commit on
+  the current branch, the sole valid `git reset` target.
+
 - **A Divergence tab and push state everywhere.** The current branch versus
   its upstream, outgoing above incoming, with history editing keys disabled
   there; commit hashes are tinted red until they reach the remote. The

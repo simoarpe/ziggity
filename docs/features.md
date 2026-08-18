@@ -33,7 +33,10 @@ status; `enter` opens the commit's changed files.
 `ctrl+l` opens the real `git log --graph` DAG in git's own colors. By default
 it shows the current branch **and its upstream**, so the commits you are
 behind by are visible right away; `a` toggles all branches. Jump to HEAD with
-`@`, or to a commit's first parent with `p`.
+`@`, or to a commit's first parent with `p`. `space` resets the current branch
+to the commit under the cursor (soft / mixed / hard) — handy for rewinding to
+the last merge; the hint only appears for a commit on the current branch, since
+that is the only valid `git reset` target.
 
 ![Commit graph viewer](screenshots/04-commit-graph.png)
 
