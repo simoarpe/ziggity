@@ -125,7 +125,9 @@ form index of those intentional differences.
   `j`/`k` and the wheel when the list is long and pannable with `H`/`L` when a
   path is wider than the popup, so a change hidden below a short Files panel
   can't be discarded unseen. lazygit's prompt caps the preview at the first
-  three paths plus a "and N more" summary.
+  three paths plus a "and N more" summary. The single-file discard menu (`d`)
+  likewise names its target file (or folder) and carries the same yellow
+  warning above the choices.
 
 - **A Divergence tab and push state everywhere.** The current branch versus
   its upstream, outgoing above incoming, with history editing keys disabled

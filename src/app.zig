@@ -567,6 +567,14 @@ pub const Menu = struct {
     title: []const u8,
     items: []const MenuItem,
     index: usize = 0,
+    /// Optional path shown under the title (e.g. the file/folder the discard
+    /// menu acts on). Must point at memory that outlives the menu — copy into
+    /// `menu_subtitle_buf`, never a raw slice into `data.files` (which a
+    /// background refresh can free while the menu is open).
+    subtitle: ?[]const u8 = null,
+    /// Show a yellow "This cannot be undone." line under the subtitle, for
+    /// destructive menus (discard).
+    warn: bool = false,
 };
 
 const discard_menu_staged_and_unstaged = [_]MenuItem{
@@ -2404,6 +2412,9 @@ pub const App = struct {
     undo_label_buf: [160]u8 = undefined,
     undo_label_len: usize = 0,
     active_menu: ?Menu = null,
+    /// App-owned backing for a menu's optional path subtitle, copied on open so
+    /// it survives a background file-list refresh while the menu is open.
+    menu_subtitle_buf: [1024]u8 = undefined,
     pending_confirmation: ?Confirmation = null,
     // ctrl+r recent-repository switcher (mode `.recent_repos`): a scrollable,
     // mouse-interactive overlay modeled on the commit-graph viewer. `recent_repos`
@@ -7540,6 +7551,12 @@ pub const App = struct {
         try self.setMessage("status filter", .{});
     }
 
+    /// Copy a path into the App-owned menu-subtitle buffer and return the slice,
+    /// so an open menu's subtitle survives a `data.files` refresh.
+    fn menuSubtitle(self: *App, comptime fmt: []const u8, args: anytype) []const u8 {
+        return std.fmt.bufPrint(&self.menu_subtitle_buf, fmt, args) catch self.menu_subtitle_buf[0..0];
+    }
+
     fn startDiscardMenu(self: *App) !void {
         // A directory row (tree view): discard every changed file beneath it.
         // Offer both variants since a folder usually mixes staged and unstaged.
@@ -7552,7 +7569,7 @@ pub const App = struct {
                 return;
             }
             self.mode = .menu;
-            self.active_menu = .{ .title = "Discard changes in folder", .items = &discard_menu_staged_and_unstaged, .index = 0 };
+            self.active_menu = .{ .title = "Discard changes in folder", .items = &discard_menu_staged_and_unstaged, .index = 0, .subtitle = self.menuSubtitle("{s}/", .{dir}), .warn = true };
             try self.setMessage("discard changes under {s}/", .{dir});
             return;
         }
@@ -7565,7 +7582,7 @@ pub const App = struct {
         else
             &discard_menu_all_only;
         self.mode = .menu;
-        self.active_menu = .{ .title = "Discard changes", .items = items, .index = 0 };
+        self.active_menu = .{ .title = "Discard changes", .items = items, .index = 0, .subtitle = self.menuSubtitle("{s}", .{file.path}), .warn = true };
         try self.setMessage("discard changes", .{});
     }
 
@@ -12746,6 +12763,9 @@ test "discard menu offers the unstaged option only when a file has both" {
     try std.testing.expectEqual(Mode.menu, app.mode);
     try std.testing.expectEqual(@as(usize, 2), app.active_menu.?.items.len);
     try std.testing.expectEqual(MenuAction.discard_file_unstaged, app.active_menu.?.items[1].action);
+    // The menu names the target file and carries the destructive warning.
+    try std.testing.expectEqualStrings("src/main.zig", app.active_menu.?.subtitle.?);
+    try std.testing.expect(app.active_menu.?.warn);
 
     var unstaged_only = [_]model.FileStatus{.{
         .path = @constCast("src/main.zig"),

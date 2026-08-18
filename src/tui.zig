@@ -2210,13 +2210,46 @@ fn drawStatusFilterPopup(root: vaxis.Window, app: *const app_mod.App) void {
 fn drawMenuPopup(root: vaxis.Window, app: *const app_mod.App) void {
     const st = styles();
     const menu = app.active_menu orelse return;
-    var max_label: usize = menu.title.len;
-    for (menu.items) |item| max_label = @max(max_label, item.label.len);
-    const w: u16 = @intCast(@min(@as(usize, 72), max_label + 6));
-    const h: u16 = @intCast(menu.items.len + 2);
+    const warn_text = "This cannot be undone.";
+
+    var content: usize = menu.title.len;
+    for (menu.items) |item| content = @max(content, item.label.len);
+    if (menu.subtitle) |s| content = @max(content, s.len + 2); // 2-space indent
+    if (menu.warn) content = @max(content, warn_text.len);
+
+    // Optional header: the target path, a yellow warning, then a blank line
+    // before the choices — the discard menu's version of the discard-all prompt.
+    const has_header = menu.subtitle != null or menu.warn;
+    var header_rows: u16 = 0;
+    if (menu.subtitle != null) header_rows += 1;
+    if (menu.warn) header_rows += 1;
+    if (has_header) header_rows += 1; // blank separator
+
+    const w: u16 = @intCast(@min(@as(usize, root.width -| 4), content + 6));
+    const h: u16 = @intCast(menu.items.len + header_rows + 2);
     const win = popup(root, w, h, menu.title, null);
+
+    var row: u16 = 0;
+    if (menu.subtitle) |s| {
+        var buf: [1200]u8 = undefined;
+        const avail: usize = win.width -| 2; // columns after the "  " indent
+        // A path wider than the popup keeps its tail (the filename) visible,
+        // left-truncated with "..." — the leading directories are what to drop.
+        const line = if (s.len <= avail)
+            std.fmt.bufPrint(&buf, "  {s}", .{s}) catch s
+        else
+            std.fmt.bufPrint(&buf, "  ...{s}", .{s[s.len -| (avail -| 3)..]}) catch s;
+        print(win, row, 0, line, st.normal);
+        row += 1;
+    }
+    if (menu.warn) {
+        print(win, row, 0, warn_text, st.warning);
+        row += 1;
+    }
+    if (has_header) row += 1; // blank separator
+
     for (menu.items, 0..) |item, idx| {
-        drawSelectable(win, @intCast(idx), item.label, st.normal, selOf(idx == menu.index, true));
+        drawSelectable(win, row + @as(u16, @intCast(idx)), item.label, st.normal, selOf(idx == menu.index, true));
     }
 }
 
