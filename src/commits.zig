@@ -225,10 +225,13 @@ pub fn submitCommit(app: *App) !void {
     const action = app.commit_action;
     const reword_index = app.commit_reword_index;
     app.mode = .normal;
+    // Preserve the draft across the async commit so a failure (a rejecting
+    // pre-commit hook, a signing error, nothing staged…) keeps the message
+    // instead of discarding it — `completeMutation` drops it once the commit
+    // actually lands. A reword's text is tied to its commit, so it isn't kept.
+    if (action == .create) try savePreservedCommitMessage(app) else clearPreservedCommitMessage(app);
     app.commit_buffer.clearRetainingCapacity();
     app.commit_body_buffer.clearRetainingCapacity();
-    // The message is being committed: drop any preserved draft.
-    clearPreservedCommitMessage(app);
 
     switch (action) {
         // Run the commit off-thread (close the panel first, then commit via a

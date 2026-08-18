@@ -185,7 +185,11 @@ The animation itself is in the [README](../README.md).
   72, `0` off). When the editor opens, the repo's `prepare-commit-msg` hook
   runs (as it would for an interactive commit) and prefills the fields,
   editable before you commit (`prepare_commit_msg_hook = true`, disable to
-  skip it).
+  skip it). An unfinished message is not lost: if you cancel the editor **or
+  the commit fails** (a rejecting `pre-commit` hook, a signing error, nothing
+  staged), the draft is kept and restored the next time you press `c`, and it
+  even survives quitting (persisted under `.git`). It is cleared only once a
+  commit actually lands.
 - Per commit: reset (`g`, soft, mixed or hard), revert (`t`), checkout
   (`space`, detached), branch from it (`n`), move commits to a new branch
   (`N`), tag (`T`), change author (`a`), and a copy menu (`y`: hash, subject,

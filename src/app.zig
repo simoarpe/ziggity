@@ -9238,6 +9238,10 @@ pub const App = struct {
             var mutable = result;
             defer mutable.deinit(gpa);
             if (mutable.ok()) {
+                // The commit landed: drop the preserved draft that submitCommit
+                // kept in case this failed. (On failure it stays, so reopening
+                // the commit dialog restores the message.)
+                if (std.meta.activeTag(job) == .commit) commits_mod.clearPreservedCommitMessage(self);
                 switch (self.mutation_post) {
                     .none => {},
                     .clear_patch => patch_mod.clearPatch(self),
@@ -10276,6 +10280,44 @@ test "graph reset target: only a commit on the current branch's log" {
     try std.testing.expect(commitgraph_mod.cursorCommitIndex(&app) == null);
     app.commit_graph_sel = 3; // a connector row has no commit
     try std.testing.expect(commitgraph_mod.cursorCommitIndex(&app) == null);
+}
+
+test "a failed commit keeps the message; a successful one clears it" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    // Compose and submit a create-commit.
+    app.commit_action = .create;
+    try app.commit_buffer.appendSlice(allocator, "fix: important thing");
+    try app.commit_body_buffer.appendSlice(allocator, "the body");
+    try commits_mod.submitCommit(&app);
+
+    // The draft is preserved across the async commit; the editor is cleared.
+    try std.testing.expectEqualStrings("fix: important thing", app.commit_preserved_subject);
+    try std.testing.expectEqualStrings("the body", app.commit_preserved_body);
+    try std.testing.expectEqual(@as(usize, 0), app.commit_buffer.items.len);
+
+    // The commit FAILS (e.g. a rejecting hook): the preserved draft must survive
+    // so reopening the commit dialog restores it.
+    const job_a = app.takeMutation().?;
+    const failed = git_mod.ExecResult{ .stdout = try page_alloc.dupe(u8, ""), .stderr = try page_alloc.dupe(u8, "hook rejected"), .term = .{ .exited = 1 } };
+    try app.completeMutation(job_a, failed, page_alloc);
+    try std.testing.expectEqualStrings("fix: important thing", app.commit_preserved_subject);
+    try std.testing.expectEqualStrings("the body", app.commit_preserved_body);
+
+    // Re-submit; this time the commit SUCCEEDS and the draft is dropped.
+    app.commit_action = .create;
+    try app.commit_buffer.appendSlice(allocator, "fix: important thing");
+    try commits_mod.submitCommit(&app);
+    const job_b = app.takeMutation().?;
+    const okres = git_mod.ExecResult{ .stdout = try page_alloc.dupe(u8, ""), .stderr = try page_alloc.dupe(u8, ""), .term = .{ .exited = 0 } };
+    try app.completeMutation(job_b, okres, page_alloc);
+    try std.testing.expectEqual(@as(usize, 0), app.commit_preserved_subject.len);
+    try std.testing.expectEqual(@as(usize, 0), app.commit_preserved_body.len);
 }
 
 test "amending the last commit asks first, but only with staged changes" {
