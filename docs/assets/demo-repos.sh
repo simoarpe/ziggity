@@ -27,6 +27,46 @@ git commit -q -m "Add parser stub"
 printf 'pub fn tokenize(src: []const u8) Lexer {\n    return .{ .src = src, .pos = 0, .line = 1 };\n}\n\npub fn next(l: *Lexer) ?Token {\n    return l.scan();\n}\n' > src/lexer.zig
 git add src/lexer.zig
 
+# --- /tmp/zdemo-commit-ai: same staged change, wired to a stub ai_command -----
+# Records the AI commit-authoring demo offline. The stub stands in for a real
+# tool (pi, llm, ollama run ...): it reads the prompt on stdin and, after a
+# short pause so the spinner is visible, prints a canned subject or body. It
+# branches on the prompt's own wording ("SUBJECT LINE" vs "MESSAGE BODY").
+rm -rf /tmp/zdemo-commit-ai
+mkdir -p /tmp/zdemo-commit-ai/src
+cd /tmp/zdemo-commit-ai
+git init -q -b main
+git config user.email demo@ziggity.dev
+git config user.name "Demo"
+printf 'const std = @import("std");\n\npub fn main() !void {\n    try run();\n}\n' > src/main.zig
+printf 'pub fn tokenize(src: []const u8) Lexer {\n    return .{ .src = src, .pos = 0 };\n}\n' > src/lexer.zig
+printf '# aurora\nA tiny expression evaluator.\n' > README.md
+git add .
+git commit -q -m "Initial project skeleton"
+printf 'pub fn parse(tokens: []Token) !Ast {\n    // TODO\n}\n' > src/parser.zig
+git add .
+git commit -q -m "Add parser stub"
+printf 'pub fn tokenize(src: []const u8) Lexer {\n    return .{ .src = src, .pos = 0, .line = 1 };\n}\n\npub fn next(l: *Lexer) ?Token {\n    return l.scan();\n}\n' > src/lexer.zig
+git add src/lexer.zig
+
+cat > /tmp/zdemo-ai.sh <<'AISTUB'
+#!/usr/bin/env bash
+# Stub ai_command for the demo: prompt on stdin, completion on stdout.
+prompt="$(cat)"
+sleep 1.2
+if printf '%s' "$prompt" | grep -q 'SUBJECT LINE'; then
+  printf 'Track line and column positions in the lexer\n'
+else
+  printf 'Record the line and column for each token as the lexer scans, so\n'
+  printf 'diagnostics can point at the exact source location.\n\n'
+  printf 'Also expose a next() helper for pulling tokens.\n'
+fi
+AISTUB
+chmod +x /tmp/zdemo-ai.sh
+printf 'ai_command = bash /tmp/zdemo-ai.sh\n' > /tmp/zdemo-commit-ai/.ziggity.ini
+# Keep the config out of the Files panel so the recording shows only the change.
+printf '.ziggity.ini\n' >> /tmp/zdemo-commit-ai/.git/info/exclude
+
 # --- /tmp/zdemo-co: an origin with a feature branch not present locally ------
 rm -rf /tmp/zdemo-co
 mkdir -p /tmp/zdemo-co/origin.git

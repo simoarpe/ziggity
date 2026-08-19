@@ -65,6 +65,7 @@ they improve the user experience. See
 - 🚀 Starts in ~3.6 ms
 - 🔄 Non-blocking Git operations
 - 🖱️ First-class keyboard and mouse interaction
+- 🤖 Optional AI commit messages, using the model or subscription you already have
 - 🐙 Uses your existing `git` installation
 - 🧩 No libgit2 dependency
 - ⚙️ Written entirely in Zig
@@ -291,7 +292,8 @@ point, with demos:
   shows.
 - **A real commit editor**: a summary line and multiline body, a live count
   nudging the 50/72 rule, and your repository's `prepare-commit-msg` hook run
-  on open, so a branch ticket prefix finally lands in a terminal UI.
+  on open, so a branch ticket prefix finally lands in a terminal UI. It can also
+  draft the whole message from the staged diff with your own AI tool (`ctrl+g`).
 - **Range select anywhere**: `v` or `shift+arrows` mark a range in any list,
   then one key acts on every file, commit, branch or stash in it; `*` selects
   a branch's own commits.
@@ -331,6 +333,59 @@ point, with demos:
 
 [docs/features.md](docs/features.md) has the full per panel breakdown and the
 rest of the screenshots.
+
+## AI-Assisted Commit Messages
+
+<p align="center">
+  <img src="docs/assets/ziggity-ai-commit.gif" alt="Ziggity drafting a commit subject and body from the staged diff" width="900">
+</p>
+
+<p align="center"><i><code>ctrl+g</code> drafts the subject from the staged diff, then the body to match. Each field generates on its own, with a spinner while it works.</i></p>
+
+The commit dialog can write your message from the staged diff: a subject line
+that follows your recent style, and a body that explains the change. It is fully
+optional and stays out of the way. You can type over any field at any moment, a
+generated result never overwrites text you edited, and a failure is a small note
+in the field rather than a blocker. Once inserted, it is ordinary editable text.
+
+Ziggity ships no model and calls no API of its own. You point it at a command
+that reads a prompt on standard input and prints the completion on standard
+output, and everything about the provider, model, key, or subscription lives in
+that tool. That keeps ziggity a tiny static binary and lets you bring whatever
+you already pay for.
+
+### Unlock It With pi
+
+[pi](https://github.com/earendil-works/pi) is the companion we recommend: a
+small CLI that drives the ChatGPT Plus, Claude Pro, or GitHub Copilot
+subscription you may already have, so there is no per-token bill.
+
+1. Install pi (see its README) and sign in once:
+
+   ```sh
+   pi-ai login
+   ```
+
+2. Point ziggity at it from your config (`<repo>/.ziggity.ini`, or the file in
+   `ZIGGITY_CONFIG` for every repo):
+
+   ```ini
+   ai_command = pi -p
+   # optional: draft both fields the moment the commit dialog opens
+   auto_generate_commit_title = true
+   auto_generate_commit_description = true
+   ```
+
+3. Stage a change, press `c` to open the commit dialog, and press `ctrl+g` to
+   generate the focused field (the summary or the body); `ctrl+g` again
+   regenerates it. The subject targets your `commit_summary_limit` and the body
+   reflows to `commit_body_guide` (50 and 72 by default), so the AI honors the
+   same conventions the dialog already nudges you toward.
+
+Prefer API keys or a fully local model? Any command that fits the same stdin to
+stdout contract works, for example Simon Willison's
+[`llm`](https://llm.datasette.io) or `ollama run <model>`.
+[docs/configuration.md](docs/configuration.md) has the full setting reference.
 
 ## Keybindings
 
