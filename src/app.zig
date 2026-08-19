@@ -146,6 +146,8 @@ pub const TextPromptKind = enum {
     new_branch_from_commit,
     move_to_new_branch,
     set_commit_author,
+    set_author_date,
+    set_committer_date,
     rename_stash,
     stash_message,
 
@@ -175,6 +177,8 @@ pub const TextPromptKind = enum {
             .new_branch_from_commit => "New branch name (at the selected commit)",
             .move_to_new_branch => "New branch name (move commits onto it)",
             .set_commit_author => "Author as: Name <email>",
+            .set_author_date => "Author date (ISO 8601, e.g. 2024-01-31T14:00:00+01:00)",
+            .set_committer_date => "Committer date (ISO 8601, e.g. 2024-01-31T14:00:00+01:00)",
             .rename_stash => "Rename stash",
             .stash_message => "Stash message (empty = default WIP name)",
         };
@@ -509,6 +513,13 @@ pub const MenuAction = enum {
     copy_commit_author,
     reset_commit_author,
     set_commit_author,
+    edit_author_identity,
+    edit_author_date,
+    edit_committer_date,
+    author_date_now,
+    author_date_manual,
+    committer_date_now,
+    committer_date_manual,
     sort_branches_date,
     sort_branches_recency,
     sort_branches_alpha,
@@ -530,10 +541,28 @@ pub const branch_sort_menu = [_]MenuItem{
     .{ .label = "Sort alphabetically", .action = .sort_branches_alpha },
 };
 
-/// The `a` author menu on the Commits tab.
+/// The top-level `a` menu on the Commits tab: pick which commit attribute to
+/// edit. "Edit author name & email" opens `author_menu` below.
+pub const commit_attr_menu = [_]MenuItem{
+    .{ .label = "Edit author name & email", .action = .edit_author_identity },
+    .{ .label = "Edit author date", .action = .edit_author_date },
+    .{ .label = "Edit committer date", .action = .edit_committer_date },
+};
+
+/// The author name/email submenu, reached from `commit_attr_menu`.
 pub const author_menu = [_]MenuItem{
     .{ .label = "Reset author to your git user", .action = .reset_commit_author },
     .{ .label = "Set author...", .action = .set_commit_author },
+};
+
+/// The author/committer date submenus: set to the current time, or type a date.
+pub const author_date_menu = [_]MenuItem{
+    .{ .label = "Set to now", .action = .author_date_now },
+    .{ .label = "Set manually...", .action = .author_date_manual },
+};
+pub const committer_date_menu = [_]MenuItem{
+    .{ .label = "Set to now", .action = .committer_date_now },
+    .{ .label = "Set manually...", .action = .committer_date_manual },
 };
 
 /// The `y` copy-attribute menu on the Commits/Reflog tabs.
@@ -3602,8 +3631,8 @@ pub const App = struct {
             .amend_attribute => {
                 if (try commitops_mod.commitForAction(self)) |_| {
                     self.mode = .menu;
-                    self.active_menu = .{ .title = "Change author", .items = &author_menu, .index = 0 };
-                    try self.setMessage("change commit author", .{});
+                    self.active_menu = .{ .title = "Edit commit metadata", .items = &commit_attr_menu, .index = 0 };
+                    try self.setMessage("edit commit metadata", .{});
                 }
             },
             .reset_cherry_pick => {
@@ -6735,7 +6764,25 @@ pub const App = struct {
 
     pub fn startTextPrompt(self: *App, kind: TextPromptKind) !void {
         var prefill: []const u8 = "";
+        // Backing for a date prefill copied out of a (freed) CommitIdentity; must
+        // outlive the switch, since `prefill` is applied to the buffer below.
+        var date_buf: [64]u8 = undefined;
         switch (kind) {
+            // Prefill the date prompts with the commit's current value so you
+            // edit in place; any git-parseable string is accepted on submit.
+            .set_author_date, .set_committer_date => {
+                if (self.commits_tab == .commits and self.data.commits.len > 0) {
+                    const i = @min(self.commit_index, self.data.commits.len - 1);
+                    if (self.git.commitIdentity(self.data.commits[i].hash)) |id_val| {
+                        var id = id_val;
+                        defer id.deinit(self.allocator);
+                        const src = if (kind == .set_author_date) id.author_date else id.committer_date;
+                        const n = @min(src.len, date_buf.len);
+                        @memcpy(date_buf[0..n], src[0..n]);
+                        prefill = date_buf[0..n];
+                    } else |_| {}
+                }
+            },
             .new_branch => {
                 if (self.branches_tab != .local) self.branches_tab = .local;
                 self.focus = .branches;
@@ -7278,6 +7325,18 @@ pub const App = struct {
                 self.text_prompt_kind = null;
                 defer self.input_buffer.clearRetainingCapacity();
                 return commitops_mod.amendCommitAuthor(self, value);
+            },
+            .set_author_date => {
+                self.mode = .normal;
+                self.text_prompt_kind = null;
+                defer self.input_buffer.clearRetainingCapacity();
+                return commitops_mod.amendCommitAuthorDate(self, value);
+            },
+            .set_committer_date => {
+                self.mode = .normal;
+                self.text_prompt_kind = null;
+                defer self.input_buffer.clearRetainingCapacity();
+                return commitops_mod.amendCommitCommitterDate(self, value);
             },
             .rename_stash => {
                 const entry = self.selectedStash() orelse {
@@ -7979,6 +8038,39 @@ pub const App = struct {
             },
             .delete_tag_remote => return self.startRemoteTagDelete(false),
             .delete_tag_both => return self.startRemoteTagDelete(true),
+            .edit_author_identity => {
+                self.mode = .menu;
+                self.active_menu = .{ .title = "Edit author name & email", .items = &author_menu, .index = 0 };
+                try self.setMessage("change commit author", .{});
+            },
+            .edit_author_date => {
+                self.mode = .menu;
+                self.active_menu = .{ .title = "Edit author date", .items = &author_date_menu, .index = 0 };
+                try self.setMessage("edit author date", .{});
+            },
+            .edit_committer_date => {
+                self.mode = .menu;
+                self.active_menu = .{ .title = "Edit committer date", .items = &committer_date_menu, .index = 0 };
+                try self.setMessage("edit committer date", .{});
+            },
+            .author_date_now => {
+                const now = self.git.nowDate(self.allocator) catch {
+                    try self.setMessage("could not read the current time", .{});
+                    return;
+                };
+                defer self.allocator.free(now);
+                return commitops_mod.amendCommitAuthorDate(self, now);
+            },
+            .author_date_manual => return self.startTextPrompt(.set_author_date),
+            .committer_date_now => {
+                const now = self.git.nowDate(self.allocator) catch {
+                    try self.setMessage("could not read the current time", .{});
+                    return;
+                };
+                defer self.allocator.free(now);
+                return commitops_mod.amendCommitCommitterDate(self, now);
+            },
+            .committer_date_manual => return self.startTextPrompt(.set_committer_date),
             .reset_commit_author => return commitops_mod.amendCommitAuthor(self, null),
             .set_commit_author => return self.startTextPrompt(.set_commit_author),
             .sort_branches_date, .sort_branches_recency, .sort_branches_alpha => {
@@ -8708,9 +8800,11 @@ pub const App = struct {
                 // WITHOUT discarding the stat above, and never dumps tens of MB of
                 // raw bytes into the panel. Runs off the UI thread.
                 // (`--stat` alone gives the diffstat without the patch; `--format=`
-                // on the patch section suppresses a duplicate header.)
+                // on the patch section suppresses a duplicate header.) `--pretty=fuller`
+                // makes the header show AuthorDate and CommitDate separately, so the
+                // committer date (editable via `a`) is visible here.
                 try sections.append(page_alloc, .{
-                    .argv = try dupArgv(&.{ "show", "--no-ext-diff", "--color=always", "--show-signature", "--stat", hash }),
+                    .argv = try dupArgv(&.{ "show", "--no-ext-diff", "--color=always", "--show-signature", "--pretty=fuller", "--stat", hash }),
                     .annotate_sizes = true,
                     // A stat this large (~thousands of files) means the patch is
                     // tens of MB and/or binary — skip it rather than stall the

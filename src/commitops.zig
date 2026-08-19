@@ -188,21 +188,90 @@ pub fn writeRebaseTodoRange(w: *std.Io.Writer, commits: []const model.Commit, lo
 /// configured git user; otherwise set it to the given "Name <email>". Runs a
 /// non-interactive rebase whose todo `exec`s `git commit --amend` at the target,
 /// so it works for any commit, not just HEAD. Commits tab only.
-pub fn amendCommitAuthor(app: *App, author: ?[]const u8) !void {
+/// Guards for a single-commit history edit on the Commits tab. Returns the
+/// target commit index, or null after setting an explanatory message.
+fn commitAmendTarget(app: *App) !?usize {
     if (app.commits_tab != .commits) {
-        try app.setMessage("author edits apply to the Commits tab", .{});
-        return;
+        try app.setMessage("history edits apply to the Commits tab", .{});
+        return null;
     }
     if (app.data.state != .clean) {
         try app.setMessage("finish the in-progress rebase/merge first (m)", .{});
-        return;
+        return null;
     }
-    const commits = app.data.commits;
-    if (commits.len == 0) {
+    if (app.data.commits.len == 0) {
         try app.setMessage("no commit selected", .{});
-        return;
+        return null;
     }
-    const i = @min(app.commit_index, commits.len - 1);
+    return @min(app.commit_index, app.data.commits.len - 1);
+}
+
+/// Rewrite commit `i` by running `exec_cmd` (an `sh -c` line) as the rebase's
+/// exec step: pick oldest-first up to the target, exec the amend, then pick the
+/// newer commits so they replay on top.
+fn submitCommitAmend(app: *App, i: usize, exec_cmd: []const u8, gerund: []const u8, comptime success_fmt: []const u8) !void {
+    const commits = app.data.commits;
+    const base_ref = try std.fmt.allocPrint(app.allocator, "{s}^", .{commits[i].hash});
+    defer app.allocator.free(base_ref);
+
+    var aw: std.Io.Writer.Allocating = .init(app.allocator);
+    defer aw.deinit();
+    var k = i;
+    while (true) : (k -= 1) {
+        try aw.writer.print("pick {s}\n", .{commits[k].hash});
+        if (k == i) try aw.writer.print("exec {s}\n", .{exec_cmd});
+        if (k == 0) break;
+    }
+    const todo = try aw.toOwnedSlice();
+    defer app.allocator.free(todo);
+
+    return app.requestMutation(
+        .{ .rebase_todo = .{ .base_ref = base_ref, .todo = todo, .message = null } },
+        .{ .gerund = gerund, .command = "git rebase -i" },
+        success_fmt,
+        .{commits[i].short_hash},
+    );
+}
+
+/// `NAME='value' ` — a shell-safe env assignment prefix for the exec line.
+fn appendEnvAssign(out: *std.ArrayList(u8), allocator: std.mem.Allocator, name: []const u8, value: []const u8) !void {
+    try out.appendSlice(allocator, name);
+    try out.append(allocator, '=');
+    try shellQuote(out, allocator, value);
+    try out.append(allocator, ' ');
+}
+
+/// Build the `sh -c` exec line for a date edit. The committer name/email are
+/// always pinned to the originals. When `edit_committer` is true the committer
+/// date is set to `new_date` and the author is left untouched by the amend;
+/// otherwise the committer date is pinned to `orig_committer_date` and the
+/// author date is set via `--date`, so only the author date moves.
+fn dateEditExec(
+    allocator: std.mem.Allocator,
+    committer_name: []const u8,
+    committer_email: []const u8,
+    orig_committer_date: []const u8,
+    new_date: []const u8,
+    edit_committer: bool,
+) ![]u8 {
+    var cmd: std.ArrayList(u8) = .empty;
+    errdefer cmd.deinit(allocator);
+    try appendEnvAssign(&cmd, allocator, "GIT_COMMITTER_NAME", committer_name);
+    try appendEnvAssign(&cmd, allocator, "GIT_COMMITTER_EMAIL", committer_email);
+    if (edit_committer) {
+        try cmd.appendSlice(allocator, "GIT_COMMITTER_DATE=");
+        try shellQuote(&cmd, allocator, new_date);
+        try cmd.appendSlice(allocator, " git commit --amend --no-edit");
+    } else {
+        try appendEnvAssign(&cmd, allocator, "GIT_COMMITTER_DATE", orig_committer_date);
+        try cmd.appendSlice(allocator, "git commit --amend --no-edit --date=");
+        try shellQuote(&cmd, allocator, new_date);
+    }
+    return cmd.toOwnedSlice(allocator);
+}
+
+pub fn amendCommitAuthor(app: *App, author: ?[]const u8) !void {
+    const i = (try commitAmendTarget(app)) orelse return;
 
     // The amend command run by the rebase's `exec` line (sh -c).
     var cmd_buf: std.ArrayList(u8) = .empty;
@@ -214,28 +283,56 @@ pub fn amendCommitAuthor(app: *App, author: ?[]const u8) !void {
     } else {
         try cmd_buf.appendSlice(app.allocator, " --reset-author");
     }
+    return submitCommitAmend(app, i, cmd_buf.items, "editing author", "updated author of {s}");
+}
 
-    const base_ref = try std.fmt.allocPrint(app.allocator, "{s}^", .{commits[i].hash});
-    defer app.allocator.free(base_ref);
-
-    // Oldest-first todo: pick the target, exec the amend, then pick newer commits.
-    var aw: std.Io.Writer.Allocating = .init(app.allocator);
-    defer aw.deinit();
-    var k = i;
-    while (true) : (k -= 1) {
-        try aw.writer.print("pick {s}\n", .{commits[k].hash});
-        if (k == i) try aw.writer.print("exec {s}\n", .{cmd_buf.items});
-        if (k == 0) break;
+/// Set commit `i`'s author date to `date` (any git-parseable form), pinning the
+/// committer name/email/date to their originals so only the author date moves
+/// (a plain amend would reset the committer to "now").
+pub fn amendCommitAuthorDate(app: *App, date_in: []const u8) !void {
+    const date = std.mem.trim(u8, date_in, " \t\r\n");
+    if (date.len == 0) {
+        try app.setMessage("date cannot be empty", .{});
+        return;
     }
-    const todo = try aw.toOwnedSlice();
-    defer app.allocator.free(todo);
+    if (!app.git.isValidDate(date)) {
+        try app.setMessage("invalid date; use ISO 8601 (2024-01-31T14:00:00+01:00) or @<epoch> <tz>", .{});
+        return;
+    }
+    const i = (try commitAmendTarget(app)) orelse return;
+    var id = app.git.commitIdentity(app.data.commits[i].hash) catch {
+        try app.setMessage("could not read the commit's dates", .{});
+        return;
+    };
+    defer id.deinit(app.allocator);
 
-    return app.requestMutation(
-        .{ .rebase_todo = .{ .base_ref = base_ref, .todo = todo, .message = null } },
-        .{ .gerund = "editing author", .command = "git rebase -i" },
-        "updated author of {s}",
-        .{commits[i].short_hash},
-    );
+    const exec = try dateEditExec(app.allocator, id.committer_name, id.committer_email, id.committer_date, date, false);
+    defer app.allocator.free(exec);
+    return submitCommitAmend(app, i, exec, "editing author date", "updated author date of {s}");
+}
+
+/// Set commit `i`'s committer date to `date`, preserving its committer
+/// name/email and the whole author identity (name/email/date).
+pub fn amendCommitCommitterDate(app: *App, date_in: []const u8) !void {
+    const date = std.mem.trim(u8, date_in, " \t\r\n");
+    if (date.len == 0) {
+        try app.setMessage("date cannot be empty", .{});
+        return;
+    }
+    if (!app.git.isValidDate(date)) {
+        try app.setMessage("invalid date; use ISO 8601 (2024-01-31T14:00:00+01:00) or @<epoch> <tz>", .{});
+        return;
+    }
+    const i = (try commitAmendTarget(app)) orelse return;
+    var id = app.git.commitIdentity(app.data.commits[i].hash) catch {
+        try app.setMessage("could not read the commit's dates", .{});
+        return;
+    };
+    defer id.deinit(app.allocator);
+
+    const exec = try dateEditExec(app.allocator, id.committer_name, id.committer_email, id.committer_date, date, true);
+    defer app.allocator.free(exec);
+    return submitCommitAmend(app, i, exec, "editing committer date", "updated committer date of {s}");
 }
 
 /// `d` in a commit's file list: drop the selected file(s)' changes from that
@@ -465,4 +562,23 @@ pub fn autosquashFixups(app: *App) !void {
     var cmd_buf: [128]u8 = undefined;
     const cmd = std.fmt.bufPrint(&cmd_buf, "git rebase -i --autosquash {s}", .{base}) catch "git rebase -i --autosquash";
     return app.requestMutation(.{ .autosquash = base }, .{ .gerund = "autosquashing", .command = cmd }, "autosquashed fixups", .{});
+}
+
+test "dateEditExec pins the untouched fields and quotes safely" {
+    const a = std.testing.allocator;
+
+    // Author-date edit: committer fully pinned, author date set via --date.
+    const e1 = try dateEditExec(a, "Al Ice", "al@x.io", "2020-06-01T20:00:00+00:00", "2021-03-15T09:30:00+00:00", false);
+    defer a.free(e1);
+    try std.testing.expect(std.mem.indexOf(u8, e1, "GIT_COMMITTER_NAME='Al Ice'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, e1, "GIT_COMMITTER_EMAIL='al@x.io'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, e1, "GIT_COMMITTER_DATE='2020-06-01T20:00:00+00:00'") != null); // original, pinned
+    try std.testing.expect(std.mem.indexOf(u8, e1, "--date='2021-03-15T09:30:00+00:00'") != null); // new author date
+
+    // Committer-date edit: committer date is the new value; author untouched (no --date).
+    const e2 = try dateEditExec(a, "Al Ice", "al@x.io", "2020-06-01T20:00:00+00:00", "2022-12-31T23:59:00+00:00", true);
+    defer a.free(e2);
+    try std.testing.expect(std.mem.indexOf(u8, e2, "GIT_COMMITTER_DATE='2022-12-31T23:59:00+00:00'") != null); // new committer date
+    try std.testing.expect(std.mem.indexOf(u8, e2, "--date=") == null); // author left alone
+    try std.testing.expect(std.mem.indexOf(u8, e2, "GIT_COMMITTER_NAME='Al Ice'") != null);
 }

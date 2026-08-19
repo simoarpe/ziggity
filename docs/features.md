@@ -202,8 +202,12 @@ The animation itself is in the [README](../README.md).
   commit actually lands.
 - Per commit: reset (`g`, soft, mixed or hard), revert (`t`), checkout
   (`space`, detached), branch from it (`n`), move commits to a new branch
-  (`N`), tag (`T`), change author (`a`), and a copy menu (`y`: hash, subject,
-  author).
+  (`N`), tag (`T`), and a copy menu (`y`: hash, subject, author).
+- Edit commit metadata (`a`): change the author name and email, the author
+  date, or the committer date. The date prompts prefill with the commit's
+  current value (ISO 8601) and validate the input before rewriting, so a typo
+  is rejected up front rather than stranding a rebase. Editing one date leaves
+  the other exactly as it was.
 - GPG signatures: a signed commit's diff shows git's verification block
   (`--show-signature`), and `x` verifies the selected commit's signature on
   demand (result in a dialog), with no per row cost.

@@ -848,6 +848,104 @@ pub const Git = struct {
         res.deinit(self.allocator);
     }
 
+    /// A commit's author and committer identity fields, read in strict ISO 8601
+    /// dates (`%aI`/`%cI`) so they round-trip back through `GIT_*_DATE`. Used to
+    /// prefill the date prompts and to pin the fields an edit should leave alone.
+    pub const CommitIdentity = struct {
+        author_name: []u8,
+        author_email: []u8,
+        author_date: []u8,
+        committer_name: []u8,
+        committer_email: []u8,
+        committer_date: []u8,
+
+        pub fn deinit(self: *CommitIdentity, allocator: std.mem.Allocator) void {
+            allocator.free(self.author_name);
+            allocator.free(self.author_email);
+            allocator.free(self.author_date);
+            allocator.free(self.committer_name);
+            allocator.free(self.committer_email);
+            allocator.free(self.committer_date);
+            self.* = undefined;
+        }
+    };
+
+    /// The current time as git's raw "<epoch> <tz>" date string — accepted by
+    /// `--date`, `GIT_COMMITTER_DATE`, and `isValidDate` alike (unlike the word
+    /// "now", which the committer path rejects). Read off `git var
+    /// GIT_AUTHOR_IDENT`, whose output ends "… <epoch> <tz>". Caller owns it.
+    pub fn nowDate(self: *Git, allocator: std.mem.Allocator) ![]u8 {
+        var res = try self.exec(&.{ "var", "GIT_AUTHOR_IDENT" });
+        defer res.deinit(self.allocator);
+        if (!res.ok()) return error.GitCommandFailed;
+        const line = std.mem.trim(u8, res.stdout, " \t\r\n");
+        // Name/email may contain spaces, so take the final two tokens.
+        const last = std.mem.lastIndexOfScalar(u8, line, ' ') orelse return error.ParseFailed;
+        const tz = line[last + 1 ..];
+        const prev = std.mem.lastIndexOfScalar(u8, line[0..last], ' ') orelse return error.ParseFailed;
+        const epoch = line[prev + 1 .. last];
+        return std.fmt.allocPrint(allocator, "{s} {s}", .{ epoch, tz });
+    }
+
+    /// Whether `date` is a form git will accept for author/committer dates.
+    /// Validated with `git var GIT_AUTHOR_IDENT` (which parses `GIT_AUTHOR_DATE`
+    /// through the same strict date parser the committer-date path uses), so a
+    /// pass here guarantees the later amend won't fail mid-rebase. Accepts ISO
+    /// 8601 and `@<epoch> <tz>`; rejects garbage and relative forms like
+    /// "2 days ago" (which the committer-date path cannot take anyway).
+    pub fn isValidDate(self: *Git, date: []const u8) bool {
+        var env = self.environ.clone(self.allocator) catch return false;
+        defer env.deinit();
+        env.put("GIT_AUTHOR_DATE", date) catch return false;
+        var child = std.process.spawn(self.io, .{
+            .argv = &.{ "git", "var", "GIT_AUTHOR_IDENT" },
+            .cwd = .{ .path = self.root },
+            .environ_map = &env,
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        }) catch return false;
+        const term = child.wait(self.io) catch return false;
+        return switch (term) {
+            .exited => |code| code == 0,
+            else => false,
+        };
+    }
+
+    pub fn commitIdentity(self: *Git, hash: []const u8) !CommitIdentity {
+        var res = try self.exec(&.{ "show", "-s", "--no-show-signature", "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI", hash });
+        defer res.deinit(self.allocator);
+        if (!res.ok()) return error.GitCommandFailed;
+        const trimmed = std.mem.trim(u8, res.stdout, "\n");
+        var it = std.mem.splitScalar(u8, trimmed, 0);
+        const an = it.next() orelse return error.ParseFailed;
+        const ae = it.next() orelse return error.ParseFailed;
+        const ai = it.next() orelse return error.ParseFailed;
+        const cn = it.next() orelse return error.ParseFailed;
+        const ce = it.next() orelse return error.ParseFailed;
+        const ci = it.next() orelse return error.ParseFailed;
+
+        const author_name = try self.allocator.dupe(u8, an);
+        errdefer self.allocator.free(author_name);
+        const author_email = try self.allocator.dupe(u8, ae);
+        errdefer self.allocator.free(author_email);
+        const author_date = try self.allocator.dupe(u8, ai);
+        errdefer self.allocator.free(author_date);
+        const committer_name = try self.allocator.dupe(u8, cn);
+        errdefer self.allocator.free(committer_name);
+        const committer_email = try self.allocator.dupe(u8, ce);
+        errdefer self.allocator.free(committer_email);
+        const committer_date = try self.allocator.dupe(u8, ci);
+        return .{
+            .author_name = author_name,
+            .author_email = author_email,
+            .author_date = author_date,
+            .committer_name = committer_name,
+            .committer_email = committer_email,
+            .committer_date = committer_date,
+        };
+    }
+
     pub fn loadCommits(self: *Git, ref_name: []const u8, limit: usize) ![]model.Commit {
         const limit_arg = try std.fmt.allocPrint(self.allocator, "-{d}", .{limit});
         defer self.allocator.free(limit_arg);
