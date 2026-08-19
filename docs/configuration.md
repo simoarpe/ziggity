@@ -39,6 +39,20 @@ highlight_conventional_commits = true
 # branch), matching an interactive commit. Default on; false skips the hook.
 prepare_commit_msg_hook = true
 
+# AI-assisted commit authoring. `ai_command` is a shell command that reads a
+# prompt on stdin and prints a completion on stdout — ziggity treats it as a
+# black box, so the provider, model, key, or subscription all live in that tool,
+# never in ziggity. AI features (the ctrl+g shortcut in the commit dialog, and
+# the two flags below) appear only when this is set. Examples:
+#   ai_command = pi -p                     # earendil pi; ChatGPT Plus/Claude Pro/Copilot via `pi-ai login`
+#   ai_command = llm                       # Simon Willison's llm (API keys / local)
+#   ai_command = ollama run qwen2.5-coder  # local, free
+ai_command =
+# Start generating automatically when the commit dialog opens (only affects
+# automatic start; ctrl+g manual generation is always available when configured).
+auto_generate_commit_title = false
+auto_generate_commit_description = false
+
 # Seconds between idle background working tree refreshes (git status, run
 # off the interface thread). On a big repo a tight interval makes git status
 # thrash; default 10. Set to 0 to disable the periodic refresh (it still

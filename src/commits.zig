@@ -20,6 +20,7 @@ pub fn startCommitPrompt(app: *App, no_verify: bool) !void {
     app.commit_action = .create;
     app.commit_no_verify = no_verify;
     app.commit_field = .subject;
+    app.resetCommitAiState(); // fresh dialog instance: bump generation, clear state
     app.commit_buffer.clearRetainingCapacity();
     app.commit_body_buffer.clearRetainingCapacity();
     // The first time the dialog opens this session, pick up a draft left on disk
@@ -63,6 +64,15 @@ pub fn startCommitPrompt(app: *App, no_verify: bool) !void {
         try app.setMessage("enter commit message (prefilled by prepare-commit-msg)", .{});
     } else {
         try app.setMessage("enter commit message", .{});
+    }
+    // Automatic AI generation on open, when configured. Only for empty fields, so
+    // a restored draft or hook seed is never clobbered. Title and description
+    // requests start independently (concurrently), neither waiting on the other.
+    if (app.config.aiConfigured()) {
+        const subj_empty = std.mem.trim(u8, app.commit_buffer.items, " \t\r\n").len == 0;
+        const body_empty = std.mem.trim(u8, app.commit_body_buffer.items, " \t\r\n").len == 0;
+        if (app.config.auto_generate_commit_title and subj_empty) try app.requestAiGeneration(.title);
+        if (app.config.auto_generate_commit_description and body_empty) try app.requestAiGeneration(.description);
     }
 }
 
@@ -142,6 +152,7 @@ pub fn startReword(app: *App) !void {
 
     app.mode = .commit_prompt;
     app.commit_action = .reword;
+    app.resetCommitAiState();
     app.commit_reword_index = i;
     app.commit_field = .subject;
     app.commit_buffer.clearRetainingCapacity();
@@ -180,7 +191,18 @@ pub fn handleCommitPromptKey(app: *App, key: vaxis.Key) !void {
         if (app.commit_action == .create) try savePreservedCommitMessage(app);
         app.commit_buffer.clearRetainingCapacity();
         app.commit_body_buffer.clearRetainingCapacity();
+        app.resetCommitAiState(); // ignore any in-flight AI result for this dialog
         try app.setMessage("commit cancelled", .{});
+        return;
+    }
+    // ctrl+g: generate/regenerate the focused field with AI (when configured).
+    // Only for `create` — AI describes the staged diff, which is meaningless for
+    // a reword of an existing commit.
+    if (key.matches('g', .{ .ctrl = true })) {
+        if (app.commit_action == .create and app.config.aiConfigured()) {
+            const field: @import("aiauthor.zig").Field = if (app.commit_field == .subject) .title else .description;
+            try app.requestAiGeneration(field);
+        }
         return;
     }
     // Tab switches between the subject and body fields.
@@ -196,6 +218,7 @@ pub fn handleCommitPromptKey(app: *App, key: vaxis.Key) !void {
         if (app.commit_field == .body) {
             try app.commit_body_buffer.insertSlice(app.allocator, app.commit_body_cursor, "\n");
             app.commit_body_cursor += 1;
+            app.bumpCommitFieldRevision(.body); // a real edit — invalidates a stale AI body
             return;
         }
         if (app.pasting) {
@@ -206,7 +229,9 @@ pub fn handleCommitPromptKey(app: *App, key: vaxis.Key) !void {
     }
     const buffer = if (app.commit_field == .subject) &app.commit_buffer else &app.commit_body_buffer;
     const cursor = if (app.commit_field == .subject) &app.commit_cursor else &app.commit_body_cursor;
-    _ = try app.editLine(buffer, cursor, key);
+    // A content edit bumps the field revision so an AI result from before the
+    // edit is discarded; cursor-only moves must not.
+    if (try app.editLine(buffer, cursor, key) == .changed) app.bumpCommitFieldRevision(app.commit_field);
 }
 
 pub fn submitCommit(app: *App) !void {
@@ -225,6 +250,7 @@ pub fn submitCommit(app: *App) !void {
     const action = app.commit_action;
     const reword_index = app.commit_reword_index;
     app.mode = .normal;
+    app.resetCommitAiState(); // dialog closing: ignore any in-flight AI result
     // Preserve the draft across the async commit so a failure (a rejecting
     // pre-commit hook, a signing error, nothing staged…) keeps the message
     // instead of discarding it — `completeMutation` drops it once the commit

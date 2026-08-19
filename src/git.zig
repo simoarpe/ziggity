@@ -946,6 +946,74 @@ pub const Git = struct {
         };
     }
 
+    /// The staged patch (`git diff --cached`), the AI context for commit
+    /// authoring. Owned by the caller; empty on failure.
+    pub fn stagedDiff(self: *Git) ![]u8 {
+        var res = try self.exec(&.{ "diff", "--cached", "--no-color", "--no-ext-diff" });
+        defer res.deinit(self.allocator);
+        if (!res.ok()) return self.allocator.dupe(u8, "");
+        return self.allocator.dupe(u8, res.stdout);
+    }
+
+    /// Newline-separated names of staged files (`git diff --cached --name-only`).
+    pub fn stagedFileNames(self: *Git) ![]u8 {
+        var res = try self.exec(&.{ "diff", "--cached", "--name-only" });
+        defer res.deinit(self.allocator);
+        if (!res.ok()) return self.allocator.dupe(u8, "");
+        return self.allocator.dupe(u8, res.stdout);
+    }
+
+    /// The `n` most recent commit subjects (newline-separated), so the model can
+    /// pick up the repo's commit-message conventions. Owned; empty on failure.
+    pub fn recentSubjects(self: *Git, n: usize) ![]u8 {
+        const narg = std.fmt.allocPrint(self.allocator, "-{d}", .{n}) catch return self.allocator.dupe(u8, "");
+        defer self.allocator.free(narg);
+        var res = self.exec(&.{ "log", narg, "--no-merges", "--format=%s" }) catch return self.allocator.dupe(u8, "");
+        defer res.deinit(self.allocator);
+        if (!res.ok()) return self.allocator.dupe(u8, "");
+        return self.allocator.dupe(u8, res.stdout);
+    }
+
+    /// Append `s` single-quoted (POSIX-safe) to `out`, for embedding a path in a
+    /// `sh -c` line.
+    fn appendSingleQuoted(out: *std.ArrayList(u8), allocator: std.mem.Allocator, s: []const u8) !void {
+        try out.append(allocator, '\'');
+        for (s) |c| {
+            if (c == '\'') try out.appendSlice(allocator, "'\\''") else try out.append(allocator, c);
+        }
+        try out.append(allocator, '\'');
+    }
+
+    /// Run the configured AI command, feeding `prompt` on stdin and returning its
+    /// stdout. The prompt is piped in from a temp file (`cat file | <command>`),
+    /// which handles pipelines and avoids any stdin/stdout deadlock. `slot`
+    /// (e.g. "title"/"desc") separates concurrent requests' temp files. ziggity
+    /// treats the command as a black box: prompt in, completion out.
+    pub fn runAiCommand(self: *Git, command: []const u8, slot: []const u8, prompt: []const u8) !ExecResult {
+        const name = try std.fmt.allocPrint(self.allocator, "ziggity-ai-{s}", .{slot});
+        defer self.allocator.free(name);
+        const path = try self.gitDirPath(name);
+        defer self.allocator.free(path);
+        try std.Io.Dir.writeFile(.cwd(), self.io, .{ .sub_path = path, .data = prompt });
+        defer std.Io.Dir.deleteFile(.cwd(), self.io, path) catch {};
+
+        var full: std.ArrayList(u8) = .empty;
+        defer full.deinit(self.allocator);
+        try full.appendSlice(self.allocator, "cat ");
+        try appendSingleQuoted(&full, self.allocator, path);
+        try full.appendSlice(self.allocator, " | ");
+        try full.appendSlice(self.allocator, command);
+
+        const result = try runWithLockRetry(self.allocator, self.io, .{
+            .argv = &.{ "sh", "-c", full.items },
+            .cwd = .{ .path = self.root },
+            .environ_map = self.environ,
+            .stdout_limit = .limited(1 * 1024 * 1024),
+            .stderr_limit = .limited(256 * 1024),
+        });
+        return .{ .stdout = result.stdout, .stderr = result.stderr, .term = result.term };
+    }
+
     pub fn loadCommits(self: *Git, ref_name: []const u8, limit: usize) ![]model.Commit {
         const limit_arg = try std.fmt.allocPrint(self.allocator, "-{d}", .{limit});
         defer self.allocator.free(limit_arg);

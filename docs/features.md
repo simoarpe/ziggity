@@ -76,6 +76,24 @@ a live character count nudging the 50/72 rule, and optionally a
 
 ![Commit message dialog](screenshots/08-commit-dialog.png)
 
+**AI-assisted authoring (optional).** Set `ai_command` to a CLI that reads a
+prompt on stdin and prints a completion (for example `pi -p`, `llm`, or
+`ollama run <model>`) and the commit dialog gains AI generation. ziggity treats
+the command as a black box, so the provider, model, and key or subscription all
+live in that tool; nothing AI-related appears until it is configured. Then:
+
+- `ctrl+g` generates (or regenerates) the focused field from the staged diff:
+  the title when the summary is focused, the body when the description is. The
+  title targets `commit_summary_limit` characters and the body is reflowed to
+  `commit_body_guide` columns (50 and 72 by default), so the AI follows the same
+  length conventions the dialog already nudges you toward.
+- `auto_generate_commit_title` / `auto_generate_commit_description` start
+  generation automatically when the dialog opens (concurrently, never blocking
+  it). A spinner shows in each field while it works.
+- You can type at any time; a generated result never overwrites text you have
+  edited, and a failure is a small in-field note (`ctrl+g` to retry), never a
+  blocker. Generated text is ordinary editable text once inserted.
+
 ### Branches & Tags
 
 The Branches panel shows ahead and behind arrows, upstream tracking and per

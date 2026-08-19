@@ -15,6 +15,7 @@ const rebaseplan_mod = @import("rebaseplan.zig");
 const staging_mod = @import("staging.zig");
 const commitgraph_mod = @import("commitgraph.zig");
 const graphlanes_mod = @import("graphlanes.zig");
+const aiauthor_mod = @import("aiauthor.zig");
 const worddiff = @import("worddiff.zig");
 
 /// Active theme, set from config at startup and read by `styles()`.
@@ -56,6 +57,8 @@ const Event = union(enum) {
     scoped_load_done,
     graph_done,
     pr_status_done,
+    ai_title_done,
+    ai_desc_done,
 };
 
 /// A network op run off the UI loop. Allocations use the SMP allocator, which is
@@ -362,6 +365,66 @@ fn scopedLoadWorker(sr: *ScopedLoadRun) void {
     _ = sr.loop.tryPostEvent(.scoped_load_done) catch false;
 }
 
+/// An off-thread AI commit-authoring request (one per field). Owns its command
+/// and title copies plus the generated result; borrows the stable repo strings.
+/// Carries the revision tokens captured at request time so the result can be
+/// applied or discarded on the UI thread. `root`/`git_dir`/`environ` outlive the
+/// worker (they belong to the app's Git), so a closed dialog can't dangle it.
+const AiGenRun = struct {
+    io: std.Io,
+    loop: *vaxis.Loop(Event),
+    root: []u8,
+    git_dir: []const u8,
+    environ: *std.process.Environ.Map,
+    command: []u8,
+    current_title: []u8,
+    field: aiauthor_mod.Field,
+    limits: aiauthor_mod.Limits = .{},
+    dialog_generation: u64 = 0,
+    revision: u64 = 0,
+    staged_signature: u64 = 0,
+    result: ?[]u8 = null,
+    failed: bool = false,
+
+    fn free(self: *AiGenRun) void {
+        async_allocator.free(self.command);
+        async_allocator.free(self.current_title);
+        if (self.result) |r| async_allocator.free(r);
+        self.result = null;
+    }
+};
+
+fn runAiGen(ag: *AiGenRun) void {
+    var wgit = git_mod.Git{
+        .allocator = async_allocator,
+        .io = ag.io,
+        .environ = ag.environ,
+        .root = ag.root,
+        .git_dir = @constCast(ag.git_dir),
+    };
+    defer {
+        for (wgit.command_log.items) |e| async_allocator.free(e);
+        wgit.command_log.deinit(async_allocator);
+    }
+    if (aiauthor_mod.generate(async_allocator, &wgit, ag.command, ag.field, ag.current_title, ag.limits)) |text| {
+        ag.result = text;
+        ag.failed = false;
+    } else |_| {
+        ag.result = null;
+        ag.failed = true;
+    }
+}
+
+fn aiTitleWorker(ag: *AiGenRun) void {
+    runAiGen(ag);
+    _ = ag.loop.tryPostEvent(.ai_title_done) catch false;
+}
+
+fn aiDescWorker(ag: *AiGenRun) void {
+    runAiGen(ag);
+    _ = ag.loop.tryPostEvent(.ai_desc_done) catch false;
+}
+
 // The ticker always wakes at this fast cadence so the spinner animates smoothly
 // and a newly-started op begins spinning within one tick — instead of staying
 // stuck on the first frame until a long idle sleep finishes.
@@ -479,6 +542,20 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
         f.await(io);
         if (mutation_run.result) |*r| r.deinit(async_allocator);
         mutation_run.mutation.deinit(async_allocator);
+    };
+
+    // AI commit-authoring workers (one per field), each single-flight.
+    var ai_title_run: AiGenRun = undefined;
+    var ai_title_future: ?std.Io.Future(void) = null;
+    defer if (ai_title_future) |*f| {
+        f.await(io);
+        ai_title_run.free();
+    };
+    var ai_desc_run: AiGenRun = undefined;
+    var ai_desc_future: ?std.Io.Future(void) = null;
+    defer if (ai_desc_future) |*f| {
+        f.await(io);
+        ai_desc_run.free();
     };
 
     var render_ctx = RenderCtx{ .vx = &vx, .writer = writer, .app = app };
@@ -620,6 +697,24 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     commitgraph_mod.complete(app, graph_run.result, graph_run.parents, graph_run.generation, async_allocator);
                     graph_run.result = null;
                     graph_run.parents = null;
+                }
+            },
+            .ai_title_done => {
+                if (ai_title_future) |*f| {
+                    f.await(io);
+                    ai_title_future = null;
+                    app.applyAiResult(.title, ai_title_run.dialog_generation, ai_title_run.revision, ai_title_run.staged_signature, if (ai_title_run.failed) null else ai_title_run.result) catch {};
+                    ai_title_run.free();
+                    render_needed = true;
+                }
+            },
+            .ai_desc_done => {
+                if (ai_desc_future) |*f| {
+                    f.await(io);
+                    ai_desc_future = null;
+                    app.applyAiResult(.description, ai_desc_run.dialog_generation, ai_desc_run.revision, ai_desc_run.staged_signature, if (ai_desc_run.failed) null else ai_desc_run.result) catch {};
+                    ai_desc_run.free();
+                    render_needed = true;
                 }
             },
         }
@@ -851,10 +946,64 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             }
         }
 
+        // Start a queued AI commit-title generation off the loop (single-flight).
+        if (ai_title_future == null) {
+            if (app.commit_ai_title_req) |req| {
+                ai_title_run = .{
+                    .io = io,
+                    .loop = &loop,
+                    .root = app.git.root,
+                    .git_dir = app.git.git_dir,
+                    .environ = app.git.environ,
+                    .command = async_allocator.dupe(u8, app.config.ai_command.get()) catch "",
+                    .current_title = async_allocator.dupe(u8, req.current_title) catch "",
+                    .field = .title,
+                    .limits = req.limits,
+                    .dialog_generation = req.dialog_generation,
+                    .revision = req.revision,
+                    .staged_signature = req.staged_signature,
+                };
+                app.clearAiRequest(.title);
+                ai_title_future = io.concurrent(aiTitleWorker, .{&ai_title_run}) catch blk: {
+                    app.applyAiResult(.title, ai_title_run.dialog_generation, ai_title_run.revision, ai_title_run.staged_signature, null) catch {};
+                    ai_title_run.free();
+                    break :blk null;
+                };
+                render_needed = true;
+            }
+        }
+
+        // Likewise for the AI commit-description generation.
+        if (ai_desc_future == null) {
+            if (app.commit_ai_desc_req) |req| {
+                ai_desc_run = .{
+                    .io = io,
+                    .loop = &loop,
+                    .root = app.git.root,
+                    .git_dir = app.git.git_dir,
+                    .environ = app.git.environ,
+                    .command = async_allocator.dupe(u8, app.config.ai_command.get()) catch "",
+                    .current_title = async_allocator.dupe(u8, req.current_title) catch "",
+                    .field = .description,
+                    .limits = req.limits,
+                    .dialog_generation = req.dialog_generation,
+                    .revision = req.revision,
+                    .staged_signature = req.staged_signature,
+                };
+                app.clearAiRequest(.description);
+                ai_desc_future = io.concurrent(aiDescWorker, .{&ai_desc_run}) catch blk: {
+                    app.applyAiResult(.description, ai_desc_run.dialog_generation, ai_desc_run.revision, ai_desc_run.staged_signature, null) catch {};
+                    ai_desc_run.free();
+                    break :blk null;
+                };
+                render_needed = true;
+            }
+        }
+
         // Reflect foreground-busy state for the ticker (spinner animation speed).
         // Speed the ticker up (to animate the spinner + repaint) while a
         // foreground op runs OR a preview is still loading off-thread.
-        app.busy_flag.store(app.foregroundBusy() or app.preview_loading, .release);
+        app.busy_flag.store(app.foregroundBusy() or app.preview_loading or app.commitAiGenerating(), .release);
         // Reflect whether the about-splash animation wants continuous ticks.
         app.animate_flag.store(app.wantsAnimation(), .release);
 
@@ -2092,11 +2241,27 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     if (count_col > 8) print(win, 0, count_col, count_text, count_style);
 
     // Summary: single line at row 1, scrolled horizontally to keep the caret in.
+    // While empty and being generated, the field shows a spinner placeholder;
+    // on failure a small non-modal status. Any typed text takes over immediately.
     const subj = app.commit_buffer.items;
     const subj_caret = @min(app.commit_cursor, subj.len);
     const subj_sc = app_mod.viewScroll(app.commit_scroll, win.width, subj_caret);
     app.commit_scroll = subj_sc.origin;
-    print(win, 1, 0, subj[subj_sc.origin..], st.normal);
+    // The placeholder replaces the field while generating (including a regenerate
+    // over existing text), but only until the user types: an edit advances the
+    // revision past the one captured when generation began, and their text takes
+    // over immediately.
+    const title_generating = app.commit_ai_title_state == .generating and
+        app.commit_title_revision == app.commit_title_gen_rev;
+    if (title_generating) {
+        var sb: [96]u8 = undefined;
+        const m = std.fmt.bufPrint(&sb, "{s} Generating commit title...", .{spinnerGlyph(app.spinner_frame)}) catch "Generating...";
+        print(win, 1, 0, m, st.muted);
+    } else if (app.commit_ai_title_state == .failed and subj.len == 0) {
+        print(win, 1, 0, "AI generation failed  (ctrl+g to retry)", st.warning);
+    } else {
+        print(win, 1, 0, subj[subj_sc.origin..], st.normal);
+    }
 
     // Body: multi-line area from row 4 down to the footer, scrolled in both axes.
     const body_top: u16 = 4;
@@ -2133,15 +2298,25 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
         }
     }
 
-    var lines = std.mem.splitScalar(u8, body, '\n');
-    var idx: usize = 0;
-    var drawn: usize = 0;
-    while (lines.next()) |line| : (idx += 1) {
-        if (idx < scy.origin) continue;
-        if (drawn >= body_h) break;
-        const row: u16 = body_top + @as(u16, @intCast(drawn));
-        if (scx.origin < line.len) print(win, row, 0, line[scx.origin..], st.normal);
-        drawn += 1;
+    const desc_generating = app.commit_ai_desc_state == .generating and
+        app.commit_desc_revision == app.commit_desc_gen_rev;
+    if (desc_generating) {
+        var sb: [96]u8 = undefined;
+        const m = std.fmt.bufPrint(&sb, "{s} Generating commit description...", .{spinnerGlyph(app.spinner_frame)}) catch "Generating...";
+        print(win, body_top, 0, m, st.muted);
+    } else if (app.commit_ai_desc_state == .failed and body.len == 0) {
+        print(win, body_top, 0, "AI generation failed  (ctrl+g to retry)", st.warning);
+    } else {
+        var lines = std.mem.splitScalar(u8, body, '\n');
+        var idx: usize = 0;
+        var drawn: usize = 0;
+        while (lines.next()) |line| : (idx += 1) {
+            if (idx < scy.origin) continue;
+            if (drawn >= body_h) break;
+            const row: u16 = body_top + @as(u16, @intCast(drawn));
+            if (scx.origin < line.len) print(win, row, 0, line[scx.origin..], st.normal);
+            drawn += 1;
+        }
     }
 
     // Scrollbar over the multi-line description when it overflows, on the right
@@ -2151,11 +2326,17 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     const py: u16 = (root.height - 12) / 2;
     drawScrollbarRange(root, px + w - 1, py + 1 + body_top, body_h, body_lines, scy.origin, !subject_focused);
 
-    print(win, footer_row, 0, "tab: switch field   enter: commit / newline   esc: cancel", st.bottom_accent);
+    const footer_text = if (app.config.aiConfigured() and app.commit_action == .create)
+        "tab: field   enter: commit/newline   ctrl+g: AI   esc: cancel"
+    else
+        "tab: switch field   enter: commit / newline   esc: cancel";
+    print(win, footer_row, 0, footer_text, st.bottom_accent);
 
+    // Hide the caret while the focused field shows the generation placeholder,
+    // so it doesn't blink in the middle of "Generating...".
     if (subject_focused) {
-        win.showCursor(@intCast(subj_sc.view), 1);
-    } else {
+        if (!title_generating) win.showCursor(@intCast(subj_sc.view), 1);
+    } else if (!desc_generating) {
         const cursor_row: u16 = body_top + @as(u16, @intCast(caret_line - scy.origin));
         win.showCursor(@intCast(scx.view), cursor_row);
     }

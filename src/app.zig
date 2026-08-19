@@ -11,6 +11,7 @@ const conflicts_mod = @import("conflicts.zig");
 const fixupbase_mod = @import("fixupbase.zig");
 const commitgraph_mod = @import("commitgraph.zig");
 const graphlanes_mod = @import("graphlanes.zig");
+const aiauthor_mod = @import("aiauthor.zig");
 const config_mod = @import("config.zig");
 const diffmode_mod = @import("diffmode.zig");
 const credentials_mod = @import("credentials.zig");
@@ -101,6 +102,23 @@ pub const CommitField = enum { subject, body };
 
 /// Whether the commit editor creates a new commit or rewords an existing one.
 pub const CommitAction = enum { create, reword };
+
+/// A commit field's AI generation state. No `completed`: once a result lands in
+/// the field it is just normal editable text.
+pub const GenState = enum { idle, generating, failed };
+
+/// A pending AI generation request, carrying the tokens captured when it started
+/// so a stale result can be discarded (see `App.applyAiResult`).
+pub const AiRequest = struct {
+    field: aiauthor_mod.Field,
+    dialog_generation: u64,
+    revision: u64,
+    staged_signature: u64,
+    /// The 50/72-style length conventions, resolved from config at request time.
+    limits: aiauthor_mod.Limits,
+    /// Owned copy of the current title, for description requests (empty otherwise).
+    current_title: []u8,
+};
 
 /// A reusable single-line text-input popup. Each kind knows its title and what
 /// An editor launch requested by the edit action, performed by the TUI loop.
@@ -2288,6 +2306,29 @@ pub const App = struct {
     commit_body_scroll_y: usize = 0,
     file_filter_scroll: usize = 0,
     commit_action: CommitAction = .create,
+    // ---- AI-assisted commit authoring (see aiauthor.zig) --------------------
+    // Per-field generation state, driving the in-field spinner / failure line.
+    commit_ai_title_state: GenState = .idle,
+    commit_ai_desc_state: GenState = .idle,
+    // A field's revision bumps on every user edit. A generation request captures
+    // the revision at start; its result is applied only if the revision (and the
+    // dialog generation and staged signature) still match — so an AI result can
+    // never overwrite text the user typed or edited while it was in flight.
+    commit_title_revision: u64 = 0,
+    commit_desc_revision: u64 = 0,
+    // The field revision captured when generation last started. While generating,
+    // the loading placeholder shows only if the revision is still this — so a
+    // regenerate over existing text shows the spinner, but the moment the user
+    // types (revision advances) their text takes over again.
+    commit_title_gen_rev: u64 = 0,
+    commit_desc_gen_rev: u64 = 0,
+    // Bumps every time the commit dialog opens or closes, so a result belonging
+    // to a previous/destroyed dialog instance is safely ignored.
+    commit_dialog_generation: u64 = 0,
+    // Pending AI requests for the TUI loop to spawn as background workers. The
+    // request carries the revision tokens captured at request time.
+    commit_ai_title_req: ?AiRequest = null,
+    commit_ai_desc_req: ?AiRequest = null,
     // Skip pre-commit hooks for the commit being composed (the Files panel `w`).
     commit_no_verify: bool = false,
     commit_reword_index: usize = 0,
@@ -2693,6 +2734,8 @@ pub const App = struct {
         rebaseplan_mod.free(self);
         commitgraph_mod.deinit(self);
         if (self.inline_graph) |*g| g.deinit();
+        self.clearAiRequest(.title);
+        self.clearAiRequest(.description);
         self.data.deinit(self.allocator);
         model.deinitCommitFiles(self.allocator, self.commit_files);
         model.deinitCommitFiles(self.allocator, self.branch_files);
@@ -4549,7 +4592,7 @@ pub const App = struct {
         // While a foreground op runs — or a preview is still loading off-thread
         // — the ticker fires fast to animate the spinner; advance it and skip the
         // (paused) background refresh.
-        if (self.foregroundBusy() or self.preview_loading) {
+        if (self.foregroundBusy() or self.preview_loading or self.commitAiGenerating()) {
             self.spinner_frame +%= 1;
             return;
         }
@@ -9603,6 +9646,157 @@ pub const App = struct {
         self.inline_graph = graphlanes_mod.build(self.allocator, self.data.commits) catch null;
     }
 
+    // ---- AI-assisted commit authoring ---------------------------------------
+
+    /// A cheap content signature of the staged state (each staged file's path +
+    /// porcelain status). Lets a finished AI result be discarded if staging
+    /// changed while it ran. Content-only re-stages of one file aren't caught —
+    /// a documented lightweight approximation, per the spec.
+    pub fn stagedSignature(self: *const App) u64 {
+        var h = std.hash.Wyhash.init(0);
+        for (self.data.files) |f| {
+            if (!f.has_staged) continue;
+            h.update(f.path);
+            h.update(&f.short_status);
+        }
+        return h.final();
+    }
+
+    pub fn clearAiRequest(self: *App, field: aiauthor_mod.Field) void {
+        switch (field) {
+            .title => if (self.commit_ai_title_req) |r| {
+                self.allocator.free(r.current_title);
+                self.commit_ai_title_req = null;
+            },
+            .description => if (self.commit_ai_desc_req) |r| {
+                self.allocator.free(r.current_title);
+                self.commit_ai_desc_req = null;
+            },
+        }
+    }
+
+    /// Reset all commit-dialog AI state and bump the dialog generation, so any
+    /// in-flight result from the previous dialog instance is ignored. Call on
+    /// both open and close.
+    pub fn resetCommitAiState(self: *App) void {
+        self.commit_dialog_generation +%= 1;
+        self.commit_ai_title_state = .idle;
+        self.commit_ai_desc_state = .idle;
+        self.clearAiRequest(.title);
+        self.clearAiRequest(.description);
+    }
+
+    /// Bump a commit field's revision on a user edit, so an AI result generated
+    /// before the edit is discarded. Clears a lingering failure indicator.
+    pub fn bumpCommitFieldRevision(self: *App, field: CommitField) void {
+        switch (field) {
+            .subject => {
+                self.commit_title_revision +%= 1;
+                if (self.commit_ai_title_state == .failed) self.commit_ai_title_state = .idle;
+            },
+            .body => {
+                self.commit_desc_revision +%= 1;
+                if (self.commit_ai_desc_state == .failed) self.commit_ai_desc_state = .idle;
+            },
+        }
+    }
+
+    /// Start (or restart) AI generation for `field`, if AI is configured. No-op
+    /// when that field is already generating (single-flight). Captures the
+    /// revision tokens and hands a request to the TUI loop to run off-thread.
+    pub fn requestAiGeneration(self: *App, field: aiauthor_mod.Field) !void {
+        if (!self.config.aiConfigured()) return;
+        const state = switch (field) {
+            .title => self.commit_ai_title_state,
+            .description => self.commit_ai_desc_state,
+        };
+        if (state == .generating) return;
+        const revision = switch (field) {
+            .title => self.commit_title_revision,
+            .description => self.commit_desc_revision,
+        };
+        // The description request complements the current title (when set).
+        const title_copy = if (field == .description)
+            try self.allocator.dupe(u8, std.mem.trim(u8, self.commit_buffer.items, " \t\r\n"))
+        else
+            try self.allocator.dupe(u8, "");
+        errdefer self.allocator.free(title_copy);
+
+        const req = AiRequest{
+            .field = field,
+            .dialog_generation = self.commit_dialog_generation,
+            .revision = revision,
+            .staged_signature = self.stagedSignature(),
+            .limits = .{
+                // Fall back to the 50/72 convention when the config disables the
+                // summary counter / body guide (0).
+                .title_max = if (self.config.commit_summary_limit > 0) self.config.commit_summary_limit else 50,
+                .body_wrap = if (self.config.commit_body_guide > 0) self.config.commit_body_guide else 72,
+            },
+            .current_title = title_copy,
+        };
+        switch (field) {
+            .title => {
+                self.clearAiRequest(.title);
+                self.commit_ai_title_req = req;
+                self.commit_ai_title_state = .generating;
+                self.commit_title_gen_rev = revision;
+            },
+            .description => {
+                self.clearAiRequest(.description);
+                self.commit_ai_desc_req = req;
+                self.commit_ai_desc_state = .generating;
+                self.commit_desc_gen_rev = revision;
+            },
+        }
+    }
+
+    /// Apply or discard a finished AI generation (`result_opt` null on failure).
+    /// A result from a previous dialog instance is ignored. Within the current
+    /// dialog the generated text is inserted only if the field revision and
+    /// staged signature still match — otherwise the user edited or restaged, so
+    /// the text is dropped, but the spinner still clears.
+    pub fn applyAiResult(self: *App, field: aiauthor_mod.Field, dialog_generation: u64, revision: u64, staged_signature: u64, result_opt: ?[]const u8) !void {
+        if (dialog_generation != self.commit_dialog_generation) return; // old dialog
+        const current_rev = switch (field) {
+            .title => self.commit_title_revision,
+            .description => self.commit_desc_revision,
+        };
+        const text_stale = revision != current_rev or staged_signature != self.stagedSignature();
+        if (result_opt) |result| {
+            if (!text_stale) {
+                const buffer = switch (field) {
+                    .title => &self.commit_buffer,
+                    .description => &self.commit_body_buffer,
+                };
+                const cursor = switch (field) {
+                    .title => &self.commit_cursor,
+                    .description => &self.commit_body_cursor,
+                };
+                buffer.clearRetainingCapacity();
+                try buffer.appendSlice(self.allocator, result);
+                cursor.* = buffer.items.len;
+            }
+            switch (field) {
+                .title => self.commit_ai_title_state = .idle,
+                .description => self.commit_ai_desc_state = .idle,
+            }
+        } else {
+            // Failure: surface it only if the user was still waiting for it.
+            const new_state: GenState = if (text_stale) .idle else .failed;
+            switch (field) {
+                .title => self.commit_ai_title_state = new_state,
+                .description => self.commit_ai_desc_state = new_state,
+            }
+        }
+    }
+
+    /// Whether either commit field is mid AI generation — drives the spinner
+    /// ticker so the in-field placeholder animates without blocking input.
+    pub fn commitAiGenerating(self: *const App) bool {
+        return self.commit_ai_title_state == .generating or self.commit_ai_desc_state == .generating;
+    }
+
     fn restoreFileSelection(self: *App, selected_path: ?[]const u8) void {
         const path = selected_path orelse return;
         for (self.data.files, 0..) |file, idx| {
@@ -10416,6 +10610,84 @@ test "graph reset target: only a commit on the current branch's log" {
     try std.testing.expect(commitgraph_mod.cursorCommitIndex(&app) == null);
     app.commit_graph_sel = 3; // a connector row has no commit
     try std.testing.expect(commitgraph_mod.cursorCommitIndex(&app) == null);
+}
+
+test "AI commit authoring: availability, request, and stale-result protection" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // Not configured: AI unavailable, a request is a no-op, dialog unchanged.
+    try std.testing.expect(!app.config.aiConfigured());
+    try app.requestAiGeneration(.title);
+    try std.testing.expectEqual(GenState.idle, app.commit_ai_title_state);
+    try std.testing.expect(app.commit_ai_title_req == null);
+
+    app.config.ai_command.set("echo hi");
+    try std.testing.expect(app.config.aiConfigured());
+
+    // Configured: a request enters `generating` and queues work for the loop.
+    app.resetCommitAiState();
+    try app.requestAiGeneration(.title);
+    try std.testing.expectEqual(GenState.generating, app.commit_ai_title_state);
+    const r1 = app.commit_ai_title_req.?;
+
+    // Matching tokens: the generated title populates the field, spinner clears.
+    try app.applyAiResult(.title, r1.dialog_generation, r1.revision, r1.staged_signature, "Fix wallet layout");
+    try std.testing.expectEqualStrings("Fix wallet layout", app.commit_buffer.items);
+    try std.testing.expectEqual(GenState.idle, app.commit_ai_title_state);
+
+    // User edits while a request runs: the stale result is discarded.
+    app.resetCommitAiState();
+    app.commit_buffer.clearRetainingCapacity();
+    try app.requestAiGeneration(.title);
+    const r2 = app.commit_ai_title_req.?;
+    try app.commit_buffer.appendSlice(allocator, "User typed");
+    app.bumpCommitFieldRevision(.subject);
+    try app.applyAiResult(.title, r2.dialog_generation, r2.revision, r2.staged_signature, "AI title");
+    try std.testing.expectEqualStrings("User typed", app.commit_buffer.items); // user wins
+
+    // A result for a closed/previous dialog instance is ignored.
+    app.resetCommitAiState();
+    app.commit_buffer.clearRetainingCapacity();
+    try app.requestAiGeneration(.title);
+    const r3 = app.commit_ai_title_req.?;
+    app.resetCommitAiState(); // dialog closes
+    try app.applyAiResult(.title, r3.dialog_generation, r3.revision, r3.staged_signature, "Late title");
+    try std.testing.expectEqual(@as(usize, 0), app.commit_buffer.items.len);
+
+    // Failure surfaces a non-modal failed state (commit still possible).
+    app.resetCommitAiState();
+    try app.requestAiGeneration(.title);
+    const r4 = app.commit_ai_title_req.?;
+    try app.applyAiResult(.title, r4.dialog_generation, r4.revision, r4.staged_signature, null);
+    try std.testing.expectEqual(GenState.failed, app.commit_ai_title_state);
+    app.resetCommitAiState();
+}
+
+test "AI ctrl+g targets the focused commit field" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    app.config.ai_command.set("echo hi");
+    app.commit_action = .create;
+    app.mode = .commit_prompt;
+
+    const ctrl_g = vaxis.Key{ .codepoint = 'g', .mods = .{ .ctrl = true } };
+
+    app.commit_field = .body; // description focused
+    try commits_mod.handleCommitPromptKey(&app, ctrl_g);
+    try std.testing.expect(app.commit_ai_desc_req != null);
+    try std.testing.expect(app.commit_ai_title_req == null);
+    app.resetCommitAiState();
+
+    app.commit_field = .subject; // title focused
+    try commits_mod.handleCommitPromptKey(&app, ctrl_g);
+    try std.testing.expect(app.commit_ai_title_req != null);
+    try std.testing.expect(app.commit_ai_desc_req == null);
+    app.resetCommitAiState();
 }
 
 test "a failed commit keeps the message; a successful one clears it" {
@@ -12862,6 +13134,8 @@ fn testApp(allocator: std.mem.Allocator, files: []model.FileStatus) !App {
 }
 
 fn deinitTestApp(app: *App) void {
+    app.clearAiRequest(.title);
+    app.clearAiRequest(.description);
     if (app.inline_graph) |*g| g.deinit();
     app.allocator.free(app.diff);
     app.allocator.free(app.message);

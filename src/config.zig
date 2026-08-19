@@ -303,6 +303,16 @@ pub const Config = struct {
     /// seed the message fields from its output (e.g. a branch-derived ticket
     /// prefix). Matches interactive git; disable to skip the hook at open time.
     prepare_commit_msg_hook: bool = true,
+    /// AI-assisted commit authoring. `ai_command` is a shell command that reads
+    /// a prompt on stdin and prints a completion on stdout (e.g. `pi -p`, `llm`,
+    /// `ollama run <model>`). AI features are exposed only when this is
+    /// non-empty; ziggity never handles the provider or key itself, it just runs
+    /// the command. The two flags start automatic generation when the commit
+    /// dialog opens; manual generation (ctrl+g) is always available once
+    /// `ai_command` is set, regardless of these.
+    ai_command: FixedStr(256) = .{},
+    auto_generate_commit_title: bool = false,
+    auto_generate_commit_description: bool = false,
     /// Accordion mode: when true, the focused side-panel list grows to
     /// `expanded_side_panel_weight` while the others shrink. Default off.
     expand_focused_side_panel: bool = false,
@@ -344,6 +354,11 @@ pub const Config = struct {
     editor: EditorConfig = .{},
     custom_commands: [max_custom_commands]CustomCommand = undefined,
     custom_count: usize = 0,
+
+    /// AI features are available only when a generation command is configured.
+    pub fn aiConfigured(self: *const Config) bool {
+        return self.ai_command.get().len > 0;
+    }
 
     pub fn load(
         allocator: std.mem.Allocator,
@@ -415,6 +430,18 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "highlight_conventional_commits")) {
             if (parseBool(value)) |on| self.highlight_conventional_commits = on;
+            return;
+        }
+        if (std.mem.eql(u8, key, "ai_command")) {
+            self.ai_command.set(value);
+            return;
+        }
+        if (std.mem.eql(u8, key, "auto_generate_commit_title")) {
+            if (parseBool(value)) |on| self.auto_generate_commit_title = on;
+            return;
+        }
+        if (std.mem.eql(u8, key, "auto_generate_commit_description")) {
+            if (parseBool(value)) |on| self.auto_generate_commit_description = on;
             return;
         }
         if (std.mem.eql(u8, key, "prepare_commit_msg_hook")) {
@@ -645,10 +672,16 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     try std.testing.expect(!cfg.skip_confirm.amend); // amend confirms by default
     try std.testing.expectEqual(model.CommitGraphMode.on, cfg.commit_graph); // graph on by default
     try std.testing.expectEqual(model.LogOrder.topo, cfg.log_order); // topo order by default
+    try std.testing.expect(!cfg.aiConfigured()); // no ai_command -> AI unavailable
+    try std.testing.expect(!cfg.auto_generate_commit_title);
+    try std.testing.expect(!cfg.auto_generate_commit_description);
 
     cfg.applyBytes(
         \\result_dialog = always
         \\command_output = silent
+        \\ai_command = pi -p
+        \\auto_generate_commit_title = true
+        \\auto_generate_commit_description = yes
         \\skip_confirm.discard_all = true
         \\skip_confirm.amend = true
         \\skip_confirm.undo = yes
@@ -666,6 +699,10 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     );
     try std.testing.expectEqual(model.CommitGraphMode.focused, cfg.commit_graph);
     try std.testing.expectEqual(model.LogOrder.date, cfg.log_order);
+    try std.testing.expect(cfg.aiConfigured());
+    try std.testing.expectEqualStrings("pi -p", cfg.ai_command.get());
+    try std.testing.expect(cfg.auto_generate_commit_title);
+    try std.testing.expect(cfg.auto_generate_commit_description);
     try std.testing.expectEqual(StagingSplitMode.on, cfg.staging_split);
     try std.testing.expectEqual(ResultDialog.always, cfg.result_dialog); // valid set; bad value ignored
     try std.testing.expectEqual(CommandOutput.silent, cfg.command_output);
