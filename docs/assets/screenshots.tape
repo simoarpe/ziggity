@@ -53,6 +53,20 @@ Sleep 1.5s
 Screenshot docs/screenshots/03-commits.png
 Sleep 300ms
 
+# 23: the edit-commit-metadata menu (a). The fuller preview behind it shows the
+# author and committer dates separately. `k` lands on a commit with a clear diff;
+# `j` after restores the cursor so the rebase-plan shot below is unchanged.
+Type "k"
+Sleep 300ms
+Type "a"
+Sleep 1s
+Screenshot docs/screenshots/23-commit-metadata.png
+Sleep 300ms
+Escape
+Sleep 300ms
+Type "j"
+Sleep 400ms
+
 # 10: the interactive rebase plan editor for the commits down to here.
 Type "i"
 Sleep 1.5s

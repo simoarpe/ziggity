@@ -56,6 +56,18 @@ Full interactive rebase: press `i` on a commit to open a plan editor, mark
 
 ![Interactive rebase plan editor](screenshots/10-rebase-plan.png)
 
+### Editing Commit Metadata
+
+Press `a` on a commit to edit its metadata: the author name and email, the
+author date, or the committer date. Each date option offers "Set to now" or a
+prompt prefilled with the commit's current value, and the input is validated
+before anything is rewritten, so a typo is rejected up front instead of
+stranding a half finished rebase. Editing one date leaves the other exactly as
+it was, and the preview shows the author and committer dates side by side (via
+`git show --pretty=fuller`) so you can confirm the change took effect.
+
+![Edit commit metadata menu, with the author and committer dates in the preview](screenshots/23-commit-metadata.png)
+
 ### Committing
 
 `c` opens the commit dialog: a summary line plus an optional multiline body,
