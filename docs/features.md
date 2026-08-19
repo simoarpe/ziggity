@@ -72,7 +72,13 @@ it was, and the preview shows the author and committer dates side by side (via
 
 `c` opens the commit dialog: a summary line plus an optional multiline body,
 a live character count nudging the 50/72 rule, and optionally a
-`prepare-commit-msg` hook prefill.
+`prepare-commit-msg` hook prefill. In the body, the up and down arrows move
+between lines and the mouse wheel scrolls it, so a long description stays easy
+to navigate even past the visible area. The summary and description behave like
+a small text editor: click to place the caret (and focus that field), drag to
+select, `shift` with the arrows / `home` / `end` to select from the keyboard,
+`ctrl+c` to copy, and typing or `backspace` replaces the selection. A mouse drag
+also copies on release.
 
 ![Commit message dialog](screenshots/08-commit-dialog.png)
 

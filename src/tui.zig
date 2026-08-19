@@ -2211,6 +2211,21 @@ fn drawCredentialPopup(root: vaxis.Window, app: *app_mod.App) void {
     win.showCursor(@intCast(sc.view), 0);
 }
 
+/// The selected column span `[lo, hi)` within a rendered commit row, given the
+/// buffer byte offset of the row's first visible character (`base`) and how many
+/// bytes are on screen (`vis_len`). Empty (0,0) when `focused` is false (the
+/// selection lives in the other field) or nothing on this row is selected.
+fn selCols(app: *const app_mod.App, focused: bool, base: usize, vis_len: usize) struct { lo: u16, hi: u16 } {
+    if (!focused) return .{ .lo = 0, .hi = 0 };
+    const r = app.commitSelRange() orelse return .{ .lo = 0, .hi = 0 };
+    const lo_b = if (r.lo > base) r.lo - base else 0;
+    const hi_b = if (r.hi > base) r.hi - base else 0;
+    const lo = @min(lo_b, vis_len);
+    const hi = @min(hi_b, vis_len);
+    if (hi <= lo) return .{ .lo = 0, .hi = 0 };
+    return .{ .lo = @intCast(lo), .hi = @intCast(hi) };
+}
+
 fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
     const subject_focused = app.commit_field == .subject;
@@ -2219,6 +2234,15 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     const w: u16 = @min(@as(u16, 80), root.width -| 4);
     const title = if (app.commit_action == .reword) "Reword commit" else "Commit message";
     const win = popup(root, w, 12, title, null);
+
+    // Capture the interior's absolute origin and reset the per-row click map so
+    // the mouse handler can map a cell to a field + byte offset. win.x_off/y_off
+    // are the absolute screen coordinates of the interior's top-left cell. The
+    // summary and body rows fill in their entries below as they draw.
+    app.commit_content_x = @intCast(@max(win.x_off, 0));
+    app.commit_content_y = @intCast(@max(win.y_off, 0));
+    app.commit_row_count = @min(@as(usize, win.height), app.commit_rows.len);
+    for (app.commit_rows[0..app.commit_row_count]) |*r| r.* = .{};
 
     // The description's soft body-wrap guide column (config; 0 disables it).
     const body_guide_col: usize = app.config.commit_body_guide;
@@ -2260,7 +2284,10 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     } else if (app.commit_ai_title_state == .failed and subj.len == 0) {
         print(win, 1, 0, "AI generation failed  (ctrl+g to retry)", st.warning);
     } else {
-        print(win, 1, 0, subj[subj_sc.origin..], st.normal);
+        const vis = subj[subj_sc.origin..];
+        const sel = selCols(app, subject_focused, subj_sc.origin, vis.len);
+        printAnsi(win, 1, vis, st.normal, sel.lo, sel.hi, 0);
+        app.commit_rows[1] = .{ .kind = .summary, .base = subj_sc.origin, .vis_len = vis.len };
     }
 
     // Body: multi-line area from row 4 down to the footer, scrolled in both axes.
@@ -2277,9 +2304,27 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
             caret_col = 0;
         } else caret_col += 1;
     }
-    const scy = app_mod.viewScroll(app.commit_body_scroll_y, body_h, caret_line);
+    // Total body rows (no soft-wrap: one row per newline-separated line), and the
+    // furthest the view can scroll while still showing a full page.
+    var total_lines: usize = 1;
+    for (body) |b| {
+        if (b == '\n') total_lines += 1;
+    }
+    const max_y_origin = if (total_lines > body_h) total_lines - body_h else 0;
+    // Reveal the caret only when it *moved* (typing / arrow keys); a wheel scroll
+    // leaves the view where the user parked it, even with the caret off-screen.
+    const caret_moved = app.commit_body_cursor != app.commit_body_last_caret;
+    app.commit_body_last_caret = app.commit_body_cursor;
+    var y_origin = @min(app.commit_body_scroll_y, max_y_origin);
+    if (caret_moved) {
+        if (caret_line < y_origin) {
+            y_origin = caret_line;
+        } else if (body_h > 0 and caret_line >= y_origin + body_h) {
+            y_origin = caret_line + 1 - body_h;
+        }
+    }
+    app.commit_body_scroll_y = y_origin;
     const scx = app_mod.viewScroll(app.commit_body_scroll_x, win.width, caret_col);
-    app.commit_body_scroll_y = scy.origin;
     app.commit_body_scroll_x = scx.origin;
 
     // A soft vertical guide at the configured body-wrap column, drawn *under*
@@ -2311,10 +2356,17 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
         var idx: usize = 0;
         var drawn: usize = 0;
         while (lines.next()) |line| : (idx += 1) {
-            if (idx < scy.origin) continue;
+            if (idx < y_origin) continue;
             if (drawn >= body_h) break;
             const row: u16 = body_top + @as(u16, @intCast(drawn));
-            if (scx.origin < line.len) print(win, row, 0, line[scx.origin..], st.normal);
+            // Byte offset of this line within the body buffer (for selection and
+            // click mapping), plus the horizontal-scroll offset into it.
+            const line_start = @intFromPtr(line.ptr) - @intFromPtr(body.ptr);
+            const vis = if (scx.origin < line.len) line[scx.origin..] else "";
+            const base = @min(line_start + scx.origin, line_start + line.len);
+            const sel = selCols(app, !subject_focused, base, vis.len);
+            printAnsi(win, row, vis, st.normal, sel.lo, sel.hi, 0);
+            app.commit_rows[row] = .{ .kind = .body, .base = base, .vis_len = vis.len };
             drawn += 1;
         }
     }
@@ -2324,7 +2376,7 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     const body_lines = std.mem.count(u8, body, "\n") + 1;
     const px: u16 = (root.width - w) / 2;
     const py: u16 = (root.height - 12) / 2;
-    drawScrollbarRange(root, px + w - 1, py + 1 + body_top, body_h, body_lines, scy.origin, !subject_focused);
+    drawScrollbarRange(root, px + w - 1, py + 1 + body_top, body_h, body_lines, y_origin, !subject_focused);
 
     const footer_text = if (app.config.aiConfigured() and app.commit_action == .create)
         "tab: field   enter: commit/newline   ctrl+g: AI   esc: cancel"
@@ -2337,8 +2389,12 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     if (subject_focused) {
         if (!title_generating) win.showCursor(@intCast(subj_sc.view), 1);
     } else if (!desc_generating) {
-        const cursor_row: u16 = body_top + @as(u16, @intCast(caret_line - scy.origin));
-        win.showCursor(@intCast(scx.view), cursor_row);
+        // Only show the body caret when it is within the scrolled view; a wheel
+        // scroll can push it off-screen, and then it should simply not be drawn.
+        if (caret_line >= y_origin and caret_line < y_origin + body_h) {
+            const cursor_row: u16 = body_top + @as(u16, @intCast(caret_line - y_origin));
+            win.showCursor(@intCast(scx.view), cursor_row);
+        }
     }
 }
 

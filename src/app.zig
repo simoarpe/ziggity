@@ -107,6 +107,16 @@ pub const CommitAction = enum { create, reword };
 /// the field it is just normal editable text.
 pub const GenState = enum { idle, generating, failed };
 
+/// One rendered row of the commit popup, recorded during draw so a mouse click
+/// can map an absolute cell back to a byte offset in the summary or body buffer.
+/// `base` is the buffer offset of the row's first *visible* character (past any
+/// horizontal scroll) and `vis_len` how many bytes are on screen from there.
+pub const CommitRowMap = struct {
+    kind: enum { none, summary, body } = .none,
+    base: usize = 0,
+    vis_len: usize = 0,
+};
+
 /// A pending AI generation request, carrying the tokens captured when it started
 /// so a stale result can be discarded (see `App.applyAiResult`).
 pub const AiRequest = struct {
@@ -2304,6 +2314,22 @@ pub const App = struct {
     commit_scroll: usize = 0,
     commit_body_scroll_x: usize = 0,
     commit_body_scroll_y: usize = 0,
+    // The body caret at the previous render, so the view can scroll to reveal
+    // the caret only when it *moved* (a keyboard edit / arrow), leaving a
+    // wheel-scrolled view where the user parked it.
+    commit_body_last_caret: usize = 0,
+    // Text selection in the commit dialog. `commit_sel_anchor` is a byte offset
+    // in the *focused* field's buffer; the selection spans from it to that
+    // field's caret. Null means no selection. Cleared on field switch, plain
+    // caret moves, edits, and dialog open/close.
+    commit_sel_anchor: ?usize = null,
+    commit_mouse_selecting: bool = false,
+    // Commit-popup geometry captured at render time so the mouse handler can map
+    // an absolute cell to a field + byte offset without re-deriving the layout.
+    commit_content_x: u16 = 0,
+    commit_content_y: u16 = 0,
+    commit_row_count: usize = 0,
+    commit_rows: [16]CommitRowMap = [_]CommitRowMap{.{}} ** 16,
     file_filter_scroll: usize = 0,
     commit_action: CommitAction = .create,
     // ---- AI-assisted commit authoring (see aiauthor.zig) --------------------
@@ -3743,6 +3769,9 @@ pub const App = struct {
         // The checkout-by-name prompt lets the mouse pick a suggestion: a click
         // on a result highlights it, and the wheel moves the highlight.
         if (self.mode == .text_prompt) return self.handleTextPromptMouse(mouse);
+        // The commit dialog owns its mouse: caret placement, drag-selection of the
+        // summary/body, and wheel scrolling of the body.
+        if (self.mode == .commit_prompt) return self.handleCommitMouse(mouse);
 
         if (self.mode != .normal) {
             const c: u16 = if (mouse.col < 0) 0 else @intCast(mouse.col);
@@ -7142,6 +7171,160 @@ pub const App = struct {
         return .ignored;
     }
 
+    /// Move a caret one line up or down within a multi-line buffer, keeping the
+    /// same column where the target line is long enough (clamped to its end
+    /// otherwise). Used by the commit body's up/down arrows. Returns true if the
+    /// caret moved.
+    pub fn moveCaretVertical(buf: []const u8, cursor: *usize, down: bool) bool {
+        if (cursor.* > buf.len) cursor.* = buf.len;
+        const start = lineStart(buf, cursor.*);
+        const col = cursor.* - start;
+        if (down) {
+            const end = lineEnd(buf, cursor.*);
+            if (end >= buf.len) return false; // already on the last line
+            const next_start = end + 1;
+            const next_end = lineEnd(buf, next_start);
+            cursor.* = @min(next_start + col, next_end);
+        } else {
+            if (start == 0) return false; // already on the first line
+            const prev_end = start - 1;
+            const prev_start = lineStart(buf, prev_end);
+            cursor.* = @min(prev_start + col, prev_end);
+        }
+        return true;
+    }
+
+    // ---- Commit dialog text selection ----------------------------------------
+
+    /// The byte range of the commit selection in the focused field, normalized so
+    /// `lo <= hi`, or null when there is no (or an empty) selection.
+    pub fn commitSelRange(self: *const App) ?struct { lo: usize, hi: usize } {
+        const anchor = self.commit_sel_anchor orelse return null;
+        const caret = if (self.commit_field == .body) self.commit_body_cursor else self.commit_cursor;
+        if (anchor == caret) return null;
+        return .{ .lo = @min(anchor, caret), .hi = @max(anchor, caret) };
+    }
+
+    /// Copy the commit selection (if any) to the clipboard.
+    pub fn copyCommitSelection(self: *App) !void {
+        const r = self.commitSelRange() orelse return;
+        const buf = if (self.commit_field == .body) self.commit_body_buffer.items else self.commit_buffer.items;
+        const hi = @min(r.hi, buf.len);
+        const lo = @min(r.lo, hi);
+        if (hi <= lo) return;
+        if (self.clipboard_request) |c| self.allocator.free(c);
+        self.clipboard_request = try self.allocator.dupe(u8, buf[lo..hi]);
+        try self.setMessage("copied selection", .{});
+    }
+
+    /// Delete the commit selection (if any) from the focused field, collapsing the
+    /// caret to its start. Returns true if something was removed.
+    pub fn deleteCommitSelection(self: *App) bool {
+        const r = self.commitSelRange() orelse return false;
+        const buf = if (self.commit_field == .body) &self.commit_body_buffer else &self.commit_buffer;
+        const cur = if (self.commit_field == .body) &self.commit_body_cursor else &self.commit_cursor;
+        const hi = @min(r.hi, buf.items.len);
+        const lo = @min(r.lo, hi);
+        if (hi > lo) deleteRange(buf, lo, hi - lo);
+        cur.* = lo;
+        self.commit_sel_anchor = null;
+        return hi > lo;
+    }
+
+    /// Target byte offset for a caret-movement key (arrows, word moves via
+    /// alt/ctrl, home/end), or null if `key` is not such a move. The shift
+    /// modifier is ignored here; the caller decides whether to select or collapse.
+    /// Up/down only move when `is_body` (the summary is a single line).
+    pub fn caretTarget(buf: []const u8, cursor: usize, key: vaxis.Key, is_body: bool) ?usize {
+        const cur = @min(cursor, buf.len);
+        const word = key.mods.alt or key.mods.ctrl;
+        return switch (key.codepoint) {
+            vaxis.Key.left => if (word) moveLeftWord(buf, cur) else prevCodepoint(buf, cur),
+            vaxis.Key.right => if (word) moveRightWord(buf, cur) else nextCodepoint(buf, cur),
+            vaxis.Key.home => lineStart(buf, cur),
+            vaxis.Key.end => lineEnd(buf, cur),
+            vaxis.Key.up, vaxis.Key.down => blk: {
+                if (!is_body) break :blk null;
+                var c = cur;
+                _ = moveCaretVertical(buf, &c, key.codepoint == vaxis.Key.down);
+                break :blk c;
+            },
+            else => null,
+        };
+    }
+
+    /// Map an absolute screen cell to a commit field + byte offset, or null if the
+    /// cell is outside a text row. The offset is snapped back to a UTF-8 boundary.
+    fn commitPointAt(self: *const App, col: u16, row: u16) ?struct { is_body: bool, offset: usize } {
+        if (row < self.commit_content_y or col < self.commit_content_x) return null;
+        const wr: usize = row - self.commit_content_y;
+        if (wr >= self.commit_row_count) return null;
+        const m = self.commit_rows[wr];
+        if (m.kind == .none) return null;
+        const wc: usize = col - self.commit_content_x;
+        const is_body = m.kind == .body;
+        const buf = if (is_body) self.commit_body_buffer.items else self.commit_buffer.items;
+        var off = @min(m.base + @min(wc, m.vis_len), buf.len);
+        // Don't land in the middle of a multi-byte character.
+        while (off > 0 and off < buf.len and (buf[off] & 0xC0) == 0x80) off -= 1;
+        return .{ .is_body = is_body, .offset = off };
+    }
+
+    /// Mouse handling for the open commit dialog: wheel scrolls the body, a left
+    /// click positions the caret (and focuses that field), and a left drag
+    /// selects text, copying it on release.
+    fn handleCommitMouse(self: *App, mouse: vaxis.Mouse) !bool {
+        const c: u16 = if (mouse.col < 0) 0 else @intCast(mouse.col);
+        const rw: u16 = if (mouse.row < 0) 0 else @intCast(mouse.row);
+        switch (mouse.type) {
+            .press => switch (mouse.button) {
+                .wheel_up => {
+                    self.commit_body_scroll_y -|= 3;
+                    return true;
+                },
+                .wheel_down => {
+                    self.commit_body_scroll_y += 3; // render clamps to the last page
+                    return true;
+                },
+                .left => {
+                    const pt = self.commitPointAt(c, rw) orelse return false;
+                    self.commit_field = if (pt.is_body) .body else .subject;
+                    if (pt.is_body) {
+                        self.commit_body_cursor = pt.offset;
+                    } else {
+                        self.commit_cursor = pt.offset;
+                    }
+                    self.commit_sel_anchor = pt.offset;
+                    self.commit_mouse_selecting = true;
+                    return true;
+                },
+                else => return false,
+            },
+            .drag => {
+                if (!self.commit_mouse_selecting) return false;
+                if (self.commitPointAt(c, rw)) |pt| {
+                    // Keep the drag within the field it began in.
+                    const body_field = self.commit_field == .body;
+                    if (pt.is_body == body_field) {
+                        if (body_field) self.commit_body_cursor = pt.offset else self.commit_cursor = pt.offset;
+                    }
+                }
+                return true;
+            },
+            .release => {
+                if (!self.commit_mouse_selecting) return false;
+                self.commit_mouse_selecting = false;
+                if (self.commitSelRange()) |_| {
+                    try self.copyCommitSelection(); // drag selected something
+                } else {
+                    self.commit_sel_anchor = null; // a plain click: caret only
+                }
+                return true;
+            },
+            else => return false,
+        }
+    }
+
     fn handleTextPromptKey(self: *App, key: vaxis.Key) !void {
         // While pasting, esc/enter are pasted content, not cancel/submit. These
         // prompts are single-line, so a pasted newline is simply dropped.
@@ -9776,6 +9959,11 @@ pub const App = struct {
                 buffer.clearRetainingCapacity();
                 try buffer.appendSlice(self.allocator, result);
                 cursor.* = buffer.items.len;
+                // The field's text was replaced wholesale — drop a stale selection
+                // pointing into the old content of the focused field.
+                if ((field == .title and self.commit_field == .subject) or
+                    (field == .description and self.commit_field == .body))
+                    self.commit_sel_anchor = null;
             }
             switch (field) {
                 .title => self.commit_ai_title_state = .idle,
@@ -9952,7 +10140,7 @@ pub const App = struct {
         return self.isEscapeKey(key) or self.config.keymap.quit.matches(key);
     }
 
-    fn isBackspaceKey(self: *const App, key: vaxis.Key) bool {
+    pub fn isBackspaceKey(self: *const App, key: vaxis.Key) bool {
         return self.config.keymap.backspace.matches(key) or key.matches(vaxis.Key.backspace, .{});
     }
 };
@@ -11843,6 +12031,132 @@ test "bracketed paste: a newline in the commit subject moves to the body, not su
     try app.handleKey(enter);
     try std.testing.expect(app.mode == .commit_prompt);
     try std.testing.expectEqualStrings("\n", app.commit_body_buffer.items);
+}
+
+test "moveCaretVertical navigates body lines keeping the column" {
+    // Buffer: "abc\nde\nfghij" — line starts at bytes 0, 4, 7.
+    const buf = "abc\nde\nfghij";
+    var cursor: usize = 9; // "f g |h" -> byte 9 is column 2 of the third line
+
+    // Up from column 2 of "fghij" lands on the short line "de", clamped to its end.
+    try std.testing.expect(App.moveCaretVertical(buf, &cursor, false));
+    try std.testing.expectEqual(@as(usize, 6), cursor); // end of "de"
+
+    // Up again keeps the (now smaller) column on "abc".
+    try std.testing.expect(App.moveCaretVertical(buf, &cursor, false));
+    try std.testing.expectEqual(@as(usize, 2), cursor); // column 2 of "abc"
+
+    // At the first line, up is a no-op.
+    try std.testing.expect(!App.moveCaretVertical(buf, &cursor, false));
+    try std.testing.expectEqual(@as(usize, 2), cursor);
+
+    // Down restores the column onto the next line.
+    try std.testing.expect(App.moveCaretVertical(buf, &cursor, true));
+    try std.testing.expectEqual(@as(usize, 6), cursor); // "de" clamps column 2 to its end
+
+    // On the last line, down is a no-op.
+    cursor = 9;
+    try std.testing.expect(!App.moveCaretVertical(buf, &cursor, true));
+    try std.testing.expectEqual(@as(usize, 9), cursor);
+}
+
+test "commit dialog: mouse wheel scrolls the description body" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.mode = .commit_prompt;
+    app.commit_action = .create;
+
+    const wheel_down: vaxis.Mouse = .{ .col = 10, .row = 8, .button = .wheel_down, .mods = .{}, .type = .press };
+    const wheel_up: vaxis.Mouse = .{ .col = 10, .row = 8, .button = .wheel_up, .mods = .{}, .type = .press };
+
+    // A wheel notch moves the body scroll origin (render later clamps to content).
+    try std.testing.expect(try app.handleMouse(wheel_down));
+    try std.testing.expectEqual(@as(usize, 3), app.commit_body_scroll_y);
+    try std.testing.expect(try app.handleMouse(wheel_down));
+    try std.testing.expectEqual(@as(usize, 6), app.commit_body_scroll_y);
+
+    // Scrolling back up saturates at the top (no underflow).
+    _ = try app.handleMouse(wheel_up);
+    _ = try app.handleMouse(wheel_up);
+    _ = try app.handleMouse(wheel_up);
+    try std.testing.expectEqual(@as(usize, 0), app.commit_body_scroll_y);
+}
+
+test "commit dialog: mouse click positions the caret and drag selects/copies" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.mode = .commit_prompt;
+    app.commit_action = .create;
+    try app.commit_buffer.appendSlice(allocator, "fix the parser");
+    try app.commit_body_buffer.appendSlice(allocator, "handles nested groups");
+    // Stand in for a drawCommitPopup render: interior origin (1,1), the summary on
+    // win row 1 and a body line on win row 4, both fully visible from offset 0.
+    app.commit_content_x = 1;
+    app.commit_content_y = 1;
+    app.commit_row_count = 10;
+    app.commit_rows[1] = .{ .kind = .summary, .base = 0, .vis_len = app.commit_buffer.items.len };
+    app.commit_rows[4] = .{ .kind = .body, .base = 0, .vis_len = app.commit_body_buffer.items.len };
+
+    // A plain click positions the caret in the summary and leaves no selection.
+    _ = try app.handleMouse(.{ .col = 5, .row = 2, .button = .left, .mods = .{}, .type = .press }); // col 4
+    _ = try app.handleMouse(.{ .col = 5, .row = 2, .button = .left, .mods = .{}, .type = .release });
+    try std.testing.expectEqual(CommitField.subject, app.commit_field);
+    try std.testing.expectEqual(@as(usize, 4), app.commit_cursor);
+    try std.testing.expect(app.commitSelRange() == null);
+
+    // Drag over "parser" (cols 8..14) on the summary row and release to copy.
+    _ = try app.handleMouse(.{ .col = 9, .row = 2, .button = .left, .mods = .{}, .type = .press }); // col 8
+    _ = try app.handleMouse(.{ .col = 15, .row = 2, .button = .left, .mods = .{}, .type = .drag }); // col 14
+    _ = try app.handleMouse(.{ .col = 15, .row = 2, .button = .left, .mods = .{}, .type = .release });
+    try std.testing.expectEqualStrings("parser", app.clipboard_request.?);
+
+    // Clicking the body row switches focus there; a drag copies from it.
+    _ = try app.handleMouse(.{ .col = 1, .row = 5, .button = .left, .mods = .{}, .type = .press }); // body col 0
+    try std.testing.expectEqual(CommitField.body, app.commit_field);
+    _ = try app.handleMouse(.{ .col = 8, .row = 5, .button = .left, .mods = .{}, .type = .drag }); // col 7
+    _ = try app.handleMouse(.{ .col = 8, .row = 5, .button = .left, .mods = .{}, .type = .release });
+    try std.testing.expectEqualStrings("handles", app.clipboard_request.?);
+}
+
+test "commit dialog: shift+arrows select, ctrl+c copies, typing replaces" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.mode = .commit_prompt;
+    app.commit_action = .create;
+    app.commit_field = .subject;
+    try app.commit_buffer.appendSlice(allocator, "hello world");
+    app.commit_cursor = app.commit_buffer.items.len; // at the end
+
+    // shift+left five times selects "world" (from the end back to col 6).
+    var i: usize = 0;
+    while (i < 5) : (i += 1)
+        try app.handleKey(.{ .codepoint = vaxis.Key.left, .mods = .{ .shift = true } });
+    const r = app.commitSelRange().?;
+    try std.testing.expectEqual(@as(usize, 6), r.lo);
+    try std.testing.expectEqual(@as(usize, 11), r.hi);
+
+    // ctrl+c copies the selection.
+    try app.handleKey(.{ .codepoint = 'c', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqualStrings("world", app.clipboard_request.?);
+
+    // Typing a character replaces the selection.
+    try app.handleKey(.{ .codepoint = 'W', .text = "W", .mods = .{ .shift = true } });
+    try std.testing.expectEqualStrings("hello W", app.commit_buffer.items);
+    try std.testing.expect(app.commitSelRange() == null);
+
+    // A plain arrow collapses any selection (nothing selected here, still a no-op
+    // on state beyond the caret move).
+    try app.handleKey(.{ .codepoint = vaxis.Key.left, .mods = .{} });
+    try std.testing.expect(app.commit_sel_anchor == null);
 }
 
 test "tab toggles focus into the diff panel and back" {

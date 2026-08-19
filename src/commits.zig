@@ -58,6 +58,9 @@ pub fn startCommitPrompt(app: *App, no_verify: bool) !void {
     app.commit_scroll = 0;
     app.commit_body_scroll_x = 0;
     app.commit_body_scroll_y = 0;
+    app.commit_body_last_caret = std.math.maxInt(usize); // force the caret into view on open
+    app.commit_sel_anchor = null;
+    app.commit_mouse_selecting = false;
     if (restored) {
         try app.setMessage("enter commit message (restored draft)", .{});
     } else if (seeded) {
@@ -164,6 +167,9 @@ pub fn startReword(app: *App) !void {
     app.commit_scroll = 0;
     app.commit_body_scroll_x = 0;
     app.commit_body_scroll_y = 0;
+    app.commit_body_last_caret = std.math.maxInt(usize); // force the caret into view on open
+    app.commit_sel_anchor = null;
+    app.commit_mouse_selecting = false;
     try app.setMessage("reword commit", .{});
 }
 
@@ -191,6 +197,8 @@ pub fn handleCommitPromptKey(app: *App, key: vaxis.Key) !void {
         if (app.commit_action == .create) try savePreservedCommitMessage(app);
         app.commit_buffer.clearRetainingCapacity();
         app.commit_body_buffer.clearRetainingCapacity();
+        app.commit_sel_anchor = null;
+        app.commit_mouse_selecting = false;
         app.resetCommitAiState(); // ignore any in-flight AI result for this dialog
         try app.setMessage("commit cancelled", .{});
         return;
@@ -205,19 +213,23 @@ pub fn handleCommitPromptKey(app: *App, key: vaxis.Key) !void {
         }
         return;
     }
-    // Tab switches between the subject and body fields.
+    // Tab switches between the subject and body fields (dropping any selection,
+    // which is scoped to one field).
     if (key.matches(vaxis.Key.tab, .{})) {
         app.commit_field = if (app.commit_field == .subject) .body else .subject;
+        app.commit_sel_anchor = null;
         return;
     }
-    // Enter submits from the subject; in the body it inserts a newline. While
-    // pasting, a newline never submits: in the subject it moves to the body (so
-    // the first pasted line is the subject and the rest becomes the body), and
-    // in the body it inserts a literal line break.
+    // Enter submits from the subject; in the body it inserts a newline (replacing
+    // any selection). While pasting, a newline never submits: in the subject it
+    // moves to the body (so the first pasted line is the subject and the rest
+    // becomes the body), and in the body it inserts a literal line break.
     if (app.isEnterKey(key)) {
         if (app.commit_field == .body) {
+            _ = app.deleteCommitSelection();
             try app.commit_body_buffer.insertSlice(app.allocator, app.commit_body_cursor, "\n");
             app.commit_body_cursor += 1;
+            app.commit_sel_anchor = null;
             app.bumpCommitFieldRevision(.body); // a real edit — invalidates a stale AI body
             return;
         }
@@ -227,11 +239,65 @@ pub fn handleCommitPromptKey(app: *App, key: vaxis.Key) !void {
         }
         return submitCommit(app);
     }
-    const buffer = if (app.commit_field == .subject) &app.commit_buffer else &app.commit_body_buffer;
-    const cursor = if (app.commit_field == .subject) &app.commit_cursor else &app.commit_body_cursor;
+
+    const is_body = app.commit_field == .body;
+    const buffer = if (is_body) &app.commit_body_buffer else &app.commit_buffer;
+    const cursor = if (is_body) &app.commit_body_cursor else &app.commit_cursor;
+
+    // ctrl+c copies the current selection (no-op if there is none).
+    if (key.matches('c', .{ .ctrl = true })) {
+        try app.copyCommitSelection();
+        return;
+    }
+
+    // Shift + a caret move grows the selection from a fixed anchor.
+    if (key.mods.shift) {
+        if (App.caretTarget(buffer.items, cursor.*, key, is_body)) |target| {
+            if (app.commit_sel_anchor == null) app.commit_sel_anchor = cursor.*;
+            cursor.* = target;
+            if (app.commit_sel_anchor.? == cursor.*) app.commit_sel_anchor = null; // collapsed onto the anchor
+            return;
+        }
+    } else {
+        // A plain caret move (arrows, word moves, home/end) collapses any
+        // selection and repositions the caret — never bumps the field revision.
+        if (App.caretTarget(buffer.items, cursor.*, key, is_body)) |target| {
+            app.commit_sel_anchor = null;
+            cursor.* = target;
+            return;
+        }
+    }
+
+    // From here it is editing. A live selection is replaced or removed first.
+    if (app.commitSelRange() != null) {
+        // Backspace / delete simply remove the selection.
+        if (app.isBackspaceKey(key) or key.matches(vaxis.Key.delete, .{})) {
+            _ = app.deleteCommitSelection();
+            app.bumpCommitFieldRevision(app.commit_field);
+            return;
+        }
+        // A typed character replaces the selection: drop it, then insert below.
+        if (isTextInsertion(key)) _ = app.deleteCommitSelection();
+    }
+
     // A content edit bumps the field revision so an AI result from before the
-    // edit is discarded; cursor-only moves must not.
-    if (try app.editLine(buffer, cursor, key) == .changed) app.bumpCommitFieldRevision(app.commit_field);
+    // edit is discarded; a cursor-only move must not. Either way an edit or move
+    // collapses the selection.
+    switch (try app.editLine(buffer, cursor, key)) {
+        .changed => {
+            app.commit_sel_anchor = null;
+            app.bumpCommitFieldRevision(app.commit_field);
+        },
+        .moved => app.commit_sel_anchor = null,
+        .ignored => {},
+    }
+}
+
+/// Whether a key event is a printable character insertion (matching the rule in
+/// `editLine`), so a live selection can be replaced before the character lands.
+fn isTextInsertion(key: vaxis.Key) bool {
+    if (key.text) |t| return !key.mods.ctrl and !key.mods.alt and t.len > 0 and t[0] >= 0x20;
+    return false;
 }
 
 pub fn submitCommit(app: *App) !void {
@@ -258,6 +324,8 @@ pub fn submitCommit(app: *App) !void {
     if (action == .create) try savePreservedCommitMessage(app) else clearPreservedCommitMessage(app);
     app.commit_buffer.clearRetainingCapacity();
     app.commit_body_buffer.clearRetainingCapacity();
+    app.commit_sel_anchor = null;
+    app.commit_mouse_selecting = false;
 
     switch (action) {
         // Run the commit off-thread (close the panel first, then commit via a
