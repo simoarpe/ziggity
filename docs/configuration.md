@@ -169,6 +169,11 @@ color.hash = 3                   # commit short hashes in the log
 color.tag = 3                    # a tag's annotation and subject in the Tags list
 ```
 
+The AI helpers referenced by `ai_command` above:
+[pi](https://github.com/earendil-works/pi) (the recommended one, covers
+everything), [llm](https://github.com/simonw/llm) (any provider via an API key),
+and [ollama](https://github.com/ollama/ollama) (local models).
+
 Key values may be a single character or one of `space`, `enter`, `tab`,
 `esc`, `backspace`, `ctrl+x`, or `alt+x`. Every binding is remappable via
 `key.<name>`, every color via `color.<name>`.

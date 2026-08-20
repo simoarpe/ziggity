@@ -266,6 +266,7 @@ point, with demos:
 - [At Home in Any Terminal](docs/comparison.md#at-home-in-any-terminal)
 - [Checkout by Name That Lands on a Real Branch](docs/comparison.md#checkout-by-name-that-lands-on-a-real-branch)
 - [A Commit Editor That Nudges the 50/72 Rule](docs/comparison.md#a-commit-editor-that-nudges-the-5072-rule)
+- [AI Commit Messages, Your Own Model](docs/comparison.md#ai-commit-messages-your-own-model)
 - [A Force Push That Never Dead Ends](docs/comparison.md#a-force-push-that-never-dead-ends)
 - [Diffs the Way Review Tools Show Them](docs/comparison.md#diffs-the-way-review-tools-show-them)
 - [Word-Level Diff Highlighting](docs/comparison.md#word-level-diff-highlighting)
@@ -292,8 +293,13 @@ point, with demos:
   shows.
 - **A real commit editor**: a summary line and multiline body, a live count
   nudging the 50/72 rule, and your repository's `prepare-commit-msg` hook run
-  on open, so a branch ticket prefix finally lands in a terminal UI. It can also
-  draft the whole message from the staged diff with your own AI tool (`ctrl+g`).
+  on open, so a branch ticket prefix finally lands in a terminal UI.
+- **AI commit messages, optional**: `ctrl+g` drafts the subject and body from
+  the staged diff with a tool you choose. [`pi`](https://github.com/earendil-works/pi)
+  is the way to go and covers everything, subscriptions you already have
+  included; [`llm`](https://github.com/simonw/llm) or a local
+  [`ollama`](https://github.com/ollama/ollama) model work too. It never
+  overwrites your edits, and ziggity ships no model or key of its own.
 - **Range select anywhere**: `v` or `shift+arrows` mark a range in any list,
   then one key acts on every file, commit, branch or stash in it; `*` selects
   a branch's own commits.
@@ -356,11 +362,12 @@ you already pay for.
 
 ### Unlock It With pi
 
-[pi](https://github.com/earendil-works/pi) is the companion we recommend: a
-small CLI that drives the ChatGPT Plus, Claude Pro, or GitHub Copilot
-subscription you may already have, so there is no per-token bill.
+[pi](https://github.com/earendil-works/pi) is the way to go: one small CLI that
+speaks to everything, including the ChatGPT Plus, Claude Pro, and GitHub Copilot
+subscriptions you may already have, so there is no per-token bill.
 
-1. Install pi (see its README) and sign in once:
+1. Install [pi](https://github.com/earendil-works/pi) (see its README) and sign
+   in once:
 
    ```sh
    pi-ai login
@@ -382,10 +389,12 @@ subscription you may already have, so there is no per-token bill.
    reflows to `commit_body_guide` (50 and 72 by default), so the AI honors the
    same conventions the dialog already nudges you toward.
 
-Prefer API keys or a fully local model? Any command that fits the same stdin to
-stdout contract works, for example Simon Willison's
-[`llm`](https://llm.datasette.io) or `ollama run <model>`.
-[docs/configuration.md](docs/configuration.md) has the full setting reference.
+[pi](https://github.com/earendil-works/pi) covers the most ground, but the
+contract is open: any command that reads a prompt on stdin and prints the
+completion on stdout works. Want a specific provider through an API key? Use
+[`llm`](https://github.com/simonw/llm). Want a fully local model?
+[`ollama run <model>`](https://github.com/ollama/ollama). See
+[docs/configuration.md](docs/configuration.md) for the full setting reference.
 
 ## Keybindings
 

@@ -227,6 +227,39 @@ silently do nothing (lazygit issue
 [#4995](https://github.com/jesseduffield/lazygit/issues/4995)). Drafts
 survive too: close the dialog, come back later, your message is still there.
 
+## AI Commit Messages, Your Own Model
+
+The same dialog can draft the message from the staged diff: a subject line in
+your recent style and a body that explains the change. It is optional and off
+until you set it up, and it never takes over. Press `ctrl+g` to generate the
+focused field and again to regenerate it. The subject targets your summary
+limit and the body reflows to your wrap column, the same 50/72 conventions the
+dialog already nudges. You can keep typing while it works, a generated result
+never overwrites text you edited, and a failure is a small note in the field
+rather than a blocker.
+
+<p align="center">
+  <img src="assets/ziggity-ai-commit.gif" alt="Ziggity drafting a commit subject and body from the staged diff" width="900">
+</p>
+
+<p align="center"><i><code>ctrl+g</code> drafts the subject from the staged diff, then the body to match, each with its own spinner while it works.</i></p>
+
+The part that keeps ziggity small: it ships no model and calls no API of its
+own. You point `ai_command` at a command that reads a prompt on standard input
+and prints the completion on standard output, so the provider, model, key, and
+subscription all live in that tool. The binary stays a tiny static download.
+
+[pi](https://github.com/earendil-works/pi) is the one to reach for. It talks to
+everything, the ChatGPT Plus, Claude Pro, and Copilot subscriptions included, so
+you use what you already pay for with no per-token bill. Want something
+different? [`llm`](https://github.com/simonw/llm) drives any provider you hold an
+API key for. Want it fully local? [`ollama run <model>`](https://github.com/ollama/ollama)
+keeps it on your machine. Nothing is baked into ziggity either way.
+
+lazygit has no built-in commit message drafting; you would bolt an external
+tool on through a custom command, without the in-dialog per-field generation,
+the spinners, or the guarantee that a result never clobbers what you typed.
+
 ## A Force Push That Never Dead Ends
 
 When a push is rejected because the remote moved, what happens next should

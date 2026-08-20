@@ -83,8 +83,11 @@ also copies on release.
 ![Commit message dialog](screenshots/08-commit-dialog.png)
 
 **AI-assisted authoring (optional).** Set `ai_command` to a CLI that reads a
-prompt on stdin and prints a completion (for example `pi -p`, `llm`, or
-`ollama run <model>`) and the commit dialog gains AI generation. ziggity treats
+prompt on stdin and prints a completion (for example
+[`pi -p`](https://github.com/earendil-works/pi),
+[`llm`](https://github.com/simonw/llm), or
+[`ollama run <model>`](https://github.com/ollama/ollama)) and the commit dialog
+gains AI generation. ziggity treats
 the command as a black box, so the provider, model, and key or subscription all
 live in that tool; nothing AI-related appears until it is configured. Then:
 
