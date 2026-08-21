@@ -2010,10 +2010,24 @@ pub const TreeState = struct {
         self.rows = try filetree.build(allocator, entries, &self.collapsed, true);
         self.cursor = 0;
         if (restore_path) |path| {
-            for (self.rows, 0..) |row, i| {
-                if (std.mem.eql(u8, row.path, path)) {
-                    self.cursor = i;
-                    break;
+            found: {
+                for (self.rows, 0..) |row, i| {
+                    if (std.mem.eql(u8, row.path, path)) {
+                        self.cursor = i;
+                        break :found;
+                    }
+                }
+                // Rename-aware fallback: the row the cursor sat on (e.g. the old
+                // path of a split rename) may have merged into a rename row whose
+                // primary path is the new name; match the source path instead, so
+                // the cursor follows the file rather than resetting to the root.
+                for (self.rows, 0..) |row, i| {
+                    if (row.previous_path) |prev| {
+                        if (std.mem.eql(u8, prev, path)) {
+                            self.cursor = i;
+                            break :found;
+                        }
+                    }
                 }
             }
         }
@@ -2914,6 +2928,11 @@ pub const App = struct {
     pub fn refreshFiles(self: *App) !void {
         const selected_path = if (self.selectedFile()) |file| try self.allocator.dupe(u8, file.path) else null;
         defer if (selected_path) |p| self.allocator.free(p);
+        const selected_prev = if (self.selectedFile()) |file|
+            (if (file.previous_path) |p| try self.allocator.dupe(u8, p) else null)
+        else
+            null;
+        defer if (selected_prev) |p| self.allocator.free(p);
         const tree_path = try self.captureTreePath();
         defer if (tree_path) |p| self.allocator.free(p);
 
@@ -2928,7 +2947,7 @@ pub const App = struct {
         // Only working-tree file diffs can have changed.
         self.preview_cache.invalidatePrefix(self.allocator, "f:");
 
-        self.restoreFileSelection(selected_path);
+        self.restoreFileSelection(selected_path, selected_prev);
         self.clampSelections();
         if (self.tree_view) try self.rebuildTree(tree_path);
         const content = self.contentFocus();
@@ -3167,6 +3186,11 @@ pub const App = struct {
 
         const selected_path = if (self.selectedFile()) |file| try self.allocator.dupe(u8, file.path) else null;
         defer if (selected_path) |path| self.allocator.free(path);
+        const selected_prev = if (self.selectedFile()) |file|
+            (if (file.previous_path) |p| try self.allocator.dupe(u8, p) else null)
+        else
+            null;
+        defer if (selected_prev) |p| self.allocator.free(p);
         const tree_path = try self.captureTreePath();
         defer if (tree_path) |p| self.allocator.free(p);
 
@@ -3180,7 +3204,7 @@ pub const App = struct {
         // previews stay valid, so drop just the "f:" entries.
         self.preview_cache.invalidatePrefix(self.allocator, "f:");
 
-        self.restoreFileSelection(selected_path);
+        self.restoreFileSelection(selected_path, selected_prev);
         self.clampSelections();
         if (self.tree_view) try self.rebuildTree(tree_path);
 
@@ -4784,7 +4808,7 @@ pub const App = struct {
     /// Collect the filtered working-tree files as tree entries (path + index).
     fn fileTreeEntries(self: *App, entries: *std.ArrayList(filetree.Entry)) !void {
         for (self.data.files, 0..) |file, idx| {
-            if (self.fileMatchesFilter(file)) try entries.append(self.allocator, .{ .path = file.path, .index = idx });
+            if (self.fileMatchesFilter(file)) try entries.append(self.allocator, .{ .path = file.path, .index = idx, .previous_path = file.previous_path });
         }
     }
 
@@ -10056,12 +10080,37 @@ pub const App = struct {
         return self.commit_ai_title_state == .generating or self.commit_ai_desc_state == .generating;
     }
 
-    fn restoreFileSelection(self: *App, selected_path: ?[]const u8) void {
-        const path = selected_path orelse return;
+    /// Re-anchor the Files cursor onto the same logical file after a refresh.
+    /// `path`/`prev` are the selected file's `path` and `previous_path` (for a
+    /// rename) captured before the reload. An exact `path` match wins; failing
+    /// that we match either side of a rename, because staging/unstaging can merge
+    /// a `D old` + `A new` pair into one `R new|old` entry (or split it back), and
+    /// the primary path flips between `old` and `new`. Without this the cursor
+    /// jumps whenever the row it sat on was absorbed into (or emitted from) a
+    /// rename. See the rename-detection transitions in `parseStatus`.
+    fn restoreFileSelection(self: *App, path: ?[]const u8, prev: ?[]const u8) void {
+        const sel = path orelse return;
+        // Exact match first: the common case, and unambiguous.
         for (self.data.files, 0..) |file, idx| {
-            if (std.mem.eql(u8, file.path, path)) {
+            if (std.mem.eql(u8, file.path, sel)) {
                 self.file_index = idx;
                 return;
+            }
+        }
+        // Rename-aware fallback: the same content may now live under the other
+        // side of a rename. Match the captured path/prev against each file's
+        // path and previous_path.
+        for (self.data.files, 0..) |file, idx| {
+            const fp = file.previous_path;
+            if (fp != null and std.mem.eql(u8, fp.?, sel)) {
+                self.file_index = idx;
+                return;
+            }
+            if (prev) |sp| {
+                if (std.mem.eql(u8, file.path, sp) or (fp != null and std.mem.eql(u8, fp.?, sp))) {
+                    self.file_index = idx;
+                    return;
+                }
             }
         }
     }
@@ -13057,6 +13106,94 @@ test "footer message (the log line) is mouse-selectable and copies" {
     _ = try app.handleMouse(.{ .col = 4, .row = 20, .button = .left, .mods = .{}, .type = .release });
     try std.testing.expect(!app.footer_sel_active);
     try std.testing.expectEqualStrings("committed", app.clipboard_request.?);
+}
+
+test "Files cursor does not jump across rename stage/unstage transitions" {
+    const allocator = std.testing.allocator;
+    const Case = struct {
+        before: []const u8,
+        target: []const u8, // path the cursor sits on before the toggle
+        after: []const u8, // porcelain after the space toggle + git settles
+        expect: []const u8, // path the cursor must land on after the refresh
+    };
+    // Porcelain -z entries; a rename adds a trailing \0<oldpath>. These mirror
+    // real `git status --porcelain -z --find-renames=50%` output.
+    const cases = [_]Case{
+        // The reported jump: cursor on the deletion half of a split rename;
+        // staging it makes git detect the rename and merge both halves into one
+        // `R new|old` entry whose primary path is the *new* name.
+        .{
+            .before = "M  aaa.zig\x00A  new.zig\x00 D old.zig\x00M  zzz.zig\x00",
+            .target = "old.zig",
+            .after = "M  aaa.zig\x00R  new.zig\x00old.zig\x00M  zzz.zig\x00",
+            .expect = "new.zig",
+        },
+        // Unstaging a staged rename splits it back; the new side stays put.
+        .{
+            .before = "M  aaa.zig\x00R  new.zig\x00old.zig\x00M  zzz.zig\x00",
+            .target = "new.zig",
+            .after = "M  aaa.zig\x00D  old.zig\x00?? new.zig\x00M  zzz.zig\x00",
+            .expect = "new.zig",
+        },
+        // Staging the modification of a renamed+modified file keeps it in place.
+        .{
+            .before = "M  aaa.zig\x00RM new.zig\x00old.zig\x00M  zzz.zig\x00",
+            .target = "new.zig",
+            .after = "M  aaa.zig\x00R  new.zig\x00old.zig\x00M  zzz.zig\x00",
+            .expect = "new.zig",
+        },
+    };
+
+    for (cases) |c| {
+        var no_files = [_]model.FileStatus{};
+        var app = try testApp(allocator, &no_files);
+        defer deinitTestApp(&app);
+
+        // Load the "before" list and place the cursor on the target file.
+        app.data.files = try git_mod.parseStatus(allocator, c.before);
+        var found = false;
+        for (app.data.files, 0..) |file, idx| {
+            if (std.mem.eql(u8, file.path, c.target)) {
+                app.file_index = idx;
+                found = true;
+                break;
+            }
+        }
+        try std.testing.expect(found);
+
+        // Capture the identity, swap in the "after" list, and restore — the exact
+        // capture/replace/restore sequence refreshFiles runs after a stage toggle.
+        const sel = try allocator.dupe(u8, app.selectedFile().?.path);
+        defer allocator.free(sel);
+        const prev = if (app.selectedFile().?.previous_path) |p| try allocator.dupe(u8, p) else null;
+        defer if (prev) |p| allocator.free(p);
+
+        app.data.replaceFiles(allocator, try git_mod.parseStatus(allocator, c.after));
+        app.applyFileSort();
+        app.restoreFileSelection(sel, prev);
+
+        try std.testing.expectEqualStrings(c.expect, app.selectedFile().?.path);
+
+        model.deinitFileStatuses(allocator, app.data.files);
+        app.data.files = &.{};
+    }
+}
+
+test "tree view cursor follows a file merged into a rename (no jump to root)" {
+    const allocator = std.testing.allocator;
+    var tree = TreeState{ .collapsed = std.BufSet.init(allocator) };
+    defer tree.deinit(allocator);
+
+    // After a rename merge, `old.zig` no longer has its own row; `new.zig`
+    // carries it as previous_path. Restoring the cursor that sat on `old.zig`
+    // must land on the rename row, not reset to the synthetic root.
+    var after = [_]filetree.Entry{
+        .{ .path = "aaa.zig", .index = 0 },
+        .{ .path = "new.zig", .index = 1, .previous_path = "old.zig" },
+        .{ .path = "zzz.zig", .index = 2 },
+    };
+    try tree.rebuild(allocator, &after, "old.zig");
+    try std.testing.expectEqualStrings("new.zig", tree.selectedRow().?.path);
 }
 
 test "escape clears active file filter before quitting" {

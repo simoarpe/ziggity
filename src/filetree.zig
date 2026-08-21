@@ -7,6 +7,10 @@ pub const Row = struct {
     is_dir: bool,
     depth: u16,
     path: []const u8,
+    /// For a renamed/copied file row, the source path, so the caller can keep the
+    /// cursor on it when a rename merges (`D old` + `A new` -> `R new|old`) and
+    /// the primary path flips. Null for directories and non-renamed files.
+    previous_path: ?[]const u8 = null,
     /// Byte offset into `path` where this row's display name begins (the part
     /// after its parent's prefix). A compressed chain like "a/b/c" displays the
     /// whole "a/b/c"; "src/sub" under "src" displays just "sub". Files render by
@@ -20,6 +24,8 @@ pub const Row = struct {
 pub const Entry = struct {
     path: []const u8,
     index: usize,
+    /// Rename/copy source path, propagated onto the file's `Row` (see there).
+    previous_path: ?[]const u8 = null,
 };
 
 /// Build the flattened, currently-visible rows of a directory tree from a
@@ -55,7 +61,7 @@ fn buildLevel(allocator: std.mem.Allocator, rows: *std.ArrayList(Row), entries: 
         const path = entries[i].path;
         const slash = std.mem.indexOfScalarPos(u8, path, base, '/') orelse {
             // A file sitting directly in this directory.
-            try rows.append(allocator, .{ .is_dir = false, .depth = depth, .path = path, .name_off = base, .file_index = entries[i].index });
+            try rows.append(allocator, .{ .is_dir = false, .depth = depth, .path = path, .name_off = base, .file_index = entries[i].index, .previous_path = entries[i].previous_path });
             i += 1;
             continue;
         };
