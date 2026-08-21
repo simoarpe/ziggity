@@ -241,31 +241,44 @@ fn appendEnvAssign(out: *std.ArrayList(u8), allocator: std.mem.Allocator, name: 
     try out.append(allocator, ' ');
 }
 
+/// Which date(s) a date edit moves.
+pub const DateTarget = enum { author, committer, both };
+
 /// Build the `sh -c` exec line for a date edit. The committer name/email are
-/// always pinned to the originals. When `edit_committer` is true the committer
-/// date is set to `new_date` and the author is left untouched by the amend;
-/// otherwise the committer date is pinned to `orig_committer_date` and the
-/// author date is set via `--date`, so only the author date moves.
+/// always pinned to the originals. `target` selects which date(s) move to
+/// `new_date`:
+///   - `author`: committer date pinned to `orig_committer_date`, author date
+///     set via `--date` (a plain amend would reset the committer to "now").
+///   - `committer`: committer date set to `new_date`, author left untouched.
+///   - `both`: committer date set to `new_date` and author date set via
+///     `--date`, so the two end up identical.
 fn dateEditExec(
     allocator: std.mem.Allocator,
     committer_name: []const u8,
     committer_email: []const u8,
     orig_committer_date: []const u8,
     new_date: []const u8,
-    edit_committer: bool,
+    target: DateTarget,
 ) ![]u8 {
     var cmd: std.ArrayList(u8) = .empty;
     errdefer cmd.deinit(allocator);
     try appendEnvAssign(&cmd, allocator, "GIT_COMMITTER_NAME", committer_name);
     try appendEnvAssign(&cmd, allocator, "GIT_COMMITTER_EMAIL", committer_email);
-    if (edit_committer) {
-        try cmd.appendSlice(allocator, "GIT_COMMITTER_DATE=");
-        try shellQuote(&cmd, allocator, new_date);
-        try cmd.appendSlice(allocator, " git commit --amend --no-edit");
-    } else {
-        try appendEnvAssign(&cmd, allocator, "GIT_COMMITTER_DATE", orig_committer_date);
-        try cmd.appendSlice(allocator, "git commit --amend --no-edit --date=");
-        try shellQuote(&cmd, allocator, new_date);
+    switch (target) {
+        .committer, .both => {
+            try cmd.appendSlice(allocator, "GIT_COMMITTER_DATE=");
+            try shellQuote(&cmd, allocator, new_date);
+            try cmd.appendSlice(allocator, " git commit --amend --no-edit");
+            if (target == .both) {
+                try cmd.appendSlice(allocator, " --date=");
+                try shellQuote(&cmd, allocator, new_date);
+            }
+        },
+        .author => {
+            try appendEnvAssign(&cmd, allocator, "GIT_COMMITTER_DATE", orig_committer_date);
+            try cmd.appendSlice(allocator, "git commit --amend --no-edit --date=");
+            try shellQuote(&cmd, allocator, new_date);
+        },
     }
     return cmd.toOwnedSlice(allocator);
 }
@@ -286,10 +299,11 @@ pub fn amendCommitAuthor(app: *App, author: ?[]const u8) !void {
     return submitCommitAmend(app, i, cmd_buf.items, "editing author", "updated author of {s}");
 }
 
-/// Set commit `i`'s author date to `date` (any git-parseable form), pinning the
-/// committer name/email/date to their originals so only the author date moves
-/// (a plain amend would reset the committer to "now").
-pub fn amendCommitAuthorDate(app: *App, date_in: []const u8) !void {
+/// Set commit `i`'s date(s) to `date` (any git-parseable form). The committer
+/// name/email are always preserved; `target` picks which date(s) move (see
+/// `dateEditExec`). A plain amend would reset the committer to "now", so the
+/// untouched committer date is pinned back to its original.
+fn amendCommitDate(app: *App, date_in: []const u8, target: DateTarget, gerund: []const u8, comptime success_fmt: []const u8) !void {
     const date = std.mem.trim(u8, date_in, " \t\r\n");
     if (date.len == 0) {
         try app.setMessage("date cannot be empty", .{});
@@ -306,33 +320,24 @@ pub fn amendCommitAuthorDate(app: *App, date_in: []const u8) !void {
     };
     defer id.deinit(app.allocator);
 
-    const exec = try dateEditExec(app.allocator, id.committer_name, id.committer_email, id.committer_date, date, false);
+    const exec = try dateEditExec(app.allocator, id.committer_name, id.committer_email, id.committer_date, date, target);
     defer app.allocator.free(exec);
-    return submitCommitAmend(app, i, exec, "editing author date", "updated author date of {s}");
+    return submitCommitAmend(app, i, exec, gerund, success_fmt);
 }
 
-/// Set commit `i`'s committer date to `date`, preserving its committer
-/// name/email and the whole author identity (name/email/date).
-pub fn amendCommitCommitterDate(app: *App, date_in: []const u8) !void {
-    const date = std.mem.trim(u8, date_in, " \t\r\n");
-    if (date.len == 0) {
-        try app.setMessage("date cannot be empty", .{});
-        return;
-    }
-    if (!app.git.isValidDate(date)) {
-        try app.setMessage("invalid date; use ISO 8601 (2024-01-31T14:00:00+01:00) or @<epoch> <tz>", .{});
-        return;
-    }
-    const i = (try commitAmendTarget(app)) orelse return;
-    var id = app.git.commitIdentity(app.data.commits[i].hash) catch {
-        try app.setMessage("could not read the commit's dates", .{});
-        return;
-    };
-    defer id.deinit(app.allocator);
+/// Set commit `i`'s author date, pinning the committer date so only it moves.
+pub fn amendCommitAuthorDate(app: *App, date_in: []const u8) !void {
+    return amendCommitDate(app, date_in, .author, "editing author date", "updated author date of {s}");
+}
 
-    const exec = try dateEditExec(app.allocator, id.committer_name, id.committer_email, id.committer_date, date, true);
-    defer app.allocator.free(exec);
-    return submitCommitAmend(app, i, exec, "editing committer date", "updated committer date of {s}");
+/// Set commit `i`'s committer date, preserving the whole author identity.
+pub fn amendCommitCommitterDate(app: *App, date_in: []const u8) !void {
+    return amendCommitDate(app, date_in, .committer, "editing committer date", "updated committer date of {s}");
+}
+
+/// Set commit `i`'s author *and* committer date to the same value.
+pub fn amendCommitBothDates(app: *App, date_in: []const u8) !void {
+    return amendCommitDate(app, date_in, .both, "editing dates", "updated author & committer dates of {s}");
 }
 
 /// `d` in a commit's file list: drop the selected file(s)' changes from that
@@ -568,7 +573,7 @@ test "dateEditExec pins the untouched fields and quotes safely" {
     const a = std.testing.allocator;
 
     // Author-date edit: committer fully pinned, author date set via --date.
-    const e1 = try dateEditExec(a, "Al Ice", "al@x.io", "2020-06-01T20:00:00+00:00", "2021-03-15T09:30:00+00:00", false);
+    const e1 = try dateEditExec(a, "Al Ice", "al@x.io", "2020-06-01T20:00:00+00:00", "2021-03-15T09:30:00+00:00", .author);
     defer a.free(e1);
     try std.testing.expect(std.mem.indexOf(u8, e1, "GIT_COMMITTER_NAME='Al Ice'") != null);
     try std.testing.expect(std.mem.indexOf(u8, e1, "GIT_COMMITTER_EMAIL='al@x.io'") != null);
@@ -576,9 +581,16 @@ test "dateEditExec pins the untouched fields and quotes safely" {
     try std.testing.expect(std.mem.indexOf(u8, e1, "--date='2021-03-15T09:30:00+00:00'") != null); // new author date
 
     // Committer-date edit: committer date is the new value; author untouched (no --date).
-    const e2 = try dateEditExec(a, "Al Ice", "al@x.io", "2020-06-01T20:00:00+00:00", "2022-12-31T23:59:00+00:00", true);
+    const e2 = try dateEditExec(a, "Al Ice", "al@x.io", "2020-06-01T20:00:00+00:00", "2022-12-31T23:59:00+00:00", .committer);
     defer a.free(e2);
     try std.testing.expect(std.mem.indexOf(u8, e2, "GIT_COMMITTER_DATE='2022-12-31T23:59:00+00:00'") != null); // new committer date
     try std.testing.expect(std.mem.indexOf(u8, e2, "--date=") == null); // author left alone
     try std.testing.expect(std.mem.indexOf(u8, e2, "GIT_COMMITTER_NAME='Al Ice'") != null);
+
+    // Both-dates edit: the same value drives GIT_COMMITTER_DATE and --date.
+    const e3 = try dateEditExec(a, "Al Ice", "al@x.io", "2020-06-01T20:00:00+00:00", "2023-07-04T12:00:00+00:00", .both);
+    defer a.free(e3);
+    try std.testing.expect(std.mem.indexOf(u8, e3, "GIT_COMMITTER_DATE='2023-07-04T12:00:00+00:00'") != null); // new committer date
+    try std.testing.expect(std.mem.indexOf(u8, e3, "--date='2023-07-04T12:00:00+00:00'") != null); // new author date
+    try std.testing.expect(std.mem.indexOf(u8, e3, "GIT_COMMITTER_NAME='Al Ice'") != null);
 }

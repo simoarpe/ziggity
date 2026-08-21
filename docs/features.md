@@ -59,11 +59,12 @@ Full interactive rebase: press `i` on a commit to open a plan editor, mark
 ### Editing Commit Metadata
 
 Press `a` on a commit to edit its metadata: the author name and email, the
-author date, or the committer date. Each date option offers "Set to now" or a
-prompt prefilled with the commit's current value, and the input is validated
-before anything is rewritten, so a typo is rejected up front instead of
-stranding a half finished rebase. Editing one date leaves the other exactly as
-it was, and the preview shows the author and committer dates side by side (via
+author date, the committer date, or both dates at once. Each date option offers
+"Set to now" or a prompt prefilled with the commit's current value, and the
+input is validated before anything is rewritten, so a typo is rejected up front
+instead of stranding a half finished rebase. Editing one date leaves the other
+exactly as it was; the "author & committer date" option applies the same value
+to both. The preview shows the author and committer dates side by side (via
 `git show --pretty=fuller`) so you can confirm the change took effect.
 
 ![Edit commit metadata menu, with the author and committer dates in the preview](screenshots/23-commit-metadata.png)
@@ -243,10 +244,11 @@ The animation itself is in the [README](../README.md).
   (`space`, detached), branch from it (`n`), move commits to a new branch
   (`N`), tag (`T`), and a copy menu (`y`: hash, subject, author).
 - Edit commit metadata (`a`): change the author name and email, the author
-  date, or the committer date. The date prompts prefill with the commit's
-  current value (ISO 8601) and validate the input before rewriting, so a typo
-  is rejected up front rather than stranding a rebase. Editing one date leaves
-  the other exactly as it was.
+  date, the committer date, or both dates at once. The date prompts prefill with
+  the commit's current value (ISO 8601) and validate the input before rewriting,
+  so a typo is rejected up front rather than stranding a rebase. Editing one date
+  leaves the other exactly as it was; the combined option sets both to the same
+  value.
 - GPG signatures: a signed commit's diff shows git's verification block
   (`--show-signature`), and `x` verifies the selected commit's signature on
   demand (result in a dialog), with no per row cost.

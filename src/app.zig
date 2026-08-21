@@ -176,6 +176,7 @@ pub const TextPromptKind = enum {
     set_commit_author,
     set_author_date,
     set_committer_date,
+    set_both_date,
     rename_stash,
     stash_message,
 
@@ -207,6 +208,7 @@ pub const TextPromptKind = enum {
             .set_commit_author => "Author as: Name <email>",
             .set_author_date => "Author date (ISO 8601, e.g. 2024-01-31T14:00:00+01:00)",
             .set_committer_date => "Committer date (ISO 8601, e.g. 2024-01-31T14:00:00+01:00)",
+            .set_both_date => "Author & committer date (ISO 8601, e.g. 2024-01-31T14:00:00+01:00)",
             .rename_stash => "Rename stash",
             .stash_message => "Stash message (empty = default WIP name)",
         };
@@ -544,10 +546,13 @@ pub const MenuAction = enum {
     edit_author_identity,
     edit_author_date,
     edit_committer_date,
+    edit_both_dates,
     author_date_now,
     author_date_manual,
     committer_date_now,
     committer_date_manual,
+    both_date_now,
+    both_date_manual,
     sort_branches_date,
     sort_branches_recency,
     sort_branches_alpha,
@@ -575,6 +580,7 @@ pub const commit_attr_menu = [_]MenuItem{
     .{ .label = "Edit author name & email", .action = .edit_author_identity },
     .{ .label = "Edit author date", .action = .edit_author_date },
     .{ .label = "Edit committer date", .action = .edit_committer_date },
+    .{ .label = "Edit author & committer date", .action = .edit_both_dates },
 };
 
 /// The author name/email submenu, reached from `commit_attr_menu`.
@@ -591,6 +597,10 @@ pub const author_date_menu = [_]MenuItem{
 pub const committer_date_menu = [_]MenuItem{
     .{ .label = "Set to now", .action = .committer_date_now },
     .{ .label = "Set manually...", .action = .committer_date_manual },
+};
+pub const both_date_menu = [_]MenuItem{
+    .{ .label = "Set to now", .action = .both_date_now },
+    .{ .label = "Set manually...", .action = .both_date_manual },
 };
 
 /// The `y` copy-attribute menu on the Commits/Reflog tabs.
@@ -6932,13 +6942,15 @@ pub const App = struct {
         switch (kind) {
             // Prefill the date prompts with the commit's current value so you
             // edit in place; any git-parseable string is accepted on submit.
-            .set_author_date, .set_committer_date => {
+            .set_author_date, .set_committer_date, .set_both_date => {
                 if (self.commits_tab == .commits and self.data.commits.len > 0) {
                     const i = @min(self.commit_index, self.data.commits.len - 1);
                     if (self.git.commitIdentity(self.data.commits[i].hash)) |id_val| {
                         var id = id_val;
                         defer id.deinit(self.allocator);
-                        const src = if (kind == .set_author_date) id.author_date else id.committer_date;
+                        // The "both" prompt seeds from the author date (either is a
+                        // reasonable starting point; both get the submitted value).
+                        const src = if (kind == .set_committer_date) id.committer_date else id.author_date;
                         const n = @min(src.len, date_buf.len);
                         @memcpy(date_buf[0..n], src[0..n]);
                         prefill = date_buf[0..n];
@@ -7653,6 +7665,12 @@ pub const App = struct {
                 self.text_prompt_kind = null;
                 defer self.input_buffer.clearRetainingCapacity();
                 return commitops_mod.amendCommitCommitterDate(self, value);
+            },
+            .set_both_date => {
+                self.mode = .normal;
+                self.text_prompt_kind = null;
+                defer self.input_buffer.clearRetainingCapacity();
+                return commitops_mod.amendCommitBothDates(self, value);
             },
             .rename_stash => {
                 const entry = self.selectedStash() orelse {
@@ -8369,6 +8387,11 @@ pub const App = struct {
                 self.active_menu = .{ .title = "Edit committer date", .items = &committer_date_menu, .index = 0 };
                 try self.setMessage("edit committer date", .{});
             },
+            .edit_both_dates => {
+                self.mode = .menu;
+                self.active_menu = .{ .title = "Edit author & committer date", .items = &both_date_menu, .index = 0 };
+                try self.setMessage("edit author & committer date", .{});
+            },
             .author_date_now => {
                 const now = self.git.nowDate(self.allocator) catch {
                     try self.setMessage("could not read the current time", .{});
@@ -8387,6 +8410,15 @@ pub const App = struct {
                 return commitops_mod.amendCommitCommitterDate(self, now);
             },
             .committer_date_manual => return self.startTextPrompt(.set_committer_date),
+            .both_date_now => {
+                const now = self.git.nowDate(self.allocator) catch {
+                    try self.setMessage("could not read the current time", .{});
+                    return;
+                };
+                defer self.allocator.free(now);
+                return commitops_mod.amendCommitBothDates(self, now);
+            },
+            .both_date_manual => return self.startTextPrompt(.set_both_date),
             .reset_commit_author => return commitops_mod.amendCommitAuthor(self, null),
             .set_commit_author => return self.startTextPrompt(.set_commit_author),
             .sort_branches_date, .sort_branches_recency, .sort_branches_alpha => {

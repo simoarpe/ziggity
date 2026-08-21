@@ -97,7 +97,7 @@ the written reference. Every binding is remappable, see
 - `space` / `n` / `N` (Commits/Reflog): checkout (detached) / branch from it
   / move commits to a new branch
 - `T` / `a` (Commits): tag the commit / edit its metadata (author name & email,
-  author date, or committer date)
+  author date, committer date, or both dates at once)
 - `y` / `C`: copy menu / clear the cherry pick selection
 - `i` (Commits): interactive rebase plan editor
 - `ctrl+l` (Commits): commit graph viewer (`j` and `k` move, `@` HEAD, `p`
