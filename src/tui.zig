@@ -4106,6 +4106,8 @@ fn drawStagingSplit(root: vaxis.Window, app: *app_mod.App, x: u16, y: u16, w: u1
 fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
     fillRow(win, 0, st.bottom);
+    // No selectable message unless the normal-mode branch below draws one.
+    app.footer_msg_len = 0;
     // The commit-graph viewer and the recent-repositories switcher are full
     // overlays with their own footers, so the panel hints below them are just
     // noise — keep the main bar clean while they're open (the normal footer
@@ -4157,7 +4159,22 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
 
     var col: u16 = 0;
     if (app.message.len > 0) {
+        // Register the message as a mouse-selectable span (see handleMouse). Its
+        // origin is this bar's absolute top-left; offsets are byte == column.
+        app.footer_msg_x = @intCast(@max(win.x_off, 0));
+        app.footer_msg_y = @intCast(@max(win.y_off, 0));
+        app.footer_msg_len = app.message.len;
         col = printSpan(win, 0, 0, app.message, st.bottom);
+        // Highlight the dragged selection over the base text.
+        if (app.footer_sel_active and app.footer_sel_dragged) {
+            const lo = @min(app.footer_sel_anchor, app.footer_sel_head);
+            const hi = @min(@max(app.footer_sel_anchor, app.footer_sel_head), app.message.len);
+            if (hi > lo) {
+                var sel_style = st.bottom;
+                sel_style.bg = .{ .index = ui_theme.selected_bg };
+                _ = printSpan(win, 0, @intCast(lo), app.message[lo..hi], sel_style);
+            }
+        }
         col = printSpan(win, 0, col, "  |  ", st.bottom);
     }
     _ = drawHints(win, 0, col, contextHints(app), st.hint_key, st.hint_desc);

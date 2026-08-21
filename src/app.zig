@@ -2215,6 +2215,17 @@ pub const App = struct {
     // render so the mouse handler can map screen coords to text and the copy can
     // reconstruct the span. Selection is per-view: it clears when the dialog
     // scrolls or closes.
+    // Mouse text selection of the footer message (the "log" line, lower left):
+    // left-drag selects, release copies. The message's absolute origin and byte
+    // length are captured at render so the handler can map a cell to an offset;
+    // anchor/head are byte offsets (== columns) within the message.
+    footer_msg_x: u16 = 0,
+    footer_msg_y: u16 = 0,
+    footer_msg_len: usize = 0,
+    footer_sel_active: bool = false,
+    footer_sel_dragged: bool = false,
+    footer_sel_anchor: usize = 0,
+    footer_sel_head: usize = 0,
     dialog_sel_active: bool = false,
     dialog_sel_dragged: bool = false,
     dialog_sel_anchor_row: usize = 0,
@@ -3836,6 +3847,50 @@ pub const App = struct {
             return false;
         }
 
+        // Footer message ("log" line, lower left): left-drag selects, release
+        // copies. Its own row sits below every panel and the about splash, so this
+        // runs first and never collides with them. Captured origin/length come
+        // from the render (drawBottom); a press elsewhere clears a stale selection
+        // and falls through so the click still acts on what it hit.
+        if (self.footer_msg_len > 0 or self.footer_sel_active) {
+            const c: u16 = if (mouse.col < 0) 0 else @intCast(mouse.col);
+            const rw: u16 = if (mouse.row < 0) 0 else @intCast(mouse.row);
+            const in_msg = rw == self.footer_msg_y and c >= self.footer_msg_x and
+                (c - self.footer_msg_x) <= self.footer_msg_len;
+            switch (mouse.type) {
+                .press => if (mouse.button == .left) {
+                    if (in_msg) {
+                        const off = c - self.footer_msg_x;
+                        self.footer_sel_active = true;
+                        self.footer_sel_dragged = false;
+                        self.footer_sel_anchor = off;
+                        self.footer_sel_head = off;
+                        return true;
+                    } else if (self.footer_sel_active) {
+                        self.footer_sel_active = false;
+                        self.footer_sel_dragged = false;
+                    }
+                },
+                .drag => if (self.footer_sel_active) {
+                    if (rw == self.footer_msg_y and c >= self.footer_msg_x) {
+                        self.footer_sel_head = @min(c - self.footer_msg_x, self.footer_msg_len);
+                        self.footer_sel_dragged = true;
+                    }
+                    return true;
+                },
+                .release => if (self.footer_sel_active) {
+                    if (self.footer_sel_dragged and self.footer_sel_head != self.footer_sel_anchor) {
+                        try self.copyFooterSelection();
+                    } else {
+                        self.footer_sel_active = false;
+                    }
+                    self.footer_sel_dragged = false;
+                    return true;
+                },
+                else => {},
+            }
+        }
+
         // The Status-panel "about" splash reuses the dialog-grid selection: drag
         // over its text lines to select, release to copy. Its rows are registered
         // in `drawAbout`; the banner and animated donut rows are left empty, so
@@ -4485,6 +4540,17 @@ pub const App = struct {
     pub fn clearDialogSelection(self: *App) void {
         self.dialog_sel_active = false;
         self.dialog_sel_dragged = false;
+    }
+
+    /// Copy the current footer-message selection to the clipboard.
+    fn copyFooterSelection(self: *App) !void {
+        const msg = self.message;
+        const hi = @min(@max(self.footer_sel_anchor, self.footer_sel_head), msg.len);
+        const lo = @min(@min(self.footer_sel_anchor, self.footer_sel_head), hi);
+        if (hi <= lo) return;
+        if (self.clipboard_request) |c| self.allocator.free(c);
+        self.clipboard_request = try self.allocator.dupe(u8, msg[lo..hi]);
+        try self.setMessage("copied selection", .{});
     }
 
     /// Select the item under a left-click in a list panel. The clicked item is
@@ -9350,6 +9416,8 @@ pub const App = struct {
         // Mirror the outcome in the bottom bar for a glance after dismissal.
         self.allocator.free(self.message);
         self.message = try std.fmt.allocPrint(self.allocator, "{s}", .{summary});
+        self.footer_sel_active = false;
+        self.footer_sel_dragged = false;
     }
 
     /// Tear down a pending "Running…" frame (from beginOp) without showing a
@@ -9683,6 +9751,9 @@ pub const App = struct {
     pub fn setMessage(self: *App, comptime fmt: []const u8, args: anytype) !void {
         self.allocator.free(self.message);
         self.message = try std.fmt.allocPrint(self.allocator, fmt, args);
+        // A new log line invalidates any selection over the old one.
+        self.footer_sel_active = false;
+        self.footer_sel_dragged = false;
     }
 
     pub fn clampSelections(self: *App) void {
@@ -12956,6 +13027,36 @@ test "dialog text is mouse-selectable and copies to the clipboard" {
     _ = try app.handleMouse(.{ .col = 4, .row = 3, .button = .left, .mods = .{}, .type = .release });
     try std.testing.expect(!app.dialog_sel_active);
     try std.testing.expectEqualStrings("world\nsecond", app.clipboard_request.?);
+}
+
+test "footer message (the log line) is mouse-selectable and copies" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.mode = .normal;
+    app.focus = .files; // not the Status about splash, so the footer is reachable
+    try app.setMessage("committed 3 files", .{});
+    // Stand in for drawBottom capturing the message at absolute origin (1, 20).
+    app.footer_msg_x = 1;
+    app.footer_msg_y = 20;
+    app.footer_msg_len = app.message.len;
+
+    // Drag over "committed" (offsets 0..9) on the footer row and release to copy.
+    _ = try app.handleMouse(.{ .col = 1, .row = 20, .button = .left, .mods = .{}, .type = .press });
+    try std.testing.expect(app.footer_sel_active);
+    _ = try app.handleMouse(.{ .col = 10, .row = 20, .button = .left, .mods = .{}, .type = .drag });
+    try std.testing.expect(app.footer_sel_dragged);
+    _ = try app.handleMouse(.{ .col = 10, .row = 20, .button = .left, .mods = .{}, .type = .release });
+    try std.testing.expectEqualStrings("committed", app.clipboard_request.?);
+
+    // A plain click on the message (no drag) selects nothing and leaves the
+    // clipboard untouched.
+    _ = try app.handleMouse(.{ .col = 4, .row = 20, .button = .left, .mods = .{}, .type = .press });
+    _ = try app.handleMouse(.{ .col = 4, .row = 20, .button = .left, .mods = .{}, .type = .release });
+    try std.testing.expect(!app.footer_sel_active);
+    try std.testing.expectEqualStrings("committed", app.clipboard_request.?);
 }
 
 test "escape clears active file filter before quitting" {

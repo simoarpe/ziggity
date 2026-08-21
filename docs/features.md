@@ -331,10 +331,11 @@ The animation itself is in the [README](../README.md).
   [comparison.md](comparison.md#jump-between-repositories)).
 - Find the fixup base for a staged change and make a `fixup!` (`ctrl+f`, via
   blame).
-- Mouse text selection with automatic copy in the diff panel and the read
-  only dialogs (OSC 52); copy a hash, branch or tag (`ctrl+o`); open a commit
-  or branch on its remote host (`o`), with the right URL shape for GitHub,
-  GitLab and Codeberg.
+- Mouse text selection with automatic copy in the diff panel, the read only
+  dialogs, and the footer message line (drag the lower left log to copy it)
+  (OSC 52); copy a hash, branch or tag (`ctrl+o`); open a commit or branch on
+  its remote host (`o`), with the right URL shape for GitHub, GitLab and
+  Codeberg.
 - Terminal integration: bracketed paste, so a pasted multiline commit message
   never submits early; focus events, which pause animations and background
   refreshes when the window loses focus; and the kitty keyboard protocol
