@@ -174,6 +174,7 @@ pub const TextPromptKind = enum {
     new_branch_from_commit,
     move_to_new_branch,
     set_commit_author,
+    set_commit_committer,
     set_author_date,
     set_committer_date,
     set_both_date,
@@ -206,6 +207,7 @@ pub const TextPromptKind = enum {
             .new_branch_from_commit => "New branch name (at the selected commit)",
             .move_to_new_branch => "New branch name (move commits onto it)",
             .set_commit_author => "Author as: Name <email>",
+            .set_commit_committer => "Committer as: Name <email>",
             .set_author_date => "Author date (ISO 8601, e.g. 2024-01-31T14:00:00+01:00)",
             .set_committer_date => "Committer date (ISO 8601, e.g. 2024-01-31T14:00:00+01:00)",
             .set_both_date => "Author & committer date (ISO 8601, e.g. 2024-01-31T14:00:00+01:00)",
@@ -543,7 +545,10 @@ pub const MenuAction = enum {
     copy_commit_author,
     reset_commit_author,
     set_commit_author,
+    reset_commit_committer,
+    set_commit_committer,
     edit_author_identity,
+    edit_committer_identity,
     edit_author_date,
     edit_committer_date,
     edit_both_dates,
@@ -578,6 +583,7 @@ pub const branch_sort_menu = [_]MenuItem{
 /// edit. "Edit author name & email" opens `author_menu` below.
 pub const commit_attr_menu = [_]MenuItem{
     .{ .label = "Edit author name & email", .action = .edit_author_identity },
+    .{ .label = "Edit committer name & email", .action = .edit_committer_identity },
     .{ .label = "Edit author date", .action = .edit_author_date },
     .{ .label = "Edit committer date", .action = .edit_committer_date },
     .{ .label = "Edit author & committer date", .action = .edit_both_dates },
@@ -587,6 +593,12 @@ pub const commit_attr_menu = [_]MenuItem{
 pub const author_menu = [_]MenuItem{
     .{ .label = "Reset author to your git user", .action = .reset_commit_author },
     .{ .label = "Set author...", .action = .set_commit_author },
+};
+
+/// The committer name/email submenu, reached from `commit_attr_menu`.
+pub const committer_menu = [_]MenuItem{
+    .{ .label = "Reset committer to your git user", .action = .reset_commit_committer },
+    .{ .label = "Set committer...", .action = .set_commit_committer },
 };
 
 /// The author/committer date submenus: set to the current time, or type a date.
@@ -6996,7 +7008,7 @@ pub const App = struct {
             // selection still names the entry the branch is created from.
             .new_branch_from_commit => self.focus = .commits,
             .move_to_new_branch => self.focus = .commits,
-            .set_commit_author => self.focus = .commits,
+            .set_commit_author, .set_commit_committer => self.focus = .commits,
             .rename_stash => {
                 self.focus = .stash;
                 if (self.selectedStash()) |s| prefill = s.message;
@@ -7653,6 +7665,12 @@ pub const App = struct {
                 self.text_prompt_kind = null;
                 defer self.input_buffer.clearRetainingCapacity();
                 return commitops_mod.amendCommitAuthor(self, value);
+            },
+            .set_commit_committer => {
+                self.mode = .normal;
+                self.text_prompt_kind = null;
+                defer self.input_buffer.clearRetainingCapacity();
+                return commitops_mod.amendCommitCommitter(self, value);
             },
             .set_author_date => {
                 self.mode = .normal;
@@ -8377,6 +8395,11 @@ pub const App = struct {
                 self.active_menu = .{ .title = "Edit author name & email", .items = &author_menu, .index = 0 };
                 try self.setMessage("change commit author", .{});
             },
+            .edit_committer_identity => {
+                self.mode = .menu;
+                self.active_menu = .{ .title = "Edit committer name & email", .items = &committer_menu, .index = 0 };
+                try self.setMessage("change commit committer", .{});
+            },
             .edit_author_date => {
                 self.mode = .menu;
                 self.active_menu = .{ .title = "Edit author date", .items = &author_date_menu, .index = 0 };
@@ -8421,6 +8444,8 @@ pub const App = struct {
             .both_date_manual => return self.startTextPrompt(.set_both_date),
             .reset_commit_author => return commitops_mod.amendCommitAuthor(self, null),
             .set_commit_author => return self.startTextPrompt(.set_commit_author),
+            .reset_commit_committer => return commitops_mod.amendCommitCommitter(self, null),
+            .set_commit_committer => return self.startTextPrompt(.set_commit_committer),
             .sort_branches_date, .sort_branches_recency, .sort_branches_alpha => {
                 const order: model.BranchSortOrder = switch (action) {
                     .sort_branches_date => .date,

@@ -299,6 +299,60 @@ pub fn amendCommitAuthor(app: *App, author: ?[]const u8) !void {
     return submitCommitAmend(app, i, cmd_buf.items, "editing author", "updated author of {s}");
 }
 
+/// Parse a `Name <email>` identity string into its parts, or null when it lacks
+/// a well-formed `<email>`. Whitespace around each part is trimmed.
+fn parseIdent(s: []const u8) ?struct { name: []const u8, email: []const u8 } {
+    const trimmed = std.mem.trim(u8, s, " \t\r\n");
+    const lt = std.mem.lastIndexOfScalar(u8, trimmed, '<') orelse return null;
+    const gt = std.mem.lastIndexOfScalar(u8, trimmed, '>') orelse return null;
+    if (gt < lt) return null;
+    const email = std.mem.trim(u8, trimmed[lt + 1 .. gt], " \t\r\n");
+    const name = std.mem.trim(u8, trimmed[0..lt], " \t\r\n");
+    if (name.len == 0 or email.len == 0) return null;
+    return .{ .name = name, .email = email };
+}
+
+/// Build the `sh -c` exec line for a committer name/email edit. When `name`/
+/// `email` are null the committer defaults to your current git user; otherwise
+/// they are set explicitly. The committer date is always pinned to its original
+/// so changing who committed doesn't also reset when (a plain amend would move
+/// it to "now"). The author identity is untouched by an amend.
+fn committerEditExec(allocator: std.mem.Allocator, name: ?[]const u8, email: ?[]const u8, orig_committer_date: []const u8) ![]u8 {
+    var cmd: std.ArrayList(u8) = .empty;
+    errdefer cmd.deinit(allocator);
+    if (name) |n| try appendEnvAssign(&cmd, allocator, "GIT_COMMITTER_NAME", n);
+    if (email) |e| try appendEnvAssign(&cmd, allocator, "GIT_COMMITTER_EMAIL", e);
+    try appendEnvAssign(&cmd, allocator, "GIT_COMMITTER_DATE", orig_committer_date);
+    try cmd.appendSlice(allocator, "git commit --amend --no-edit");
+    return cmd.toOwnedSlice(allocator);
+}
+
+/// Set commit `i`'s committer name/email. `ident` is a `Name <email>` string; a
+/// null resets the committer to your current git user. Either way the committer
+/// date and the whole author identity are preserved.
+pub fn amendCommitCommitter(app: *App, ident: ?[]const u8) !void {
+    var name: ?[]const u8 = null;
+    var email: ?[]const u8 = null;
+    if (ident) |s| {
+        const parsed = parseIdent(s) orelse {
+            try app.setMessage("use the form: Name <email>", .{});
+            return;
+        };
+        name = parsed.name;
+        email = parsed.email;
+    }
+    const i = (try commitAmendTarget(app)) orelse return;
+    var id = app.git.commitIdentity(app.data.commits[i].hash) catch {
+        try app.setMessage("could not read the commit's committer", .{});
+        return;
+    };
+    defer id.deinit(app.allocator);
+
+    const exec = try committerEditExec(app.allocator, name, email, id.committer_date);
+    defer app.allocator.free(exec);
+    return submitCommitAmend(app, i, exec, "editing committer", "updated committer of {s}");
+}
+
 /// Set commit `i`'s date(s) to `date` (any git-parseable form). The committer
 /// name/email are always preserved; `target` picks which date(s) move (see
 /// `dateEditExec`). A plain amend would reset the committer to "now", so the
@@ -593,4 +647,33 @@ test "dateEditExec pins the untouched fields and quotes safely" {
     try std.testing.expect(std.mem.indexOf(u8, e3, "GIT_COMMITTER_DATE='2023-07-04T12:00:00+00:00'") != null); // new committer date
     try std.testing.expect(std.mem.indexOf(u8, e3, "--date='2023-07-04T12:00:00+00:00'") != null); // new author date
     try std.testing.expect(std.mem.indexOf(u8, e3, "GIT_COMMITTER_NAME='Al Ice'") != null);
+}
+
+test "parseIdent extracts name and email, or rejects malformed input" {
+    const ok = parseIdent("  Ada Lovelace <ada@x.io> ").?;
+    try std.testing.expectEqualStrings("Ada Lovelace", ok.name);
+    try std.testing.expectEqualStrings("ada@x.io", ok.email);
+    try std.testing.expect(parseIdent("no brackets") == null);
+    try std.testing.expect(parseIdent("<only@email.io>") == null); // empty name
+    try std.testing.expect(parseIdent("Name <>") == null); // empty email
+}
+
+test "committerEditExec sets the committer and pins its date; author untouched" {
+    const a = std.testing.allocator;
+
+    // Explicit committer: name/email set, date pinned, no author flags.
+    const e1 = try committerEditExec(a, "Ada Lovelace", "ada@x.io", "2020-06-01T20:00:00+00:00");
+    defer a.free(e1);
+    try std.testing.expect(std.mem.indexOf(u8, e1, "GIT_COMMITTER_NAME='Ada Lovelace'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, e1, "GIT_COMMITTER_EMAIL='ada@x.io'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, e1, "GIT_COMMITTER_DATE='2020-06-01T20:00:00+00:00'") != null); // pinned
+    try std.testing.expect(std.mem.indexOf(u8, e1, "--date=") == null); // author date untouched
+    try std.testing.expect(std.mem.indexOf(u8, e1, "--author") == null);
+
+    // Reset: no name/email set (git uses the current user), date still pinned.
+    const e2 = try committerEditExec(a, null, null, "2020-06-01T20:00:00+00:00");
+    defer a.free(e2);
+    try std.testing.expect(std.mem.indexOf(u8, e2, "GIT_COMMITTER_NAME") == null);
+    try std.testing.expect(std.mem.indexOf(u8, e2, "GIT_COMMITTER_EMAIL") == null);
+    try std.testing.expect(std.mem.indexOf(u8, e2, "GIT_COMMITTER_DATE='2020-06-01T20:00:00+00:00'") != null);
 }

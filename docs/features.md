@@ -59,7 +59,9 @@ Full interactive rebase: press `i` on a commit to open a plan editor, mark
 ### Editing Commit Metadata
 
 Press `a` on a commit to edit its metadata: the author name and email, the
-author date, the committer date, or both dates at once. Each date option offers
+committer name and email, the author date, the committer date, or both dates at
+once. Setting or resetting the committer keeps its date (and the whole author)
+exactly as it was. Each date option offers
 "Set to now" or a prompt prefilled with the commit's current value, and the
 input is validated before anything is rewritten, so a typo is rejected up front
 instead of stranding a half finished rebase. Editing one date leaves the other
@@ -243,8 +245,10 @@ The animation itself is in the [README](../README.md).
 - Per commit: reset (`g`, soft, mixed or hard), revert (`t`), checkout
   (`space`, detached), branch from it (`n`), move commits to a new branch
   (`N`), tag (`T`), and a copy menu (`y`: hash, subject, author).
-- Edit commit metadata (`a`): change the author name and email, the author
-  date, the committer date, or both dates at once. The date prompts prefill with
+- Edit commit metadata (`a`): change the author name and email, the committer
+  name and email, the author date, the committer date, or both dates at once.
+  Editing the committer identity preserves its date and the author. The date
+  prompts prefill with
   the commit's current value (ISO 8601) and validate the input before rewriting,
   so a typo is rejected up front rather than stranding a rebase. Editing one date
   leaves the other exactly as it was; the combined option sets both to the same
