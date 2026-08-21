@@ -210,7 +210,7 @@ pub const TextPromptKind = enum {
             .set_commit_committer => "Committer as: Name <email>",
             .set_author_date => "Author date (ISO 8601, e.g. 2024-01-31T14:00:00+01:00)",
             .set_committer_date => "Committer date (ISO 8601, e.g. 2024-01-31T14:00:00+01:00)",
-            .set_both_date => "Author & committer date (ISO 8601, e.g. 2024-01-31T14:00:00+01:00)",
+            .set_both_date => "Both dates (ISO 8601, e.g. 2024-01-31T14:00:00+01:00)",
             .rename_stash => "Rename stash",
             .stash_message => "Stash message (empty = default WIP name)",
         };
