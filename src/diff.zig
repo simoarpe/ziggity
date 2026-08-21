@@ -193,6 +193,111 @@ pub fn buildLinePatch(
     return patch.toOwnedSlice();
 }
 
+/// Whether `diff`'s header describes a newly added file (`new file mode` /
+/// `--- /dev/null`). Such a diff has no old side, so a partial discard cannot be
+/// expressed as a reverse patch (see `buildNewFileDiscardPatch`).
+pub fn isNewFileDiff(diff: []const u8, parsed: ParsedDiff) bool {
+    const header = diff[0..parsed.header_end];
+    var lines = std.mem.splitScalar(u8, header, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "new file mode")) return true;
+        if (std.mem.eql(u8, line, "--- /dev/null")) return true;
+    }
+    return false;
+}
+
+/// Build a *forward*-apply patch that discards the selected added lines of a new
+/// file. A new file's diff has no old side, so reverse-applying the normal
+/// discard patch fails with "new file X depends on old contents": its context
+/// lines reference content the `--- /dev/null` side says does not exist. Here the
+/// file's current lines become the old side, the selected lines become deletions
+/// and the rest context, and the header is rewritten as an ordinary
+/// modification, so applying it forward simply removes the chosen lines.
+pub fn buildNewFileDiscardPatch(
+    allocator: std.mem.Allocator,
+    diff: []const u8,
+    parsed: ParsedDiff,
+    hunk_index: usize,
+    sel_first: usize,
+    sel_last: usize,
+) ![]u8 {
+    if (hunk_index >= parsed.hunks.len) return error.InvalidHunk;
+    const hunk = parsed.hunks[hunk_index];
+    const header = diff[0..parsed.header_end];
+    const hunk_text = diff[hunk.start..hunk.end];
+    const nl = std.mem.indexOfScalar(u8, hunk_text, '\n') orelse return error.InvalidHunk;
+
+    // The `+++ b/<path>` line names the file; reuse it to give the `---` side a
+    // real path instead of /dev/null.
+    var plus_path: ?[]const u8 = null;
+    {
+        var hl = std.mem.splitScalar(u8, header, '\n');
+        while (hl.next()) |line| {
+            if (std.mem.startsWith(u8, line, "+++ ")) {
+                plus_path = line[4..]; // e.g. "b/f.txt"
+                break;
+            }
+        }
+    }
+
+    // Body first, so the recomputed counts are known before the header is written.
+    var body: std.Io.Writer.Allocating = .init(allocator);
+    defer body.deinit();
+    const bw = &body.writer;
+    var old_count: usize = 0;
+    var new_count: usize = 0;
+    var changed = false;
+    var lines = std.mem.splitScalar(u8, hunk_text[nl + 1 ..], '\n');
+    var j: usize = 0;
+    while (lines.next()) |line| : (j += 1) {
+        if (line.len == 0) break; // trailing element after the final newline
+        const selected = j >= sel_first and j <= sel_last;
+        switch (line[0]) {
+            '+' => {
+                old_count += 1; // every added line exists in the file right now
+                if (selected) {
+                    try bw.print("-{s}\n", .{line[1..]}); // discard: delete it
+                    changed = true;
+                } else {
+                    try bw.print(" {s}\n", .{line[1..]}); // keep: context
+                    new_count += 1;
+                }
+            },
+            // A partial patch can't reliably place a no-newline marker; let the
+            // caller fall back to discarding the whole hunk.
+            '\\' => return error.NoNewlineHunk,
+            // A new-file diff is all additions; anything else is unexpected.
+            else => return error.InvalidHunk,
+        }
+    }
+    if (!changed) return error.EmptySelection;
+
+    const body_bytes = try body.toOwnedSlice();
+    defer allocator.free(body_bytes);
+
+    var patch: std.Io.Writer.Allocating = .init(allocator);
+    errdefer patch.deinit();
+    const pw = &patch.writer;
+    var hl = std.mem.splitScalar(u8, header, '\n');
+    while (hl.next()) |line| {
+        if (line.len == 0) continue;
+        if (std.mem.startsWith(u8, line, "new file mode")) continue; // drop
+        if (std.mem.startsWith(u8, line, "index ")) continue; // drop (0000.. preimage)
+        if (std.mem.startsWith(u8, line, "--- ")) {
+            if (plus_path) |pp| {
+                // pp is "b/<path>"; swap the leading "b" for "a".
+                try pw.print("--- a{s}\n", .{pp[1..]});
+            } else try pw.print("{s}\n", .{line});
+            continue;
+        }
+        try pw.print("{s}\n", .{line});
+    }
+    const new_start: usize = if (new_count == 0) 0 else 1;
+    try pw.print("@@ -1,{d} +{d},{d} @@\n", .{ old_count, new_start, new_count });
+    try pw.writeAll(body_bytes);
+    return patch.toOwnedSlice();
+}
+
 /// Build a forward (apply) patch from a file's full diff including only the body
 /// lines for which `included[abs_line]` is true (`abs_line` is the 0-based line
 /// index into `diff`). The file header is written once, then every hunk that
@@ -422,6 +527,42 @@ test "buildLinePatch keeps a selected addition and drops the rest" {
         " a\n" ++
         "+X\n" ++
         " b\n" ++
+        " c\n" ++
+        " d\n";
+    try std.testing.expectEqualStrings(expected, patch);
+}
+
+test "buildNewFileDiscardPatch rewrites a new-file diff as a forward deletion" {
+    // Discarding a line from a staged new file must not reverse a `new file mode`
+    // patch (git: "new file ... depends on old contents"). Instead the current
+    // lines form the old side and the discarded line becomes a deletion.
+    const diff =
+        "diff --git a/f.txt b/f.txt\n" ++
+        "new file mode 100644\n" ++
+        "index 0000000..d68dd40\n" ++
+        "--- /dev/null\n" ++
+        "+++ b/f.txt\n" ++
+        "@@ -0,0 +1,4 @@\n" ++
+        "+a\n" ++
+        "+b\n" ++
+        "+c\n" ++
+        "+d\n";
+    var parsed = try parse(std.testing.allocator, diff);
+    defer parsed.deinit(std.testing.allocator);
+
+    try std.testing.expect(isNewFileDiff(diff, parsed));
+
+    // Body index 1 is "+b"; discard just it.
+    const patch = try buildNewFileDiscardPatch(std.testing.allocator, diff, parsed, 0, 1, 1);
+    defer std.testing.allocator.free(patch);
+
+    const expected =
+        "diff --git a/f.txt b/f.txt\n" ++
+        "--- a/f.txt\n" ++
+        "+++ b/f.txt\n" ++
+        "@@ -1,4 +1,3 @@\n" ++
+        " a\n" ++
+        "-b\n" ++
         " c\n" ++
         " d\n";
     try std.testing.expectEqualStrings(expected, patch);

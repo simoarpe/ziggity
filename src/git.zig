@@ -430,6 +430,22 @@ pub const Git = struct {
         return self.exec(&.{ "apply", "--reverse", "--whitespace=nowarn", "--", p });
     }
 
+    /// Forward-apply a discard patch. Used for a partial line discard of a *new*
+    /// file, where the change is expressed as deletions from the current content
+    /// rather than a reverse of the (old-side-less) new-file patch. `--index`
+    /// updates the index too, so a staged new file is patched in both places.
+    pub fn discardForwardPatch(self: *Git, patch: []const u8, staged: bool) !ExecResult {
+        const p = try self.writeTempPatch(patch);
+        defer {
+            std.Io.Dir.deleteFile(.cwd(), self.io, p) catch {};
+            self.allocator.free(p);
+        }
+        if (staged) {
+            return self.exec(&.{ "apply", "--index", "--whitespace=nowarn", "--", p });
+        }
+        return self.exec(&.{ "apply", "--whitespace=nowarn", "--", p });
+    }
+
     /// Remove a built patch's changes from its source commit: rebase with the
     /// caller's `edit` todo to stop at the source, reverse-apply the patch to
     /// the index and tree, amend, then continue. If the patch fails to apply

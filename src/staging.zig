@@ -299,6 +299,11 @@ pub fn discardStagingSelection(app: *App) !void {
     // holds the additions — the orientation `buildLinePatch` produces with
     // `reverse = true`. Reverse-applying it then removes the change; the whole
     // hunk is copied verbatim.
+    // A partial discard of a new file needs a forward-applied modification patch:
+    // a new file has no old side, so reverse-applying a normal patch fails with
+    // "new file ... depends on old contents". The whole-hunk case is unaffected
+    // (reversing the full creation just removes the file).
+    var forward = false;
     const patch = if (whole_hunk)
         try diff_mod.buildHunkPatch(app.allocator, app.staging_diff, parsed, hunk_index)
     else blk: {
@@ -307,7 +312,13 @@ pub fn discardStagingSelection(app: *App) !void {
         const body_first = hunk.start_line + 1;
         const lo = (@max(lo_abs, body_first)) - body_first;
         const hi = (@min(hi_abs, hunk.end_line - 1)) - body_first;
-        break :blk diff_mod.buildLinePatch(app.allocator, app.staging_diff, parsed, hunk_index, lo, hi, true) catch |err| switch (err) {
+        const new_file = diff_mod.isNewFileDiff(app.staging_diff, parsed);
+        forward = new_file;
+        const built = if (new_file)
+            diff_mod.buildNewFileDiscardPatch(app.allocator, app.staging_diff, parsed, hunk_index, lo, hi)
+        else
+            diff_mod.buildLinePatch(app.allocator, app.staging_diff, parsed, hunk_index, lo, hi, true);
+        break :blk built catch |err| switch (err) {
             error.EmptySelection => {
                 try app.setMessage("selection contains no change", .{});
                 return;
@@ -325,7 +336,10 @@ pub fn discardStagingSelection(app: *App) !void {
     };
     defer app.allocator.free(patch);
 
-    var result = try app.git.discardStagingPatch(patch, app.staging_staged_view);
+    var result = if (forward)
+        try app.git.discardForwardPatch(patch, app.staging_staged_view)
+    else
+        try app.git.discardStagingPatch(patch, app.staging_staged_view);
     defer result.deinit(app.allocator);
     if (!result.ok()) {
         const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
