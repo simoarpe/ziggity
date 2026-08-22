@@ -2524,6 +2524,8 @@ fn drawConfirmPopup(root: vaxis.Window, app: *app_mod.App) void {
         .rebase_remote => "Rebase onto remote branch",
         .undo => "Undo",
         .force_push, .force_push_plain => "Force push",
+        .drop_commit => "Drop commit",
+        .squash_commit => "Squash commit",
         .delete_index_lock => "Git locked",
         .reset_patch => "Discard patch",
         .remove_recent_repo => "Remove from recent list",

@@ -121,6 +121,8 @@ command_output = show       # show (default) custom command output in a dialog,
 # false, i.e. confirmations stay on). Names match the action:
 skip_confirm.discard_all = false
 skip_confirm.amend = false             # confirm before `A` amends the last commit
+skip_confirm.drop_commit = false       # confirm before `d` drops a commit
+skip_confirm.squash_commit = false     # confirm before `s` squashes a commit down
 skip_confirm.merge_branch = false
 skip_confirm.rebase_branch = false
 skip_confirm.delete_tag = false

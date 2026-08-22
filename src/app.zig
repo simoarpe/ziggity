@@ -242,6 +242,11 @@ pub const Confirmation = enum {
     undo,
     force_push,
     force_push_plain,
+    /// Offered before `d` drops a commit and `s` squashes one into the commit
+    /// below (both rewrite history), matching lazygit. Skipped via
+    /// `skip_confirm.drop_commit` / `skip_confirm.squash_commit`.
+    drop_commit,
+    squash_commit,
     /// Offered when a git command fails because a `.git` lock file is present
     /// even after the automatic retries — almost always a stale lock left by a
     /// crashed git. Confirming deletes the lock file and (for async ops) retries.
@@ -3807,8 +3812,8 @@ pub const App = struct {
             .rebase_drop => if (self.commitsFilesActive())
                 try commitops_mod.discardFilesFromCommit(self)
             else
-                try commitops_mod.rebaseSelectedCommit(self, .drop),
-            .rebase_squash => try commitops_mod.rebaseSelectedCommit(self, .squash),
+                try commitops_mod.requestRebaseConfirm(self, .drop),
+            .rebase_squash => try commitops_mod.requestRebaseConfirm(self, .squash),
             .rebase_fixup => try commitops_mod.rebaseSelectedCommit(self, .fixup),
             .rebase_edit => try commitops_mod.rebaseSelectedCommit(self, .edit),
             .rebase_reword => try commits_mod.startReword(self),
@@ -6262,10 +6267,31 @@ pub const App = struct {
         return self.data.stash[@min(self.stash_index, self.data.stash.len - 1)];
     }
 
+    /// How many commits a rebase action (`d`/`s`) will touch: the size of an
+    /// active commit-list range, else 1. Mirrors `rebaseSelectedCommit`'s gate.
+    fn commitActionCount(self: *const App) usize {
+        if (self.rangeActive() and !self.commitsFilesActive()) {
+            if (self.rangeBounds()) |b| {
+                if (b.lo != b.hi) return b.hi - b.lo + 1;
+            }
+        }
+        return 1;
+    }
+
     pub fn confirmationText(self: *const App, buf: []u8) []const u8 {
         return switch (self.pending_confirmation orelse return "No pending action.") {
             .discard_all => "Discard all working tree changes? This cannot be undone.",
             .amend => "Amend the last commit with the staged changes?",
+            .drop_commit => blk: {
+                const n = self.commitActionCount();
+                if (n > 1) break :blk std.fmt.bufPrint(buf, "Drop {d} commits? This rewrites history.", .{n}) catch "Drop the selected commits?";
+                break :blk "Drop this commit? This rewrites history.";
+            },
+            .squash_commit => blk: {
+                const n = self.commitActionCount();
+                if (n > 1) break :blk std.fmt.bufPrint(buf, "Squash {d} commits into the one below?", .{n}) catch "Squash the selected commits down?";
+                break :blk "Squash this commit into the one below?";
+            },
             .merge_branch => blk: {
                 if (self.selectedBranch()) |branch| {
                     break :blk std.fmt.bufPrint(buf, "Merge {s} into {s}?", .{ branch.name, self.data.current_branch }) catch "Merge the selected branch into the current one?";
@@ -8778,6 +8804,8 @@ pub const App = struct {
         switch (pending) {
             .discard_all => return self.runMutationFiles(try self.git.discardAll(), "discarded all changes", .{}),
             .amend => return self.requestMutation(.amend, .{ .gerund = "amending", .command = "git commit --amend", .refresh = Refresh.commit }, "amended last commit", .{}),
+            .drop_commit => return commitops_mod.rebaseSelectedCommit(self, .drop),
+            .squash_commit => return commitops_mod.rebaseSelectedCommit(self, .squash),
             .merge_branch => {
                 const branch = self.selectedBranch() orelse {
                     try self.setMessage("no branch selected", .{});
@@ -11060,6 +11088,42 @@ test "graph reset target: only a commit on the current branch's log" {
     try std.testing.expect(commitgraph_mod.cursorCommitIndex(&app) == null);
     app.commit_graph_sel = 3; // a connector row has no commit
     try std.testing.expect(commitgraph_mod.cursorCommitIndex(&app) == null);
+}
+
+test "drop and squash gate a confirmation before rewriting history" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("aaaaaaa"), .short_hash = @constCast("aaa"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("first") },
+        .{ .hash = @constCast("bbbbbbb"), .short_hash = @constCast("bbb"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("second") },
+    };
+    app.data.commits = &commits;
+    app.commits_tab = .commits;
+    app.data.state = .clean;
+    app.commit_index = 0;
+    var buf: [128]u8 = undefined;
+
+    // Drop asks first by default.
+    try commitops_mod.requestRebaseConfirm(&app, .drop);
+    try std.testing.expectEqual(Confirmation.drop_commit, app.pending_confirmation.?);
+    try std.testing.expect(app.mode == .confirmation);
+    try std.testing.expectEqualStrings("Drop this commit? This rewrites history.", app.confirmationText(&buf));
+
+    // Squash asks too.
+    app.pending_confirmation = null;
+    app.mode = .normal;
+    try commitops_mod.requestRebaseConfirm(&app, .squash);
+    try std.testing.expectEqual(Confirmation.squash_commit, app.pending_confirmation.?);
+    try std.testing.expectEqualStrings("Squash this commit into the one below?", app.confirmationText(&buf));
+
+    // The skip flags short-circuit the prompt, and are independent of each other.
+    try std.testing.expect(!app.shouldSkipConfirm(.drop_commit));
+    app.config.skip_confirm.drop_commit = true;
+    try std.testing.expect(app.shouldSkipConfirm(.drop_commit));
+    try std.testing.expect(!app.shouldSkipConfirm(.squash_commit));
 }
 
 test "AI commit authoring: availability, request, and stale-result protection" {

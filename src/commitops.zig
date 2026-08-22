@@ -48,6 +48,32 @@ pub fn revertSelectedCommit(app: *App) !void {
     return app.requestMutation(.{ .revert = commit.hash }, .{ .gerund = "reverting", .command = "git revert", .refresh = App.Refresh.commit }, "reverted {s}", .{commit.short_hash});
 }
 
+/// Gate a history-rewriting rebase action behind a confirmation, matching
+/// lazygit: `d` (drop) and `s` (squash) prompt before running, unless the
+/// matching `skip_confirm.*` flag is set. Other actions pass straight through.
+/// The same preconditions as the run are checked here so we never prompt for a
+/// no-op. On confirm, `confirmPendingAction` calls `rebaseSelectedCommit`.
+pub fn requestRebaseConfirm(app: *App, action: RebaseAction) !void {
+    if (action != .drop and action != .squash) return rebaseSelectedCommit(app, action);
+    if (app.commits_tab != .commits) {
+        try app.setMessage("rebase actions apply to the Commits tab", .{});
+        return;
+    }
+    if (app.data.state != .clean) {
+        try app.setMessage("finish the in-progress rebase/merge first (m)", .{});
+        return;
+    }
+    if (app.data.commits.len == 0) {
+        try app.setMessage("no commit selected", .{});
+        return;
+    }
+    return switch (action) {
+        .drop => app.requestConfirmation(.drop_commit, "confirm drop", .{}),
+        .squash => app.requestConfirmation(.squash_commit, "confirm squash", .{}),
+        else => unreachable,
+    };
+}
+
 pub fn rebaseSelectedCommit(app: *App, action: RebaseAction) !void {
     if (app.commits_tab != .commits) {
         try app.setMessage("rebase actions apply to the Commits tab", .{});

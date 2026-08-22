@@ -246,6 +246,10 @@ pub const ConfirmSkips = struct {
     undo: bool = false,
     force_push: bool = false,
     force_push_plain: bool = false,
+    /// Confirm before `d` drops a commit, or `s` squashes one into the commit
+    /// below. Both rewrite history; on by default, matching lazygit.
+    drop_commit: bool = false,
+    squash_commit: bool = false,
     /// Field exists so `shouldSkipConfirm`'s comptime lookup covers every
     /// Confirmation tag; the lock-recovery prompt is never auto-skipped.
     delete_index_lock: bool = false,
