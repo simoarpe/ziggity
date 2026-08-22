@@ -1846,12 +1846,12 @@ const help_lines = [_][]const u8{
     "  V              paste — cherry-pick the copied commit onto HEAD",
     "  C              clear the cherry-pick copy selection",
     "  y              copy menu: commit hash, subject or author",
-    "  d              drop the commit (confirms first)",
+    "  d              drop the commit (confirms; merge commits handled specially)",
     "  s              squash down (confirms first)",
     "  f              fixup down — menu: plain, or keep this message",
     "  e              edit — stop the rebase at this commit",
     "  r              reword the commit message",
-    "  F              create a fixup! commit",
+    "  F              menu: mark staged changes as a fixup!/amend! for this commit",
     "  S              autosquash — menu: above selected, or down to a branch",
     "  B              mark a base, then rebase a branch onto it",
     "  G              open the branch's pull/merge request, else the new-PR page",
@@ -2232,7 +2232,11 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     // Wide enough to show the 72-column body-wrap guide (see below) with a small
     // margin, but never wider than the terminal.
     const w: u16 = @min(@as(u16, 80), root.width -| 4);
-    const title = if (app.commit_action == .reword) "Reword commit" else "Commit message";
+    const title = switch (app.commit_action) {
+        .reword => "Reword commit",
+        .amend_fixup => "Amend into commit (new message)",
+        .create => "Commit message",
+    };
     const win = popup(root, w, 12, title, null);
 
     // Capture the interior's absolute origin and reset the per-row click map so

@@ -271,13 +271,18 @@ The animation itself is in the [README](../README.md).
 ### Interactive rebase & patches
 
 - Per commit interactive rebase: drop (`d`), squash (`s`), fixup (`f`), edit
-  (`e`), reword (`r`), move (`ctrl+j` and `ctrl+k`), create a `fixup!` (`F`),
+  (`e`), reword (`r`), move (`ctrl+j` and `ctrl+k`), mark a fixup/amend (`F`),
   autosquash (`S`). Drop and squash confirm first (rewriting history), skippable
-  via `skip_confirm.drop_commit` / `skip_confirm.squash_commit`. `f` opens a
+  via `skip_confirm.drop_commit` / `skip_confirm.squash_commit`. Dropping a merge
+  commit uses a dedicated `git rebase --onto <merge>^1 <merge>` path (removing the
+  merge and the side it brought in) with its own confirmation. `f` opens a
   small menu (plain fixup, or keep this commit's message via `fixup -C`), and
   `S` opens one too: autosquash the fixups above the selected commit, or down to
   a branch you pick (folding every fixup your branch added since it forked from
-  that branch, `base = git merge-base`).
+  that branch, `base = git merge-base`). `F` marks your staged changes to fold
+  into the selected commit later (with `S`): a plain `fixup!` (keeps the target's
+  message) or an `amend!` (you write a new message in the commit dialog, and the
+  staged changes fold in too).
 - Rebase plan editor (`i`): compose a plan for the commits down to the
   selected one, mark each action (with range select to mark or reorder many
   at once), then run it as one rebase.

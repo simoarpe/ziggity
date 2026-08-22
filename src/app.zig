@@ -101,7 +101,10 @@ pub const RenderHook = struct {
 pub const CommitField = enum { subject, body };
 
 /// Whether the commit editor creates a new commit or rewords an existing one.
-pub const CommitAction = enum { create, reword };
+/// What the commit-message dialog does on submit: create a new commit, reword an
+/// existing one, or write an `amend!` marker (new message + staged changes, to
+/// be folded into the target on autosquash).
+pub const CommitAction = enum { create, reword, amend_fixup };
 
 /// A commit field's AI generation state. No `completed`: once a result lands in
 /// the field it is just normal editable text.
@@ -580,6 +583,8 @@ pub const MenuAction = enum {
     fixup_down_keep,
     autosquash_above,
     autosquash_to_branch,
+    create_fixup_commit,
+    create_amend_commit,
 };
 
 /// The Files `i` menu: add the selected path to the shared, committed
@@ -594,6 +599,14 @@ pub const ignore_menu = [_]MenuItem{
 pub const fixup_menu = [_]MenuItem{
     .{ .label = "Fixup: fold into the commit below", .action = .fixup_down },
     .{ .label = "Fixup, keep this commit's message", .action = .fixup_down_keep },
+};
+
+/// The `F` menu on a commit: record the staged changes as a marker to fold into
+/// the selected commit later (with `S`). Fixup keeps the target's message; amend
+/// replaces it with a new one you write.
+pub const create_fixup_menu = [_]MenuItem{
+    .{ .label = "Fixup: fold staged changes in later, keep its message", .action = .create_fixup_commit },
+    .{ .label = "Amend: fold in later with a new message", .action = .create_amend_commit },
 };
 
 /// The `S` autosquash menu: fold every fixup!/squash! commit into its target,
@@ -1528,6 +1541,11 @@ pub const Mutation = union(enum) {
     rebase: []const u8,
     rebase_onto_marked: struct { newbase: []const u8, marked_base: []const u8 },
     autosquash: []const u8,
+    /// Drop a merge commit (its hash): `git rebase --onto <hash>^1 <hash>`.
+    drop_merge: []const u8,
+    /// Create an `amend!` marker: `subject` is the target's original subject (for
+    /// autosquash matching), `message` the new message to apply on fold.
+    amend_marker: struct { subject: []const u8, message: []const u8 },
     fast_forward_current,
     fast_forward_branch: struct { remote: []const u8, remote_ref: []const u8, local: []const u8 },
     bisect_start_mark: struct { good: bool, rev: []const u8 },
@@ -1612,6 +1630,8 @@ pub const Mutation = union(enum) {
             .rebase => |b| wgit.rebaseOnto(b),
             .rebase_onto_marked => |x| wgit.rebaseOntoMarked(x.newbase, x.marked_base),
             .autosquash => |base| wgit.autosquashRebase(base),
+            .drop_merge => |h| wgit.dropMergeCommit(h),
+            .amend_marker => |x| wgit.createAmendMarker(x.subject, x.message),
             .fast_forward_current => wgit.fastForwardCurrent(),
             .fast_forward_branch => |x| wgit.fastForwardBranch(x.remote, x.remote_ref, x.local),
             .bisect_start_mark => |x| wgit.bisectStartMark(x.good, x.rev),
@@ -1682,6 +1702,8 @@ pub const Mutation = union(enum) {
             .rebase => |b| .{ .rebase = try gpa.dupe(u8, b) },
             .rebase_onto_marked => |x| .{ .rebase_onto_marked = .{ .newbase = try gpa.dupe(u8, x.newbase), .marked_base = try gpa.dupe(u8, x.marked_base) } },
             .autosquash => |base| .{ .autosquash = try gpa.dupe(u8, base) },
+            .drop_merge => |h| .{ .drop_merge = try gpa.dupe(u8, h) },
+            .amend_marker => |x| .{ .amend_marker = .{ .subject = try gpa.dupe(u8, x.subject), .message = try gpa.dupe(u8, x.message) } },
             .fast_forward_current => .fast_forward_current,
             .fast_forward_branch => |x| .{ .fast_forward_branch = .{ .remote = try gpa.dupe(u8, x.remote), .remote_ref = try gpa.dupe(u8, x.remote_ref), .local = try gpa.dupe(u8, x.local) } },
             .bisect_start_mark => |x| .{ .bisect_start_mark = .{ .good = x.good, .rev = try gpa.dupe(u8, x.rev) } },
@@ -1698,8 +1720,12 @@ pub const Mutation = union(enum) {
 
     pub fn deinit(self: Mutation, gpa: std.mem.Allocator) void {
         switch (self) {
-            .checkout, .checkout_track, .revert, .create_fixup, .delete_tag, .remove_worktree, .update_submodule, .remove_submodule, .merge, .rebase, .autosquash => |s| gpa.free(s),
+            .checkout, .checkout_track, .revert, .create_fixup, .delete_tag, .remove_worktree, .update_submodule, .remove_submodule, .merge, .rebase, .autosquash, .drop_merge => |s| gpa.free(s),
             .commit => |x| gpa.free(x.message),
+            .amend_marker => |x| {
+                gpa.free(x.subject);
+                gpa.free(x.message);
+            },
             .create_tag => |x| {
                 gpa.free(x.name);
                 gpa.free(x.message);
@@ -3845,7 +3871,7 @@ pub const App = struct {
             .rebase_reword => try commits_mod.startReword(self),
             .rebase_move_down => try commitops_mod.rebaseSelectedCommit(self, .move_down),
             .rebase_move_up => try commitops_mod.rebaseSelectedCommit(self, .move_up),
-            .rebase_create_fixup => try commitops_mod.createFixupCommit(self),
+            .rebase_create_fixup => try self.startCreateFixupMenu(),
             .rebase_autosquash => try self.startAutosquashMenu(),
             .mark_base => try self.toggleMarkBase(),
             .bisect_menu => try self.startBisectMenu(),
@@ -6293,6 +6319,15 @@ pub const App = struct {
         return self.data.stash[@min(self.stash_index, self.data.stash.len - 1)];
     }
 
+    /// True when `d` should drop a single *merge* commit, which needs the
+    /// `rebase --onto <hash>^1 <hash>` path (a flat rebase mishandles merges).
+    /// Only for a single selection; a range keeps the flat path.
+    fn mergeDropSelected(self: *const App) bool {
+        if (self.commitActionCount() != 1) return false;
+        const c = self.selectedCommit() orelse return false;
+        return c.isMerge();
+    }
+
     /// How many commits a rebase action (`d`/`s`) will touch: the size of an
     /// active commit-list range, else 1. Mirrors `rebaseSelectedCommit`'s gate.
     fn commitActionCount(self: *const App) usize {
@@ -6309,6 +6344,8 @@ pub const App = struct {
             .discard_all => "Discard all working tree changes? This cannot be undone.",
             .amend => "Amend the last commit with the staged changes?",
             .drop_commit => blk: {
+                if (self.mergeDropSelected())
+                    break :blk "Drop this merge commit? It removes the merge and the commits it brought in.";
                 const n = self.commitActionCount();
                 if (n > 1) break :blk std.fmt.bufPrint(buf, "Drop {d} commits? This rewrites history.", .{n}) catch "Drop the selected commits?";
                 break :blk "Drop this commit? This rewrites history.";
@@ -8147,6 +8184,18 @@ pub const App = struct {
         self.active_menu = .{ .title = "Autosquash fixups", .items = &autosquash_menu, .index = 0 };
     }
 
+    /// `F`: record the staged changes as a fixup!/amend! marker for the commit.
+    /// Both variants fold the staged changes, so staged changes are required.
+    fn startCreateFixupMenu(self: *App) !void {
+        if (!try self.commitMenuReady("create fixup")) return;
+        if (self.data.stagedCount() == 0) {
+            try self.setMessage("stage changes to create a fixup/amend commit", .{});
+            return;
+        }
+        self.mode = .menu;
+        self.active_menu = .{ .title = "Create fixup / amend", .items = &create_fixup_menu, .index = 0 };
+    }
+
     fn startStatusFilterMenu(self: *App) !void {
         self.focus = .files;
         self.mode = .status_filter_menu;
@@ -8316,6 +8365,8 @@ pub const App = struct {
             .fixup_down_keep => return commitops_mod.rebaseSelectedCommit(self, .fixup_keep),
             .autosquash_above => return commitops_mod.autosquashFixups(self),
             .autosquash_to_branch => return self.startTextPrompt(.autosquash_base),
+            .create_fixup_commit => return commitops_mod.createFixupCommit(self),
+            .create_amend_commit => return commits_mod.startAmendCommit(self),
             .discard_file_all => {
                 if (self.rangeActive()) {
                     var files: std.ArrayList(model.FileStatus) = .empty;
@@ -8873,7 +8924,15 @@ pub const App = struct {
         switch (pending) {
             .discard_all => return self.runMutationFiles(try self.git.discardAll(), "discarded all changes", .{}),
             .amend => return self.requestMutation(.amend, .{ .gerund = "amending", .command = "git commit --amend", .refresh = Refresh.commit }, "amended last commit", .{}),
-            .drop_commit => return commitops_mod.rebaseSelectedCommit(self, .drop),
+            .drop_commit => {
+                if (self.mergeDropSelected()) {
+                    const c = self.selectedCommit() orelse return;
+                    var cmd_buf: [96]u8 = undefined;
+                    const cmd = std.fmt.bufPrint(&cmd_buf, "git rebase --onto {s}^1 {s}", .{ c.short_hash, c.short_hash }) catch "git rebase --onto";
+                    return self.requestMutation(.{ .drop_merge = c.hash }, .{ .gerund = "dropping merge", .command = cmd }, "dropped merge commit", .{});
+                }
+                return commitops_mod.rebaseSelectedCommit(self, .drop);
+            },
             .squash_commit => return commitops_mod.rebaseSelectedCommit(self, .squash),
             .merge_branch => {
                 const branch = self.selectedBranch() orelse {
@@ -11195,6 +11254,39 @@ test "drop and squash gate a confirmation before rewriting history" {
     try std.testing.expect(!app.shouldSkipConfirm(.squash_commit));
 }
 
+test "dropping a merge commit warns differently (rebase --onto path)" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var parents = [_][]u8{ @constCast("p0p0p0p"), @constCast("p1p1p1p") };
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("mmmmmmm"), .short_hash = @constCast("mmm"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("Merge feature"), .parents = &parents },
+        .{ .hash = @constCast("aaaaaaa"), .short_hash = @constCast("aaa"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("plain") },
+    };
+    app.data.commits = &commits;
+    app.commits_tab = .commits;
+    app.data.state = .clean;
+    var buf: [200]u8 = undefined;
+
+    // On the merge commit: distinct prompt, and the merge-drop path is chosen.
+    app.commit_index = 0;
+    try std.testing.expect(app.mergeDropSelected());
+    try commitops_mod.requestRebaseConfirm(&app, .drop);
+    try std.testing.expectEqual(Confirmation.drop_commit, app.pending_confirmation.?);
+    try std.testing.expectEqualStrings("Drop this merge commit? It removes the merge and the commits it brought in.", app.confirmationText(&buf));
+
+    // On a plain commit: normal prompt, normal path.
+    app.pending_confirmation = null;
+    app.commit_index = 1;
+    try std.testing.expect(!app.mergeDropSelected());
+    try std.testing.expectEqualStrings("Drop this commit? This rewrites history.", blk: {
+        app.pending_confirmation = .drop_commit;
+        break :blk app.confirmationText(&buf);
+    });
+}
+
 test "f and S open the fixup and autosquash menus (lazygit style)" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -11226,6 +11318,23 @@ test "f and S open the fixup and autosquash menus (lazygit style)" {
     try std.testing.expect(app.mode == .text_prompt);
     try std.testing.expect(app.text_prompt_kind.? == .autosquash_base);
     app.cancelTextPrompt("");
+
+    // F needs staged changes; without them it won't open the menu.
+    app.mode = .normal;
+    try app.startCreateFixupMenu();
+    try std.testing.expect(app.mode != .menu);
+
+    // With a staged file, F opens the two-item fixup/amend menu.
+    var files = [_]model.FileStatus{
+        .{ .path = @constCast("x"), .short_status = .{ 'M', ' ' }, .has_staged = true, .has_unstaged = false, .tracked = true, .added = false, .deleted = false, .conflict = false },
+    };
+    app.data.files = &files;
+    try app.startCreateFixupMenu();
+    try std.testing.expect(app.mode == .menu);
+    try std.testing.expectEqual(MenuAction.create_fixup_commit, app.active_menu.?.items[0].action);
+    try std.testing.expectEqual(MenuAction.create_amend_commit, app.active_menu.?.items[1].action);
+    app.closeMenu();
+    app.data.files = &.{};
 }
 
 test "AI commit authoring: availability, request, and stale-result protection" {

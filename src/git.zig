@@ -1658,6 +1658,16 @@ pub const Git = struct {
         return self.exec(&.{ "commit", arg });
     }
 
+    /// Create an `amend!` marker commit from the staged changes: on autosquash it
+    /// folds into the commit whose subject is `orig_subject`, replacing its
+    /// message with `message`. `orig_subject` must match the target's original
+    /// subject so `--autosquash` can pair them.
+    pub fn createAmendMarker(self: *Git, orig_subject: []const u8, message: []const u8) !ExecResult {
+        const marker = try std.fmt.allocPrint(self.allocator, "amend! {s}", .{orig_subject});
+        defer self.allocator.free(marker);
+        return self.exec(&.{ "commit", "-m", marker, "-m", message });
+    }
+
     /// Autosquash fixup!/squash! commits in the range above `base`, accepting
     /// git's reordered todo (both editors are no-ops via env vars).
     pub fn autosquashRebase(self: *Git, base: []const u8) !ExecResult {
@@ -1666,6 +1676,29 @@ pub const Git = struct {
         try env.put("GIT_SEQUENCE_EDITOR", "true");
         try env.put("GIT_EDITOR", "true");
         const argv = [_][]const u8{ "git", "rebase", "-i", "--autosquash", "--autostash", base };
+        self.recordCommand(argv[1..]);
+        const result = try runWithLockRetry(self.allocator, self.io, .{
+            .argv = &argv,
+            .cwd = .{ .path = self.root },
+            .environ_map = &env,
+            .stdout_limit = .limited(16 * 1024 * 1024),
+            .stderr_limit = .limited(4 * 1024 * 1024),
+        });
+        return .{ .stdout = result.stdout, .stderr = result.stderr, .term = result.term };
+    }
+
+    /// Drop a merge commit: replay everything after it onto its first parent,
+    /// removing the merge and the commits it brought in. `git rebase --onto
+    /// <hash>^1 <hash>`. Runs like the other rebases (autostash, lock retry, no
+    /// editor); may stop on conflict, handled by the usual merge/rebase flow.
+    pub fn dropMergeCommit(self: *Git, hash: []const u8) !ExecResult {
+        const first_parent = try std.fmt.allocPrint(self.allocator, "{s}^1", .{hash});
+        defer self.allocator.free(first_parent);
+        var env = try self.environ.clone(self.allocator);
+        defer env.deinit();
+        try env.put("GIT_SEQUENCE_EDITOR", "true");
+        try env.put("GIT_EDITOR", "true");
+        const argv = [_][]const u8{ "git", "rebase", "--autostash", "--onto", first_parent, hash };
         self.recordCommand(argv[1..]);
         const result = try runWithLockRetry(self.allocator, self.io, .{
             .argv = &argv,

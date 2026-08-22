@@ -173,6 +173,51 @@ pub fn startReword(app: *App) !void {
     try app.setMessage("reword commit", .{});
 }
 
+/// `F` -> "Amend": open the message dialog prefilled with the selected commit's
+/// message so you can write a new one. On submit it records an `amend!` marker
+/// (new message + the staged changes) that `S` folds into the commit later.
+pub fn startAmendCommit(app: *App) !void {
+    if (app.commits_tab != .commits) {
+        try app.setMessage("amend applies to the Commits tab", .{});
+        return;
+    }
+    if (app.data.state != .clean) {
+        try app.setMessage("finish the in-progress operation first (m)", .{});
+        return;
+    }
+    if (app.data.commits.len == 0) {
+        try app.setMessage("no commit selected", .{});
+        return;
+    }
+    if (app.data.stagedCount() == 0) {
+        try app.setMessage("stage changes to create an amend commit", .{});
+        return;
+    }
+    const i = @min(app.commit_index, app.data.commits.len - 1);
+    const commit = app.data.commits[i];
+    const body = app.git.commitBody(commit.hash) catch try app.allocator.alloc(u8, 0);
+    defer app.allocator.free(body);
+
+    app.mode = .commit_prompt;
+    app.commit_action = .amend_fixup;
+    app.resetCommitAiState();
+    app.commit_reword_index = i;
+    app.commit_field = .subject;
+    app.commit_buffer.clearRetainingCapacity();
+    try app.commit_buffer.appendSlice(app.allocator, commit.subject);
+    app.commit_body_buffer.clearRetainingCapacity();
+    try app.commit_body_buffer.appendSlice(app.allocator, body);
+    app.commit_cursor = app.commit_buffer.items.len;
+    app.commit_body_cursor = app.commit_body_buffer.items.len;
+    app.commit_scroll = 0;
+    app.commit_body_scroll_x = 0;
+    app.commit_body_scroll_y = 0;
+    app.commit_body_last_caret = std.math.maxInt(usize);
+    app.commit_sel_anchor = null;
+    app.commit_mouse_selecting = false;
+    try app.setMessage("amend! new message (staged changes fold in on autosquash)", .{});
+}
+
 pub fn amendLastCommit(app: *App) !void {
     if (app.data.state != .clean) {
         try app.setMessage("finish the in-progress operation first (m)", .{});
@@ -334,5 +379,12 @@ pub fn submitCommit(app: *App) !void {
         // scoped to the views a commit changes.
         .create => return app.requestMutation(.{ .commit = .{ .message = message, .no_verify = app.commit_no_verify } }, .{ .gerund = "committing", .command = if (app.commit_no_verify) "git commit --no-verify" else "git commit", .refresh = App.Refresh.commit }, "commit created", .{}),
         .reword => return commitops_mod.runRebase(app, .reword, reword_index, message),
+        .amend_fixup => {
+            // The marker matches its target by the target's *original* subject
+            // (unedited); data.commits isn't touched by the dialog, so read it now.
+            const orig = if (reword_index < app.data.commits.len) app.data.commits[reword_index].subject else "";
+            const short = if (reword_index < app.data.commits.len) app.data.commits[reword_index].short_hash else "";
+            return app.requestMutation(.{ .amend_marker = .{ .subject = orig, .message = message } }, .{ .gerund = "creating amend!", .command = "git commit -m amend!", .refresh = App.Refresh.commit }, "created amend! for {s}", .{short});
+        },
     }
 }
