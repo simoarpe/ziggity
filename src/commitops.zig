@@ -667,6 +667,13 @@ pub fn autosquashDownToRef(app: *App, ref_in: []const u8) !void {
         return;
     };
     defer app.allocator.free(base);
+    // Empty window: `ref` is at or ahead of HEAD (e.g. you picked the branch you
+    // are on), so the fork point is HEAD itself and there is nothing to fold.
+    // commits[0] is HEAD; both hashes are the full `%H` form.
+    if (app.data.commits.len > 0 and std.mem.eql(u8, base, app.data.commits[0].hash)) {
+        try app.setMessage("nothing to autosquash: {s} is at or ahead of HEAD", .{ref});
+        return;
+    }
     var cmd_buf: [128]u8 = undefined;
     const cmd = std.fmt.bufPrint(&cmd_buf, "git rebase -i --autosquash {s}", .{base}) catch "git rebase -i --autosquash";
     return app.requestMutation(.{ .autosquash = base }, .{ .gerund = "autosquashing", .command = cmd }, "autosquashed fixups", .{});
