@@ -152,6 +152,9 @@ const donut_frame_ms: i96 = 80;
 pub const TextPromptKind = enum {
     new_branch,
     checkout_by_name,
+    /// Pick a branch/ref to autosquash down to: the fixups your branch added
+    /// since it forked from that ref are folded in (base = merge-base).
+    autosquash_base,
     rename_branch,
     new_tag,
     new_tag_message,
@@ -185,6 +188,7 @@ pub const TextPromptKind = enum {
         return switch (self) {
             .new_branch => "New branch name",
             .checkout_by_name => "Checkout branch by name",
+            .autosquash_base => "Autosquash fixups down to (branch/ref)",
             .rename_branch => "Rename branch",
             .new_tag => "New tag name",
             .new_tag_message => "Tag message (empty = lightweight)",
@@ -422,6 +426,9 @@ pub const RebaseAction = enum {
     drop,
     squash,
     fixup,
+    /// Like `fixup`, but keep this commit's message on the combined commit
+    /// (`fixup -C` in the todo) instead of the target's.
+    fixup_keep,
     edit,
     reword,
     move_up,
@@ -433,6 +440,7 @@ pub const RebaseAction = enum {
             .drop => "drop",
             .squash => "squash",
             .fixup => "fixup",
+            .fixup_keep => "fixup -C",
             .edit => "edit",
             .reword => "reword",
             .move_up, .move_down => "pick",
@@ -443,7 +451,7 @@ pub const RebaseAction = enum {
         return switch (self) {
             .drop => "dropped commit",
             .squash => "squashed commit",
-            .fixup => "fixed up commit",
+            .fixup, .fixup_keep => "fixed up commit",
             .edit => "stopped to edit commit",
             .reword => "reworded commit",
             .move_up => "moved commit up",
@@ -568,6 +576,10 @@ pub const MenuAction = enum {
     sort_branches_alpha,
     ignore_add_gitignore,
     ignore_add_exclude,
+    fixup_down,
+    fixup_down_keep,
+    autosquash_above,
+    autosquash_to_branch,
 };
 
 /// The Files `i` menu: add the selected path to the shared, committed
@@ -575,6 +587,20 @@ pub const MenuAction = enum {
 pub const ignore_menu = [_]MenuItem{
     .{ .label = "Add to .gitignore", .action = .ignore_add_gitignore },
     .{ .label = "Add to .git/info/exclude", .action = .ignore_add_exclude },
+};
+
+/// The `f` fixup menu on a commit: squash into the commit below, keeping the
+/// target's message (plain fixup) or this commit's message (`fixup -C`).
+pub const fixup_menu = [_]MenuItem{
+    .{ .label = "Fixup: fold into the commit below", .action = .fixup_down },
+    .{ .label = "Fixup, keep this commit's message", .action = .fixup_down_keep },
+};
+
+/// The `S` autosquash menu: fold every fixup!/squash! commit into its target,
+/// either across the whole current branch or just above the selected commit.
+pub const autosquash_menu = [_]MenuItem{
+    .{ .label = "Squash fixups above the selected commit", .action = .autosquash_above },
+    .{ .label = "Squash fixups down to a branch...", .action = .autosquash_to_branch },
 };
 
 /// The `s` branch-sort menu on the local Branches tab.
@@ -3814,13 +3840,13 @@ pub const App = struct {
             else
                 try commitops_mod.requestRebaseConfirm(self, .drop),
             .rebase_squash => try commitops_mod.requestRebaseConfirm(self, .squash),
-            .rebase_fixup => try commitops_mod.rebaseSelectedCommit(self, .fixup),
+            .rebase_fixup => try self.startFixupMenu(),
             .rebase_edit => try commitops_mod.rebaseSelectedCommit(self, .edit),
             .rebase_reword => try commits_mod.startReword(self),
             .rebase_move_down => try commitops_mod.rebaseSelectedCommit(self, .move_down),
             .rebase_move_up => try commitops_mod.rebaseSelectedCommit(self, .move_up),
             .rebase_create_fixup => try commitops_mod.createFixupCommit(self),
-            .rebase_autosquash => try commitops_mod.autosquashFixups(self),
+            .rebase_autosquash => try self.startAutosquashMenu(),
             .mark_base => try self.toggleMarkBase(),
             .bisect_menu => try self.startBisectMenu(),
             .stash_pop => try stash_mod.popSelectedStash(self),
@@ -7118,7 +7144,7 @@ pub const App = struct {
             // selection still names the entry the branch is created from.
             .new_branch_from_commit => self.focus = .commits,
             .move_to_new_branch => self.focus = .commits,
-            .set_commit_author, .set_commit_committer => self.focus = .commits,
+            .set_commit_author, .set_commit_committer, .autosquash_base => self.focus = .commits,
             .rename_stash => {
                 self.focus = .stash;
                 if (self.selectedStash()) |s| prefill = s.message;
@@ -7161,7 +7187,7 @@ pub const App = struct {
     /// would confirm.
     fn refreshPromptSuggestions(self: *App) void {
         self.clearPromptSuggestions();
-        if (self.text_prompt_kind != .checkout_by_name) return;
+        if (self.text_prompt_kind != .checkout_by_name and self.text_prompt_kind != .autosquash_base) return;
         const needle = std.mem.trim(u8, self.input_buffer.items, " \t");
         if (needle.len == 0) return;
 
@@ -7818,6 +7844,12 @@ pub const App = struct {
             // branch, DWIM-tracks a remote branch, detaches onto a tag/commit,
             // or (with "-") switches to the previous branch. `requestMutation`
             // dupes `value` before the input buffer is cleared.
+            .autosquash_base => {
+                self.mode = .normal;
+                self.text_prompt_kind = null;
+                defer self.input_buffer.clearRetainingCapacity();
+                return commitops_mod.autosquashDownToRef(self, value);
+            },
             .checkout_by_name => {
                 defer {
                     self.mode = .normal;
@@ -8082,6 +8114,39 @@ pub const App = struct {
         self.filter_history.append(self.allocator, entry) catch self.allocator.free(entry);
     }
 
+    /// Preconditions shared by the `f` and `S` commit menus: on the Commits tab,
+    /// a commit selected, and no operation in progress. Returns false (with a
+    /// bottom-bar message) when a menu should not open.
+    fn commitMenuReady(self: *App, verb: []const u8) !bool {
+        if (self.commits_tab != .commits) {
+            try self.setMessage("{s} applies to the Commits tab", .{verb});
+            return false;
+        }
+        if (self.data.state != .clean) {
+            try self.setMessage("finish the in-progress operation first (m)", .{});
+            return false;
+        }
+        if (self.data.commits.len == 0) {
+            try self.setMessage("no commit selected", .{});
+            return false;
+        }
+        return true;
+    }
+
+    /// `f`: choose between a plain fixup and one that keeps this commit's message.
+    fn startFixupMenu(self: *App) !void {
+        if (!try self.commitMenuReady("fixup")) return;
+        self.mode = .menu;
+        self.active_menu = .{ .title = "Fixup", .items = &fixup_menu, .index = 0 };
+    }
+
+    /// `S`: choose the autosquash scope (whole branch, or above the selection).
+    fn startAutosquashMenu(self: *App) !void {
+        if (!try self.commitMenuReady("autosquash")) return;
+        self.mode = .menu;
+        self.active_menu = .{ .title = "Autosquash fixups", .items = &autosquash_menu, .index = 0 };
+    }
+
     fn startStatusFilterMenu(self: *App) !void {
         self.focus = .files;
         self.mode = .status_filter_menu;
@@ -8247,6 +8312,10 @@ pub const App = struct {
 
     fn runMenuAction(self: *App, action: MenuAction) !void {
         switch (action) {
+            .fixup_down => return commitops_mod.rebaseSelectedCommit(self, .fixup),
+            .fixup_down_keep => return commitops_mod.rebaseSelectedCommit(self, .fixup_keep),
+            .autosquash_above => return commitops_mod.autosquashFixups(self),
+            .autosquash_to_branch => return self.startTextPrompt(.autosquash_base),
             .discard_file_all => {
                 if (self.rangeActive()) {
                     var files: std.ArrayList(model.FileStatus) = .empty;
@@ -11124,6 +11193,39 @@ test "drop and squash gate a confirmation before rewriting history" {
     app.config.skip_confirm.drop_commit = true;
     try std.testing.expect(app.shouldSkipConfirm(.drop_commit));
     try std.testing.expect(!app.shouldSkipConfirm(.squash_commit));
+}
+
+test "f and S open the fixup and autosquash menus (lazygit style)" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("aaaaaaa"), .short_hash = @constCast("aaa"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("first") },
+        .{ .hash = @constCast("bbbbbbb"), .short_hash = @constCast("bbb"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("second") },
+    };
+    app.data.commits = &commits;
+    app.commits_tab = .commits;
+    app.data.state = .clean;
+    app.commit_index = 0;
+
+    try app.startFixupMenu();
+    try std.testing.expect(app.mode == .menu);
+    try std.testing.expectEqual(MenuAction.fixup_down, app.active_menu.?.items[0].action);
+    try std.testing.expectEqual(MenuAction.fixup_down_keep, app.active_menu.?.items[1].action);
+    app.closeMenu();
+
+    try app.startAutosquashMenu();
+    try std.testing.expect(app.mode == .menu);
+    try std.testing.expectEqual(MenuAction.autosquash_above, app.active_menu.?.items[0].action);
+    try std.testing.expectEqual(MenuAction.autosquash_to_branch, app.active_menu.?.items[1].action);
+    // The branch option opens a ref prompt (with branch/tag completion).
+    app.closeMenu();
+    try app.runMenuAction(.autosquash_to_branch);
+    try std.testing.expect(app.mode == .text_prompt);
+    try std.testing.expect(app.text_prompt_kind.? == .autosquash_base);
+    app.cancelTextPrompt("");
 }
 
 test "AI commit authoring: availability, request, and stale-result protection" {
@@ -14212,6 +14314,7 @@ test "rebase todo ordering for drop, squash, and move" {
         .{ .i = 1, .action = .drop, .want = "drop bbb\npick aaa\n" },
         .{ .i = 0, .action = .squash, .want = "pick bbb\nsquash aaa\n" },
         .{ .i = 0, .action = .fixup, .want = "pick bbb\nfixup aaa\n" },
+        .{ .i = 0, .action = .fixup_keep, .want = "pick bbb\nfixup -C aaa\n" },
         .{ .i = 0, .action = .move_down, .want = "pick aaa\npick bbb\n" },
         .{ .i = 1, .action = .move_up, .want = "pick aaa\npick bbb\n" },
         .{ .i = 1, .action = .reword, .want = "reword bbb\npick aaa\n" },

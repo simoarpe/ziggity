@@ -107,7 +107,7 @@ pub fn runRebaseRange(app: *App, action: RebaseAction, lo: usize, hi: usize) !vo
     const commits = app.data.commits;
     if (hi >= commits.len) return;
     switch (action) {
-        .squash, .fixup, .move_down => if (hi + 1 >= commits.len) {
+        .squash, .fixup, .fixup_keep, .move_down => if (hi + 1 >= commits.len) {
             try app.setMessage("no commit below the selection to combine with", .{});
             return;
         },
@@ -120,7 +120,7 @@ pub fn runRebaseRange(app: *App, action: RebaseAction, lo: usize, hi: usize) !vo
 
     const base_index: usize = switch (action) {
         .drop, .edit, .reword, .move_up => hi,
-        .squash, .fixup, .move_down => hi + 1,
+        .squash, .fixup, .fixup_keep, .move_down => hi + 1,
     };
     const base_ref = try std.fmt.allocPrint(app.allocator, "{s}^", .{commits[base_index].hash});
     defer app.allocator.free(base_ref);
@@ -163,7 +163,7 @@ pub fn writeRebaseTodoRange(w: *std.Io.Writer, commits: []const model.Commit, lo
                 if (k == 0) break;
             }
         },
-        .squash, .fixup => {
+        .squash, .fixup, .fixup_keep => {
             // The commit just below the range (commits[hi+1]) stays "pick" and
             // is the anchor every selected commit melds into.
             var k = hi + 1;
@@ -520,10 +520,10 @@ pub fn runRebase(app: *App, action: RebaseAction, i: usize, message: ?[]const u8
     const commits = app.data.commits;
     const base_index: usize = switch (action) {
         .drop, .edit, .reword, .move_up => i,
-        .squash, .fixup, .move_down => i + 1,
+        .squash, .fixup, .fixup_keep, .move_down => i + 1,
     };
     switch (action) {
-        .squash, .fixup, .move_down => if (i + 1 >= commits.len) {
+        .squash, .fixup, .fixup_keep, .move_down => if (i + 1 >= commits.len) {
             try app.setMessage("no commit below to combine with", .{});
             return;
         },
@@ -573,7 +573,7 @@ pub fn writeRebaseTodo(w: *std.Io.Writer, commits: []const model.Commit, i: usiz
                 if (k == 0) break;
             }
         },
-        .squash, .fixup => {
+        .squash, .fixup, .fixup_keep => {
             var k = i + 1;
             while (true) : (k -= 1) {
                 const word = if (k == i) action.word() else "pick";
@@ -643,6 +643,29 @@ pub fn autosquashFixups(app: *App) !void {
     }
     const commit = try commitForAction(app) orelse return;
     const base = try std.fmt.allocPrint(app.allocator, "{s}^", .{commit.hash});
+    defer app.allocator.free(base);
+    var cmd_buf: [128]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "git rebase -i --autosquash {s}", .{base}) catch "git rebase -i --autosquash";
+    return app.requestMutation(.{ .autosquash = base }, .{ .gerund = "autosquashing", .command = cmd }, "autosquashed fixups", .{});
+}
+
+/// Autosquash every fixup!/squash! commit your branch added since `ref`: the
+/// window runs from `merge-base(HEAD, ref)` (the fork point) up to HEAD, so only
+/// your own commits are touched. `ref` is any branch/tag/commit the user picked.
+pub fn autosquashDownToRef(app: *App, ref_in: []const u8) !void {
+    const ref = std.mem.trim(u8, ref_in, " \t\r\n");
+    if (ref.len == 0) {
+        try app.setMessage("enter a branch or ref to squash down to", .{});
+        return;
+    }
+    if (app.data.state != .clean) {
+        try app.setMessage("finish the in-progress operation first (m)", .{});
+        return;
+    }
+    const base = app.git.mergeBaseWith(ref) catch {
+        try app.setMessage("no common base with {s}", .{ref});
+        return;
+    };
     defer app.allocator.free(base);
     var cmd_buf: [128]u8 = undefined;
     const cmd = std.fmt.bufPrint(&cmd_buf, "git rebase -i --autosquash {s}", .{base}) catch "git rebase -i --autosquash";

@@ -903,6 +903,18 @@ pub const Git = struct {
         return std.fmt.allocPrint(allocator, "{s} {s}", .{ epoch, tz });
     }
 
+    /// The merge base of HEAD and `ref` (their common ancestor, the fork point),
+    /// used to bound an autosquash to the commits your branch added since `ref`.
+    /// Errors when there is no common ancestor or `ref` doesn't resolve. Owned.
+    pub fn mergeBaseWith(self: *Git, ref: []const u8) ![]u8 {
+        var res = try self.exec(&.{ "merge-base", "HEAD", ref });
+        defer res.deinit(self.allocator);
+        if (!res.ok()) return error.NoMergeBase;
+        const hash = std.mem.trim(u8, res.stdout, " \t\r\n");
+        if (hash.len == 0) return error.NoMergeBase;
+        return self.allocator.dupe(u8, hash);
+    }
+
     /// Whether `date` is a form git will accept for author/committer dates.
     /// Validated with `git var GIT_AUTHOR_IDENT` (which parses `GIT_AUTHOR_DATE`
     /// through the same strict date parser the committer-date path uses), so a
