@@ -2334,6 +2334,11 @@ pub const App = struct {
     /// An all-op supersedes per-path pending (it sets the baseline for everything).
     stage_all_pending: ?bool = null,
     file_display_filter: model.FileDisplayFilter = .all,
+    // Paths that had a conflict while the `.conflicted` filter has been active.
+    // The filter keeps showing them once resolved (so their diff stays reviewable
+    // until the whole operation is done), mirroring lazygit. Reset whenever the
+    // display filter changes; accumulated each refresh while `.conflicted`.
+    conflict_remembered: std.ArrayList([]u8) = .empty,
     commit_body_buffer: std.ArrayList(u8) = .empty,
     // An unfinalized "create commit" message (subject + body), preserved when the
     // commit dialog is cancelled and restored when it is reopened; cleared on a
@@ -2830,6 +2835,8 @@ pub const App = struct {
         self.allocator.free(self.diff);
         self.allocator.free(self.message);
         self.allocator.free(self.file_filter);
+        self.clearRememberedConflicts();
+        self.conflict_remembered.deinit(self.allocator);
         self.allocator.free(self.op_command);
         self.allocator.free(self.op_summary);
         self.allocator.free(self.op_output);
@@ -2915,6 +2922,7 @@ pub const App = struct {
         // rebuild instead of snapping to the top row.
         const tree_path = self.captureTreePath() catch null;
         defer if (tree_path) |p| self.allocator.free(p);
+        const prev_conflicts = self.conflictFileCount();
         self.data.deinit(self.allocator);
         self.data = gpa_data;
         self.refresh_generation +%= 1;
@@ -2923,6 +2931,9 @@ pub const App = struct {
         self.rebuildInlineGraph(); // the whole commit list was replaced
         self.restoreSelections(sel_keys);
         self.clampSelections();
+        // Opening straight into a repo that is already mid-merge focuses the
+        // Files panel on the conflicts (prev is 0, so the takeover fires).
+        self.applyConflictAutoFilter(prev_conflicts);
         if (self.select_current_branch_pending) {
             self.selectCurrentBranch();
             self.select_current_branch_pending = false;
@@ -2958,6 +2969,7 @@ pub const App = struct {
         const tree_path = try self.captureTreePath();
         defer if (tree_path) |p| self.allocator.free(p);
 
+        const prev_conflicts = self.conflictFileCount();
         var files = try self.git.loadFiles();
         errdefer model.deinitFileStatuses(self.allocator, files);
         self.data.replaceFiles(self.allocator, files);
@@ -2971,6 +2983,7 @@ pub const App = struct {
 
         self.restoreFileSelection(selected_path, selected_prev);
         self.clampSelections();
+        self.applyConflictAutoFilter(prev_conflicts);
         if (self.tree_view) try self.rebuildTree(tree_path);
         const content = self.contentFocus();
         if (content == .files or content == .status) {
@@ -3034,6 +3047,7 @@ pub const App = struct {
         const sel_keys = self.captureSelections();
         defer sel_keys.deinit(a);
         const s = sd.scopes;
+        const prev_conflicts = self.conflictFileCount();
 
         if (s.contains(.status)) {
             if (a.dupe(u8, src.current_branch)) |cb| {
@@ -3082,6 +3096,9 @@ pub const App = struct {
 
         self.restoreSelections(sel_keys);
         self.clampSelections();
+        // A merge/rebase/cherry-pick that just produced (or cleared) conflicts
+        // lands here; auto-focus the Files panel on the conflicting files.
+        if (s.contains(.files)) self.applyConflictAutoFilter(prev_conflicts);
         if (self.select_current_branch_pending and s.contains(.branches)) {
             self.selectCurrentBranch();
             self.select_current_branch_pending = false;
@@ -3216,6 +3233,7 @@ pub const App = struct {
         const tree_path = try self.captureTreePath();
         defer if (tree_path) |p| self.allocator.free(p);
 
+        const prev_conflicts = self.conflictFileCount();
         self.data.replaceStatus(self.allocator, status);
         status = .{};
         self.data.replaceFiles(self.allocator, files);
@@ -3228,6 +3246,7 @@ pub const App = struct {
 
         self.restoreFileSelection(selected_path, selected_prev);
         self.clampSelections();
+        self.applyConflictAutoFilter(prev_conflicts);
         if (self.tree_view) try self.rebuildTree(tree_path);
 
         // History can move without any Ziggity action — an external commit,
@@ -4968,8 +4987,72 @@ pub const App = struct {
         return self.fileFilterActive() or self.fileDisplayFilterActive();
     }
 
+    /// How many working-tree files currently have a merge conflict.
+    fn conflictFileCount(self: *const App) usize {
+        var n: usize = 0;
+        for (self.data.files) |f| {
+            if (f.conflict) n += 1;
+        }
+        return n;
+    }
+
+    fn isRememberedConflict(self: *const App, path: []const u8) bool {
+        for (self.conflict_remembered.items) |p| {
+            if (std.mem.eql(u8, p, path)) return true;
+        }
+        return false;
+    }
+
+    fn rememberConflict(self: *App, path: []const u8) void {
+        if (self.isRememberedConflict(path)) return;
+        const dup = self.allocator.dupe(u8, path) catch return;
+        self.conflict_remembered.append(self.allocator, dup) catch self.allocator.free(dup);
+    }
+
+    fn clearRememberedConflicts(self: *App) void {
+        for (self.conflict_remembered.items) |p| self.allocator.free(p);
+        self.conflict_remembered.clearRetainingCapacity();
+    }
+
+    /// After a working-tree reload, mirror lazygit's merge behaviour: when
+    /// conflicts newly appear, take over the Files panel with the `.conflicted`
+    /// filter (only from the default `.all`, never overriding a filter the user
+    /// picked). When the last conflict clears, revert to `.all`. While filtered
+    /// to conflicts, remember the conflicting paths so a resolved file stays
+    /// visible for review until the whole operation is done. `prev_conflicts` is
+    /// the conflict count captured before the reload replaced the file list.
+    fn applyConflictAutoFilter(self: *App, prev_conflicts: usize) void {
+        const now = self.conflictFileCount();
+        var changed = false;
+        if (now > 0 and prev_conflicts == 0 and self.file_display_filter == .all) {
+            self.file_display_filter = .conflicted;
+            self.clearRememberedConflicts();
+            changed = true;
+        } else if (now == 0 and self.file_display_filter == .conflicted) {
+            self.file_display_filter = .all;
+            self.clearRememberedConflicts();
+            changed = true;
+        }
+        if (self.file_display_filter == .conflicted) {
+            for (self.data.files) |f| {
+                if (f.conflict) self.rememberConflict(f.path);
+            }
+        }
+        if (changed) {
+            self.normalizeFileSelectionForFilter();
+            if (self.tree_view) self.rebuildTree(null) catch {};
+        }
+    }
+
     pub fn fileMatchesFilter(self: *const App, file: model.FileStatus) bool {
-        if (!self.file_display_filter.matches(file)) return false;
+        // The `.conflicted` filter also keeps files whose conflict was just
+        // resolved (remembered while the filter is active), so their resolved
+        // diff stays visible until the merge/rebase finishes.
+        const status_ok = if (self.file_display_filter == .conflicted)
+            file.conflict or self.isRememberedConflict(file.path)
+        else
+            self.file_display_filter.matches(file);
+        if (!status_ok) return false;
         if (self.file_filter.len == 0) return true;
         if (textmatch.pathMatchesFilter(file.path, self.file_filter)) return true;
         if (file.previous_path) |previous| {
@@ -5794,6 +5877,7 @@ pub const App = struct {
         a.free(self.file_filter);
         self.file_filter = a.dupe(u8, "") catch &.{};
         self.file_display_filter = .all;
+        self.clearRememberedConflicts();
         self.file_filter_buffer.clearRetainingCapacity();
 
         a.free(self.commit_preserved_subject);
@@ -10214,6 +10298,7 @@ pub const App = struct {
     fn setFileDisplayFilter(self: *App, filter: model.FileDisplayFilter) !void {
         self.mode = .normal;
         self.file_display_filter = filter;
+        self.clearRememberedConflicts(); // a filter change resets the remembered set
         self.file_index = self.firstMatchingFileIndex() orelse 0;
         if (self.tree_view) try self.rebuildTree(null);
         self.resetMainView();
@@ -13253,6 +13338,62 @@ test "tree view cursor follows a file merged into a rename (no jump to root)" {
     try std.testing.expectEqualStrings("new.zig", tree.selectedRow().?.path);
 }
 
+test "merge conflicts auto-filter the Files panel, remember resolved, then revert" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    defer {
+        model.deinitFileStatuses(allocator, app.data.files);
+        app.data.files = &.{};
+    }
+
+    try std.testing.expectEqual(model.FileDisplayFilter.all, app.file_display_filter);
+
+    // A conflict appears (a.zig is UU). With no prior conflicts and the default
+    // filter, the panel takes over and shows conflicts only.
+    app.data.files = try git_mod.parseStatus(allocator, "UU a.zig\x00 M b.zig\x00M  c.zig\x00");
+    app.applyConflictAutoFilter(0);
+    try std.testing.expectEqual(model.FileDisplayFilter.conflicted, app.file_display_filter);
+    try std.testing.expectEqual(@as(usize, 1), app.visibleFileCount()); // only a.zig
+
+    // a.zig is resolved (now staged) while b.zig becomes conflicted. The filter
+    // stays, and the just-resolved a.zig remains visible for review (remembered).
+    const prev1 = app.conflictFileCount();
+    model.deinitFileStatuses(allocator, app.data.files);
+    app.data.files = try git_mod.parseStatus(allocator, "M  a.zig\x00UU b.zig\x00M  c.zig\x00");
+    app.applyConflictAutoFilter(prev1);
+    try std.testing.expectEqual(model.FileDisplayFilter.conflicted, app.file_display_filter);
+    try std.testing.expect(app.isRememberedConflict("a.zig"));
+    try std.testing.expectEqual(@as(usize, 2), app.visibleFileCount()); // a (resolved) + b (conflict)
+
+    // Every conflict resolved: revert to the normal all-files view and forget.
+    const prev2 = app.conflictFileCount();
+    model.deinitFileStatuses(allocator, app.data.files);
+    app.data.files = try git_mod.parseStatus(allocator, "M  a.zig\x00M  b.zig\x00M  c.zig\x00");
+    app.applyConflictAutoFilter(prev2);
+    try std.testing.expectEqual(model.FileDisplayFilter.all, app.file_display_filter);
+    try std.testing.expectEqual(@as(usize, 3), app.visibleFileCount());
+    try std.testing.expect(!app.isRememberedConflict("a.zig"));
+}
+
+test "merge conflicts do not hijack a filter the user chose" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    defer {
+        model.deinitFileStatuses(allocator, app.data.files);
+        app.data.files = &.{};
+    }
+
+    // The user explicitly filtered to staged; a conflict must not take over.
+    app.file_display_filter = .staged;
+    app.data.files = try git_mod.parseStatus(allocator, "UU a.zig\x00M  c.zig\x00");
+    app.applyConflictAutoFilter(0);
+    try std.testing.expectEqual(model.FileDisplayFilter.staged, app.file_display_filter);
+}
+
 test "escape clears active file filter before quitting" {
     const allocator = std.testing.allocator;
     var app = App{
@@ -13749,6 +13890,8 @@ fn deinitTestApp(app: *App) void {
     app.allocator.free(app.diff);
     app.allocator.free(app.message);
     app.allocator.free(app.file_filter);
+    app.clearRememberedConflicts();
+    app.conflict_remembered.deinit(app.allocator);
     app.allocator.free(app.op_command);
     app.allocator.free(app.op_summary);
     app.allocator.free(app.op_output);
