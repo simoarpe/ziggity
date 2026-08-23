@@ -11484,9 +11484,11 @@ test "a amends the selected commit's author via a rebase exec todo" {
     defer app.git.command_log.deinit(allocator);
     defer for (app.git.command_log.items) |e| allocator.free(e);
 
+    var p1 = [_][]u8{@constCast("2222222222222222222222222222222222222222")};
+    var p2 = [_][]u8{@constCast("3333333333333333333333333333333333333333")};
     var commits = [_]model.Commit{
-        .{ .hash = @constCast("1111111111111111111111111111111111111111"), .short_hash = @constCast("1111111"), .author = @constCast("A"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("newest") },
-        .{ .hash = @constCast("2222222222222222222222222222222222222222"), .short_hash = @constCast("2222222"), .author = @constCast("A"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("target") },
+        .{ .hash = @constCast("1111111111111111111111111111111111111111"), .short_hash = @constCast("1111111"), .author = @constCast("A"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("newest"), .parents = p1[0..] },
+        .{ .hash = @constCast("2222222222222222222222222222222222222222"), .short_hash = @constCast("2222222"), .author = @constCast("A"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("target"), .parents = p2[0..] },
     };
     app.data.commits = &commits;
     app.commits_tab = .commits;

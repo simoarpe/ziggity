@@ -99,6 +99,15 @@ pub fn rebaseSelectedCommit(app: *App, action: RebaseAction) !void {
     return runRebase(app, action, i, null);
 }
 
+/// The rebase upstream for rewriting commit `c`: its parent, or `--root` when
+/// `c` is the root commit. `<hash>^` is an invalid upstream for the root (it has
+/// no parent), which is why rewording/dropping/etc. the very first commit failed.
+/// Owned string; free with the same allocator.
+fn rebaseBaseRef(allocator: std.mem.Allocator, c: model.Commit) ![]u8 {
+    if (c.parents.len == 0) return allocator.dupe(u8, "--root");
+    return std.fmt.allocPrint(allocator, "{s}^", .{c.hash});
+}
+
 /// Build and run the rebase todo for `action` applied to the contiguous commit
 /// range [lo, hi] (newest-first indices, lo ≤ hi; lo is nearest HEAD). Every
 /// selected commit gets the verb, and for squash/fixup the commit just below
@@ -122,7 +131,7 @@ pub fn runRebaseRange(app: *App, action: RebaseAction, lo: usize, hi: usize) !vo
         .drop, .edit, .reword, .move_up => hi,
         .squash, .fixup, .fixup_keep, .move_down => hi + 1,
     };
-    const base_ref = try std.fmt.allocPrint(app.allocator, "{s}^", .{commits[base_index].hash});
+    const base_ref = try rebaseBaseRef(app.allocator, commits[base_index]);
     defer app.allocator.free(base_ref);
 
     var aw: std.Io.Writer.Allocating = .init(app.allocator);
@@ -237,7 +246,7 @@ fn commitAmendTarget(app: *App) !?usize {
 /// newer commits so they replay on top.
 fn submitCommitAmend(app: *App, i: usize, exec_cmd: []const u8, gerund: []const u8, comptime success_fmt: []const u8) !void {
     const commits = app.data.commits;
-    const base_ref = try std.fmt.allocPrint(app.allocator, "{s}^", .{commits[i].hash});
+    const base_ref = try rebaseBaseRef(app.allocator, commits[i]);
     defer app.allocator.free(base_ref);
 
     var aw: std.Io.Writer.Allocating = .init(app.allocator);
@@ -480,7 +489,7 @@ pub fn discardFilesFromCommit(app: *App) !void {
     }
     try cmd.appendSlice(app.allocator, "git commit --amend --no-edit");
 
-    const base_ref = try std.fmt.allocPrint(app.allocator, "{s}^", .{commits[i].hash});
+    const base_ref = try rebaseBaseRef(app.allocator, commits[i]);
     defer app.allocator.free(base_ref);
 
     // Oldest-first todo: pick the target, exec the discard+amend, then pick newer.
@@ -534,7 +543,7 @@ pub fn runRebase(app: *App, action: RebaseAction, i: usize, message: ?[]const u8
         else => {},
     }
 
-    const base_ref = try std.fmt.allocPrint(app.allocator, "{s}^", .{commits[base_index].hash});
+    const base_ref = try rebaseBaseRef(app.allocator, commits[base_index]);
     defer app.allocator.free(base_ref);
 
     var aw: std.Io.Writer.Allocating = .init(app.allocator);
@@ -642,7 +651,7 @@ pub fn autosquashFixups(app: *App) !void {
         return;
     }
     const commit = try commitForAction(app) orelse return;
-    const base = try std.fmt.allocPrint(app.allocator, "{s}^", .{commit.hash});
+    const base = try rebaseBaseRef(app.allocator, commit);
     defer app.allocator.free(base);
     var cmd_buf: [128]u8 = undefined;
     const cmd = std.fmt.bufPrint(&cmd_buf, "git rebase -i --autosquash {s}", .{base}) catch "git rebase -i --autosquash";
@@ -732,4 +741,38 @@ test "committerEditExec sets the committer and pins its date; author untouched" 
     try std.testing.expect(std.mem.indexOf(u8, e2, "GIT_COMMITTER_NAME") == null);
     try std.testing.expect(std.mem.indexOf(u8, e2, "GIT_COMMITTER_EMAIL") == null);
     try std.testing.expect(std.mem.indexOf(u8, e2, "GIT_COMMITTER_DATE='2020-06-01T20:00:00+00:00'") != null);
+}
+
+test "rebaseBaseRef uses --root for the root commit, parent^ otherwise" {
+    const a = std.testing.allocator;
+
+    // Root commit (no parents): the upstream is the sentinel --root, since
+    // `<hash>^` would be an invalid upstream for a commit with no parent.
+    const root: model.Commit = .{
+        .hash = @constCast("abc123"),
+        .short_hash = @constCast("abc123"),
+        .author = @constCast(""),
+        .time = @constCast(""),
+        .refs = @constCast(""),
+        .subject = @constCast(""),
+        .parents = &.{},
+    };
+    const rb = try rebaseBaseRef(a, root);
+    defer a.free(rb);
+    try std.testing.expectEqualStrings("--root", rb);
+
+    // A commit with a parent rebases onto `<hash>^`.
+    var parent = [_][]u8{@constCast("deadbeef")};
+    const child: model.Commit = .{
+        .hash = @constCast("abc123"),
+        .short_hash = @constCast("abc123"),
+        .author = @constCast(""),
+        .time = @constCast(""),
+        .refs = @constCast(""),
+        .subject = @constCast(""),
+        .parents = parent[0..],
+    };
+    const cb = try rebaseBaseRef(a, child);
+    defer a.free(cb);
+    try std.testing.expectEqualStrings("abc123^", cb);
 }
