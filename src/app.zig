@@ -14141,6 +14141,213 @@ pub fn webUrlFromRemote(allocator: std.mem.Allocator, remote: []const u8) !?[]u8
     return try std.fmt.allocPrint(allocator, "https://{s}/{s}", .{ host, path });
 }
 
+// --- Real-repo staging integration test harness --------------------------------
+
+/// Fill `env` with an isolated git environment rooted at `home` (no global/system
+/// config, a minimal PATH). Mirrors the setup the git.zig repo tests use.
+fn testGitEnv(env: *std.process.Environ.Map, home: []const u8) !void {
+    try env.put("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    try env.put("HOME", home);
+    try env.put("GIT_CONFIG_GLOBAL", "/dev/null");
+    try env.put("GIT_CONFIG_SYSTEM", "/dev/null");
+}
+
+/// Run `script` with `sh -c` in `dir_path`; returns error.SetupFailed on nonzero.
+fn testRunSetup(allocator: std.mem.Allocator, tio: std.Io, env: *std.process.Environ.Map, dir_path: []const u8, script: []const u8) !void {
+    var sh = [_][]const u8{ "sh", "-c", script };
+    const r = try std.process.run(allocator, tio, .{
+        .argv = &sh,
+        .cwd = .{ .path = dir_path },
+        .environ_map = env,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+    defer allocator.free(r.stdout);
+    defer allocator.free(r.stderr);
+    switch (r.term) {
+        .exited => |code| if (code != 0) return error.SetupFailed,
+        else => return error.SetupFailed,
+    }
+}
+
+/// First char of 0-based line `idx` in `text`, or 0 — the staging cursor's view
+/// of a diff line (`+`/`-` change, ` ` context, `@` header).
+fn testLineLead(text: []const u8, idx: usize) u8 {
+    var it = std.mem.splitScalar(u8, text, '\n');
+    var i: usize = 0;
+    while (it.next()) |line| : (i += 1) {
+        if (i == idx) return if (line.len > 0) line[0] else 0;
+    }
+    return 0;
+}
+
+/// Index of the first (`last=false`) or last (`last=true`) `+`/`-` change line at
+/// or after `from`, or null. `from` is passed as the first hunk header so the
+/// `---`/`+++` file-header lines are never mistaken for changes.
+fn testFindChange(text: []const u8, from: usize, last: bool) ?usize {
+    var it = std.mem.splitScalar(u8, text, '\n');
+    var i: usize = 0;
+    var found: ?usize = null;
+    while (it.next()) |line| : (i += 1) {
+        if (i < from) continue;
+        if (line.len > 0 and (line[0] == '+' or line[0] == '-')) {
+            found = i;
+            if (!last) return found;
+        }
+    }
+    return found;
+}
+
+test "staging a line advances the cursor past context to the next change (e2e)" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    // Two pure insertions separated by a context line, so staging the first turns
+    // its line into context under the kept cursor — the stall the fix addresses.
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf 'a\nb\nc\n' > f.txt
+        \\git add f.txt
+        \\git commit -qm init
+        \\printf 'a\nNEW1\nb\nNEW2\nc\n' > f.txt
+    );
+
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    app.git = try git_mod.Git.initAt(a, tio, &env, dir_path);
+    defer app.git.deinit();
+    defer app.data.deinit(a); // free the files refreshFiles heap-loads
+
+    try app.refreshFiles();
+    try std.testing.expectEqual(@as(usize, 1), app.data.files.len);
+    app.file_index = 0;
+    try staging_mod.openStaging(&app);
+
+    // Put the cursor on the first change (a `+` line) and stage just it.
+    const first_change = testFindChange(app.staging_diff, staging_mod.stagingFirstLine(&app), false).?;
+    app.staging_cursor = first_change;
+    try std.testing.expectEqual(@as(u8, '+'), testLineLead(app.staging_diff, first_change));
+    try staging_mod.applyStagingSelection(&app);
+
+    // Cursor landed on the remaining change (not stranded on the new context),
+    // and the staged line left the unstaged side while the other change remains.
+    const lead = testLineLead(app.staging_diff, app.staging_cursor);
+    try std.testing.expect(lead == '+' or lead == '-');
+    try std.testing.expect(std.mem.indexOf(u8, app.staging_diff, "+NEW1") == null);
+    try std.testing.expect(std.mem.indexOf(u8, app.staging_diff, "+NEW2") != null);
+}
+
+test "staging the last change falls back to the change above (e2e)" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    // Two pure insertions far apart => two separate hunks. Staging the lower one
+    // removes it entirely, so the kept cursor would strand on trailing context.
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf 'a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n' > f.txt
+        \\git add f.txt
+        \\git commit -qm init
+        \\printf 'a\nb\nTOP\nc\nd\ne\nf\ng\nh\ni\nj\nBOT\nk\nl\n' > f.txt
+    );
+
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    app.git = try git_mod.Git.initAt(a, tio, &env, dir_path);
+    defer app.git.deinit();
+    defer app.data.deinit(a); // free the files refreshFiles heap-loads
+
+    try app.refreshFiles();
+    app.file_index = 0;
+    try staging_mod.openStaging(&app);
+    try std.testing.expect(app.staging.?.hunks.len == 2); // two hunks
+
+    // Stage the lower insertion (the last change line).
+    const last_change = testFindChange(app.staging_diff, staging_mod.stagingFirstLine(&app), true).?;
+    app.staging_cursor = last_change;
+    try staging_mod.applyStagingSelection(&app);
+
+    // Nothing stageable remains below, so the cursor falls back UP to the change
+    // still waiting above rather than sitting on context.
+    const lead = testLineLead(app.staging_diff, app.staging_cursor);
+    try std.testing.expect(lead == '+' or lead == '-');
+    try std.testing.expect(app.staging_cursor < last_change);
+    try std.testing.expect(std.mem.indexOf(u8, app.staging_diff, "+BOT") == null);
+    try std.testing.expect(std.mem.indexOf(u8, app.staging_diff, "+TOP") != null);
+}
+
+test "staging a whole hunk moves the cursor to the next hunk header (e2e)" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    // Two far-apart modifications => two hunks. Staging the whole lower hunk (on
+    // its `@@` header) removes it; the cursor must land on a remaining header.
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf 'a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\n' > f.txt
+        \\git add f.txt
+        \\git commit -qm init
+        \\printf 'A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nM\n' > f.txt
+    );
+
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    app.git = try git_mod.Git.initAt(a, tio, &env, dir_path);
+    defer app.git.deinit();
+    defer app.data.deinit(a); // free the files refreshFiles heap-loads
+
+    try app.refreshFiles();
+    app.file_index = 0;
+    try staging_mod.openStaging(&app);
+    try std.testing.expect(app.staging.?.hunks.len == 2);
+
+    // Put the cursor on the SECOND hunk's `@@` header and stage the whole hunk.
+    app.staging_cursor = app.staging.?.hunks[1].start_line;
+    try staging_mod.applyStagingSelection(&app);
+
+    // The lower hunk is gone; the cursor sits on the remaining hunk's `@@` header
+    // (hunk-level workflow preserved), not stranded on context.
+    try std.testing.expectEqual(@as(u8, '@'), testLineLead(app.staging_diff, app.staging_cursor));
+    try std.testing.expect(std.mem.indexOf(u8, app.staging_diff, "+M") == null);
+    try std.testing.expect(std.mem.indexOf(u8, app.staging_diff, "+A") != null);
+}
+
 fn testApp(allocator: std.mem.Allocator, files: []model.FileStatus) !App {
     return App{
         .allocator = allocator,

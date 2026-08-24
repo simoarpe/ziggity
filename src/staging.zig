@@ -218,6 +218,79 @@ pub fn stagingHunkAt(app: *const App, abs: usize) ?usize {
     return null;
 }
 
+/// The first character of absolute line `abs` in `diff`, or null when the line
+/// is empty or out of range. `+`/`-` mark a stageable change, ` ` a context
+/// line, `@@` a hunk header.
+fn lineLead(diff: []const u8, abs: usize) ?u8 {
+    var idx: usize = 0;
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i <= diff.len) : (i += 1) {
+        if (i == diff.len or diff[i] == '\n') {
+            if (idx == abs) return if (i > start) diff[start] else null;
+            idx += 1;
+            start = i + 1;
+        }
+    }
+    return null;
+}
+
+/// The nearest stageable change line (`+`/`-`) to `from`, preferring the first
+/// one at or below it (scanning down to `last`) and otherwise the closest one
+/// above (scanning up to `first`). Returns `from` unchanged only when no change
+/// remains anywhere in `[first, last]`. This keeps the cursor on an actionable
+/// line so repeated `space` never stalls: on a context line it moves to the next
+/// change; when the change just staged was the last one below, it falls back to
+/// the changes still waiting above.
+fn nearestStageableLine(diff: []const u8, from: usize, first: usize, last: usize) usize {
+    var down = from;
+    while (down <= last) : (down += 1) {
+        const c = lineLead(diff, down) orelse continue;
+        if (c == '+' or c == '-') return down;
+    }
+    var up = from;
+    while (up > first) {
+        up -= 1;
+        const c = lineLead(diff, up) orelse continue;
+        if (c == '+' or c == '-') return up;
+    }
+    return from;
+}
+
+/// After a line stage/discard, move the cursor onto the nearest remaining change
+/// so repeated `space`/`d` keeps flowing instead of stalling on a context line.
+/// A no-op when the kept cursor already sits on a change (the common case where
+/// the next change shifts straight up under it).
+fn advanceToNextStageable(app: *App) void {
+    const target = nearestStageableLine(app.staging_diff, app.staging_cursor, stagingFirstLine(app), stagingLastLine(app));
+    if (target == app.staging_cursor) return;
+    app.staging_cursor = target;
+    scrollToStagingCursor(app);
+}
+
+/// After a whole-hunk stage/discard, move the cursor onto the nearest remaining
+/// hunk's `@@` header (the next one below, else the last one above) so repeated
+/// `space`/`d` keeps staging hunk by hunk. Staging the first hunk is a no-op (the
+/// next hunk's header shifts up to the same index); staging a lower hunk would
+/// otherwise strand the cursor on the trailing context of a hunk above.
+fn advanceToNextHunk(app: *App) void {
+    const parsed = app.staging orelse return;
+    if (parsed.hunks.len == 0) return;
+    const target = nearestHunkHeader(parsed.hunks, app.staging_cursor);
+    if (target == app.staging_cursor) return;
+    app.staging_cursor = target;
+    scrollToStagingCursor(app);
+}
+
+/// The `@@` header line of the nearest hunk to `from`: the first hunk at or below
+/// it, else the last hunk above. `hunks` must be non-empty and ordered.
+fn nearestHunkHeader(hunks: []const diff_mod.Hunk, from: usize) usize {
+    for (hunks) |h| {
+        if (h.start_line >= from) return h.start_line;
+    }
+    return hunks[hunks.len - 1].start_line;
+}
+
 pub fn applyStagingSelection(app: *App) !void {
     const parsed = app.staging orelse return;
     if (parsed.hunks.len == 0) {
@@ -229,9 +302,13 @@ pub fn applyStagingSelection(app: *App) !void {
         return;
     };
     const hunk = parsed.hunks[hunk_index];
+    // Whether the cursor was on the `@@` header (whole-hunk stage) — captured
+    // before the reload clamps the cursor, since it drives the message scope and
+    // whether we auto-advance to the next change afterwards.
+    const on_header = app.staging_cursor == hunk.start_line;
 
     // On the `@@` header line, stage the whole hunk; otherwise the lines.
-    const patch = if (app.staging_cursor == hunk.start_line)
+    const patch = if (on_header)
         try diff_mod.buildHunkPatch(app.allocator, app.staging_diff, parsed, hunk_index)
     else blk: {
         const lo_abs = @min(app.staging_anchor orelse app.staging_cursor, app.staging_cursor);
@@ -265,7 +342,7 @@ pub fn applyStagingSelection(app: *App) !void {
         return;
     }
     const verb = if (app.staging_staged_view) "unstaged" else "staged";
-    const scope = if (app.staging_cursor == hunk.start_line) "hunk" else "selection";
+    const scope = if (on_header) "hunk" else "selection";
     try app.setMessage("{s} {s}", .{ verb, scope });
     app.staging_anchor = null;
     // Staging a line only touches the index — scoped (fast) reload. Keep the
@@ -273,6 +350,11 @@ pub fn applyStagingSelection(app: *App) !void {
     // into its position, and don't flip to the other side when this one empties.
     app.refreshFiles() catch {};
     try reloadStagingAfterEdit(app);
+    // Keep the cursor on an actionable spot so repeated `space` flows on instead
+    // of stalling: a line stage moves to the next change (context between changes,
+    // or the last change below now gone, would otherwise strand it); a whole-hunk
+    // stage moves to the next hunk header, staying in the hunk-level workflow.
+    if (on_header) advanceToNextHunk(app) else advanceToNextStageable(app);
 }
 
 /// `d` in the staging view: discard the change under the cursor instead of
@@ -355,6 +437,10 @@ pub fn discardStagingSelection(app: *App) !void {
     // don't flip to the other side when this one empties.
     app.refreshFiles() catch {};
     try reloadStagingAfterEdit(app);
+    // Same as a stage: keep the cursor on an actionable spot so repeated `d`
+    // flows on — the next change for a line discard, the next hunk header for a
+    // whole-hunk discard — instead of stranding on a context line.
+    if (whole_hunk) advanceToNextHunk(app) else advanceToNextStageable(app);
 }
 
 pub fn closeStaging(app: *App) !void {
@@ -539,4 +625,55 @@ pub fn toggleAllStaged(app: *App) !void {
         return;
     }
     try app.setMessage("no visible files to stage", .{});
+}
+
+test "nearestStageableLine prefers the next change below, else falls back above" {
+    // A hunk with two changes separated by a context line (the shape that used
+    // to strand the cursor on the context line after a stage).
+    const diff =
+        "@@ -1,3 +1,3 @@\n" ++ // 0: header
+        " a\n" ++ //             1: context
+        "-b\n" ++ //             2: change
+        " c\n" ++ //             3: context
+        "-d\n" ++ //             4: change
+        " e\n"; //               5: context
+    const first: usize = 0;
+    const last: usize = 5;
+
+    // From the header, the first change below is line 2.
+    try std.testing.expectEqual(@as(usize, 2), nearestStageableLine(diff, 0, first, last));
+    // Sitting on a change is a no-op (the shifted-up change already landed here).
+    try std.testing.expectEqual(@as(usize, 2), nearestStageableLine(diff, 2, first, last));
+    // On the context between the changes, skip down to the next change.
+    try std.testing.expectEqual(@as(usize, 4), nearestStageableLine(diff, 3, first, last));
+    // On trailing context past the last change, fall back UP to the change above
+    // (the case where the change just staged was the last one below).
+    try std.testing.expectEqual(@as(usize, 4), nearestStageableLine(diff, 5, first, last));
+
+    // No change anywhere (all context): keep the position.
+    const ctx = "@@ -1,1 +1,1 @@\n a\n b\n";
+    try std.testing.expectEqual(@as(usize, 2), nearestStageableLine(ctx, 2, 0, 2));
+}
+
+test "nearestHunkHeader picks the next hunk header below, else the last above" {
+    // Two hunks: headers at line 4 and line 10.
+    const hunks = [_]diff_mod.Hunk{
+        .{ .start = 0, .end = 0, .start_line = 4, .end_line = 10 },
+        .{ .start = 0, .end = 0, .start_line = 10, .end_line = 16 },
+    };
+    // On the first header: stays (a first-hunk stage lands the next header here).
+    try std.testing.expectEqual(@as(usize, 4), nearestHunkHeader(&hunks, 4));
+    // Between headers: jump down to the second hunk's header.
+    try std.testing.expectEqual(@as(usize, 10), nearestHunkHeader(&hunks, 6));
+    // Past the last header (staged the last hunk, only earlier ones remain):
+    // fall back UP to the last header rather than strand on trailing context.
+    try std.testing.expectEqual(@as(usize, 10), nearestHunkHeader(&hunks, 14));
+}
+
+test "lineLead reads the leading char of each diff line" {
+    const diff = "@@ -1,2 +1,2 @@\n a\n+x\n";
+    try std.testing.expectEqual(@as(?u8, '@'), lineLead(diff, 0));
+    try std.testing.expectEqual(@as(?u8, ' '), lineLead(diff, 1));
+    try std.testing.expectEqual(@as(?u8, '+'), lineLead(diff, 2));
+    try std.testing.expectEqual(@as(?u8, null), lineLead(diff, 9)); // out of range
 }
