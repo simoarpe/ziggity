@@ -33,8 +33,12 @@ const Kind = enum { removed, added, other };
 const tab_width = 4; // must match tui.printAnsi's fixed tab expansion
 /// Skip refinement past these bounds — a full DP over huge lines/blocks is not
 /// worth it, and a near-total rewrite reads better as plain line-level colour.
+/// The token cap is a perf guard on the O(n*m) LCS; since the result is cached
+/// per diff (not recomputed per frame) it can be generous enough to cover long
+/// prose/markdown paragraphs, which routinely tokenize to a few hundred tokens
+/// once every bracket, slash and URL punctuation counts as its own token.
 const max_line_cols = 4096;
-const max_tokens = 128;
+const max_tokens = 512;
 /// Minimum fraction of shared content for a pair to be worth refining; below
 /// this the two lines are basically unrelated and highlighting is just noise.
 const min_similarity = 0.25;
@@ -332,6 +336,42 @@ test "refinePair finds two separate changed words" {
     // "tcp"->"quic" and "30"->"45": two spans on each side.
     try testing.expectEqual(@as(usize, 2), old.len);
     try testing.expectEqual(@as(usize, 2), new.len);
+}
+
+test "refinePair refines a long prose paragraph past the old 128-token cap" {
+    const a = testing.allocator;
+    // A ~150-word paragraph (≈299 tokens once spaces count) with a single word
+    // changed in the middle. Above the old 128 cap it was skipped entirely; the
+    // 512 cap now refines it and highlights just the one differing word — the
+    // real-world case is a full markdown paragraph edited in one spot.
+    var old_b: std.ArrayList(u8) = .empty;
+    defer old_b.deinit(a);
+    var new_b: std.ArrayList(u8) = .empty;
+    defer new_b.deinit(a);
+    var w: usize = 0;
+    while (w < 150) : (w += 1) {
+        if (w > 0) {
+            try old_b.append(a, ' ');
+            try new_b.append(a, ' ');
+        }
+        try old_b.appendSlice(a, if (w == 75) "alpha" else "word");
+        try new_b.appendSlice(a, if (w == 75) "omega" else "word");
+    }
+
+    var old: []Span = &.{};
+    var new: []Span = &.{};
+    defer if (old.len > 0) a.free(old);
+    defer if (new.len > 0) a.free(new);
+    refinePair(a, old_b.items, new_b.items, &old, &new);
+
+    // Exactly the middle word is marked. Word 75 starts at content col 75*5 =
+    // 375; spans carry the +1 marker offset, so the span is 376..381.
+    try testing.expectEqual(@as(usize, 1), old.len);
+    try testing.expectEqual(@as(usize, 1), new.len);
+    try testing.expectEqual(@as(u16, 376), old[0].start);
+    try testing.expectEqual(@as(u16, 381), old[0].end);
+    try testing.expectEqual(@as(u16, 376), new[0].start);
+    try testing.expectEqual(@as(u16, 381), new[0].end);
 }
 
 test "refinePair skips near-unrelated lines (similarity guard)" {
