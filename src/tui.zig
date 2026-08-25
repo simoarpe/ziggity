@@ -508,7 +508,9 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     defer if (preview_future) |*f| {
         f.cancel(io);
         if (preview_run.result) |r| async_allocator.free(r);
-        preview_run.job.deinit(async_allocator);
+        // The job is page-allocated (see `buildPreviewJob`); free it with the
+        // page allocator, not the worker's smp allocator (issue #19).
+        preview_run.job.deinit(std.heap.page_allocator);
     };
 
     var worktree_run: WorktreeRun = undefined;
@@ -541,7 +543,9 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     defer if (mutation_future) |*f| {
         f.await(io);
         if (mutation_run.result) |*r| r.deinit(async_allocator);
-        mutation_run.mutation.deinit(async_allocator);
+        // The mutation payload is page-allocated (see `requestMutation`); free it
+        // with the page allocator, not the worker's smp allocator (issue #19).
+        mutation_run.mutation.deinit(std.heap.page_allocator);
     };
 
     // AI commit-authoring workers (one per field), each single-flight.

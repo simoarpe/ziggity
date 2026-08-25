@@ -9516,7 +9516,11 @@ pub const App = struct {
         } else if (is_desired) {
             self.preview_loading = false;
         }
-        job.deinit(gpa);
+        // The job was built with the page allocator (`buildPreviewJob`); free it
+        // with the same one. Using `gpa` (the worker's smp allocator) here frees
+        // page-allocated memory through the wrong allocator, corrupting it and
+        // crashing on a later free (issue #19). `t` above is worker-owned (`gpa`).
+        job.deinit(page_alloc);
     }
 
     fn statusPreview(self: *App) ![]u8 {
@@ -9962,7 +9966,11 @@ pub const App = struct {
     /// like the synchronous path, then refreshes. Frees the job and result.
     pub fn completeMutation(self: *App, job: Mutation, result_opt: ?git_mod.ExecResult, gpa: std.mem.Allocator) !void {
         self.mutation_active = false;
-        defer job.deinit(gpa);
+        // The job payload was built with the page allocator (`requestMutation`),
+        // so it must be freed with it — not `gpa` (the worker's smp allocator),
+        // which would corrupt the allocator and crash on a later free. `gpa` still
+        // frees the worker-produced result below.
+        defer job.deinit(page_alloc);
         if (result_opt) |result| {
             var mutable = result;
             defer mutable.deinit(gpa);
@@ -14168,6 +14176,85 @@ fn testRunSetup(allocator: std.mem.Allocator, tio: std.Io, env: *std.process.Env
         .exited => |code| if (code != 0) return error.SetupFailed,
         else => return error.SetupFailed,
     }
+}
+
+test "real threaded load then App.deinit is allocator-clean (issue #19)" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    // A repo with a couple of commits, a branch, a tag, and a working-tree change
+    // so every loader (commits/branches/tags/status/…) returns real data.
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf 'a\n' > f.txt
+        \\git add f.txt
+        \\git commit -qm first
+        \\printf 'a\nb\n' > f.txt
+        \\git add f.txt
+        \\git commit -qm second
+        \\git branch feature
+        \\git tag v1
+        \\printf 'a\nb\nc\n' > f.txt
+    );
+
+    // Build the app around the real repo (ownership of the Git moves into `app`,
+    // which `App.deinit` tears down).
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    app.git = try git_mod.Git.initAt(a, tio, &env, dir_path);
+
+    // Drive the exact fresh-launch path: the real threaded loader (page-allocated
+    // payload) applied through `applyRepoLoad`, which deep-copies into gpa-owned
+    // `data`. Then the full `App.deinit` runs under the checking allocator, which
+    // panics on any invalid/double free — reproducing issue #19 if present.
+    const loaded = loadRepoDataAsync(page_alloc, tio, &env, app.git.root, app.git.git_dir, app.git.branch_sort, app.git.log_order, app.git.untracked_files, app.commit_limit, true);
+    app.applyRepoLoad(loaded, page_alloc);
+    app.deinit();
+}
+
+test "completePreview frees the page-allocated job with the page allocator (issue #19)" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+
+    // A page-allocated PreviewJob, exactly as `buildPreviewJob` produces one: key,
+    // section argv, and the sections slice all come from the page allocator.
+    const pa = std.heap.page_allocator;
+    const argv = try pa.alloc([]const u8, 1);
+    argv[0] = try pa.dupe(u8, "status");
+    const sections = try pa.alloc(PreviewSection, 1);
+    sections[0] = .{ .argv = argv, .label = "L\n" };
+    const job = PreviewJob{ .key = try pa.dupe(u8, "f:test"), .sections = sections, .empty_msg = "none" };
+
+    // Completing must free the job with the page allocator. The pre-fix code freed
+    // it through `gpa` (the worker's result allocator) instead; passing the test's
+    // checking allocator as `gpa` makes that mismatch a hard "Invalid free" panic.
+    app.completePreview(job, null, a);
+}
+
+test "completeMutation frees the page-allocated job with the page allocator (issue #19)" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+
+    // A page-allocated Mutation payload, as `requestMutation` builds via `dupe`.
+    const job = try (Mutation{ .revert = "deadbeef" }).dupe(page_alloc);
+    // Freeing it with `gpa` (here the checking allocator) would panic on the
+    // page-allocated payload; the fix frees the job with the page allocator.
+    try app.completeMutation(job, null, a);
 }
 
 /// First char of 0-based line `idx` in `text`, or 0 — the staging cursor's view
