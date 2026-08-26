@@ -10022,9 +10022,15 @@ pub const App = struct {
                 } else {
                     // On a leftover lock, offer to delete it and re-queue this same
                     // mutation (its meta fields are still set). Dupe only then.
+                    // Use the page allocator, not `gpa` (the worker's smp allocator):
+                    // a `RetryAction.mutation` is owned by the page allocator — it is
+                    // freed via `page_alloc` in `freeRetryAction` and handed to
+                    // `mutation_requested` (also page-allocated) on retry. Duping with
+                    // `gpa` here frees smp memory through the page allocator later,
+                    // corrupting the heap and crashing on a subsequent free (issue #19).
                     var action: RetryAction = .none;
                     if (git_mod.isRetryableLockError(raw)) {
-                        if (job.dupe(gpa)) |dup| action = .{ .mutation = dup } else |_| {}
+                        if (job.dupe(page_alloc)) |dup| action = .{ .mutation = dup } else |_| {}
                     }
                     // A reorder that failed (e.g. a rebase conflict) must not move the
                     // cursor to where the commit *would* have gone. Keep the pending
@@ -14255,6 +14261,34 @@ test "completeMutation frees the page-allocated job with the page allocator (iss
     // Freeing it with `gpa` (here the checking allocator) would panic on the
     // page-allocated payload; the fix frees the job with the page allocator.
     try app.completeMutation(job, null, a);
+}
+
+test "completeMutation lock-retry action is page-allocated, not gpa-owned (issue #19)" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+
+    // A page-allocated job (as `requestMutation` builds it), freed by
+    // `completeMutation` with the page allocator regardless of `gpa`.
+    const job = try (Mutation{ .revert = "deadbeef" }).dupe(page_alloc);
+    // A FAILING result whose stderr is a retryable stale-lock error, owned by the
+    // `gpa` passed in (in production that is the worker's smp allocator — distinct
+    // from the page allocator; here the checking allocator stands in for it).
+    const failed = git_mod.ExecResult{
+        .stdout = try a.dupe(u8, ""),
+        .stderr = try a.dupe(u8, "fatal: Unable to create '/repo/.git/index.lock': File exists."),
+        .term = .{ .exited = 128 },
+    };
+    // The lock error queues a retry `Mutation` in `app.retry_action`, which is
+    // owned by the page allocator (`freeRetryAction` frees it with `page_alloc`,
+    // and `confirmDeleteIndexLock` hands it to the page-allocated
+    // `mutation_requested`). Duping it with `gpa` instead — as the pre-fix code
+    // did — stores checking-allocator memory that `deinitTestApp`'s
+    // `clearLockRecovery` then frees through `page_alloc`, which the checking
+    // allocator flags (the smp/page mismatch behind issue #19's lock-retry path).
+    try app.completeMutation(job, failed, a);
+    try std.testing.expect(std.meta.activeTag(app.retry_action) == .mutation);
 }
 
 /// First char of 0-based line `idx` in `text`, or 0 — the staging cursor's view
