@@ -98,12 +98,13 @@ file_sort_order = name             # name (default) | status
 # draws it, `focused` only while the Commits panel is the active panel (handy on
 # a narrow side panel), `off` never.
 commit_graph = on                  # on (default) | focused | off
-# HEAD log ordering. `topo` (default) keeps a branch's commits contiguous so the
-# graph lanes stay clean (matching lazygit). It relies on git's commit-graph
-# cache to stay fast on huge repos, which ziggity refreshes in the background on
-# startup. `date` is git's native reverse-chronological order; `author_date`
-# orders by author date.
-log_order = topo                   # topo (default) | date | author_date
+# HEAD log ordering. `date` (default) is git's native reverse-chronological
+# order, newest commit first. `topo` keeps a branch's commits contiguous so the
+# graph lanes stay clean, at the cost of a commit's row no longer following its
+# timestamp; it relies on git's commit-graph cache (refreshed in the background
+# on startup) to stay fast on huge repos. `author_date` orders by the author
+# timestamp instead of the commit timestamp.
+log_order = date                   # date (default) | topo | author_date
 
 # Editor for `e`. With nothing set, auto detected from git core.editor, then
 # $GIT_EDITOR, $VISUAL, $EDITOR, falling back to vim. See "Editor" below.

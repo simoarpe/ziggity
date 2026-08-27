@@ -14,9 +14,10 @@ pub const FileSortOrder = enum { name, status };
 /// `focused` only while the Commits panel is focused, `on` always.
 pub const CommitGraphMode = enum { off, focused, on };
 
-/// Ordering of the HEAD commit log: `date` (git default, reverse-chronological),
-/// `topo` (keeps a branch's commits contiguous — a readable graph), or
-/// `author_date`. `date` uses git's native default order (fastest, no flag).
+/// Ordering of the HEAD commit log: `date` (the default — reverse-chronological
+/// by commit time, git's native order: fastest, no flag), `topo` (keeps a
+/// branch's commits contiguous for a readable graph), or `author_date`
+/// (reverse-chronological by the author timestamp).
 pub const LogOrder = enum { date, topo, author_date };
 
 /// The `git log` order flag for a `LogOrder`, or null to use git's native

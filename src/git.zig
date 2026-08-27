@@ -108,7 +108,7 @@ pub const Git = struct {
     log_author: ?[]u8 = null,
     log_path: ?[]u8 = null,
     /// How `loadCommits` orders the HEAD log (date / topo / author-date).
-    log_order: model.LogOrder = .topo,
+    log_order: model.LogOrder = .date,
     /// How `loadBranches` orders the local branch list.
     branch_sort: model.BranchSortOrder = .date,
     /// Which untracked files `git status` lists. Mirrors git's own
@@ -854,11 +854,11 @@ pub const Git = struct {
     }
 
     /// Best-effort: write git's commit-graph cache (commit generation numbers)
-    /// so `--topo-order` logs stay fast on large repos — the same cache a
-    /// gc/fetch-maintained repo already has, which is why lazygit's topo default
-    /// is snappy there. It's a pure cache under `.git/objects/info`, incremental
-    /// (cheap when already current), and any failure (read-only repo, old git,
-    /// shallow clone) is silently ignored. Runs off the UI thread.
+    /// so the `topo` log-order option stays fast on large repos — the same cache
+    /// a gc/fetch-maintained repo already has. It's a pure cache under
+    /// `.git/objects/info`, incremental (cheap when already current), and any
+    /// failure (read-only repo, old git, shallow clone) is silently ignored.
+    /// Runs off the UI thread.
     pub fn ensureCommitGraph(self: *Git) void {
         var res = self.exec(&.{ "commit-graph", "write", "--reachable" }) catch return;
         res.deinit(self.allocator);

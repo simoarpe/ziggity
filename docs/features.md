@@ -34,10 +34,11 @@ The Commits panel draws an **inline commit graph** to the left of each commit
 (a `git log --graph`-style DAG, one row per commit, in each author's color), so
 merges and branch topology read at a glance. It's on by default; set
 `commit_graph = focused` to show it only while the Commits panel is active, or
-`off` to hide it. The log is `--topo-order` by default for clean lanes (like
-lazygit); ziggity refreshes git's commit-graph cache in the background on
-startup so this stays fast even on huge repos. Set `log_order = date` for git's
-native order.
+`off` to hide it. Commits are listed in `date` order by default (git's native
+reverse-chronological order, newest first). Set `log_order = topo` to keep each
+branch's commits contiguous for cleaner graph lanes (ziggity refreshes git's
+commit-graph cache in the background on startup so this stays fast on huge
+repos), or `log_order = author_date` to order by author timestamp.
 
 `ctrl+l` opens the full-screen `git log --graph` DAG in git's own colors. By
 default it shows the current branch **and its upstream**, so the commits you are

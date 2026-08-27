@@ -322,7 +322,7 @@ const RepoLoadRun = struct {
     git_dir: []const u8,
     environ: *std.process.Environ.Map,
     branch_sort: model.BranchSortOrder = .date,
-    log_order: model.LogOrder = .topo,
+    log_order: model.LogOrder = .date,
     untracked: git_mod.Git.UntrackedFiles = .all,
     commit_limit: usize = app_mod.commit_load_batch,
     // Set once, for the initial load: refresh git's commit-graph so topo-order
@@ -351,7 +351,7 @@ const ScopedLoadRun = struct {
     author: ?[]u8 = null,
     path: ?[]u8 = null,
     branch_sort: model.BranchSortOrder = .date,
-    log_order: model.LogOrder = .topo,
+    log_order: model.LogOrder = .date,
     untracked: git_mod.Git.UntrackedFiles = .all,
     commit_limit: usize = app_mod.commit_load_batch,
     result: ?app_mod.ScopedData = null,
