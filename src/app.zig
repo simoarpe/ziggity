@@ -4855,6 +4855,16 @@ pub const App = struct {
         self.terminal_focused = false;
     }
 
+    /// Whether `hash` is the checked-out commit (HEAD) — used to mark it in the
+    /// inline commit graph. Prefers the HEAD hash a refresh has captured; before
+    /// the first snapshot lands (`last_head` still empty) the Commits log starts
+    /// at HEAD, so its newest entry is HEAD.
+    pub fn isHeadCommit(self: *const App, hash: []const u8) bool {
+        if (hash.len == 0) return false;
+        if (self.last_head.len > 0) return std.mem.eql(u8, hash, self.last_head);
+        return self.data.commits.len > 0 and std.mem.eql(u8, hash, self.data.commits[0].hash);
+    }
+
     pub fn selectedFile(self: *const App) ?model.FileStatus {
         if (self.data.files.len == 0) return null;
         if (self.tree_view) {
@@ -14201,6 +14211,31 @@ fn testRunSetup(allocator: std.mem.Allocator, tio: std.Io, env: *std.process.Env
         .exited => |code| if (code != 0) return error.SetupFailed,
         else => return error.SetupFailed,
     }
+}
+
+test "isHeadCommit marks the tracked HEAD, else the log's newest entry" {
+    const a = std.testing.allocator;
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("aaaa"), .short_hash = @constCast("aaaa"), .author = @constCast("A"), .time = @constCast(""), .refs = @constCast(""), .subject = @constCast("newest") },
+        .{ .hash = @constCast("bbbb"), .short_hash = @constCast("bbbb"), .author = @constCast("A"), .time = @constCast(""), .refs = @constCast(""), .subject = @constCast("older") },
+    };
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    app.data.commits = &commits;
+
+    // Before a snapshot captures HEAD (`last_head` empty): the newest log entry
+    // is HEAD, since the Commits log starts at HEAD.
+    try std.testing.expect(app.isHeadCommit("aaaa"));
+    try std.testing.expect(!app.isHeadCommit("bbbb"));
+    try std.testing.expect(!app.isHeadCommit("")); // never mark an empty hash
+
+    // Once HEAD is known, its exact hash wins — even when it is not the newest
+    // row (e.g. while a commit filter is active).
+    app.allocator.free(app.last_head);
+    app.last_head = try a.dupe(u8, "bbbb");
+    try std.testing.expect(app.isHeadCommit("bbbb"));
+    try std.testing.expect(!app.isHeadCommit("aaaa"));
 }
 
 test "real threaded load then App.deinit is allocator-clean (issue #19)" {

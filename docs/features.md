@@ -32,7 +32,9 @@ status; `enter` opens the commit's changed files.
 
 The Commits panel draws an **inline commit graph** to the left of each commit
 (a `git log --graph`-style DAG, one row per commit, in each author's color), so
-merges and branch topology read at a glance. It's on by default; set
+merges and branch topology read at a glance. The checked-out commit (HEAD) is
+drawn as a hollow node (`○`) so you can see where you are at a glance. It's on
+by default; set
 `commit_graph = focused` to show it only while the Commits panel is active, or
 `off` to hide it. Commits are listed in `date` order by default (git's native
 reverse-chronological order, newest first). Set `log_order = topo` to keep each

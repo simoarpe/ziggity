@@ -3526,7 +3526,7 @@ fn drawCommitRows(win: vaxis.Window, app: *const app_mod.App, commits: []const m
             if (idx < g.sets.len) {
                 var cells: [graphlanes_mod.max_lanes]graphlanes_mod.RenderCell = undefined;
                 const prev_hash: []const u8 = if (idx > 0) commits[idx - 1].hash else "";
-                const n = graphlanes_mod.renderRow(g.sets[idx], sel_hash, prev_hash, &cells);
+                const n = graphlanes_mod.renderRow(g.sets[idx], sel_hash, prev_hash, app.isHeadCommit(commit.hash), &cells);
                 for (cells[0..n]) |gc| {
                     col = drawGraphCodepoint(win, row, col, gc.a, base, gc.a_fg, gc.a_bold);
                     col = drawGraphCodepoint(win, row, col, gc.b, base, gc.b_fg, gc.b_bold);

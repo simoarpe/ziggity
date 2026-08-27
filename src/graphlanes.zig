@@ -250,9 +250,11 @@ const default_style = Style{ .fg = 7, .bold = false };
 const highlight_style = Style{ .fg = 15, .bold = true };
 
 // Filled nodes (a solid coloured spot), rather than the hollow outlines the
-// reference renderer uses — a merge keeps a ring so it still stands out.
+// reference renderer uses — a merge keeps a ring so it still stands out. The
+// checked-out commit (HEAD) is drawn hollow so "you are here" reads at a glance.
 pub const commit_symbol: u21 = '●';
 pub const merge_symbol: u21 = '◉';
+pub const head_symbol: u21 = '○';
 
 /// One rendered graph column pair (each graph "cell" is two terminal columns:
 /// a glyph and its horizontal connector).
@@ -265,7 +267,7 @@ pub const RenderCell = struct {
     b_bold: bool,
 };
 
-const CellType = enum { connection, commit, merge };
+const CellType = enum { connection, commit, merge, head };
 
 const Cell = struct {
     up: bool = false,
@@ -299,6 +301,7 @@ const Cell = struct {
             .connection => bd.first,
             .commit => commit_symbol,
             .merge => merge_symbol,
+            .head => head_symbol,
         };
         const rstyle = self.right_style orelse self.style;
         return .{
@@ -314,8 +317,9 @@ const Cell = struct {
 
 /// Render one commit's pipe set into `out`. Returns the number of cells written
 /// (each = two terminal columns). `selected_hash`/`prev_hash` drive the moving
-/// selection highlight; pass an empty slice for "none".
-pub fn renderRow(pipes: []const Pipe, selected_hash: []const u8, prev_hash: []const u8, out: []RenderCell) usize {
+/// selection highlight; pass an empty slice for "none". `is_head` draws this
+/// commit's node hollow to mark the checked-out commit (HEAD).
+pub fn renderRow(pipes: []const Pipe, selected_hash: []const u8, prev_hash: []const u8, is_head: bool, out: []RenderCell) usize {
     var max_pos: i16 = 0;
     var commit_pos: i16 = 0;
     var start_count: usize = 0;
@@ -372,8 +376,10 @@ pub fn renderRow(pipes: []const Pipe, selected_hash: []const u8, prev_hash: []co
         if (pipe.to_pos == commit_pos and u < count) view[u].style = highlight_style;
     }
 
+    // HEAD is drawn hollow regardless of whether it is also a merge, so the
+    // checked-out commit is unambiguous.
     const cu: usize = @intCast(commit_pos);
-    if (cu < count) view[cu].ctype = if (is_merge) .merge else .commit;
+    if (cu < count) view[cu].ctype = if (is_head) .head else if (is_merge) .merge else .commit;
 
     for (0..count) |i| out[i] = view[i].toRender();
     return count;
@@ -444,7 +450,7 @@ test "linear history: one lane, one node per row" {
 
     var out: [max_lanes]RenderCell = undefined;
     for (commits, 0..) |_, i| {
-        const n = renderRow(g.sets[i], "", "", &out);
+        const n = renderRow(g.sets[i], "", "", false, &out);
         try std.testing.expectEqual(@as(usize, 1), n); // single lane
         try std.testing.expectEqual(commit_symbol, out[0].a); // ○ node
     }
@@ -462,9 +468,40 @@ test "a merge commit marks a merge node and opens a second lane" {
     defer g.deinit();
 
     var out: [max_lanes]RenderCell = undefined;
-    const n = renderRow(g.sets[0], "", "", &out);
+    const n = renderRow(g.sets[0], "", "", false, &out);
     try std.testing.expectEqual(merge_symbol, out[0].a); // ◎ merge node
     try std.testing.expect(n >= 2); // a second lane opened for the merge parent
+}
+
+test "the checked-out commit (HEAD) draws a hollow node" {
+    const a = std.testing.allocator;
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("c0"), .short_hash = @constCast("c0"), .author = @constCast("A"), .time = @constCast(""), .refs = @constCast(""), .subject = @constCast("s"), .parents = @constCast(&[_][]u8{@constCast("c1")}) },
+        .{ .hash = @constCast("c1"), .short_hash = @constCast("c1"), .author = @constCast("A"), .time = @constCast(""), .refs = @constCast(""), .subject = @constCast("s"), .parents = @constCast(&[_][]u8{}) },
+    };
+    var g = try build(a, &commits);
+    defer g.deinit();
+    var out: [max_lanes]RenderCell = undefined;
+
+    // Marked as HEAD -> hollow node; otherwise the usual filled node.
+    _ = renderRow(g.sets[0], "", "", true, &out);
+    try std.testing.expectEqual(head_symbol, out[0].a); // ○ hollow
+    _ = renderRow(g.sets[0], "", "", false, &out);
+    try std.testing.expectEqual(commit_symbol, out[0].a); // ● filled
+}
+
+test "HEAD stays hollow even when it is a merge commit" {
+    const a = std.testing.allocator;
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("m"), .short_hash = @constCast("m"), .author = @constCast("A"), .time = @constCast(""), .refs = @constCast(""), .subject = @constCast("merge"), .parents = @constCast(&[_][]u8{ @constCast("p1"), @constCast("p2") }) },
+        .{ .hash = @constCast("p1"), .short_hash = @constCast("p1"), .author = @constCast("A"), .time = @constCast(""), .refs = @constCast(""), .subject = @constCast("s"), .parents = @constCast(&[_][]u8{@constCast("p2")}) },
+        .{ .hash = @constCast("p2"), .short_hash = @constCast("p2"), .author = @constCast("A"), .time = @constCast(""), .refs = @constCast(""), .subject = @constCast("s"), .parents = @constCast(&[_][]u8{}) },
+    };
+    var g = try build(a, &commits);
+    defer g.deinit();
+    var out: [max_lanes]RenderCell = undefined;
+    _ = renderRow(g.sets[0], "", "", true, &out);
+    try std.testing.expectEqual(head_symbol, out[0].a); // hollow, not the merge glyph
 }
 
 test "golden: matches the reference renderer on a merge-with-left-shift history" {
@@ -507,7 +544,7 @@ test "golden: matches the reference renderer on a merge-with-left-shift history"
         try line.appendSlice(a, commit.hash);
         try line.append(a, ' ');
         const prev_hash: []const u8 = if (i > 0) commits[i - 1].hash else "";
-        const n = renderRow(g.sets[i], "blah", prev_hash, &out); // "blah" never matches → no highlight
+        const n = renderRow(g.sets[i], "blah", prev_hash, false, &out); // "blah" never matches → no highlight
         for (out[0..n]) |cell| {
             var buf: [4]u8 = undefined;
             try line.appendSlice(a, buf[0 .. std.unicode.utf8Encode(cell.a, &buf) catch 0]);
