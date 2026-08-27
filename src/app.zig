@@ -1344,8 +1344,10 @@ pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.proce
     // commands that fall back to running inline.
     const workers = .{ loadStatusW, loadFilesW, loadCommitsW, loadBranchesW, loadReflogW, loadRemoteBranchesW, loadRemotesW, loadTagsW, loadWorktreesW, loadSubmodulesW, loadStashW };
     var futures: [workers.len]?std.Io.Future(void) = .{null} ** workers.len;
-    // Spawn as many as the runtime allows concurrently (it returns an error,
-    // never blocks, once `cpu_count - 1` tasks are busy).
+    // Spawn concurrently; `concurrent` never blocks — it only fails when the
+    // runtime can't take another task (with `std.Io.Threaded`'s default
+    // unlimited `concurrent_limit`, that means thread spawn or allocation
+    // failure), in which case the loader runs inline below.
     inline for (workers, 0..) |w, i| {
         futures[i] = io.concurrent(w, .{&ctx}) catch null;
     }
@@ -2823,7 +2825,11 @@ pub const App = struct {
         env_map: *std.process.Environ.Map,
     ) !App {
         var git = try git_mod.Git.init(allocator, io, env_map);
-        errdefer git.deinit();
+        // Until `git` is moved into `app` (whose own errdefer then frees it) a
+        // failure must release it here; afterwards this must stay silent or the
+        // roots would be freed twice.
+        var git_moved = false;
+        errdefer if (!git_moved) git.deinit();
 
         // Disable git's interactive credential prompt: in a TUI it would write to
         // the controlling terminal and block, corrupting the screen. Credential
@@ -2849,6 +2855,7 @@ pub const App = struct {
         app.files_tree = .{ .collapsed = std.BufSet.init(allocator) };
         app.commit_tree = .{ .collapsed = std.BufSet.init(allocator) };
         app.branch_tree = .{ .collapsed = std.BufSet.init(allocator) };
+        git_moved = true;
         errdefer app.deinit();
 
         // Our own executable path, used as GIT_ASKPASS when credentials are
@@ -5823,8 +5830,11 @@ pub const App = struct {
         recentrepos.remove(self.allocator, self.git.io, self.git.environ, self.recent_repos[self.recent_sel]);
         // Drop the entry from the in-memory arrays and rebuild the display rows.
         const removed = self.recent_sel;
-        self.allocator.free(self.recent_repos[removed]);
+        // Build the new list before freeing anything: if the allocation fails
+        // the old list stays intact (freeing first would leave a dangling entry
+        // behind for `freeRecentView` to free again).
         const kept = try self.dropRecentAt(removed);
+        self.allocator.free(self.recent_repos[removed]);
         self.allocator.free(self.recent_repos);
         self.recent_repos = kept;
         if (self.recent_repos.len == 0) {
@@ -5838,8 +5848,8 @@ pub const App = struct {
         try self.setMessage("removed from recent list", .{});
     }
 
-    /// A new `recent_repos` slice with the entry at `idx` omitted (its string was
-    /// already freed by the caller). The surviving path strings are moved over.
+    /// A new `recent_repos` slice with the entry at `idx` omitted (the caller
+    /// frees that string). The surviving path strings are moved over.
     fn dropRecentAt(self: *App, idx: usize) ![][]u8 {
         const out = try self.allocator.alloc([]u8, self.recent_repos.len - 1);
         var j: usize = 0;
@@ -9525,9 +9535,11 @@ pub const App = struct {
             self.preview_loading = false;
         }
         // The job was built with the page allocator (`buildPreviewJob`); free it
-        // with the same one. Using `gpa` (the worker's smp allocator) here frees
-        // page-allocated memory through the wrong allocator, corrupting it and
-        // crashing on a later free (issue #19). `t` above is worker-owned (`gpa`).
+        // with the same one, not `gpa` (the worker's smp allocator) — a
+        // page/smp mismatch is undefined behavior and leaks the mapping. (It was
+        // suspected for issue #19's "Invalid free"; the actual cause was the
+        // `exe_path` sentinel length, see the field doc.) `t` above is
+        // worker-owned (`gpa`).
         job.deinit(page_alloc);
     }
 
@@ -9975,9 +9987,8 @@ pub const App = struct {
     pub fn completeMutation(self: *App, job: Mutation, result_opt: ?git_mod.ExecResult, gpa: std.mem.Allocator) !void {
         self.mutation_active = false;
         // The job payload was built with the page allocator (`requestMutation`),
-        // so it must be freed with it — not `gpa` (the worker's smp allocator),
-        // which would corrupt the allocator and crash on a later free. `gpa` still
-        // frees the worker-produced result below.
+        // so it must be freed with it — not `gpa` (the worker's smp allocator).
+        // `gpa` still frees the worker-produced result below.
         defer job.deinit(page_alloc);
         if (result_opt) |result| {
             var mutable = result;
@@ -10034,8 +10045,8 @@ pub const App = struct {
                     // a `RetryAction.mutation` is owned by the page allocator — it is
                     // freed via `page_alloc` in `freeRetryAction` and handed to
                     // `mutation_requested` (also page-allocated) on retry. Duping with
-                    // `gpa` here frees smp memory through the page allocator later,
-                    // corrupting the heap and crashing on a subsequent free (issue #19).
+                    // `gpa` here would free smp memory through the page allocator
+                    // later (undefined behavior).
                     var action: RetryAction = .none;
                     if (git_mod.isRetryableLockError(raw)) {
                         if (job.dupe(page_alloc)) |dup| action = .{ .mutation = dup } else |_| {}

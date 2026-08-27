@@ -84,11 +84,21 @@ const AsyncJob = struct {
     /// freed when the op finishes; null otherwise.
     cred_environ: ?std.process.Environ.Map = null,
     op: app_mod.AsyncOp,
-    /// For `push_set_upstream`: the remote and branch appended after the op's
-    /// args (`push --set-upstream <remote> <branch>`). Borrowed from the app.
+    /// For `push_set_upstream`/`push_tag`/`fetch_remote`: the remote and branch
+    /// appended after the op's args (`push --set-upstream <remote> <branch>`).
+    /// Owned copies (`async_allocator`), so the app is free to replace its own
+    /// `push_upstream_*`/`fetch_remote_name` while the worker runs. Freed by
+    /// `freeTargets` once the future has been awaited.
     upstream_remote: ?[]const u8 = null,
     upstream_branch: ?[]const u8 = null,
     result: ?git_mod.ExecResult = null,
+
+    fn freeTargets(self: *AsyncJob) void {
+        if (self.upstream_remote) |r| async_allocator.free(r);
+        if (self.upstream_branch) |b| async_allocator.free(b);
+        self.upstream_remote = null;
+        self.upstream_branch = null;
+    }
 };
 
 fn asyncWorker(job: *AsyncJob) void {
@@ -459,6 +469,13 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
 
     var vx = try vaxis.init(io, allocator, init.environ_map, .{
         .kitty_keyboard_flags = .{ .report_events = true },
+        // vaxis's parser decodes an OSC 52 clipboard *reply* (`OSC 52 ; c ; <b64>`)
+        // into a `paste` event allocated with this allocator, and unwraps it
+        // unconditionally — without one, a terminal or multiplexer that answers
+        // our OSC 52 writes (`copyToSystemClipboard`) crashes the input thread
+        // with "attempt to use null value". `Event` has no `paste` variant, so
+        // vaxis frees the decoded text itself with the same allocator.
+        .system_clipboard_allocator = allocator,
     });
     defer vx.deinit(allocator, tty.writer());
     // Measure grapheme widths for wrapping exactly as the renderer does.
@@ -468,6 +485,11 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     try loop.start();
     try loop.installResizeHandler();
     defer loop.stop();
+    // The SIGWINCH handler vaxis installs keeps `&loop` (a local of this frame)
+    // in a process-wide table and is never removed by `Tty.deinit`. Restore the
+    // default disposition before the loop is torn down so a resize arriving
+    // during `app.deinit()`/process exit can't run the callback on dead stack.
+    defer if (@hasDecl(vaxis.Tty, "resetSignalHandler")) vaxis.Tty.resetSignalHandler();
 
     var refresh_ticker: RefreshTicker = .{ .io = io, .loop = &loop, .app = app };
     var refresh_future = try io.concurrent(refreshTickerRun, .{&refresh_ticker});
@@ -497,6 +519,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     defer if (async_future) |*f| {
         f.await(io);
         if (async_job.result) |*r| r.deinit(async_allocator);
+        async_job.freeTargets();
     };
 
     var preview_run: PreviewRun = undefined;
@@ -509,7 +532,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
         f.cancel(io);
         if (preview_run.result) |r| async_allocator.free(r);
         // The job is page-allocated (see `buildPreviewJob`); free it with the
-        // page allocator, not the worker's smp allocator (issue #19).
+        // page allocator, not the worker's smp allocator.
         preview_run.job.deinit(std.heap.page_allocator);
     };
 
@@ -525,6 +548,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     defer if (graph_future) |*f| {
         f.cancel(io);
         if (graph_run.result) |r| async_allocator.free(r);
+        if (graph_run.parents) |p| async_allocator.free(p);
     };
 
     var bg_fetch_run: BgFetchRun = undefined;
@@ -544,7 +568,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
         f.await(io);
         if (mutation_run.result) |*r| r.deinit(async_allocator);
         // The mutation payload is page-allocated (see `requestMutation`); free it
-        // with the page allocator, not the worker's smp allocator (issue #19).
+        // with the page allocator, not the worker's smp allocator.
         mutation_run.mutation.deinit(std.heap.page_allocator);
     };
 
@@ -639,6 +663,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 if (async_future) |*f| {
                     f.await(io);
                     async_future = null;
+                    async_job.freeTargets();
                     try app.completeAsync(async_job.op, async_job.result, async_allocator);
                     async_job.result = null;
                 }
@@ -751,6 +776,9 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 preview_future = null;
                 if (preview_run.result) |r| async_allocator.free(r);
                 preview_run.result = null;
+                // The in-flight job is page-allocated (`buildPreviewJob`) and
+                // would otherwise leak on every re-root.
+                preview_run.job.deinit(std.heap.page_allocator);
             }
             if (worktree_future) |*f| {
                 f.await(io);
@@ -805,13 +833,16 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 app.async_requested = null;
                 app.async_active = true;
                 async_job = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ, .op = op };
-                // A first push of an upstream-less branch carries the target.
+                // A first push of an upstream-less branch carries the target
+                // (copied: the worker must not borrow app state it outlives).
                 if (op == .push_set_upstream or op == .push_tag) {
-                    async_job.upstream_remote = app.push_upstream_remote;
-                    async_job.upstream_branch = app.push_upstream_branch;
+                    if (app.push_upstream_remote) |r| async_job.upstream_remote = async_allocator.dupe(u8, r) catch null;
+                    if (app.push_upstream_branch) |b| async_job.upstream_branch = async_allocator.dupe(u8, b) catch null;
                 }
                 // A per-remote fetch carries the remote name (appended after "fetch").
-                if (op == .fetch_remote) async_job.upstream_remote = app.fetch_remote_name;
+                if (op == .fetch_remote) {
+                    if (app.fetch_remote_name) |r| async_job.upstream_remote = async_allocator.dupe(u8, r) catch null;
+                }
                 // Attach entered credentials (a cloned, askpass-wired env) when
                 // available; on clone failure fall back to the bare env.
                 if (credentials_mod.gitCredentialsSet(app)) {
@@ -822,6 +853,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                         e.deinit();
                         async_job.cred_environ = null;
                     }
+                    async_job.freeTargets();
                     app.async_active = false;
                     try app.completeAsync(op, null, async_allocator);
                     break :blk null;
@@ -1051,6 +1083,11 @@ fn runEditor(
     // on the real (posix) Tty, not the test stub — gate the raw/cooked switch.
     const has_termios = @hasField(vaxis.Tty, "fd") and @hasField(vaxis.Tty, "termios");
     loop.stop();
+    // Drop whatever the stopped reader left queued: key events point their
+    // `text` into a grapheme cache on that thread's (now dead) stack, and
+    // `stop()` itself provokes a DSR reply that parses as a stray key. The new
+    // reader posts a fresh winsize on start, so nothing needed is lost.
+    while (loop.tryEvent() catch null) |_| {}
     vx.exitAltScreen(writer) catch {};
     vx.setMouseMode(writer, false) catch {};
     writer.writeAll(focus_events_reset) catch {};
