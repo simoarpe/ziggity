@@ -486,10 +486,10 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     try loop.installResizeHandler();
     defer loop.stop();
     // The SIGWINCH handler vaxis installs keeps `&loop` (a local of this frame)
-    // in a process-wide table and is never removed by `Tty.deinit`. Restore the
-    // default disposition before the loop is torn down so a resize arriving
-    // during `app.deinit()`/process exit can't run the callback on dead stack.
-    defer if (@hasDecl(vaxis.Tty, "resetSignalHandler")) vaxis.Tty.resetSignalHandler();
+    // in a process-wide table that `Tty.deinit` does not touch. Unregister it
+    // before the loop is torn down so a resize arriving during
+    // `app.deinit()`/process exit can't run the callback on dead stack.
+    defer loop.uninstallResizeHandler();
 
     var refresh_ticker: RefreshTicker = .{ .io = io, .loop = &loop, .app = app };
     var refresh_future = try io.concurrent(refreshTickerRun, .{&refresh_ticker});
