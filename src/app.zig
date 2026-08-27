@@ -2682,7 +2682,15 @@ pub const App = struct {
     // values feed git via an askpass re-exec of this binary (see
     // `runAskpassHelper`/`buildCredentialEnv`). `exe_path` is our own path,
     // resolved once at startup, used as `GIT_ASKPASS`.
-    exe_path: ?[]u8 = null,
+    //
+    // Sentinel-terminated on purpose: `std.process.executablePathAlloc` returns
+    // a `[:0]u8`, i.e. it allocates n+1 bytes for an n-byte path. Storing that
+    // as a plain `[]u8` drops the sentinel from the type, so `deinit` would free
+    // n bytes of an n+1-byte allocation. The DebugAllocator (`init.gpa` in
+    // ReleaseSafe builds) derives the size class from the freed length; when n is
+    // a power of two (`/usr/bin/ziggity` is 16 bytes) that lands in a different
+    // bucket than the allocation and panics "Invalid free" on quit (issue #19).
+    exe_path: ?[:0]u8 = null,
     git_username: ?[]u8 = null,
     git_password: ?[]u8 = null,
     credential_step: CredentialStep = .username,
@@ -10870,7 +10878,7 @@ test "credential prompt collects username then password and queues a retry" {
     defer deinitTestApp(&app);
     // An askpass path must exist for credential entry to be offered/used; the
     // path itself is not exercised by this flow.
-    app.exe_path = try allocator.dupe(u8, "/path/to/ziggity");
+    app.exe_path = try allocator.dupeZ(u8, "/path/to/ziggity");
     // The retry records the command in the git log; a minimal Git suffices.
     app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = undefined };
     defer app.git.command_log.deinit(allocator);
@@ -10902,7 +10910,7 @@ test "cancelling the credential prompt stores nothing and queues nothing" {
     var no_files = [_]model.FileStatus{};
     var app = try testApp(allocator, &no_files);
     defer deinitTestApp(&app);
-    app.exe_path = try allocator.dupe(u8, "/path/to/ziggity");
+    app.exe_path = try allocator.dupeZ(u8, "/path/to/ziggity");
 
     try credentials_mod.startCredentialPrompt(&app, .pull);
     try app.input_buffer.appendSlice(allocator, "octocat");
@@ -14289,6 +14297,25 @@ test "completeMutation lock-retry action is page-allocated, not gpa-owned (issue
     // allocator flags (the smp/page mismatch behind issue #19's lock-retry path).
     try app.completeMutation(job, failed, a);
     try std.testing.expect(std.meta.activeTag(app.retry_action) == .mutation);
+}
+
+test "exe_path keeps the executablePathAlloc sentinel so deinit frees the full allocation (issue #19)" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+
+    // `App.init` stores `std.process.executablePathAlloc`'s `[:0]u8` result:
+    // n+1 bytes for an n-byte path. If the field were a plain `[]u8`, the
+    // sentinel slice would silently coerce and `deinit` would free only n
+    // bytes. For a power-of-two n the DebugAllocator resolves the free to a
+    // different size class than the allocation and panics "Invalid free" —
+    // `/usr/bin/ziggity`, where every distro package installs the binary, is
+    // exactly 16 bytes, which is why the crash reproduced for packaged builds
+    // but not from a `zig-out/bin` checkout. The checking allocator here
+    // trips on the same mismatch, so this fails (panics) without the fix.
+    app.exe_path = try a.dupeZ(u8, "/usr/bin/ziggity");
+    try std.testing.expectEqual(@as(usize, 16), app.exe_path.?.len);
 }
 
 /// First char of 0-based line `idx` in `text`, or 0 — the staging cursor's view
