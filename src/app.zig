@@ -3692,11 +3692,15 @@ pub const App = struct {
                     try self.clearFileFilter();
                     return;
                 }
-                if (self.focus == .commits and self.git.hasLogFilter()) {
+                // A filter is cleared by esc only at the list level. When drilled
+                // into a commit's files (or a branch's sub-commits/files), esc must
+                // back out of the drill first; the filter is still there when you
+                // return to the list, and a second esc clears it.
+                if (self.focus == .commits and self.git.hasLogFilter() and !self.commit_files_active) {
                     try self.clearCommitFilter();
                     return;
                 }
-                if (self.focus == .branches and self.branches_tab == .local and self.branch_filter.len > 0) {
+                if (self.focus == .branches and self.branches_tab == .local and self.branch_filter.len > 0 and !self.branch_commits_active) {
                     try self.clearBranchFilter();
                     return;
                 }
@@ -14434,6 +14438,32 @@ fn testRunSetup(allocator: std.mem.Allocator, tio: std.Io, env: *std.process.Env
         .exited => |code| if (code != 0) return error.SetupFailed,
         else => return error.SetupFailed,
     }
+}
+
+test "esc backs out of a commit-files drill before clearing the commit filter" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    defer app.git.clearLogFilters();
+
+    // Commits panel, filtered, drilled into a commit's files (commit_files stays
+    // empty so the drill teardown is a no-op).
+    app.focus = .commits;
+    app.commits_tab = .commits;
+    try app.git.setLogFilter(.grep, "fix");
+    app.commit_files_active = true;
+
+    const esc = vaxis.Key{ .codepoint = vaxis.Key.escape };
+
+    // First esc closes the drill and keeps the filter (the bug cleared it here).
+    try app.handleKey(esc);
+    try std.testing.expect(!app.commit_files_active);
+    try std.testing.expect(app.git.hasLogFilter());
+
+    // Back at the log level, a second esc clears the filter.
+    try app.handleKey(esc);
+    try std.testing.expect(!app.git.hasLogFilter());
 }
 
 test "pull_mode routes p to a plain pull or the merge/rebase menu" {
