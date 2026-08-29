@@ -1231,11 +1231,11 @@ const SidePanelHeights = struct { status: u16, files: u16, branches: u16, commit
 /// joins the weighted group. With the accordion (`expand_focused_side_panel`),
 /// the focused list panel gets `expanded_weight` instead of 1, growing at the
 /// others' expense. The returned heights always sum to `body_h`.
-fn sidePanelHeights(body_h: u16, focused: model.Focus, accordion: bool, expanded_weight: u16, extra_status_row: bool) SidePanelHeights {
+fn sidePanelHeights(body_h: u16, focused: model.Focus, accordion: bool, expanded_weight: u16, extra_status_rows: u16) SidePanelHeights {
     // The Status panel is normally up to 5 tall (3 content rows: repo, summary,
-    // filter). It gets one more row when both a file filter and a commit filter
-    // need their own line.
-    const status_h: u16 = @min(body_h, if (extra_status_row) @as(u16, 6) else 5);
+    // and one filter line). The Files, Branches and Commits panels can all be
+    // filtered at once, so each active filter beyond the first gets its own row.
+    const status_h: u16 = @min(body_h, 5 + extra_status_rows);
     const stash_fixed: u16 = @min(body_h -| status_h, 3);
     const stash_focused = focused == .stash;
 
@@ -1320,7 +1320,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         app.contentFocus(),
         app.config.expand_focused_side_panel,
         app.config.expanded_side_panel_weight,
-        app.git.hasLogFilter() and app.anyFileFilterActive(),
+        app.activeFilterCount() -| 1, // one filter fits the base height; the rest add a row each
     );
     const status_h = heights.status;
     const files_h = heights.files;
@@ -1352,7 +1352,16 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         y += status_h;
         {
             const files_tabs = [_][]const u8{ "Files", "Worktrees", "Submodules" };
-            const w = tabbedPanel(root, 0, y, side_w, files_h, 2, &files_tabs, @intFromEnum(app.files_tab), "", app.focus == .files, listScrollInfo(app, .files));
+            // A filtered Files list carries the same yellow title hint as the
+            // Commits/Branches panels. Esc clears the path filter (`/`) while the
+            // panel is focused; a status-only filter shows just "(filtered)".
+            const files_suffix = if (app.files_tab != .files or !app.anyFileFilterActive())
+                ""
+            else if (app.focus == .files and app.fileFilterActive())
+                "(esc to cancel filter)"
+            else
+                "(filtered)";
+            const w = tabbedPanel(root, 0, y, side_w, files_h, 2, &files_tabs, @intFromEnum(app.files_tab), files_suffix, app.focus == .files, listScrollInfo(app, .files));
             beginListPan(app, .files);
             switch (app.files_tab) {
                 .files => drawFiles(w, app),
@@ -1379,7 +1388,15 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
                 // Drilled into a remote's branches.
                 const t = std.fmt.bufPrint(&app.branches_title_buf, "[3] {s} (esc back)", .{app.remote_drill.?}) catch "[3] Remote (esc back)";
                 break :blk panel(root, 0, y, side_w, branches_h, t, app.focus == .branches, listScrollInfo(app, .branches));
-            } else tabbedPanel(root, 0, y, side_w, branches_h, 3, &branches_tabs, @intFromEnum(app.branches_tab), "", app.focus == .branches, listScrollInfo(app, .branches));
+            } else blk: {
+                // The Local tab's name filter (`/`) shows a title hint, mirroring
+                // the Commits filter: a clear-hint while focused, else "(filtered)".
+                const suffix = if (app.branches_tab == .local and app.branch_filter.len > 0)
+                    (if (app.focus == .branches) "(esc to cancel filter)" else "(filtered)")
+                else
+                    "";
+                break :blk tabbedPanel(root, 0, y, side_w, branches_h, 3, &branches_tabs, @intFromEnum(app.branches_tab), suffix, app.focus == .branches, listScrollInfo(app, .branches));
+            };
             beginListPan(app, .branches);
             drawBranches(w, app);
             endListPan(app, .branches, w.width);
@@ -1878,6 +1895,7 @@ const help_lines = [_][]const u8{
     "  e              open the file in your editor",
     "",
     "Branches  (tabs: Local, Remotes, Tags)",
+    "  /              filter branches by name (Local; esc clears)",
     "  space          checkout the selected branch",
     "  c              checkout by name (type a branch/ref; \"-\" = previous)",
     "  n              new branch (new tag on the Tags tab)",
@@ -2805,8 +2823,8 @@ fn tabbedPanel(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, number: ?u8, 
         col = drawTitleSpan(frame.raw, w, col, tab, if (i == active) active_style else st.muted);
     }
     if (suffix.len > 0) {
-        // The suffix is only ever the active commit-filter hint; draw it in the
-        // warning colour so a filtered list stands out.
+        // The suffix is the panel's active-filter hint (Files / Branches /
+        // Commits); draw it in the warning colour so a filtered list stands out.
         col = drawTitleSpan(frame.raw, w, col, " ", st.muted);
         _ = drawTitleSpan(frame.raw, w, col, suffix, st.warning);
     }
@@ -2902,22 +2920,27 @@ fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
         print(win, 1, 0, line, st.muted);
     }
 
-    // Line 2: active file filter, if any.
+    // Lines 2+: every active filter, one per line, in the warning colour so a
+    // filtered panel is obvious at a glance. The Files, Branches and Commits
+    // panels can all be filtered at once, so the lines stack.
     var filter_row: u16 = 2;
     if (app.anyFileFilterActive()) {
-        var filter_buf: [256]u8 = undefined;
+        var fbuf: [256]u8 = undefined;
         const line = if (app.fileDisplayFilterActive() and app.fileFilterActive())
-            std.fmt.bufPrint(&filter_buf, "filter {s} {d}/{d} {s}", .{ app.file_display_filter.label(), app.visibleFileCount(), app.data.files.len, app.file_filter }) catch return
+            std.fmt.bufPrint(&fbuf, "filtering files ({s}, {d}/{d}: {s})", .{ app.file_display_filter.label(), app.visibleFileCount(), app.data.files.len, app.file_filter }) catch return
         else if (app.fileDisplayFilterActive())
-            std.fmt.bufPrint(&filter_buf, "filter {s} {d}/{d}", .{ app.file_display_filter.label(), app.visibleFileCount(), app.data.files.len }) catch return
+            std.fmt.bufPrint(&fbuf, "filtering files ({s}, {d}/{d})", .{ app.file_display_filter.label(), app.visibleFileCount(), app.data.files.len }) catch return
         else
-            std.fmt.bufPrint(&filter_buf, "filter {d}/{d} {s}", .{ app.visibleFileCount(), app.data.files.len, app.file_filter }) catch return;
-        print(win, 2, 0, line, st.muted);
-        filter_row = 3;
+            std.fmt.bufPrint(&fbuf, "filtering files ({d}/{d}: {s})", .{ app.visibleFileCount(), app.data.files.len, app.file_filter }) catch return;
+        print(win, filter_row, 0, line, st.warning);
+        filter_row += 1;
     }
-
-    // Active commit-log filter, in the warning colour so a filtered Commits list
-    // is obvious at a glance (esc clears it while that panel is focused).
+    if (app.branchFilterActive()) {
+        var bbuf: [200]u8 = undefined;
+        const line = std.fmt.bufPrint(&bbuf, "filtering branches (name: {s})", .{app.branch_filter}) catch return;
+        print(win, filter_row, 0, line, st.warning);
+        filter_row += 1;
+    }
     var cbuf: [200]u8 = undefined;
     const commit_filter: ?[]const u8 = if (app.git.log_author) |a|
         (std.fmt.bufPrint(&cbuf, "filtering commits (author: {s})", .{a}) catch null)
@@ -2927,7 +2950,10 @@ fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
         (std.fmt.bufPrint(&cbuf, "filtering commits (path: {s})", .{p}) catch null)
     else
         null;
-    if (commit_filter) |line| print(win, filter_row, 0, line, st.warning);
+    if (commit_filter) |line| {
+        print(win, filter_row, 0, line, st.warning);
+        filter_row += 1;
+    }
 }
 
 fn drawFiles(win: vaxis.Window, app: *const app_mod.App) void {
@@ -3071,6 +3097,10 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
 
     var branches: []const model.Branch = app.data.branches;
     var selected: usize = app.branch_index;
+    // The Local tab honours the `/` name filter: `branch_index`, the scroll and
+    // the row index below are visible ordinals over the matching branches. The
+    // remote drill is an unfiltered raw slice.
+    const local = !app.remoteDrillActive();
     if (app.remoteDrillActive()) {
         const r = app.drilledRemoteRange() orelse {
             print(win, 0, 0, if (app.initial_load_pending) "Loading..." else "No remote branches", styles().muted);
@@ -3079,8 +3109,14 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
         branches = app.data.remote_branches[r.start..r.end];
         selected = app.remote_index - r.start;
     }
-    if (branches.len == 0) {
-        const empty_label = if (app.initial_load_pending) "Loading..." else "No branches";
+    const total = if (local) app.visibleBranchCount() else branches.len;
+    if (total == 0) {
+        const empty_label = if (app.initial_load_pending)
+            "Loading..."
+        else if (local and app.branch_filter.len > 0)
+            "No matching branches"
+        else
+            "No branches";
         print(win, 0, 0, empty_label, styles().muted);
         return;
     }
@@ -3088,11 +3124,11 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
     const now = app.now_unix;
     var row: u16 = 0;
     var idx = start;
-    while (idx < branches.len and row < win.height) : ({
+    while (idx < total and row < win.height) : ({
         idx += 1;
         row += 1;
     }) {
-        const branch = branches[idx];
+        const branch = if (local) app.data.branches[app.rawBranchIndex(idx).?] else branches[idx];
         // '*' = the checked-out branch; a coloured ◆ = the diffing-mode base,
         // kept visible while navigating away to pick the other side (it wins
         // the marker slot; the current branch keeps its green styling).
@@ -4221,6 +4257,16 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
         win.showCursor(@intCast(8 + sc.view), 0);
         return;
     }
+    if (app.mode == .branch_filter_prompt) {
+        print(win, 0, 0, "filter: ", st.bottom_accent);
+        const field_w: usize = if (win.width > 8) win.width - 8 else 0;
+        const caret = @min(app.branch_filter_cursor, app.branch_filter_buffer.items.len);
+        const sc = app_mod.viewScroll(app.branch_filter_scroll, field_w, caret);
+        app.branch_filter_scroll = sc.origin;
+        print(win, 0, 8, app.branch_filter_buffer.items[sc.origin..], st.bottom);
+        win.showCursor(@intCast(8 + sc.view), 0);
+        return;
+    }
     if (app.mode == .status_filter_menu) {
         print(win, 0, 0, "status filter  -  j/k move  enter apply  esc cancel", st.bottom_accent);
         return;
@@ -5163,7 +5209,7 @@ test "side panel heights match the weighting" {
 
     // Default (no accordion): status fixed, stash a small fixed size when not
     // focused, files/branches/commits share the rest equally. Fills body_h.
-    const h = sidePanelHeights(body_h, .files, false, 2, false);
+    const h = sidePanelHeights(body_h, .files, false, 2, 0);
     try std.testing.expectEqual(@as(u16, 5), h.status);
     try std.testing.expectEqual(@as(u16, 3), h.stash);
     try std.testing.expectEqual(body_h, h.status + h.files + h.branches + h.commits + h.stash);
@@ -5171,14 +5217,19 @@ test "side panel heights match the weighting" {
     try std.testing.expect(lists_spread <= 1);
 
     // Stash focused: it joins the weighted group and grows past the fixed 3.
-    const hs = sidePanelHeights(body_h, .stash, false, 2, false);
+    const hs = sidePanelHeights(body_h, .stash, false, 2, 0);
     try std.testing.expect(hs.stash > 3);
     try std.testing.expectEqual(body_h, hs.status + hs.files + hs.branches + hs.commits + hs.stash);
 
     // Accordion: the focused list panel is larger than the others.
-    const ha = sidePanelHeights(body_h, .commits, true, 2, false);
+    const ha = sidePanelHeights(body_h, .commits, true, 2, 0);
     try std.testing.expect(ha.commits > ha.files);
     try std.testing.expectEqual(body_h, ha.status + ha.files + ha.branches + ha.commits + ha.stash);
+
+    // Each stacked filter beyond the first grows the Status panel by a row (so a
+    // files+branches+commits filter shows all three lines).
+    try std.testing.expectEqual(@as(u16, 6), sidePanelHeights(body_h, .files, false, 2, 1).status);
+    try std.testing.expectEqual(@as(u16, 7), sidePanelHeights(body_h, .files, false, 2, 2).status);
 }
 
 test "side panel width scales with the terminal, no fixed cap" {

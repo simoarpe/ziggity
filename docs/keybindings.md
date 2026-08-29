@@ -75,6 +75,7 @@ the written reference. Every binding is remappable, see
 - `e`: open the file under view in your editor (Files, a commit's files, the
   staging or patch view, or a working tree file's diff; see
   [Editor](configuration.md#editor-e))
+- `/` (Branches, Local): filter branches by name live; enter accepts, esc clears
 - `n`: new branch from HEAD (Branches, Local)
 - `c`: checkout a branch or ref by name (switches to a local name, tracks a
   remote one, detaches onto a tag or commit, and `-` returns to the previous

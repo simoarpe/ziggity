@@ -24,6 +24,7 @@ pub const Action = enum {
     stash_menu,
     start_file_filter,
     start_commit_filter,
+    start_branch_filter,
     open_status_filter,
     start_commit,
     amend_commit,
@@ -117,6 +118,9 @@ pub fn isBranchManagement(self: Action) bool {
         .edit_remote,
         .remove_remote,
         .set_upstream,
+        // `/` opens the branch-name filter; suppressed while drilled into a
+        // branch's commits (there is no branch list to filter there).
+        .start_branch_filter,
         => true,
         else => false,
     };
@@ -235,6 +239,7 @@ pub fn isMutating(self: Action) bool {
         .toggle_tree,
         .start_file_filter,
         .start_commit_filter,
+        .start_branch_filter,
         .open_status_filter,
         .confirm,
         .backspace,
@@ -274,8 +279,13 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     if (keymap.paste_commits.matches(key)) return .paste_commits;
     if (keymap.select_branch_commits.matches(key)) return .select_branch_commits;
 
-    // In the Commits panel, `/` filters the log instead of the file list.
+    // `/` filters the current list: the commit log in the Commits panel, branch
+    // names in the Branches panel, the file list in the Files panel. It must not
+    // fall through to the file filter from other panels (that would yank focus to
+    // the Files panel), so each panel routes it explicitly and there is no global
+    // catch-all below.
     if (focus == .commits and keymap.file_filter.matches(key)) return .start_commit_filter;
+    if (focus == .branches and keymap.file_filter.matches(key)) return .start_branch_filter;
 
     if (keymap.toggle_fullscreen.matches(key)) return .toggle_fullscreen;
     if (keymap.command_log.matches(key)) return .command_log;
@@ -288,7 +298,8 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     if (keymap.diff_mark.matches(key)) return .diff_mark;
     if (keymap.patch_menu.matches(key)) return .patch_menu;
     if (keymap.refresh.matches(key)) return .refresh;
-    if (keymap.file_filter.matches(key)) return .start_file_filter;
+    // Only the Files panel gets the file filter; other panels handled `/` above.
+    if (focus == .files and keymap.file_filter.matches(key)) return .start_file_filter;
     if (keymap.fetch.matches(key)) return .fetch;
     if (keymap.pull.matches(key)) return .pull;
     if (keymap.push.matches(key)) return .push;
@@ -407,6 +418,12 @@ test "normal key mapping handles global and focused actions" {
     try std.testing.expectEqual(Action.discard_selected, fromNormalKey(testKey('d'), keymap, .files).?);
     try std.testing.expectEqual(Action.discard_all, fromNormalKey(testKey('D'), keymap, .files).?);
     try std.testing.expectEqual(Action.start_file_filter, fromNormalKey(testKey('/'), keymap, .files).?);
+    // `/` filters the current panel, and must not steal focus to Files elsewhere.
+    try std.testing.expectEqual(Action.start_commit_filter, fromNormalKey(testKey('/'), keymap, .commits).?);
+    try std.testing.expectEqual(Action.start_branch_filter, fromNormalKey(testKey('/'), keymap, .branches).?);
+    // From other panels `/` is not the file filter (no focus-stealing catch-all).
+    try std.testing.expect(fromNormalKey(testKey('/'), keymap, .branches) != Action.start_file_filter);
+    try std.testing.expect(fromNormalKey(testKey('/'), keymap, .stash) == null);
     try std.testing.expectEqual(Action.open_status_filter, fromNormalKey(ctrlTestKey('b'), keymap, .files).?);
     try std.testing.expectEqual(Action.start_commit, fromNormalKey(testKey('c'), keymap, .files).?);
     // `c` is not a generic main-panel binding (commit there is gated to the
