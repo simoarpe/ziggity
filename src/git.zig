@@ -1211,17 +1211,25 @@ pub const Git = struct {
     /// Files changed by a single commit (vs its parent, or all files for the
     /// root commit thanks to --root).
     pub fn loadCommitFiles(self: *Git, hash: []const u8) ![]model.CommitFile {
-        var result = try self.exec(&.{ "diff-tree", "--root", "--no-commit-id", "--name-status", "-r", "-z", hash });
+        // `-m --first-parent` is what makes a MERGE list the files it brought in:
+        // a plain `git show`/`diff-tree` on a merge is empty (git can't pick a
+        // parent to diff against), so it would show no files at all. First-parent
+        // lists the changes relative to the mainline the merge landed on — what a
+        // merge "introduced". A no-op for regular commits, and `git show` handles
+        // the root commit (diff against the empty tree) without a `--root` flag.
+        var result = try self.exec(&.{ "show", "-m", "--first-parent", "--no-ext-diff", "--name-status", "--format=", "-z", hash });
         defer result.deinit(self.allocator);
         if (!result.ok()) return self.allocator.alloc(model.CommitFile, 0);
         return parseCommitFiles(self.allocator, result.stdout);
     }
 
-    /// The diff a single commit introduced for one path.
+    /// The diff a single commit introduced for one path. `-m --first-parent` gives
+    /// a merge's first-parent diff (what it brought into the mainline) instead of
+    /// the empty combined diff; a no-op for regular and root commits.
     pub fn diffForCommitFile(self: *Git, hash: []const u8, path: []const u8, diff_context: u8) ![]u8 {
         const context_arg = try std.fmt.allocPrint(self.allocator, "--unified={d}", .{diff_context});
         defer self.allocator.free(context_arg);
-        var result = try self.exec(&.{ "show", hash, "--no-ext-diff", "--no-color", context_arg, "--format=", "--", path });
+        var result = try self.exec(&.{ "show", "-m", "--first-parent", hash, "--no-ext-diff", "--no-color", context_arg, "--format=", "--", path });
         errdefer result.deinit(self.allocator);
         if (!result.ok()) return GitError.CommandFailed;
         self.allocator.free(result.stderr);
@@ -2742,6 +2750,90 @@ test "parse commit files handles modifications and renames" {
     try std.testing.expectEqualSlices(u8, "renamed.zig", files[2].path);
     try std.testing.expectEqual(@as(u8, 'D'), files[3].status);
     try std.testing.expectEqualSlices(u8, "gone.zig", files[3].path);
+}
+
+test "loadCommitFiles and diffForCommitFile show a merge's first-parent files" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    try env.put("HOME", dir_path);
+    try env.put("GIT_CONFIG_GLOBAL", "/dev/null");
+    try env.put("GIT_CONFIG_SYSTEM", "/dev/null");
+
+    // main: first + "edit main"; branch-A adds a.txt; merge branch-A into main.
+    // The merge introduces a.txt relative to main (its first parent).
+    const setup =
+        \\set -e
+        \\git init -q -b main
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf main > main.txt
+        \\git add main.txt
+        \\git commit -qm first
+        \\git checkout -q -b branch-A
+        \\printf a > a.txt
+        \\git add a.txt
+        \\git commit -qm "add a.txt"
+        \\git checkout -q main
+        \\printf 'main-edit' > main.txt
+        \\git add main.txt
+        \\git commit -qm "edit main"
+        \\git merge -q --no-ff branch-A -m "Merge branch 'branch-A'"
+    ;
+    var sh = [_][]const u8{ "sh", "-c", setup };
+    const setup_result = try std.process.run(a, tio, .{
+        .argv = &sh,
+        .cwd = .{ .path = dir_path },
+        .environ_map = &env,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+    defer a.free(setup_result.stdout);
+    defer a.free(setup_result.stderr);
+    switch (setup_result.term) {
+        .exited => |code| if (code != 0) return error.SetupFailed,
+        else => return error.SetupFailed,
+    }
+
+    var git = try Git.initAt(a, tio, &env, dir_path);
+    defer git.deinit();
+
+    var rp = try git.exec(&.{ "rev-parse", "HEAD" });
+    defer rp.deinit(a);
+    const merge = std.mem.trim(u8, rp.stdout, " \t\r\n");
+
+    // The merge lists the file it brought in — empty before the first-parent fix.
+    const files = try git.loadCommitFiles(merge);
+    defer model.deinitCommitFiles(a, files);
+    var found_a = false;
+    for (files) |f| {
+        if (std.mem.eql(u8, f.path, "a.txt")) found_a = true;
+    }
+    try std.testing.expect(found_a);
+
+    // And that file's diff for the merge is non-empty (was empty via combined diff).
+    const diff = try git.diffForCommitFile(merge, "a.txt", 3);
+    defer a.free(diff);
+    try std.testing.expect(std.mem.indexOf(u8, diff, "a.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diff, "+a") != null);
+
+    // A regular (non-merge) commit still lists its own file.
+    var rp2 = try git.exec(&.{ "rev-parse", "HEAD~1" });
+    defer rp2.deinit(a);
+    const regular = std.mem.trim(u8, rp2.stdout, " \t\r\n");
+    const rfiles = try git.loadCommitFiles(regular);
+    defer model.deinitCommitFiles(a, rfiles);
+    try std.testing.expectEqual(@as(usize, 1), rfiles.len);
+    try std.testing.expectEqualStrings("main.txt", rfiles[0].path);
 }
 
 test "retryable lock errors are detected, other errors are not" {

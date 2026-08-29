@@ -9450,8 +9450,11 @@ pub const App = struct {
                 // on the patch section suppresses a duplicate header.) `--pretty=fuller`
                 // makes the header show AuthorDate and CommitDate separately, so the
                 // committer date (editable via `a`) is visible here.
+                // `-m --first-parent` makes a merge preview show the changes it
+                // brought into the mainline (its first-parent diff) instead of the
+                // near-always-empty combined diff; a no-op for regular commits.
                 try sections.append(page_alloc, .{
-                    .argv = try dupArgv(&.{ "show", "--no-ext-diff", "--color=always", "--show-signature", "--pretty=fuller", "--stat", hash }),
+                    .argv = try dupArgv(&.{ "show", "-m", "--first-parent", "--no-ext-diff", "--color=always", "--show-signature", "--pretty=fuller", "--stat", hash }),
                     .annotate_sizes = true,
                     // A stat this large (~thousands of files) means the patch is
                     // tens of MB and/or binary — skip it rather than stall the
@@ -9459,7 +9462,7 @@ pub const App = struct {
                     .marks_huge_at = 256 * 1024,
                 });
                 try sections.append(page_alloc, .{
-                    .argv = try dupArgv(&.{ "show", "--no-ext-diff", "--color=always", "--format=", "--patch", ctx_arg, hash }),
+                    .argv = try dupArgv(&.{ "show", "-m", "--first-parent", "--no-ext-diff", "--color=always", "--format=", "--patch", ctx_arg, hash }),
                     .skip_if_huge = true,
                 });
             },
