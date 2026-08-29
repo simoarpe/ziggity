@@ -114,7 +114,9 @@ pull_mode = git                    # git (default: follow git's pull.rebase) | m
 # graph lanes stay clean, at the cost of a commit's row no longer following its
 # timestamp; it relies on git's commit-graph cache (refreshed in the background
 # on startup) to stay fast on huge repos. `author_date` orders by the author
-# timestamp instead of the commit timestamp.
+# timestamp instead of the commit timestamp. This applies to the Commits panel,
+# the inline graph, and the ctrl+l graph overlay alike, so every view agrees on
+# chronology.
 log_order = date                   # date (default) | topo | author_date
 
 # Editor for `e`. Resolved in order, first one set wins: editor_command,

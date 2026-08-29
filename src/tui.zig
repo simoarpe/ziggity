@@ -204,6 +204,9 @@ const GraphRun = struct {
     // When not `all` but the current branch tracks an upstream, include it so the
     // default graph shows the commits to pull (the remote's lane) alongside HEAD.
     include_upstream: bool,
+    // Commit ordering, kept in step with the Commits panel so the graph agrees on
+    // chronology. `--graph` implies topo-order, so date order must be requested.
+    log_order: model.LogOrder,
     generation: u64,
     result: ?[]u8 = null,
     parents: ?[]u8 = null,
@@ -231,6 +234,8 @@ fn graphWorker(gr: *GraphRun) void {
     // can paint each author in its own palette colour, matching the Commits panel.
     const base = [_][]const u8{ "git", "--no-optional-locks", "log", "--graph", "--color=always", "--decorate", "-n", "5000", "--format=format:%C(yellow)%h%C(bold magenta)%d%C(reset) %x1f%an%x1f %C(green)%ar%C(reset)  %s" };
     argv.appendSlice(async_allocator, &base) catch return postGraph(gr);
+    // `--graph` orders topologically unless told otherwise; match the Commits panel.
+    argv.append(async_allocator, model.graphOrderFlag(gr.log_order)) catch return postGraph(gr);
     appendGraphScope(&argv, gr) catch return postGraph(gr);
     const r = git_mod.runWithLockRetry(async_allocator, gr.io, .{
         .argv = argv.items,
@@ -249,6 +254,7 @@ fn graphWorker(gr: *GraphRun) void {
     defer pargv.deinit(async_allocator);
     const pbase = [_][]const u8{ "git", "--no-optional-locks", "log", "-n", "5000", "--format=%h %p" };
     pargv.appendSlice(async_allocator, &pbase) catch return postGraph(gr);
+    pargv.append(async_allocator, model.graphOrderFlag(gr.log_order)) catch return postGraph(gr);
     appendGraphScope(&pargv, gr) catch return postGraph(gr);
     if (git_mod.runWithLockRetry(async_allocator, gr.io, .{
         .argv = pargv.items,
@@ -930,6 +936,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     .environ = app.git.environ,
                     .all = req.all,
                     .include_upstream = req.include_upstream,
+                    .log_order = app.git.log_order,
                     .generation = req.generation,
                     .result = null,
                 };

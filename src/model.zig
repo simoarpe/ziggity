@@ -40,6 +40,18 @@ pub fn logOrderFlag(order: LogOrder) ?[]const u8 {
     };
 }
 
+/// The `git log --graph` order flag for a `LogOrder`. Unlike `logOrderFlag`,
+/// `.date` must be spelled out as `--date-order`: `--graph` implies
+/// `--topo-order`, so omitting a flag would order the graph topologically and
+/// disagree with the (date-ordered) Commits panel.
+pub fn graphOrderFlag(order: LogOrder) []const u8 {
+    return switch (order) {
+        .date => "--date-order",
+        .topo => "--topo-order",
+        .author_date => "--author-date-order",
+    };
+}
+
 /// Palette of 256-colour indices authors are hashed into. Shared by the Commits
 /// panel initials, the `ctrl+l` graph viewer, and the inline commit graph so an
 /// author always shows in the same colour everywhere.
@@ -760,6 +772,15 @@ pub fn deriveStatusFields(short_status: [2]u8) StatusFields {
         .deleted = staged == 'D' or unstaged == 'D',
         .conflict = conflict,
     };
+}
+
+test "graphOrderFlag spells out date order that --graph would otherwise topo-sort" {
+    // The flat log lets date fall through to git's default (null); the graph must
+    // request it explicitly, since `--graph` implies --topo-order.
+    try std.testing.expectEqual(@as(?[]const u8, null), logOrderFlag(.date));
+    try std.testing.expectEqualStrings("--date-order", graphOrderFlag(.date));
+    try std.testing.expectEqualStrings("--topo-order", graphOrderFlag(.topo));
+    try std.testing.expectEqualStrings("--author-date-order", graphOrderFlag(.author_date));
 }
 
 test "RepoData.dupe is an independent deep copy" {
