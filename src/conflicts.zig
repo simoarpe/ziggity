@@ -151,8 +151,13 @@ pub fn open(app: *App, path: []const u8) !void {
     if (parsed.len == 0) {
         app.allocator.free(content);
         app.allocator.free(parsed);
-        try app.setMessage("no conflict markers in {s} — resolve via m", .{path});
-        return;
+        // No conflict markers left: the file was resolved by hand (in an editor
+        // or externally), so stage it to mark it resolved instead of dead-ending.
+        const res = app.git.stagePaths(&.{path}) catch {
+            try app.setMessage("could not stage {s}", .{path});
+            return;
+        };
+        return app.runMutationFiles(res, "marked {s} resolved", .{path});
     }
     close(app); // clear any previous session
     app.conflict_path = try app.allocator.dupe(u8, path);

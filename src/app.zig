@@ -543,6 +543,7 @@ pub const MenuAction = enum {
     reset_hard,
     take_ours,
     take_theirs,
+    stage_resolved,
     conflict_continue,
     conflict_abort,
     rebase_amend_continue,
@@ -755,6 +756,7 @@ pub const commit_reset_menu = [_]MenuItem{
 const conflict_resolve_menu = [_]MenuItem{
     .{ .label = "Take ours (keep current branch's version)", .action = .take_ours },
     .{ .label = "Take theirs (keep incoming version)", .action = .take_theirs },
+    .{ .label = "Mark as resolved (stage the file as it is now)", .action = .stage_resolved },
 };
 
 const conflict_actions_menu = [_]MenuItem{
@@ -8442,6 +8444,36 @@ pub const App = struct {
         try self.setMessage("resolve {s}", .{file.path});
     }
 
+    /// Stage a conflicted file as resolved (`git add`), but only once its conflict
+    /// markers are gone — i.e. after you resolved it by hand, in the editor, or
+    /// externally. Refuses (with a hint) while `<<<<<<< / ======= / >>>>>>>`
+    /// blocks remain, so half-merged markers are never committed by accident.
+    pub fn markConflictResolved(self: *App) !void {
+        const file = self.selectedFile() orelse {
+            try self.setMessage("no file selected", .{});
+            return;
+        };
+        if (!file.conflict) {
+            try self.setMessage("{s} is not conflicted", .{file.path});
+            return;
+        }
+        const content = self.git.readWorkingFile(file.path) catch {
+            try self.setMessage("could not read {s}", .{file.path});
+            return;
+        };
+        defer self.allocator.free(content);
+        const blocks = conflicts_mod.parse(self.allocator, content) catch {
+            try self.setMessage("could not parse {s}", .{file.path});
+            return;
+        };
+        defer self.allocator.free(blocks);
+        if (blocks.len > 0) {
+            try self.setMessage("{s} still has {d} unresolved conflict(s) — resolve them first (enter, or edit the file)", .{ file.path, blocks.len });
+            return;
+        }
+        return self.runMutationFiles(try self.git.stagePaths(&.{file.path}), "marked {s} resolved", .{file.path});
+    }
+
     fn startConflictActionsMenu(self: *App) !void {
         if (self.data.state == .clean) {
             try self.setMessage("no merge or rebase in progress", .{});
@@ -8644,11 +8676,22 @@ pub const App = struct {
                 const theirs = action == .take_theirs;
                 return self.runMutationFiles(try self.git.resolveConflict(file.path, theirs), "resolved {s}", .{file.path});
             },
-            .conflict_continue => switch (self.data.state) {
-                .merging => return self.runMutation(try self.git.mergeContinue(), "merge continued", .{}),
-                .rebasing => return self.runMutation(try self.git.rebaseContinue(), "rebase continued", .{}),
-                .cherry_picking => return self.runMutation(try self.git.cherryPickContinue(), "cherry-pick continued", .{}),
-                .clean => try self.setMessage("nothing to continue", .{}),
+            .stage_resolved => return self.markConflictResolved(),
+            .conflict_continue => {
+                // Guard against git's terse "you have unmerged files" error: if any
+                // file is still conflicted (or resolved-but-not-staged), say so and
+                // how to fix it, rather than letting the continue fail raw.
+                const remaining = self.conflictFileCount();
+                if (remaining > 0) {
+                    try self.setMessage("{d} file(s) still conflicted — resolve and stage them first (space on the file)", .{remaining});
+                    return;
+                }
+                switch (self.data.state) {
+                    .merging => return self.runMutation(try self.git.mergeContinue(), "merge continued", .{}),
+                    .rebasing => return self.runMutation(try self.git.rebaseContinue(), "rebase continued", .{}),
+                    .cherry_picking => return self.runMutation(try self.git.cherryPickContinue(), "cherry-pick continued", .{}),
+                    .clean => try self.setMessage("nothing to continue", .{}),
+                }
             },
             .conflict_abort => switch (self.data.state) {
                 .merging => return self.runMutation(try self.git.mergeAbort(), "merge aborted", .{}),
@@ -14438,6 +14481,64 @@ fn testRunSetup(allocator: std.mem.Allocator, tio: std.Io, env: *std.process.Env
         .exited => |code| if (code != 0) return error.SetupFailed,
         else => return error.SetupFailed,
     }
+}
+
+test "markConflictResolved refuses while markers remain, stages once resolved" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    // A merge that conflicts on f.txt (both sides edit line 1).
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q -b main
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf 'base\n' > f.txt
+        \\git add f.txt
+        \\git commit -qm base
+        \\git checkout -q -b other
+        \\printf 'theirs\n' > f.txt
+        \\git add f.txt
+        \\git commit -qm theirs
+        \\git checkout -q main
+        \\printf 'ours\n' > f.txt
+        \\git add f.txt
+        \\git commit -qm ours
+        \\git merge other || true
+    );
+
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    app.git = try git_mod.Git.initAt(a, tio, &env, dir_path);
+    defer app.git.deinit();
+    defer app.data.deinit(a);
+
+    try app.refreshFiles();
+    app.file_index = 0;
+    try std.testing.expect(app.selectedFile().?.conflict); // f.txt is conflicted
+
+    // Markers still present: refuse to stage, leave it unmerged.
+    try app.markConflictResolved();
+    var st1 = try app.git.exec(&.{ "status", "--porcelain" });
+    defer st1.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, st1.stdout, "UU f.txt") != null); // still unmerged
+
+    // Resolve it by hand (no markers), then mark resolved: it gets staged.
+    try app.git.writeWorkingFile("f.txt", "merged by hand\n");
+    try app.markConflictResolved();
+    var st2 = try app.git.exec(&.{ "status", "--porcelain" });
+    defer st2.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, st2.stdout, "UU f.txt") == null); // no longer unmerged
+    try std.testing.expect(std.mem.indexOf(u8, st2.stdout, "M  f.txt") != null); // staged
 }
 
 test "esc backs out of a commit-files drill before clearing the commit filter" {

@@ -121,7 +121,12 @@ the written reference. Every binding is remappable, see
 - `e` / `x` / `u` (Remotes): edit URL / remove remote / set upstream
 - `m`: merge and rebase actions (continue, amend and continue, abort) while
   one is in progress, available from any panel, so you never have to switch
-  to Files to continue or abort
+  to Files to continue or abort. Continue is refused (with a hint) until every
+  conflict is resolved and staged
+- Conflicted files (Files panel): `enter` opens the per-conflict resolver (`o` /
+  `t` / `b` take ours / theirs / both, `u` undo); `space` opens a menu with take
+  ours / theirs and **mark as resolved**, which stages a file you fixed by hand
+  or in your editor (refused while conflict markers remain)
 - `f` / `p` / `P`: fetch / pull / push. `pull` follows your git `pull.rebase`
   config by default; set `pull_mode = menu` to pick merge/rebase/fast-forward
   when a pull has local commits to integrate (see [Configuration](configuration.md))

@@ -1879,6 +1879,8 @@ const help_lines = [_][]const u8{
     "  enter          open the hunk/line staging view (a conflicted file opens",
     "                 the per-conflict resolver: j/k between conflicts, o/t/b",
     "                 pick ours/theirs/both, u undo)",
+    "  space          on a conflicted file: menu (take ours/theirs, or mark it",
+    "                 resolved to stage a file you fixed by hand or in your editor)",
     "",
     "Worktrees tab",
     "  space, enter   switch into the worktree",
