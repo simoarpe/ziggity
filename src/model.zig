@@ -40,6 +40,26 @@ pub fn logOrderFlag(order: LogOrder) ?[]const u8 {
     };
 }
 
+/// How many rows the footer hint bar may occupy when its hints do not fit one
+/// line. `off` keeps the classic single (truncated) line; `.rows` caps the wrap
+/// at N rows; `full` wraps onto as many rows as the hints need. Configured by
+/// `footer_hint_rows` (a number, `0` for off, or `full`).
+pub const FooterHintWrap = union(enum) {
+    off,
+    rows: u16,
+    full,
+
+    /// The maximum footer rows this setting allows, before any terminal-height
+    /// clamp. `off` is a single row; `full` is effectively unbounded.
+    pub fn cap(self: FooterHintWrap) u16 {
+        return switch (self) {
+            .off => 1,
+            .rows => |n| @max(1, n),
+            .full => std.math.maxInt(u16),
+        };
+    }
+};
+
 /// The `git log --graph` order flag for a `LogOrder`. Unlike `logOrderFlag`,
 /// `.date` must be spelled out as `--date-order`: `--graph` implies
 /// `--topo-order`, so omitting a flag would order the graph topologically and

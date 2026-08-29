@@ -360,6 +360,10 @@ pub const Config = struct {
     /// for clean graph lanes), or `author_date` (reverse-chronological by the
     /// author timestamp instead of the commit timestamp).
     log_order: model.LogOrder = .date,
+    /// How many rows the bottom hint bar may wrap onto when its hints overflow
+    /// the width: a number (`1` default keeps the classic single truncated line),
+    /// `0` to disable wrapping, or `full` for as many rows as the hints need.
+    footer_hint_rows: model.FooterHintWrap = .{ .rows = 1 },
     skip_confirm: ConfirmSkips = .{},
     keymap: KeyMap = .{},
     theme: Theme = .{},
@@ -512,6 +516,14 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "log_order")) {
             if (std.meta.stringToEnum(model.LogOrder, value)) |v| self.log_order = v;
+            return;
+        }
+        if (std.mem.eql(u8, key, "footer_hint_rows")) {
+            if (std.mem.eql(u8, value, "full")) {
+                self.footer_hint_rows = .full;
+            } else if (std.fmt.parseInt(u16, value, 10)) |n| {
+                self.footer_hint_rows = if (n == 0) .off else .{ .rows = n };
+            } else |_| {}
             return;
         }
         if (std.mem.eql(u8, key, "file_sort_order")) {
@@ -744,6 +756,25 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     try std.testing.expectEqual(@as(u8, 3), cfg.expanded_side_panel_weight);
     try std.testing.expect(cfg.show_file_tree);
     try std.testing.expect(!cfg.pr_status); // default true, overridden to false
+}
+
+test "footer_hint_rows defaults to 1 and parses a number, 0, or full" {
+    var cfg: Config = .{};
+    try std.testing.expectEqual(@as(u16, 1), cfg.footer_hint_rows.rows); // default: single line
+    try std.testing.expectEqual(@as(u16, 1), cfg.footer_hint_rows.cap());
+
+    cfg.applyBytes("footer_hint_rows = 4");
+    try std.testing.expectEqual(@as(u16, 4), cfg.footer_hint_rows.cap());
+
+    cfg.applyBytes("footer_hint_rows = 0"); // disabled -> single line (cap 1)
+    try std.testing.expectEqual(model.FooterHintWrap.off, cfg.footer_hint_rows);
+    try std.testing.expectEqual(@as(u16, 1), cfg.footer_hint_rows.cap());
+
+    cfg.applyBytes("footer_hint_rows = full");
+    try std.testing.expectEqual(model.FooterHintWrap.full, cfg.footer_hint_rows);
+
+    cfg.applyBytes("footer_hint_rows = nonsense"); // bad value: unchanged
+    try std.testing.expectEqual(model.FooterHintWrap.full, cfg.footer_hint_rows);
 }
 
 test "config parser stores custom commands bound to keys" {

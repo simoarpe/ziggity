@@ -1337,7 +1337,12 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         return;
     }
 
-    const bottom_h: u16 = 1;
+    // The footer wraps its hints onto extra rows when they overflow (see
+    // `footer_hint_rows`). Its height is stable across navigation (sized to the
+    // busiest panel, not the focused one), so only a resize reflows the body;
+    // never let it take more than half the screen so the panels keep the majority.
+    const footer_w = root.width -| 1; // the footer child is indented one column
+    const bottom_h: u16 = @min(footerHeight(app, footer_w), @max(1, root.height / 2));
     const body_h = root.height - bottom_h;
     // Full-screen mode hides the side column so the Diff/main panel fills the
     // terminal (side_w = 0 → the main panel is drawn at x=0, full width).
@@ -4267,7 +4272,8 @@ fn drawStagingSplit(root: vaxis.Window, app: *app_mod.App, x: u16, y: u16, w: u1
 
 fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
-    fillRow(win, 0, st.bottom);
+    var fill_row: u16 = 0;
+    while (fill_row < win.height) : (fill_row += 1) fillRow(win, fill_row, st.bottom);
     // No selectable message unless the normal-mode branch below draws one.
     app.footer_msg_len = 0;
     // The commit-graph viewer and the recent-repositories switcher are full
@@ -4349,30 +4355,139 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
         }
         col = printSpan(win, 0, col, "  |  ", st.bottom);
     }
-    _ = drawHints(win, 0, col, contextHints(app), st.hint_key, st.hint_desc);
+    drawHints(win, 0, col, contextHints(app), st.hint_key, st.hint_desc);
 }
 
-/// Render keybinding hints: each "<key> <description>" group
-/// (groups separated by two spaces) draws the leading key token highlighted and
-/// the rest in the footer color. Returns the next column.
-fn drawHints(win: vaxis.Window, row: u16, start_col: u16, hints: []const u8, key_st: vaxis.Style, desc_st: vaxis.Style) u16 {
+/// Render keybinding hints: each "<key> <description>" group (groups separated
+/// by two spaces) draws the leading key token highlighted and the rest in the
+/// footer colour. Groups that overflow the width wrap onto the next row (flush
+/// left), never split mid-group, up to `win.height` rows; the rest truncates
+/// (still reachable via `?`). See `hintRowsNeeded` for the matching measurement.
+fn drawHints(win: vaxis.Window, start_row: u16, start_col: u16, hints: []const u8, key_st: vaxis.Style, desc_st: vaxis.Style) void {
+    var row = start_row;
     var col = start_col;
-    var first = true;
+    var first_on_row = true; // no leading separator for the first group of a row
     var it = std.mem.splitSequence(u8, hints, "  ");
     while (it.next()) |raw| {
         const group = std.mem.trim(u8, raw, " ");
         if (group.len == 0) continue;
-        if (!first) col = printSpan(win, row, col, "  ", desc_st);
-        first = false;
+        const gw: u16 = @intCast(group.len);
+        const sep: u16 = if (first_on_row) 0 else 2;
+        // Wrap when this group would overflow — but only if the row already has
+        // content (col != 0), so an over-wide group on an empty row still prints
+        // (clipped) rather than looping. A leading status message leaves col > 0,
+        // so the first hint group can wrap under it instead of being clipped.
+        if (col != 0 and col + sep + gw > win.width) {
+            row += 1;
+            if (row >= win.height) return; // out of footer rows: truncate
+            col = 0;
+            first_on_row = true;
+        }
+        if (!first_on_row) col = printSpan(win, row, col, "  ", desc_st);
+        first_on_row = false;
         if (std.mem.indexOfScalar(u8, group, ' ')) |sp| {
             col = printSpan(win, row, col, group[0..sp], key_st); // key token
             col = printSpan(win, row, col, group[sp..], desc_st); // " description"
         } else {
             col = printSpan(win, row, col, group, key_st); // key-only group
         }
-        if (col >= win.width) break;
     }
-    return col;
+}
+
+/// The number of rows the hints wrap onto at `width`, starting at `start_col` on
+/// the first row and column 0 on later rows. Mirrors `drawHints`' wrapping so the
+/// footer can reserve exactly the height it will draw. Always at least 1.
+fn hintRowsNeeded(width: u16, start_col: u16, hints: []const u8) u16 {
+    var row: u16 = 0;
+    var col = start_col;
+    var first_on_row = true;
+    var it = std.mem.splitSequence(u8, hints, "  ");
+    while (it.next()) |raw| {
+        const group = std.mem.trim(u8, raw, " ");
+        if (group.len == 0) continue;
+        const gw: u16 = @intCast(group.len);
+        const sep: u16 = if (first_on_row) 0 else 2;
+        if (col != 0 and col + sep + gw > width) {
+            row += 1;
+            col = 0;
+            first_on_row = true;
+        }
+        col += (if (first_on_row) @as(u16, 0) else 2) + gw;
+        first_on_row = false;
+    }
+    return row + 1;
+}
+
+/// Every footer context whose hints can wrap. The bar reserves a height that
+/// fits the busiest of these (see `stableFooterRows`), so the footer stays put
+/// as you move between panels or a status message comes and goes — only the
+/// terminal *width* changes its height. Not every field permutation matters;
+/// this is the set of stages `footerHints` produces distinct strings for.
+const footer_contexts = [_]FooterCtx{
+    .{ .focus = .status },
+    .{ .focus = .files, .files_tab = .files },
+    .{ .focus = .files, .files_tab = .worktrees },
+    .{ .focus = .files, .files_tab = .submodules },
+    .{ .focus = .files, .conflict = true },
+    .{ .focus = .branches, .branches_tab = .local },
+    .{ .focus = .branches, .branches_tab = .remotes },
+    .{ .focus = .branches, .branches_tab = .remotes, .remote_drill = true },
+    .{ .focus = .branches, .branches_tab = .tags },
+    .{ .focus = .branches, .branch_commits = true },
+    .{ .focus = .branches, .branch_commits = true, .branch_files = true },
+    .{ .focus = .commits },
+    .{ .focus = .commits, .reflog = true },
+    .{ .focus = .commits, .divergence = true },
+    .{ .focus = .commits, .commits_files = true },
+    .{ .focus = .stash },
+    .{ .focus = .main },
+    .{ .focus = .main, .main_file = true },
+    .{ .focus = .main, .fullscreen = true },
+    .{ .focus = .main, .fullscreen = true, .main_file = true },
+    .{ .staging = true },
+    .{ .staging_patch = true },
+    .{ .rebase_plan = true },
+};
+
+/// The footer's reserved height: enough rows for the busiest panel's hints at
+/// `width`, capped by `footer_hint_rows`. Deliberately independent of the current
+/// focus, mode, and message, so navigating never reflows the body — the height
+/// only changes on a terminal resize. `off`/one-row caps yield 1.
+fn stableFooterRows(width: u16, cap: u16) u16 {
+    if (cap <= 1) return 1;
+    var rows: u16 = 1;
+    for (footer_contexts) |ctx| {
+        rows = @max(rows, hintRowsNeeded(width, 0, footerHints(ctx)));
+    }
+    return @min(rows, cap);
+}
+
+/// How many rows the bottom bar reserves for `app`. Disabled (`footer_hint_rows
+/// = 0`) drops the bar entirely during navigation and hands the row back to the
+/// panels, keeping one row only for modes that render an interactive prompt into
+/// it. Otherwise the height is stable, per `stableFooterRows`.
+fn footerHeight(app: *const app_mod.App, width: u16) u16 {
+    return footerRowsFor(app.config.footer_hint_rows, app.mode, width);
+}
+
+/// Pure core of `footerHeight` (no `App`, so it is unit-testable).
+fn footerRowsFor(wrap: model.FooterHintWrap, mode: app_mod.Mode, width: u16) u16 {
+    switch (wrap) {
+        .off => return if (footerHasModalPrompt(mode)) 1 else 0,
+        else => {},
+    }
+    return stableFooterRows(width, wrap.cap());
+}
+
+/// Modes that render an interactive prompt (or an overlay's footer line) into the
+/// bottom bar, so it must keep a row even when the hint footer is disabled. The
+/// complement — normal navigation and the in-progress operation views — is what a
+/// disabled footer reclaims.
+fn footerHasModalPrompt(mode: app_mod.Mode) bool {
+    return switch (mode) {
+        .normal, .operation, .rebase_plan, .conflict_resolve => false,
+        else => true,
+    };
 }
 
 /// The view state that selects a footer hint line. A small value type so the
@@ -5235,6 +5350,57 @@ test "scrollbar thumb sizes and positions to the content" {
 
     // Over-scrolled position is clamped to the bottom.
     try std.testing.expectEqual(@as(usize, 9), scrollbarThumb(10, 100, 9999).?.start);
+}
+
+test "hintRowsNeeded wraps whole groups and counts rows" {
+    const hints = "j/k move  h/l panel  space stage  c commit  q quit";
+    // Everything on one line when it fits.
+    try std.testing.expectEqual(@as(u16, 1), hintRowsNeeded(200, 0, hints));
+    // A single group never gets split, so any width holds at least the widest group.
+    try std.testing.expectEqual(@as(u16, 1), hintRowsNeeded(200, 0, "only one group here"));
+
+    // 25 columns: groups pack left-to-right, wrapping when the next would overflow.
+    //   row0: "j/k move  h/l panel"      (19)
+    //   row1: "space stage  c commit"    (21)
+    //   row2: "q quit"                   (6)
+    try std.testing.expectEqual(@as(u16, 3), hintRowsNeeded(25, 0, hints));
+
+    // A leading status message pushes the first row's start column right, so the
+    // first group already wraps once the offset eats the width.
+    try std.testing.expect(hintRowsNeeded(25, 20, hints) > hintRowsNeeded(25, 0, hints));
+}
+
+test "stableFooterRows reserves the busiest panel, capped, and only width moves it" {
+    // Wide enough that every panel's hints fit one line → a single row.
+    try std.testing.expectEqual(@as(u16, 1), stableFooterRows(1000, 2));
+    try std.testing.expectEqual(@as(u16, 1), stableFooterRows(1000, std.math.maxInt(u16)));
+
+    // Narrow: something wraps, so the reserved height grows — but the cap holds.
+    try std.testing.expectEqual(@as(u16, 1), stableFooterRows(60, 1)); // disabled/one-row cap
+    try std.testing.expectEqual(@as(u16, 2), stableFooterRows(60, 2)); // capped at 2
+    try std.testing.expect(stableFooterRows(60, std.math.maxInt(u16)) >= 2); // full: as tall as needed
+
+    // The result never exceeds the cap and is always at least one row.
+    var w: u16 = 50;
+    while (w <= 400) : (w += 10) {
+        const r = stableFooterRows(w, 3);
+        try std.testing.expect(r >= 1 and r <= 3);
+    }
+}
+
+test "footer_hint_rows = 0 drops the bar in navigation but keeps a row for prompts" {
+    // Disabled: normal navigation and the operation views reclaim the row...
+    try std.testing.expectEqual(@as(u16, 0), footerRowsFor(.off, .normal, 80));
+    try std.testing.expectEqual(@as(u16, 0), footerRowsFor(.off, .operation, 80));
+    try std.testing.expectEqual(@as(u16, 0), footerRowsFor(.off, .conflict_resolve, 80));
+    // ...but a modal prompt still needs its line.
+    try std.testing.expectEqual(@as(u16, 1), footerRowsFor(.off, .menu, 80));
+    try std.testing.expectEqual(@as(u16, 1), footerRowsFor(.off, .confirmation, 80));
+    try std.testing.expectEqual(@as(u16, 1), footerRowsFor(.off, .commit_prompt, 80));
+
+    // Enabled settings keep a stable height regardless of mode (no jumping).
+    try std.testing.expectEqual(@as(u16, 1), footerRowsFor(.{ .rows = 1 }, .normal, 80));
+    try std.testing.expectEqual(footerRowsFor(.{ .rows = 2 }, .normal, 60), footerRowsFor(.{ .rows = 2 }, .menu, 60));
 }
 
 test "side panel heights match the weighting" {
