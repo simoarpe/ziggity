@@ -103,6 +103,12 @@ commit_graph = on                  # on (default) | focused | off
 # HEAD node stands out among the other refs). `a` toggles it live inside the
 # overlay; this just sets which scope it opens with.
 commit_graph_scope = current       # current (default) | all
+# How `p` (pull) behaves. `git` (default) runs `git pull`, which follows your own
+# git `pull.rebase` config (set `git config pull.rebase true` for rebase pulls).
+# `menu` opens a menu to pick merge, rebase, or fast-forward-only — but only when
+# the branch has local commits to integrate, since a pull with none can only
+# fast-forward and there is nothing to choose.
+pull_mode = git                    # git (default: follow git's pull.rebase) | menu
 # HEAD log ordering. `date` (default) is git's native reverse-chronological
 # order, newest commit first. `topo` keeps a branch's commits contiguous so the
 # graph lanes stay clean, at the cost of a commit's row no longer following its

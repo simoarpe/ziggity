@@ -19,6 +19,11 @@ pub const CommitGraphMode = enum { off, focused, on };
 /// live; this is only the initial scope.
 pub const CommitGraphScope = enum { current, all };
 
+/// How `pull` (`p`) behaves: `git` (the default) runs `git pull`, honouring
+/// git's own `pull.rebase` config; `menu` opens a menu to choose merge / rebase
+/// / fast-forward-only for each pull.
+pub const PullMode = enum { git, menu };
+
 /// Ordering of the HEAD commit log: `date` (the default — reverse-chronological
 /// by commit time, git's native order: fastest, no flag), `topo` (keeps a
 /// branch's commits contiguous for a readable graph), or `author_date`

@@ -122,7 +122,9 @@ the written reference. Every binding is remappable, see
 - `m`: merge and rebase actions (continue, amend and continue, abort) while
   one is in progress, available from any panel, so you never have to switch
   to Files to continue or abort
-- `f` / `p` / `P`: fetch / pull / push
+- `f` / `p` / `P`: fetch / pull / push. `pull` follows your git `pull.rebase`
+  config by default; set `pull_mode = menu` to pick merge/rebase/fast-forward
+  when a pull has local commits to integrate (see [Configuration](configuration.md))
 - `esc`: step back one level (deselect, clear a filter, exit diffing, cancel
   a prompt, leave a panel); never quits, only `q` does
 

@@ -291,7 +291,13 @@ fn freeRetryAction(action: RetryAction) void {
 /// Network operations that run off the UI loop so they don't freeze it.
 pub const AsyncOp = enum {
     fetch,
+    /// `git pull`, honouring the user's `pull.rebase` config (`pull_mode = git`).
     pull,
+    /// The explicit pull variants offered by `pull_mode = menu`: force a merge
+    /// (`--no-rebase`, overriding `pull.rebase`), a rebase, or fast-forward only.
+    pull_merge,
+    pull_rebase,
+    pull_ff_only,
     push,
     /// A force push, offered after a normal push is rejected for a diverged
     /// remote. Uses `--force-with-lease` so it refuses if the remote moved in a
@@ -312,10 +318,18 @@ pub const AsyncOp = enum {
     /// (see `pushSelectedTag`).
     push_tag,
 
+    /// Whether this op is one of the pull variants (`git pull ...`).
+    pub fn isPull(self: AsyncOp) bool {
+        return switch (self) {
+            .pull, .pull_merge, .pull_rebase, .pull_ff_only => true,
+            else => false,
+        };
+    }
+
     pub fn label(self: AsyncOp) []const u8 {
         return switch (self) {
             .fetch, .fetch_remote => "fetch",
-            .pull => "pull",
+            .pull, .pull_merge, .pull_rebase, .pull_ff_only => "pull",
             .push, .push_force, .push_force_plain, .push_set_upstream, .push_tag => "push",
         };
     }
@@ -323,7 +337,7 @@ pub const AsyncOp = enum {
     pub fn gerund(self: AsyncOp) []const u8 {
         return switch (self) {
             .fetch, .fetch_remote => "fetching",
-            .pull => "pulling",
+            .pull, .pull_merge, .pull_rebase, .pull_ff_only => "pulling",
             .push, .push_set_upstream, .push_tag => "pushing",
             .push_force => "force push with lease",
             .push_force_plain => "force push",
@@ -343,6 +357,11 @@ pub const AsyncOp = enum {
             // The remote name is appended by the worker (from `fetch_remote_name`).
             .fetch_remote => &.{"fetch"},
             .pull => &.{ "pull", "--no-edit" },
+            // Explicit merge overrides a `pull.rebase = true` config with
+            // `--no-rebase`, so the menu's "Merge" always merges.
+            .pull_merge => &.{ "pull", "--no-rebase", "--no-edit" },
+            .pull_rebase => &.{ "pull", "--rebase", "--no-edit" },
+            .pull_ff_only => &.{ "pull", "--ff-only" },
             .push => &.{"push"},
             .push_force => &.{ "push", "--force-with-lease" },
             .push_force_plain => &.{ "push", "--force" },
@@ -516,6 +535,9 @@ pub const MenuAction = enum {
     discard_file_unstaged,
     delete_branch,
     force_delete_branch,
+    pull_merge,
+    pull_rebase,
+    pull_ff_only,
     reset_soft,
     reset_mixed,
     reset_hard,
@@ -714,6 +736,14 @@ const discard_menu_all_only = [_]MenuItem{
 pub const branch_delete_menu = [_]MenuItem{
     .{ .label = "Delete branch", .action = .delete_branch },
     .{ .label = "Force delete branch", .action = .force_delete_branch },
+};
+
+/// Shown by `p` when `pull_mode = menu`: pick how to integrate the fetched
+/// commits. "Merge" forces `--no-rebase`, "Rebase" forces `--rebase`.
+pub const pull_menu = [_]MenuItem{
+    .{ .label = "Merge", .action = .pull_merge },
+    .{ .label = "Rebase", .action = .pull_rebase },
+    .{ .label = "Fast-forward only", .action = .pull_ff_only },
 };
 
 pub const commit_reset_menu = [_]MenuItem{
@@ -3720,7 +3750,7 @@ pub const App = struct {
                 try self.setMessage("refreshed", .{});
             },
             .fetch => try self.requestAsync(.fetch),
-            .pull => try self.requestAsync(.pull),
+            .pull => try self.startPull(),
             .push => try self.startPush(),
             .move_up => if (self.staging_active) staging_mod.moveStagingCursor(self, -1) else try self.moveUp(),
             .move_down => if (self.staging_active) staging_mod.moveStagingCursor(self, 1) else try self.moveDown(),
@@ -8461,6 +8491,9 @@ pub const App = struct {
 
     fn runMenuAction(self: *App, action: MenuAction) !void {
         switch (action) {
+            .pull_merge => return self.requestAsync(.pull_merge),
+            .pull_rebase => return self.requestAsync(.pull_rebase),
+            .pull_ff_only => return self.requestAsync(.pull_ff_only),
             .fixup_down => return commitops_mod.rebaseSelectedCommit(self, .fixup),
             .fixup_down_keep => return commitops_mod.rebaseSelectedCommit(self, .fixup_keep),
             .autosquash_above => return commitops_mod.autosquashFixups(self),
@@ -9662,6 +9695,23 @@ pub const App = struct {
     }
 
     /// Queue a network op for the TUI loop to run off-thread. Single in-flight.
+    /// `p` (pull): with `pull_mode = git` (default) run a plain `git pull`, which
+    /// honours the user's `pull.rebase` config; with `pull_mode = menu` open a
+    /// menu to pick merge / rebase / fast-forward-only — but only when there is a
+    /// choice to make. Merge vs rebase only differ when the branch has local
+    /// commits to integrate; with none, a pull can only fast-forward (they are
+    /// identical), so skip the menu and pull straight through. `ahead` (our own
+    /// commits) is reliable even without a recent fetch, so keying on it is safe.
+    pub fn startPull(self: *App) !void {
+        const has_local_commits = (self.data.ahead orelse 0) > 0;
+        if (self.config.pull_mode == .menu and has_local_commits) {
+            self.mode = .menu;
+            self.active_menu = .{ .title = "Pull", .items = &pull_menu, .index = 0 };
+            return;
+        }
+        return self.requestAsync(.pull);
+    }
+
     pub fn requestAsync(self: *App, op: AsyncOp) !void {
         if (self.async_active or self.async_requested != null) {
             try self.setMessage("a network operation is already running", .{});
@@ -9732,7 +9782,7 @@ pub const App = struct {
                 // Network success stays silent (bottom bar).
                 try self.setMessage("{s} complete", .{op.label()});
                 // A pull advances HEAD; land the Commits cursor on the new top.
-                if (op == .pull) self.select_top_commit_pending = true;
+                if (op.isPull()) self.select_top_commit_pending = true;
             } else {
                 const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
                 const raw = if (stderr.len > 0) mutable.stderr else mutable.stdout;
@@ -14384,6 +14434,45 @@ fn testRunSetup(allocator: std.mem.Allocator, tio: std.Io, env: *std.process.Env
         .exited => |code| if (code != 0) return error.SetupFailed,
         else => return error.SetupFailed,
     }
+}
+
+test "pull_mode routes p to a plain pull or the merge/rebase menu" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    defer app.git.command_log.deinit(a);
+    defer for (app.git.command_log.items) |e| a.free(e);
+
+    // Default (git): p pulls straight away (git honours its own pull.rebase).
+    app.config.pull_mode = .git;
+    try app.startPull();
+    try std.testing.expectEqual(AsyncOp.pull, app.async_requested.?);
+    app.async_requested = null;
+
+    // menu mode but no local commits: a pull can only fast-forward, so there is
+    // nothing to pick — pull straight through without the menu.
+    app.config.pull_mode = .menu;
+    app.data.ahead = 0;
+    try app.startPull();
+    try std.testing.expectEqual(Mode.normal, app.mode);
+    try std.testing.expectEqual(AsyncOp.pull, app.async_requested.?);
+    app.async_requested = null;
+
+    // menu mode with local commits: merge vs rebase matters, so p opens the menu.
+    app.data.ahead = 1;
+    try app.startPull();
+    try std.testing.expectEqual(Mode.menu, app.mode);
+    try std.testing.expectEqual(MenuAction.pull_merge, app.active_menu.?.items[0].action);
+    try std.testing.expectEqual(MenuAction.pull_rebase, app.active_menu.?.items[1].action);
+    try std.testing.expectEqual(MenuAction.pull_ff_only, app.active_menu.?.items[2].action);
+
+    // Selecting Rebase queues an explicit `git pull --rebase`.
+    try app.runMenuAction(.pull_rebase);
+    try std.testing.expectEqual(AsyncOp.pull_rebase, app.async_requested.?);
+    try std.testing.expectEqualStrings("--rebase", AsyncOp.pull_rebase.argv()[1]);
+    // "Merge" forces --no-rebase so it beats a pull.rebase=true git config.
+    try std.testing.expectEqualStrings("--no-rebase", AsyncOp.pull_merge.argv()[1]);
 }
 
 test "activeFilterCount counts the file, branch and commit filters together" {

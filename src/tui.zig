@@ -114,7 +114,24 @@ fn asyncWorker(job: *AsyncJob) void {
     // (which sets GIT_TERMINAL_PROMPT=0 so git never blocks on a terminal
     // prompt). The credential clone points GIT_ASKPASS back at this binary, so
     // git fetches the entered username/password from us instead.
-    const env = if (job.cred_environ) |*e| e else job.environ;
+    const base_env = if (job.cred_environ) |*e| e else job.environ;
+    // A pull that ends up rebasing (e.g. the user has `pull.rebase = interactive`
+    // configured) must never try to open an editor: ziggity owns the terminal and
+    // this runs off the UI thread, so an editor would hang or corrupt the screen.
+    // Force the rebase-todo and commit-message editors to the shell no-op (`:`),
+    // so the rebase proceeds unattended. Only for pull ops.
+    var pull_env: std.process.Environ.Map = undefined;
+    var have_pull_env = false;
+    if (job.op.isPull()) {
+        if (base_env.clone(async_allocator)) |cloned| {
+            pull_env = cloned;
+            pull_env.put("GIT_SEQUENCE_EDITOR", ":") catch {};
+            pull_env.put("GIT_EDITOR", ":") catch {};
+            have_pull_env = true;
+        } else |_| {}
+    }
+    defer if (have_pull_env) pull_env.deinit();
+    const env = if (have_pull_env) &pull_env else base_env;
     const result = git_mod.runWithLockRetry(async_allocator, job.io, .{
         .argv = argv.items,
         .cwd = .{ .path = job.root },
@@ -1825,7 +1842,7 @@ const help_lines = [_][]const u8{
     "                 side's changes since diverging (the pull-request view).",
     "                 Branches default to three dots, commits and tags to two.",
     "  f              fetch (async)",
-    "  p              pull (async)",
+    "  p              pull (async; pull_mode = menu asks merge/rebase/ff-only)",
     "  P              push (async)",
     "  m              merge/rebase actions during an operation (continue,",
     "                 amend+continue, abort) - available from any panel",
