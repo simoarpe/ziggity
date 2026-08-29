@@ -4,23 +4,23 @@
     "repository": "simoarpe/ziggity",
     "benchmark_path": "docs/bench",
     "measurement_notes": "docs/comparison.md",
-    "ziggity_version": "0.14.0-dev",
+    "ziggity_version": "0.36.0",
     "lazygit_version": "0.62.2",
     "window_seconds": 10
   },
   "quick_stats": [
     {
-      "value": "1.9 MB",
+      "value": "1.8 MB",
       "label": "binary",
       "detail": "single native executable"
     },
     {
-      "value": "3.6 ms",
+      "value": "3.7 ms",
       "label": "startup",
       "detail": "median version command"
     },
     {
-      "value": "8 MB",
+      "value": "10 MB",
       "label": "idle memory",
       "detail": "flat after first paint"
     },
@@ -35,18 +35,18 @@
     "rows": [
       {
         "metric": "Binary size",
-        "ziggity": "1.9 MB",
+        "ziggity": "1.8 MB",
         "lazygit": "17.6 MB"
       },
       {
         "metric": "Startup",
-        "ziggity": "3.6 ms",
-        "lazygit": "21.2 ms"
+        "ziggity": "3.7 ms",
+        "lazygit": "19.9 ms"
       },
       {
         "metric": "Git subprocesses to load repo",
-        "ziggity": "16",
-        "lazygit": "25"
+        "ziggity": "21",
+        "lazygit": "24"
       },
       {
         "metric": "Network during load",
@@ -55,13 +55,13 @@
       },
       {
         "metric": "Resident memory once settled",
-        "ziggity": "8 MB",
-        "lazygit": "36 MB"
+        "ziggity": "10 MB",
+        "lazygit": "37 MB"
       },
       {
         "metric": "Own CPU over 10 s",
         "ziggity": "40 ms",
-        "lazygit": "250 ms"
+        "lazygit": "230 ms"
       }
     ]
   }

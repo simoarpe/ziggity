@@ -16,23 +16,23 @@ tiny native binary. Here is the honest case, point by point.
 Ziggity compiles to a single static binary with no runtime, no garbage
 collector, and no library dependencies beyond the `git` you already have.
 Measured on an Apple M1 Max running macOS 26.5.1, against lazygit 0.62.2 from
-Homebrew, both opening the same repository (ziggity's own: 359 commits, 156
-tracked files, 21 refs, a working checkout with build output on disk) at the
+Homebrew, both opening the same repository (ziggity's own: 469 commits, 165
+tracked files, 44 refs, a working checkout with build output on disk) at the
 same terminal size:
 
-| | ziggity 0.14.0-dev | lazygit 0.62.2 |
+| | ziggity 0.36.0 | lazygit 0.62.2 |
 |---|---|---|
-| Binary size | **1.9 MB** | 17.6 MB |
+| Binary size | **1.8 MB** | 17.6 MB |
 | Dynamic libraries linked | **1** | 4 |
-| Process startup, median of 30 runs | **3.6 ms** | 21.2 ms |
-| Git subprocesses to load the repo | **16** | 25 |
+| Process startup, median of 30 runs | **3.7 ms** | 19.9 ms |
+| Git subprocesses to load the repo | **21** | 24 |
 | Peak git processes running in parallel | **11** | 9 |
 | Network during load | **none** | `git fetch --all` |
-| Resident memory once settled | **8 MB** | 36 MB |
-| Peak resident memory while loading | **8 MB** | 36 MB |
-| Git subprocesses over 10 s idle | **22** | 40 |
-| Own CPU time over 10 s | **40 ms** | 250 ms |
-| Total CPU including git children | **0.48 s** | 0.73 s |
+| Resident memory once settled | **10 MB** | 37 MB |
+| Peak resident memory while loading | **10 MB** | 37 MB |
+| Git subprocesses over 10 s idle | **32** | 38 |
+| Own CPU time over 10 s | **40 ms** | 230 ms |
+| Total CPU including git children | **581 ms** | 709 ms |
 
 Startup is the time from spawn to exit for `--version`, the floor any launch
 pays before real work begins. The git subprocess rows come from a shim on
@@ -56,7 +56,7 @@ memory wanders by a megabyte or two between runs as well. Binary size, library
 count, startup and peak parallelism are effectively constant.
 
 The two memory rows say the same thing, which is the point of reporting both.
-Ziggity holds about a fifth of lazygit's footprint and holds it from the first
+Ziggity holds about a quarter of lazygit's footprint and holds it from the first
 paint: the eleven loaders allocate their results on a general purpose
 allocator and hand them to the interface thread, so nothing balloons while the
 load is in flight and peak and settled land within a rounding error of each
@@ -82,7 +82,7 @@ The network row is a scheduling difference, not an absolute one. lazygit runs
 `git fetch --all` as part of loading the repository, in the same burst as
 everything else, so the first paint waits on the network. Ziggity loads and
 paints without touching it, then runs its first quiet background fetch about
-three seconds later, off the interface thread; the timer is deliberately
+three and a half seconds later, off the interface thread; the timer is deliberately
 seeded so you do not wait a full `fetch_interval_secs` for it. Both tools
 fetch. Only one of them makes you wait for it before you can do anything.
 

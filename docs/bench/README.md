@@ -26,6 +26,27 @@ python3 docs/bench/bench.py --window 30         # hold each tool open longer
 Needs a C compiler, python3, git, and lazygit on `PATH` for the comparison
 column. Works on macOS and Linux.
 
+## After a run: update every published copy
+
+**Important, do this every time you re-run the benchmark.** The numbers live in
+four places and they must not drift apart. When you accept a run as
+presentable, update all of them from that same run:
+
+1. `README.md` — the header quick stats line, the feature bullets, the
+   comparison table (including the `ziggity <version>` label and the repository
+   state description), and the derived prose (the memory fraction and the
+   background-fetch timing).
+2. `docs/comparison.md` — the same table and the same derived prose.
+3. `docs/bench/website-metrics.json` — the version, the `quick_stats`, and the
+   `comparison` rows. Regenerate with `--website-json` (below) or edit it by
+   hand to match the table you just published; either way it must equal the
+   README numbers, not a separate run.
+4. The website repository — sync it from `website-metrics.json` (below).
+
+A quick check after editing: `rg '0\.[0-9]+\.[0-9]+-dev|ziggity 0\.' README.md
+docs/comparison.md docs/bench/website-metrics.json` should show only the new
+version, nowhere the old one.
+
 ## Website metrics snapshot
 
 `website-metrics.json` is the small, display-ready benchmark snapshot consumed
