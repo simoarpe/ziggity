@@ -111,11 +111,12 @@ commit_graph_scope = current       # current (default) | all
 # timestamp instead of the commit timestamp.
 log_order = date                   # date (default) | topo | author_date
 
-# Editor for `e`. With nothing set, auto detected from git core.editor, then
-# $GIT_EDITOR, $VISUAL, $EDITOR, falling back to vim. See "Editor" below.
-editor_preset =                    # vim | nvim | nano | emacs | micro | helix | vscode | sublime | zed | ...
-editor_command =                   # explicit template, e.g. "code --reuse-window -- {{filename}}"
-editor_in_terminal =               # true = suspend the TUI (terminal editors); false = just launch (GUI)
+# Editor for `e`. Resolved in order, first one set wins: editor_command,
+# editor_preset, then git core.editor / $GIT_EDITOR / $VISUAL / $EDITOR, then
+# vim. Full details under "Editor" below.
+editor_preset =                    # vi | vim | nvim | lvim | nano | emacs | micro | helix | kakoune | vscode | sublime | zed | bbedit | xcode
+editor_command =                   # explicit command, e.g. "code --reuse-window -- {{filename}}"; overrides editor_preset. A GUI editor also needs editor_in_terminal = false (a bare command otherwise suspends the TUI)
+editor_in_terminal =               # empty = use the editor's own default | true = force suspend the TUI | false = force just launch
 
 # Action feedback. Default: silent success plus a bottom bar summary, and
 # dialogs only on failure.
@@ -219,18 +220,44 @@ is chosen when a file opens and not redecided mid edit.
 
 ## Editor (`e`)
 
-`e` opens the file under view in an editor. The command is chosen in order:
+`e` opens the selected file (in the Files panel, or a commit's file) in an
+editor. Two things matter: which command to run, and whether ziggity should
+suspend for it. A terminal editor like vim takes over the screen, so ziggity
+suspends and resumes when you quit it; a GUI editor like VS Code is just launched
+in the background. The three settings below decide both. They are tried in this
+order, and the first one that is set wins:
 
-1. **`editor_command`**: your explicit template. Use `{{filename}}` for the
-   path (quoted for you); if omitted, the path is appended.
-2. **`editor_preset`**: a named built in: `vi`, `vim`, `nvim`, `lvim`,
-   `nano`, `emacs`, `micro`, `helix`, `kakoune`, `vscode`, `sublime`, `zed`,
-   `bbedit`, `xcode`.
-3. **Auto detection**: the first of git `core.editor`, `$GIT_EDITOR`,
-   `$VISUAL`, `$EDITOR` (matched to a preset, or run as a terminal editor).
+1. **`editor_command`**: an explicit command you write. Put `{{filename}}` where
+   the path should go (it is shell quoted for you; if you leave it out, the path
+   is appended). ziggity cannot tell whether your command is a terminal or a GUI
+   editor, so with `editor_in_terminal` left empty it assumes terminal and
+   suspends for it. If your command is a GUI editor, add
+   `editor_in_terminal = false`.
+
+2. **`editor_preset`**: a named editor ziggity already knows, which fills in both
+   the command and the suspend/launch behavior for you:
+   - Terminal (ziggity suspends): `vi`, `vim`, `nvim`, `lvim`, `nano`, `emacs`,
+     `micro`, `helix`, `kakoune`
+   - GUI (ziggity just launches): `vscode`, `sublime`, `zed`, `bbedit`, `xcode`
+
+   Common binary names work as aliases too: `code` and `code-insiders` mean
+   `vscode`, `subl` means `sublime`, `hx` means `helix`, `kak` means `kakoune`,
+   `xed` means `xcode`. An unknown name here is ignored and ziggity moves to the
+   next step.
+
+3. **Auto detection**: git `core.editor`, then `$GIT_EDITOR`, `$VISUAL`,
+   `$EDITOR`. If the value is one of the presets or aliases above, that preset is
+   used; otherwise the command runs as a terminal editor.
+
 4. **Fallback**: `vim`.
 
-Terminal editors (vim, nano, emacs, micro, helix, kakoune, and friends)
-**suspend** ziggity and resume when you quit them; GUI editors (VS Code,
-Sublime, Zed, and friends) just **launch**. `editor_in_terminal = true|false`
-forces which behavior to use.
+`editor_in_terminal` is an optional override for that suspend or launch choice:
+`true` forces suspend and resume, `false` forces just launch. Left empty it does
+not override anything, so the behavior is whatever the chosen editor implies (a
+preset's own default, or suspend for a bare `editor_command`). It is never a
+third mode; at runtime the editor always either suspends or launches.
+
+That means `editor_preset = vscode` is simply shorthand for
+`editor_command = code --reuse-window -- {{filename}}` plus
+`editor_in_terminal = false`. The preset just fills in the command and the "do
+not suspend" behavior so you do not have to.
