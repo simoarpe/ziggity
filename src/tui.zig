@@ -1088,8 +1088,16 @@ fn runEditor(
     // `stop()` itself provokes a DSR reply that parses as a stray key. The new
     // reader posts a fresh winsize on start, so nothing needed is lost.
     while (loop.tryEvent() catch null) |_| {}
-    vx.exitAltScreen(writer) catch {};
-    vx.setMouseMode(writer, false) catch {};
+    // Fully hand the terminal back before spawning the editor. `resetState` pops
+    // the kitty keyboard protocol — whose key-release and modifier-change reports
+    // would otherwise reach the editor as stray escape sequences (a `:` typed in
+    // vim showing up doubled, a glyph on every shift release) — and disables mouse
+    // and bracketed paste, all while tracking vaxis's own state so the resume
+    // below re-enables each exactly once. (Just exiting the alt screen, as before,
+    // left these modes on: the editor saw garbage, and the unbalanced kitty push
+    // meant the protocol was still active after ziggity itself exited.) Focus
+    // events are ziggity's own mode, not tracked by vaxis, so reset them here too.
+    vx.resetState(writer) catch {};
     writer.writeAll(focus_events_reset) catch {};
     writer.flush() catch {};
     if (has_termios) std.posix.tcsetattr(tty.fd.handle, .FLUSH, tty.termios) catch {}; // cooked mode
@@ -1107,9 +1115,13 @@ fn runEditor(
     if (has_termios) {
         _ = vaxis.Tty.makeRaw(tty.fd.handle) catch {};
     }
+    // Re-enable everything `resetState` turned off (mouse, bracketed paste, alt
+    // screen), plus ziggity's focus events; `queryTerminal` re-runs
+    // `enableDetectedFeatures`, which re-arms the kitty keyboard protocol from the
+    // caps detected at startup.
     vx.enterAltScreen(writer) catch {};
     vx.setMouseMode(writer, true) catch {};
-    vx.setBracketedPaste(writer, true) catch {}; // exitAltScreen reset it
+    vx.setBracketedPaste(writer, true) catch {};
     writer.writeAll(focus_events_set) catch {};
     writer.flush() catch {};
     vx.queryTerminal(writer, .fromSeconds(1)) catch {};
