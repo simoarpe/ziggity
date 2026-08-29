@@ -302,8 +302,12 @@ The animation itself is in the [README](../README.md).
   resolver with line numbers. `j` and `k` walk between conflicts, `o`, `t`
   and `b` keep ours, theirs or both for the current one, `u` undoes the last
   pick, and the file is staged automatically once the last conflict is
-  resolved. `m` still offers the whole operation continue and abort actions;
-  `MERGING` or `REBASING` shows in the Status panel.
+  resolved. `space` opens a menu with every route to a resolution: the same
+  per conflict resolver, take ours or theirs for the whole file, open the file
+  in your editor, or mark a file you already fixed as resolved. When you edit
+  in your editor, ziggity re-reads the file on exit and stages it for you the
+  moment the conflict markers are gone. `m` still offers the whole operation
+  continue and abort actions; `MERGING` or `REBASING` shows in the Status panel.
 
 ### Multi selection, diffing & stash
 

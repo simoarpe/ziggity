@@ -124,9 +124,12 @@ the written reference. Every binding is remappable, see
   to Files to continue or abort. Continue is refused (with a hint) until every
   conflict is resolved and staged
 - Conflicted files (Files panel): `enter` opens the per-conflict resolver (`o` /
-  `t` / `b` take ours / theirs / both, `u` undo); `space` opens a menu with take
-  ours / theirs and **mark as resolved**, which stages a file you fixed by hand
-  or in your editor (refused while conflict markers remain)
+  `t` / `b` take ours / theirs / both, `u` undo). `space` opens a menu with every
+  way to resolve the file: resolve conflicts one by one (the same per-conflict
+  resolver), take ours / theirs for the whole file, **edit in your editor**
+  (ziggity re-reads the file when the editor closes and stages it automatically
+  once the markers are gone), and **mark as resolved**, which stages a file you
+  already fixed by hand (both refuse while conflict markers remain)
 - `f` / `p` / `P`: fetch / pull / push. `pull` follows your git `pull.rebase`
   config by default; set `pull_mode = menu` to pick merge/rebase/fast-forward
   when a pull has local commits to integrate (see [Configuration](configuration.md))

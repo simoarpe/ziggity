@@ -778,6 +778,12 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
         if (app.editor_request) |req| {
             app.editor_request = null;
             runEditor(&loop, &vx, &tty, writer, io, app, req);
+            // If this was a conflicted file, re-read it and auto-stage when the
+            // markers are gone (edit-in-editor resolution path).
+            if (req.resolve_conflict_path) |path| {
+                app.completeConflictEdit(path) catch {};
+                app.allocator.free(path);
+            }
             app.allocator.free(req.command);
             render_needed = true;
         }
@@ -1879,8 +1885,9 @@ const help_lines = [_][]const u8{
     "  enter          open the hunk/line staging view (a conflicted file opens",
     "                 the per-conflict resolver: j/k between conflicts, o/t/b",
     "                 pick ours/theirs/both, u undo)",
-    "  space          on a conflicted file: menu (take ours/theirs, or mark it",
-    "                 resolved to stage a file you fixed by hand or in your editor)",
+    "  space          on a conflicted file: resolve menu (block by block, take",
+    "                 ours/theirs, edit in your editor, or mark it resolved). Editing",
+    "                 stages the file automatically once the markers are gone",
     "",
     "Worktrees tab",
     "  space, enter   switch into the worktree",

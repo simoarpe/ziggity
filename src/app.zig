@@ -141,6 +141,10 @@ pub const AiRequest = struct {
 pub const EditorRequest = struct {
     command: []u8,
     suspend_tui: bool,
+    /// When the edited file is a conflicted one, its path (owned): after the
+    /// editor exits, ziggity re-reads it and, if the conflict markers are gone,
+    /// stages it as resolved. Null for a normal (non-conflict) edit.
+    resolve_conflict_path: ?[]u8 = null,
 };
 
 /// to do with the submitted text.
@@ -543,6 +547,8 @@ pub const MenuAction = enum {
     reset_hard,
     take_ours,
     take_theirs,
+    resolve_blocks,
+    edit_conflict,
     stage_resolved,
     conflict_continue,
     conflict_abort,
@@ -754,8 +760,10 @@ pub const commit_reset_menu = [_]MenuItem{
 };
 
 const conflict_resolve_menu = [_]MenuItem{
+    .{ .label = "Resolve conflicts one by one", .action = .resolve_blocks },
     .{ .label = "Take ours (keep current branch's version)", .action = .take_ours },
     .{ .label = "Take theirs (keep incoming version)", .action = .take_theirs },
+    .{ .label = "Edit in your editor", .action = .edit_conflict },
     .{ .label = "Mark as resolved (stage the file as it is now)", .action = .stage_resolved },
 };
 
@@ -2972,7 +2980,10 @@ pub const App = struct {
         self.copied_commits.deinit(self.allocator);
         if (self.marked_base) |b| self.allocator.free(b);
         if (self.clipboard_request) |c| self.allocator.free(c);
-        if (self.editor_request) |r| self.allocator.free(r.command);
+        if (self.editor_request) |r| {
+            self.allocator.free(r.command);
+            if (r.resolve_conflict_path) |p| self.allocator.free(p);
+        }
         if (self.diff_base) |b| self.allocator.free(b);
         if (self.patch_source) |s| self.allocator.free(s);
         for (self.patch_paths.items) |p| self.allocator.free(p);
@@ -6964,8 +6975,31 @@ pub const App = struct {
             try self.setMessage("could not build the editor command", .{});
             return;
         };
-        if (self.editor_request) |old| self.allocator.free(old.command);
-        self.editor_request = .{ .command = r.command, .suspend_tui = r.suspend_tui };
+        self.freeEditorRequest();
+        // Editing a conflicted file: remember it so the editor's result can be
+        // auto-staged if it comes back resolved (markers gone).
+        const resolve_path: ?[]u8 = if (self.pathIsConflicted(path))
+            (self.allocator.dupe(u8, path) catch null)
+        else
+            null;
+        self.editor_request = .{ .command = r.command, .suspend_tui = r.suspend_tui, .resolve_conflict_path = resolve_path };
+    }
+
+    /// True when `path` is a currently-conflicted working-tree file.
+    fn pathIsConflicted(self: *const App, path: []const u8) bool {
+        for (self.data.files) |f| {
+            if (std.mem.eql(u8, f.path, path)) return f.conflict;
+        }
+        return false;
+    }
+
+    /// Free a pending editor request's owned fields (command + any conflict path).
+    fn freeEditorRequest(self: *App) void {
+        if (self.editor_request) |old| {
+            self.allocator.free(old.command);
+            if (old.resolve_conflict_path) |p| self.allocator.free(p);
+        }
+        self.editor_request = null;
     }
 
     /// Open several files in one editor invocation (a multi-file range edit).
@@ -6983,7 +7017,7 @@ pub const App = struct {
             try self.setMessage("could not build the editor command", .{});
             return;
         };
-        if (self.editor_request) |old| self.allocator.free(old.command);
+        self.freeEditorRequest();
         self.editor_request = .{ .command = r.command, .suspend_tui = r.suspend_tui };
         self.clearRange();
     }
@@ -8474,6 +8508,18 @@ pub const App = struct {
         return self.runMutationFiles(try self.git.stagePaths(&.{file.path}), "marked {s} resolved", .{file.path});
     }
 
+    /// TUI-loop hook after the editor closes on a conflicted file: if the conflict
+    /// markers are gone, silently stage it as resolved; otherwise leave it (still
+    /// conflicted, so the resolver / take ours/theirs stay available).
+    pub fn completeConflictEdit(self: *App, path: []const u8) !void {
+        const content = self.git.readWorkingFile(path) catch return;
+        defer self.allocator.free(content);
+        const blocks = conflicts_mod.parse(self.allocator, content) catch return;
+        defer self.allocator.free(blocks);
+        if (blocks.len > 0) return; // still has conflicts — leave it as-is
+        return self.runMutationFiles(self.git.stagePaths(&.{path}) catch return, "resolved and staged {s}", .{path});
+    }
+
     fn startConflictActionsMenu(self: *App) !void {
         if (self.data.state == .clean) {
             try self.setMessage("no merge or rebase in progress", .{});
@@ -8676,6 +8722,14 @@ pub const App = struct {
                 const theirs = action == .take_theirs;
                 return self.runMutationFiles(try self.git.resolveConflict(file.path, theirs), "resolved {s}", .{file.path});
             },
+            .resolve_blocks => {
+                const file = self.selectedFile() orelse {
+                    try self.setMessage("no file selected", .{});
+                    return;
+                };
+                return conflicts_mod.open(self, file.path);
+            },
+            .edit_conflict => return self.requestEditFile(),
             .stage_resolved => return self.markConflictResolved(),
             .conflict_continue => {
                 // Guard against git's terse "you have unmerged files" error: if any
@@ -14541,6 +14595,71 @@ test "markConflictResolved refuses while markers remain, stages once resolved" {
     try std.testing.expect(std.mem.indexOf(u8, st2.stdout, "M  f.txt") != null); // staged
 }
 
+test "completeConflictEdit auto-stages only once the editor removed the markers" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q -b main
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf 'base\n' > f.txt
+        \\git add f.txt
+        \\git commit -qm base
+        \\git checkout -q -b other
+        \\printf 'theirs\n' > f.txt
+        \\git add f.txt
+        \\git commit -qm theirs
+        \\git checkout -q main
+        \\printf 'ours\n' > f.txt
+        \\git add f.txt
+        \\git commit -qm ours
+        \\git merge other || true
+    );
+
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    app.git = try git_mod.Git.initAt(a, tio, &env, dir_path);
+    defer app.git.deinit();
+    defer app.data.deinit(a);
+
+    try app.refreshFiles();
+
+    // Editor exited with markers still present (partial edit): don't stage.
+    try app.git.writeWorkingFile("f.txt", "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> other\n");
+    try app.completeConflictEdit("f.txt");
+    var st1 = try app.git.exec(&.{ "status", "--porcelain" });
+    defer st1.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, st1.stdout, "UU f.txt") != null); // still unmerged
+
+    // Editor exited with the conflict genuinely resolved: stage it silently.
+    try app.git.writeWorkingFile("f.txt", "merged in editor\n");
+    try app.completeConflictEdit("f.txt");
+    var st2 = try app.git.exec(&.{ "status", "--porcelain" });
+    defer st2.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, st2.stdout, "UU f.txt") == null); // resolved
+    try std.testing.expect(std.mem.indexOf(u8, st2.stdout, "M  f.txt") != null); // staged
+}
+
+test "the conflict resolve menu offers block, ours, theirs, editor and mark-resolved" {
+    try std.testing.expectEqual(@as(usize, 5), conflict_resolve_menu.len);
+    try std.testing.expectEqual(MenuAction.resolve_blocks, conflict_resolve_menu[0].action);
+    try std.testing.expectEqual(MenuAction.take_ours, conflict_resolve_menu[1].action);
+    try std.testing.expectEqual(MenuAction.take_theirs, conflict_resolve_menu[2].action);
+    try std.testing.expectEqual(MenuAction.edit_conflict, conflict_resolve_menu[3].action);
+    try std.testing.expectEqual(MenuAction.stage_resolved, conflict_resolve_menu[4].action);
+}
+
 test "esc backs out of a commit-files drill before clearing the commit filter" {
     const a = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -15032,7 +15151,10 @@ fn deinitTestApp(app: *App) void {
     app.allocator.free(app.op_summary);
     app.allocator.free(app.op_output);
     if (app.clipboard_request) |c| app.allocator.free(c);
-    if (app.editor_request) |r| app.allocator.free(r.command);
+    if (app.editor_request) |r| {
+        app.allocator.free(r.command);
+        if (r.resolve_conflict_path) |p| app.allocator.free(p);
+    }
     if (app.diff_base) |b| app.allocator.free(b);
     if (app.patch_source) |s| app.allocator.free(s);
     for (app.patch_paths.items) |p| app.allocator.free(p);
