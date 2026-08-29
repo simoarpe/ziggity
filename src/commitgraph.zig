@@ -273,7 +273,7 @@ fn stripAnsi(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
 ///     side effect);
 ///   - on another branch       -> confirm a checkout of that branch (if the
 ///     commit is a branch tip) or a detached checkout of the commit.
-fn jumpToSelected(app: *App) !void {
+pub fn jumpToSelected(app: *App) !void {
     const graph = app.commit_graph orelse return close(app);
     const plain = app.commit_graph_plain orelse graph;
     const line = nthLine(plain, app.commit_graph_sel) orelse return close(app);
@@ -298,11 +298,14 @@ fn jumpToSelected(app: *App) !void {
     app.allocator.free(app.graph_checkout_ref);
     app.graph_checkout_ref = try app.allocator.dupe(u8, ref);
     app.graph_checkout_is_branch = is_branch;
+    // `ref` points into the graph text that `close` frees; format the prompt from
+    // the stable dupe instead, which survives the viewer teardown.
+    const stable_ref = app.graph_checkout_ref;
     close(app); // leave the viewer before showing the confirmation
     if (is_branch) {
-        return app.requestConfirmation(.checkout_ref, "check out branch {s}?", .{ref});
+        return app.requestConfirmation(.checkout_ref, "check out branch {s}?", .{stable_ref});
     }
-    return app.requestConfirmation(.checkout_ref, "check out {s}? (detaches HEAD)", .{ref});
+    return app.requestConfirmation(.checkout_ref, "check out {s}? (detaches HEAD)", .{stable_ref});
 }
 
 /// The first local branch name in a graph row's `(decoration)`, or null. Skips

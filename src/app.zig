@@ -11585,6 +11585,36 @@ test "graph reset target: only a commit on the current branch's log" {
     try std.testing.expect(commitgraph_mod.cursorCommitIndex(&app) == null);
 }
 
+test "graph enter on an off-branch tip confirms a checkout without freed-memory reads" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    defer commitgraph_mod.deinit(&app); // frees graph_checkout_ref (App.deinit does this)
+
+    // No current-branch commits match the selected row, so it is "off-branch".
+    app.data.commits = &.{};
+
+    // A single decorated row tipping local branch `branch-B`. Both buffers are
+    // heap-allocated because `jumpToSelected` -> `close` frees them; the prompt
+    // must not read the branch name back out of that freed graph text (issue #27).
+    const row = "* abc1234 (branch-B) do things\n";
+    app.commit_graph = try allocator.dupe(u8, row);
+    app.commit_graph_plain = try allocator.dupe(u8, row);
+    app.commit_graph_sel = 0;
+    app.mode = .commit_graph;
+
+    try commitgraph_mod.jumpToSelected(&app);
+
+    // The viewer tore down and a checkout confirmation is up for the right ref.
+    try std.testing.expect(app.commit_graph == null);
+    try std.testing.expect(app.commit_graph_plain == null);
+    try std.testing.expectEqual(Mode.confirmation, app.mode);
+    try std.testing.expect(app.graph_checkout_is_branch);
+    try std.testing.expectEqualStrings("branch-B", app.graph_checkout_ref);
+    try std.testing.expectEqualStrings("check out branch branch-B?", app.message);
+}
+
 test "drop and squash gate a confirmation before rewriting history" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
