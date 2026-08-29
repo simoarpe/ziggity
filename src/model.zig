@@ -14,6 +14,11 @@ pub const FileSortOrder = enum { name, status };
 /// `focused` only while the Commits panel is focused, `on` always.
 pub const CommitGraphMode = enum { off, focused, on };
 
+/// Which refs the `ctrl+l` commit-graph viewer shows when it opens: `current`
+/// (the current branch and its upstream) or `all` (every branch). `a` toggles it
+/// live; this is only the initial scope.
+pub const CommitGraphScope = enum { current, all };
+
 /// Ordering of the HEAD commit log: `date` (the default — reverse-chronological
 /// by commit time, git's native order: fastest, no flag), `topo` (keeps a
 /// branch's commits contiguous for a readable graph), or `author_date`

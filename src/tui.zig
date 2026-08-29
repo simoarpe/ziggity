@@ -1492,6 +1492,37 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     }
 }
 
+/// Copy `line` into `buf`, replacing the first commit-node `*` (the one git draws
+/// for the commit on this row, skipping ANSI escapes and the `|`/`/`/`\` pipes)
+/// with the hollow HEAD glyph. Both are one column wide, so the swap keeps every
+/// following cell's column and colour. Returns the original line when there is no
+/// node or the marked line would not fit `buf`.
+fn markHeadNode(line: []const u8, buf: []u8) []const u8 {
+    const hollow = "\u{25CB}"; // ○, 3 bytes, one display column
+    var in_esc = false;
+    var star: ?usize = null;
+    for (line, 0..) |c, i| {
+        if (in_esc) {
+            if (c == 'm') in_esc = false;
+            continue;
+        }
+        if (c == 0x1b) {
+            in_esc = true;
+            continue;
+        }
+        if (c == '*') {
+            star = i;
+            break;
+        }
+    }
+    const s = star orelse return line;
+    if (line.len + hollow.len - 1 > buf.len) return line;
+    @memcpy(buf[0..s], line[0..s]);
+    @memcpy(buf[s..][0..hollow.len], hollow);
+    @memcpy(buf[s + hollow.len ..][0 .. line.len - s - 1], line[s + 1 ..]);
+    return buf[0 .. line.len + hollow.len - 1];
+}
+
 fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
     const w: u16 = root.width -| 4;
@@ -1551,6 +1582,7 @@ fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
     var pit = std.mem.splitScalar(u8, plain, '\n');
     var idx: usize = 0;
     var row: u16 = 0;
+    var head_buf: [1024]u8 = undefined;
     while (it.next()) |line| : (idx += 1) {
         const pline = pit.next() orelse "";
         if (idx < app.commit_graph_scroll) continue;
@@ -1567,8 +1599,10 @@ fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
         const hi: u16 = if (sel) |s| s.hi else 0;
         // The graph carries git's own ANSI colours; printAnsi renders them over
         // the (possibly selected) background, with the drag-selection span lit
-        // and the horizontal pan applied.
-        printAnsi(win, row, line, base, lo, hi, h_off);
+        // and the horizontal pan applied. On HEAD's row the node glyph is swapped
+        // to the hollow marker (same width, so columns and colour are preserved).
+        const draw_line = if (app.commit_graph_head_row == idx) markHeadNode(line, &head_buf) else line;
+        printAnsi(win, row, draw_line, base, lo, hi, h_off);
         row += 1;
     }
     drawScrollbarRange(root, px0 + w - 1, py0 + 1, avail, app.commit_graph_lines, app.commit_graph_scroll, true);
@@ -4925,6 +4959,21 @@ test "recencyStr rounds like git --date=relative" {
     try std.testing.expectEqualStrings("1y", recencyStr(&buf, now - 365 * day, now));
     // The case that floor got wrong: ~2 years reads "2y", not "1y".
     try std.testing.expectEqualStrings("2y", recencyStr(&buf, now - 730 * day, now));
+}
+
+test "markHeadNode swaps the first graph node for the hollow HEAD marker" {
+    var buf: [64]u8 = undefined;
+    // A plain node row: the '*' becomes '○'.
+    try std.testing.expectEqualStrings("\u{25CB} abc1234 subject", markHeadNode("* abc1234 subject", &buf));
+    // A node preceded by other lanes' pipes: only the '*' is swapped.
+    try std.testing.expectEqualStrings("| | \u{25CB} deadbee x", markHeadNode("| | * deadbee x", &buf));
+    // An ANSI-coloured node: the ESC…m sequence is skipped, the '*' after it swapped.
+    try std.testing.expectEqualStrings("\x1b[31m\u{25CB}\x1b[m feedface", markHeadNode("\x1b[31m*\x1b[m feedface", &buf));
+    // A connector row (no node) is returned unchanged.
+    try std.testing.expectEqualStrings("| |", markHeadNode("| |", &buf));
+    // Too small a buffer: fall back to the original line rather than overrun.
+    var tiny: [4]u8 = undefined;
+    try std.testing.expectEqualStrings("* abc1234", markHeadNode("* abc1234", &tiny));
 }
 
 test "every help-section keyword matches a real help header" {

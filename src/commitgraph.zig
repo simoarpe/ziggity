@@ -28,7 +28,8 @@ pub fn open(app: *App) !void {
     else
         try app.allocator.dupe(u8, "");
 
-    app.commit_graph_all = false;
+    // `commit_graph_all` is left as-is: it starts from `commit_graph_scope` in
+    // the config and thereafter remembers the last `a` toggle for the session.
     app.mode = .commit_graph;
     app.commit_graph_sel = 0;
     app.commit_graph_scroll = 0;
@@ -103,6 +104,9 @@ pub fn complete(app: *App, text: ?[]u8, parents: ?[]u8, generation: u64, gpa: st
         app.commit_graph_sel = findTargetRow(app);
         app.commit_graph_scroll = 0;
         app.commit_graph_recenter = true;
+        // Locate HEAD's row so the renderer can draw its node hollow. Meaningful
+        // mainly in the all-branches view, where HEAD sits among the other refs.
+        app.commit_graph_head_row = headRow(app);
     } else if (parents) |p| {
         gpa.free(p); // no graph stored, so drop the parent map too
     }
@@ -343,6 +347,7 @@ pub fn freeGraph(app: *App) void {
         app.commit_graph_parents = &.{};
     }
     app.commit_graph_lines = 0;
+    app.commit_graph_head_row = null;
 }
 
 /// Free everything (called from App.deinit / resetRepoState).
@@ -357,6 +362,14 @@ pub fn deinit(app: *App) void {
 fn findTargetRow(app: *App) usize {
     if (app.commit_graph_target.len == 0) return 0;
     return rowForHash(app, app.commit_graph_target) orelse 0;
+}
+
+/// The graph row of the checked-out commit (HEAD), or null when it is outside the
+/// loaded window. HEAD is the newest entry of the current branch's log, so its
+/// hash names the row — independent of the graph's current/all scope.
+fn headRow(app: *App) ?usize {
+    if (app.data.commits.len == 0) return null;
+    return rowForHash(app, app.data.commits[0].short_hash);
 }
 
 /// True when two abbreviated hashes name the same commit (one is a prefix of the

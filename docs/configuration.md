@@ -98,6 +98,11 @@ file_sort_order = name             # name (default) | status
 # draws it, `focused` only while the Commits panel is the active panel (handy on
 # a narrow side panel), `off` never.
 commit_graph = on                  # on (default) | focused | off
+# Initial scope of the ctrl+l commit-graph overlay: `current` (default) shows the
+# current branch and its upstream; `all` shows every branch (where the hollow
+# HEAD node stands out among the other refs). `a` toggles it live inside the
+# overlay; this just sets which scope it opens with.
+commit_graph_scope = current       # current (default) | all
 # HEAD log ordering. `date` (default) is git's native reverse-chronological
 # order, newest commit first. `topo` keeps a branch's commits contiguous so the
 # graph lanes stay clean, at the cost of a commit's row no longer following its

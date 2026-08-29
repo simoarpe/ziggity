@@ -2527,6 +2527,9 @@ pub const App = struct {
     commit_graph_sel: usize = 0,
     commit_graph_scroll: usize = 0,
     commit_graph_lines: usize = 0,
+    // The graph row of the checked-out commit (HEAD), so the renderer can draw
+    // its node hollow. Null when HEAD is not in the loaded graph.
+    commit_graph_head_row: ?usize = null,
     // The viewport height the renderer last used (so keyboard navigation can keep
     // the cursor visible), and a one-shot "center the cursor" request set on load.
     commit_graph_view_h: u16 = 0,
@@ -2851,6 +2854,9 @@ pub const App = struct {
             .config = cfg,
             .wrap_diff = cfg.wrap_diff,
             .tree_view = cfg.show_file_tree,
+            // The commit-graph viewer opens in the configured scope; `a` then
+            // toggles it and the choice is remembered for the rest of the session.
+            .commit_graph_all = cfg.commit_graph_scope == .all,
         };
         app.files_tree = .{ .collapsed = std.BufSet.init(allocator) };
         app.commit_tree = .{ .collapsed = std.BufSet.init(allocator) };
