@@ -127,10 +127,10 @@ log_order = date                   # date (default) | topo | author_date
 # more, or `full` to wrap onto as many rows as the hints need. `0` turns the bar
 # off entirely and hands the row back to the panels; it still appears for prompts
 # that need it (commit, filter, confirmations). When wrapping is on, the bar's
-# height is stable: it is sized to the busiest panel, not the focused one, so
-# moving between panels or a status message appearing never shifts the panels.
-# Only resizing the terminal width changes it. The bar never takes more than half
-# the screen.
+# height is stable across navigation: it is sized to the busiest panel, not the
+# focused one, so moving between panels never shifts the layout. Its height
+# changes only with the terminal width, or when a long status message pushes the
+# hints to reflow onto another row. The bar never takes more than half the screen.
 footer_hint_rows = 1               # 1 (default, single line) | any number | 0 (off) | full
 
 # Editor for `e`. Resolved in order, first one set wins: editor_command,

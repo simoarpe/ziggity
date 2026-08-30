@@ -4450,14 +4450,17 @@ const footer_contexts = [_]FooterCtx{
 };
 
 /// The footer's reserved height: enough rows for the busiest panel's hints at
-/// `width`, capped by `footer_hint_rows`. Deliberately independent of the current
-/// focus, mode, and message, so navigating never reflows the body — the height
-/// only changes on a terminal resize. `off`/one-row caps yield 1.
-fn stableFooterRows(width: u16, cap: u16) u16 {
+/// `width`, capped by `footer_hint_rows`. `start_col` is where the hints begin on
+/// the first row — past any status message and its separator — and MUST match what
+/// `drawHints` uses, otherwise the draw can need a row the reserve did not leave
+/// (a wider window then shows fewer hints than a narrower one). Independent of the
+/// focused panel, so navigating never reflows the body; only the width and the
+/// message length move it. `off`/one-row caps yield 1.
+fn stableFooterRows(width: u16, cap: u16, start_col: u16) u16 {
     if (cap <= 1) return 1;
     var rows: u16 = 1;
     for (footer_contexts) |ctx| {
-        rows = @max(rows, hintRowsNeeded(width, 0, footerHints(ctx)));
+        rows = @max(rows, hintRowsNeeded(width, start_col, footerHints(ctx)));
     }
     return @min(rows, cap);
 }
@@ -4467,16 +4470,25 @@ fn stableFooterRows(width: u16, cap: u16) u16 {
 /// panels, keeping one row only for modes that render an interactive prompt into
 /// it. Otherwise the height is stable, per `stableFooterRows`.
 fn footerHeight(app: *const app_mod.App, width: u16) u16 {
-    return footerRowsFor(app.config.footer_hint_rows, app.mode, width);
+    return footerRowsFor(app.config.footer_hint_rows, app.mode, width, footerHintStartCol(app));
+}
+
+/// The column the hints start on in the footer's first row: past the selectable
+/// status message and its "  |  " separator, or 0 when there is no message. Feeds
+/// both the height reserve and the draw so they agree. Byte length is used as the
+/// column width, matching `drawBottom`, which treats the message as ASCII columns.
+fn footerHintStartCol(app: *const app_mod.App) u16 {
+    if (app.message.len == 0) return 0;
+    return @intCast(@min(app.message.len + 5, @as(usize, std.math.maxInt(u16)))); // 5 = "  |  "
 }
 
 /// Pure core of `footerHeight` (no `App`, so it is unit-testable).
-fn footerRowsFor(wrap: model.FooterHintWrap, mode: app_mod.Mode, width: u16) u16 {
+fn footerRowsFor(wrap: model.FooterHintWrap, mode: app_mod.Mode, width: u16, start_col: u16) u16 {
     switch (wrap) {
         .off => return if (footerHasModalPrompt(mode)) 1 else 0,
         else => {},
     }
-    return stableFooterRows(width, wrap.cap());
+    return stableFooterRows(width, wrap.cap(), start_col);
 }
 
 /// Modes that render an interactive prompt (or an overlay's footer line) into the
@@ -5371,36 +5383,56 @@ test "hintRowsNeeded wraps whole groups and counts rows" {
 }
 
 test "stableFooterRows reserves the busiest panel, capped, and only width moves it" {
+    const full = std.math.maxInt(u16);
     // Wide enough that every panel's hints fit one line → a single row.
-    try std.testing.expectEqual(@as(u16, 1), stableFooterRows(1000, 2));
-    try std.testing.expectEqual(@as(u16, 1), stableFooterRows(1000, std.math.maxInt(u16)));
+    try std.testing.expectEqual(@as(u16, 1), stableFooterRows(1000, 2, 0));
+    try std.testing.expectEqual(@as(u16, 1), stableFooterRows(1000, full, 0));
 
     // Narrow: something wraps, so the reserved height grows — but the cap holds.
-    try std.testing.expectEqual(@as(u16, 1), stableFooterRows(60, 1)); // disabled/one-row cap
-    try std.testing.expectEqual(@as(u16, 2), stableFooterRows(60, 2)); // capped at 2
-    try std.testing.expect(stableFooterRows(60, std.math.maxInt(u16)) >= 2); // full: as tall as needed
+    try std.testing.expectEqual(@as(u16, 1), stableFooterRows(60, 1, 0)); // disabled/one-row cap
+    try std.testing.expectEqual(@as(u16, 2), stableFooterRows(60, 2, 0)); // capped at 2
+    try std.testing.expect(stableFooterRows(60, full, 0) >= 2); // full: as tall as needed
 
     // The result never exceeds the cap and is always at least one row.
     var w: u16 = 50;
     while (w <= 400) : (w += 10) {
-        const r = stableFooterRows(w, 3);
+        const r = stableFooterRows(w, 3, 0);
         try std.testing.expect(r >= 1 and r <= 3);
+    }
+}
+
+test "footer reserve covers the drawn hints at every width, message or not (issue #26)" {
+    // The bug: the reserve measured hints from column 0 but the draw offset them
+    // past the status message, so a wider window could show fewer hints than a
+    // narrower one. Reserve and draw now share `start_col`, so for every width and
+    // every panel the reserved rows must be >= the rows that panel actually draws.
+    const full = std.math.maxInt(u16);
+    const offsets = [_]u16{ 0, 12, 30, 55 }; // no message, then wider messages
+    for (offsets) |start_col| {
+        var width: u16 = 50;
+        while (width <= 320) : (width += 1) {
+            const reserved = stableFooterRows(width, full, start_col);
+            for (footer_contexts) |ctx| {
+                const drawn = hintRowsNeeded(width, start_col, footerHints(ctx));
+                try std.testing.expect(reserved >= drawn); // never truncates uncapped
+            }
+        }
     }
 }
 
 test "footer_hint_rows = 0 drops the bar in navigation but keeps a row for prompts" {
     // Disabled: normal navigation and the operation views reclaim the row...
-    try std.testing.expectEqual(@as(u16, 0), footerRowsFor(.off, .normal, 80));
-    try std.testing.expectEqual(@as(u16, 0), footerRowsFor(.off, .operation, 80));
-    try std.testing.expectEqual(@as(u16, 0), footerRowsFor(.off, .conflict_resolve, 80));
+    try std.testing.expectEqual(@as(u16, 0), footerRowsFor(.off, .normal, 80, 0));
+    try std.testing.expectEqual(@as(u16, 0), footerRowsFor(.off, .operation, 80, 0));
+    try std.testing.expectEqual(@as(u16, 0), footerRowsFor(.off, .conflict_resolve, 80, 0));
     // ...but a modal prompt still needs its line.
-    try std.testing.expectEqual(@as(u16, 1), footerRowsFor(.off, .menu, 80));
-    try std.testing.expectEqual(@as(u16, 1), footerRowsFor(.off, .confirmation, 80));
-    try std.testing.expectEqual(@as(u16, 1), footerRowsFor(.off, .commit_prompt, 80));
+    try std.testing.expectEqual(@as(u16, 1), footerRowsFor(.off, .menu, 80, 0));
+    try std.testing.expectEqual(@as(u16, 1), footerRowsFor(.off, .confirmation, 80, 0));
+    try std.testing.expectEqual(@as(u16, 1), footerRowsFor(.off, .commit_prompt, 80, 0));
 
     // Enabled settings keep a stable height regardless of mode (no jumping).
-    try std.testing.expectEqual(@as(u16, 1), footerRowsFor(.{ .rows = 1 }, .normal, 80));
-    try std.testing.expectEqual(footerRowsFor(.{ .rows = 2 }, .normal, 60), footerRowsFor(.{ .rows = 2 }, .menu, 60));
+    try std.testing.expectEqual(@as(u16, 1), footerRowsFor(.{ .rows = 1 }, .normal, 80, 0));
+    try std.testing.expectEqual(footerRowsFor(.{ .rows = 2 }, .normal, 60, 0), footerRowsFor(.{ .rows = 2 }, .menu, 60, 0));
 }
 
 test "side panel heights match the weighting" {
