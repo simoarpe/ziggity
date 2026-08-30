@@ -9679,14 +9679,21 @@ pub const App = struct {
             },
             .commit_file => |cf| {
                 empty_msg = "No changes for this file.\n";
+                // `-m --first-parent` so a merge commit shows what it brought into
+                // the mainline for this file, matching the file list and the
+                // commit-level preview. A plain `show <merge> -- <path>` gives the
+                // combined diff, which is empty for a cleanly merged-in file and a
+                // terse `--cc` blob for a conflicted one. A no-op for regular commits.
                 try sections.append(page_alloc, .{
-                    .argv = try dupArgv(&.{ "show", cf.hash, "--no-ext-diff", "--color=always", ctx_arg, "--format=", "--", cf.path }),
+                    .argv = try dupArgv(&.{ "show", "-m", "--first-parent", cf.hash, "--no-ext-diff", "--color=always", ctx_arg, "--format=", "--", cf.path }),
                 });
             },
             .commit_dir => |cd| {
                 empty_msg = "No changes under this directory.\n";
+                // See `.commit_file`: `-m --first-parent` keeps a merge commit's
+                // per-directory preview consistent with its file list.
                 try sections.append(page_alloc, .{
-                    .argv = try dupArgv(&.{ "show", cd.hash, "--no-ext-diff", "--color=always", "--stat", "--patch", ctx_arg, "--format=", "--", cd.path }),
+                    .argv = try dupArgv(&.{ "show", "-m", "--first-parent", cd.hash, "--no-ext-diff", "--color=always", "--stat", "--patch", ctx_arg, "--format=", "--", cd.path }),
                 });
             },
             .stash => |idx| {
@@ -14886,6 +14893,67 @@ test "real threaded load then App.deinit is allocator-clean (issue #19)" {
     const loaded = loadRepoDataAsync(page_alloc, tio, &env, app.git.root, app.git.git_dir, app.git.branch_sort, app.git.log_order, app.git.untracked_files, app.commit_limit, true);
     app.applyRepoLoad(loaded, page_alloc);
     app.deinit();
+}
+
+test "merge commit's per-file preview shows the brought-in file (issue #22 follow-up)" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    // A merge that both adds a new file (feat.txt) and resolves a conflict
+    // (shared.txt). A plain `git show <merge> -- feat.txt` is the combined diff:
+    // empty for the cleanly merged-in file. `-m --first-parent` shows it.
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q -b main
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf 'base\n' > shared.txt
+        \\git add shared.txt
+        \\git commit -qm base
+        \\git checkout -q -b feature
+        \\printf 'feat\n' > feat.txt
+        \\printf 'feature\n' > shared.txt
+        \\git add .
+        \\git commit -qm feature
+        \\git checkout -q main
+        \\printf 'main\n' > shared.txt
+        \\git add shared.txt
+        \\git commit -qm main
+        \\git merge feature || true
+        \\printf 'resolved\n' > shared.txt
+        \\git add shared.txt
+        \\git commit -qm "merge feature"
+    );
+
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    app.git = try git_mod.Git.initAt(a, tio, &env, dir_path);
+    defer app.git.deinit();
+    defer app.data.deinit(a);
+
+    var head = try app.git.exec(&.{ "rev-parse", "HEAD" });
+    defer head.deinit(a);
+    const merge_hash = std.mem.trim(u8, head.stdout, " \n");
+
+    // The newly-added file: its per-file preview must not come back empty.
+    const job = try app.buildPreviewJob(.{ .commit_file = .{ .hash = merge_hash, .path = "feat.txt" } }, try page_alloc.dupe(u8, "k"));
+    defer job.deinit(page_alloc);
+    const out = try job.run(page_alloc, tio, app.git.root);
+    defer page_alloc.free(out);
+    // The argv uses `--color=always`, so assert on substrings without ANSI codes
+    // between their bytes: the "new file" marker and the path in the diff header.
+    try std.testing.expect(std.mem.indexOf(u8, out, "new file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "feat.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "No changes for this file") == null);
 }
 
 test "completePreview frees the page-allocated job with the page allocator (issue #19)" {
