@@ -294,7 +294,12 @@ fn freeRetryAction(action: RetryAction) void {
 
 /// Network operations that run off the UI loop so they don't freeze it.
 pub const AsyncOp = enum {
+    /// `git fetch`, honouring the user's `fetch.prune` config (`fetch_prune_mode = git`).
     fetch,
+    /// Force prune by `git fetch --prune`
+    fetch_prune,
+    /// Force without prune, by `git -c "fetch.prune=false" fetch`
+    fetch_no_prune,
     /// `git pull`, honouring the user's `pull.rebase` config (`pull_mode = git`).
     pull,
     /// The explicit pull variants offered by `pull_mode = menu`: force a merge
@@ -332,7 +337,7 @@ pub const AsyncOp = enum {
 
     pub fn label(self: AsyncOp) []const u8 {
         return switch (self) {
-            .fetch, .fetch_remote => "fetch",
+            .fetch, .fetch_prune, .fetch_no_prune, .fetch_remote => "fetch",
             .pull, .pull_merge, .pull_rebase, .pull_ff_only => "pull",
             .push, .push_force, .push_force_plain, .push_set_upstream, .push_tag => "push",
         };
@@ -341,6 +346,8 @@ pub const AsyncOp = enum {
     pub fn gerund(self: AsyncOp) []const u8 {
         return switch (self) {
             .fetch, .fetch_remote => "fetching",
+            .fetch_prune => "fetching with prune",
+            .fetch_no_prune => "fetching without prune",
             .pull, .pull_merge, .pull_rebase, .pull_ff_only => "pulling",
             .push, .push_set_upstream, .push_tag => "pushing",
             .push_force => "force push with lease",
@@ -358,6 +365,10 @@ pub const AsyncOp = enum {
             // refs without asking. A branch surfaces as "(upstream gone)" once a
             // prune happens — i.e. exactly when git itself would consider it gone.
             .fetch => &.{ "fetch", "--all", "--no-write-fetch-head" },
+            // Force fetch with --prune (overriding possible user's `fetch.prune` git config)
+            .fetch_prune => &.{ "fetch", "--all", "--no-write-fetch-head", "--prune" },
+            // Force fetch without prune (overriding possible user's `fetch.prune` git config)
+            .fetch_no_prune => &.{ "-c", "fetch.prune=false", "fetch", "--all", "--no-write-fetch-head" },
             // The remote name is appended by the worker (from `fetch_remote_name`).
             .fetch_remote => &.{"fetch"},
             .pull => &.{ "pull", "--no-edit" },
@@ -3766,7 +3777,15 @@ pub const App = struct {
                 self.refreshViews(Refresh.all);
                 try self.setMessage("refreshed", .{});
             },
-            .fetch => try self.requestAsync(.fetch),
+            .fetch => {
+                if (self.config.fetch_prune_mode == .on) {
+                    try self.requestAsync(.fetch_prune);
+                } else if (self.config.fetch_prune_mode == .off) {
+                    try self.requestAsync(.fetch_no_prune);
+                } else {
+                    try self.requestAsync(.fetch);
+                }
+            },
             .pull => try self.startPull(),
             .push => try self.startPush(),
             .move_up => if (self.staging_active) staging_mod.moveStagingCursor(self, -1) else try self.moveUp(),

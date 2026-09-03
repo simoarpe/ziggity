@@ -103,6 +103,11 @@ commit_graph = on                  # on (default) | focused | off
 # HEAD node stands out among the other refs). `a` toggles it live inside the
 # overlay; this just sets which scope it opens with.
 commit_graph_scope = current       # current (default) | all
+# How `f` (fetch) behaves. `git` (default) runs `git fetch`, which follows your own
+# git `fetch.prune` config (set `git config fetch.prune true` to fetch with prune).
+# `on` forces fetch with prune (using `fetch --prune`).
+# `off` forces fetch without prune (using `-c fetch.prune=false fetch`).
+fetch_prune_mode = git             # git (default: follow git's fetch.prune) | on | off
 # How `p` (pull) behaves. `git` (default) runs `git pull`, which follows your own
 # git `pull.rebase` config (set `git config pull.rebase true` for rebase pulls).
 # `menu` opens a menu to pick merge, rebase, or fast-forward-only — but only when

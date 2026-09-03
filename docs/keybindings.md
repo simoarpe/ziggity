@@ -130,9 +130,12 @@ the written reference. Every binding is remappable, see
   (ziggity re-reads the file when the editor closes and stages it automatically
   once the markers are gone), and **mark as resolved**, which stages a file you
   already fixed by hand (both refuse while conflict markers remain)
-- `f` / `p` / `P`: fetch / pull / push. `pull` follows your git `pull.rebase`
-  config by default; set `pull_mode = menu` to pick merge/rebase/fast-forward
-  when a pull has local commits to integrate (see [Configuration](configuration.md))
+- `f` / `p` / `P`: fetch / pull / push. `fetch` follows your git `fetch.prune`
+  config by default; set `fetch_prune_mode = on` to force fetch with prune; set
+  `fetch_prune_mode = off` to force fetch without prune; `pull` follows your git
+  `pull.rebase` config by default; set `pull_mode = menu` to pick
+  merge/rebase/fast-forward when a pull has local commits to integrate
+  (see [Configuration](configuration.md))
 - `esc`: step back one level (deselect, clear a filter, exit diffing, cancel
   a prompt, leave a panel); never quits, only `q` does
 

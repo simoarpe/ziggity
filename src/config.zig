@@ -351,6 +351,10 @@ pub const Config = struct {
     /// the current branch and its upstream) or `all` (every branch). `a` toggles
     /// it live; this sets which scope it opens with.
     commit_graph_scope: model.CommitGraphScope = .current,
+    /// How `fetch` (`f`) prune behaves: `git` (the default) runs `git fetch`, honouring
+    /// git's own `fetch.prune` config; `on` forces `--prune` option; `off` forces
+    /// never use prune by running `git -c "fetch.prune=false" fetch`.
+    fetch_prune_mode: model.FetchPruneMode = .git,
     /// How `pull` behaves: `git` (default) runs `git pull`, honouring your git
     /// `pull.rebase` config; `menu` opens a menu to pick merge / rebase /
     /// fast-forward-only for each pull.
@@ -508,6 +512,11 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "commit_graph_scope")) {
             if (std.meta.stringToEnum(model.CommitGraphScope, value)) |v| self.commit_graph_scope = v;
+            return;
+        }
+        if (std.mem.eql(u8, key, "fetch_prune_mode")) {
+            if (std.meta.stringToEnum(model.FetchPruneMode, value)) |v| self.fetch_prune_mode = v;
+            std.debug.print("fetch_prune_mode: {}", .{self.fetch_prune_mode});
             return;
         }
         if (std.mem.eql(u8, key, "pull_mode")) {
