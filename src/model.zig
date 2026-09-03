@@ -19,6 +19,11 @@ pub const CommitGraphMode = enum { off, focused, on };
 /// live; this is only the initial scope.
 pub const CommitGraphScope = enum { current, all };
 
+/// How `fetch` (`f`) prune behaves: `git` (the default) runs `git fetch`, honouring
+/// git's own `fetch.prune` config; `on` forces `--prune` option; `off` forces
+/// never use prune by running `git -c "fetch.prune=false" fetch`.
+pub const FetchPruneMode = enum { git, on, off };
+
 /// How `pull` (`p`) behaves: `git` (the default) runs `git pull`, honouring
 /// git's own `pull.rebase` config; `menu` opens a menu to choose merge / rebase
 /// / fast-forward-only for each pull.
