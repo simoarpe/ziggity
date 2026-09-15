@@ -103,6 +103,13 @@ commit_graph = on                  # on (default) | focused | off
 # HEAD node stands out among the other refs). `a` toggles it live inside the
 # overlay; this just sets which scope it opens with.
 commit_graph_scope = current       # current (default) | all
+# Whether `f` (fetch) prunes remote-tracking branches that were deleted on the
+# remote. `git` (default) follows your own git `fetch.prune` config (set
+# `git config fetch.prune true` to prune). `on` always prunes (`--prune`); `off`
+# never prunes (`--no-prune`). Applies to the manual fetch, a per-remote fetch,
+# and the periodic background fetch alike, so a deleted branch disappears from the
+# Remotes tab and turns "(upstream gone)" on Local, matching what git considers gone.
+fetch_prune_mode = git             # git (default: follow git's fetch.prune) | on | off
 # How `p` (pull) behaves. `git` (default) runs `git pull`, which follows your own
 # git `pull.rebase` config (set `git config pull.rebase true` for rebase pulls).
 # `menu` opens a menu to pick merge, rebase, or fast-forward-only — but only when
