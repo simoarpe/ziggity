@@ -829,7 +829,7 @@ const bisect_actions_menu = [_]MenuItem{
     .{ .label = "Skip current commit", .action = .bisect_skip },
     .{ .label = "Mark selected commit good", .action = .bisect_good_selected },
     .{ .label = "Mark selected commit bad", .action = .bisect_bad_selected },
-    .{ .label = "Reset bisect", .action = .bisect_reset },
+    .{ .label = "Stop bisecting (reset, return to original HEAD)", .action = .bisect_reset },
 };
 
 const patch_menu_items = [_]MenuItem{
@@ -1183,6 +1183,10 @@ pub const WorktreeSnapshot = struct {
     status: model.StatusSummary,
     porcelain: []u8,
     state: model.RepoState,
+    /// Whether a bisect is in progress, so the idle/post-mutation working-tree
+    /// refresh keeps `data.bisecting` current (drives the Status banner and the
+    /// bisect menu). Without it the flag only updated on a full reload / restart.
+    bisecting: bool,
     /// HEAD's commit hash at snapshot time (empty on an unborn branch), so the
     /// apply step can notice history moving under it (an external commit/rebase)
     /// and refresh the branch/commit views, which the working-tree-only idle
@@ -1209,7 +1213,7 @@ pub const WorktreeSnapshot = struct {
         const porcelain = try wgit.statusPorcelain();
         errdefer gpa.free(porcelain);
         const head = try wgit.headHash();
-        return .{ .status = status, .porcelain = porcelain, .state = wgit.detectState(), .head = head };
+        return .{ .status = status, .porcelain = porcelain, .state = wgit.detectState(), .bisecting = wgit.isBisecting(), .head = head };
     }
 
     pub fn deinit(self: *WorktreeSnapshot, gpa: std.mem.Allocator) void {
@@ -1482,6 +1486,10 @@ pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process
         if (wgit.loadFiles()) |f| {
             d.files = f;
             d.state = wgit.detectState();
+            // Bisecting travels with `state` (both come from the on-disk repo
+            // state): without this a scoped refresh leaves `bisecting` stale, so
+            // starting or resetting a bisect would not update the UI until restart.
+            d.bisecting = wgit.isBisecting();
             loaded.insert(.files);
         } else |_| {}
     }
@@ -3205,6 +3213,7 @@ pub const App = struct {
                 self.data.replaceFiles(a, f);
                 self.applyFileSort();
                 self.data.state = src.state;
+                self.data.bisecting = src.bisecting;
             } else |_| {}
         }
         if (s.contains(.branches)) {
@@ -3380,6 +3389,7 @@ pub const App = struct {
         files = &.{};
         self.applyFileSort();
         self.data.state = snap.state;
+        self.data.bisecting = snap.bisecting;
         // Only working-tree file diffs can have changed; commit/branch/stash
         // previews stay valid, so drop just the "f:" entries.
         self.preview_cache.invalidatePrefix(self.allocator, "f:");
@@ -12346,6 +12356,61 @@ test "bisect menu reflects whether a bisect is in progress" {
     try std.testing.expectEqual(@as(usize, bisect_actions_menu.len), app.active_menu.?.items.len);
 }
 
+test "a scoped refresh reflects bisect start and reset (issue #29)" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q -b main
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\for i in 1 2 3 4; do printf 'line %d\n' "$i" >> f.txt; git add f.txt; git commit -qm "c$i"; done
+    );
+
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    app.git = try git_mod.Git.initAt(a, tio, &env, dir_path);
+    defer app.git.deinit();
+    defer app.data.deinit(a);
+
+    // Helper: run the real scoped-load path (worker function + apply) for the
+    // files scope, exactly as a mutation refresh does off the UI loop.
+    const refresh = struct {
+        fn run(app_: *App, tio_: std.Io, env_: *std.process.Environ.Map, root: []u8) void {
+            const sd = loadScopesAsync(page_alloc, tio_, env_, root, app_.git.git_dir, ScopeSet.init(.{ .files = true }), .{}, .date, .date, .all, 200);
+            app_.applyScopedLoad(sd, page_alloc);
+        }
+    }.run;
+
+    // Not bisecting yet.
+    refresh(&app, tio, &env, app.git.root);
+    try std.testing.expect(!app.data.bisecting);
+
+    // Start a bisect on disk, then a scoped refresh must flip `bisecting` true
+    // (the bug: it stayed false until a full reload / app restart).
+    var s1 = try app.git.exec(&.{ "bisect", "start" });
+    s1.deinit(a);
+    try std.testing.expect(app.git.isBisecting()); // sanity: on disk
+    refresh(&app, tio, &env, app.git.root);
+    try std.testing.expect(app.data.bisecting); // now reflected in the UI state
+
+    // Reset the bisect: a scoped refresh must flip it back to false.
+    var s2 = try app.git.exec(&.{ "bisect", "reset" });
+    s2.deinit(a);
+    refresh(&app, tio, &env, app.git.root);
+    try std.testing.expect(!app.data.bisecting);
+}
+
 test "W marks the selected ref directly; W again opens the options menu" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -12778,12 +12843,14 @@ test "background worktree snapshot applies on the UI thread and honors generatio
         .status = .{ .current_branch = try page.dupe(u8, "main"), .upstream = null },
         .porcelain = try page.dupe(u8, " M hello.txt\x00"),
         .state = .clean,
+        .bisecting = true,
         .head = try page.dupe(u8, "abc123"),
     };
     try app.applyWorktreeSnapshot(snap, app.refresh_generation, page);
     try std.testing.expectEqualStrings("main", app.data.current_branch);
     try std.testing.expectEqual(@as(usize, 1), app.data.files.len);
     try std.testing.expectEqualStrings("hello.txt", app.data.files[0].path);
+    try std.testing.expect(app.data.bisecting); // the working-tree refresh carries bisect state (issue #29)
 
     // A snapshot stamped with an older generation (a full refresh landed while
     // it was loading) is discarded rather than clobbering the newer data.
@@ -12792,6 +12859,7 @@ test "background worktree snapshot applies on the UI thread and honors generatio
         .status = .{ .current_branch = try page.dupe(u8, "feature"), .upstream = null },
         .porcelain = try page.dupe(u8, ""),
         .state = .clean,
+        .bisecting = false,
         .head = try page.dupe(u8, "def456"),
     };
     try app.applyWorktreeSnapshot(stale, app.refresh_generation - 1, page);
@@ -12815,6 +12883,7 @@ test "an external HEAD move between snapshots reloads the branch and commit view
                 .status = .{ .current_branch = try p.dupe(u8, "main"), .upstream = null },
                 .porcelain = try p.dupe(u8, ""),
                 .state = .clean,
+                .bisecting = false,
                 .head = try p.dupe(u8, head),
             };
         }
