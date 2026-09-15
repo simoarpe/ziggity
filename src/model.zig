@@ -24,6 +24,28 @@ pub const CommitGraphScope = enum { current, all };
 /// / fast-forward-only for each pull.
 pub const PullMode = enum { git, menu };
 
+/// Whether `fetch` (`f`) prunes remote-tracking branches that no longer exist on
+/// the remote: `git` (the default) defers to the user's own `fetch.prune` git
+/// config, `on` always prunes, `off` never does.
+pub const FetchPruneMode = enum {
+    git,
+    on,
+    off,
+
+    /// The extra `git fetch` flag this mode forces, or null to defer to the
+    /// user's `fetch.prune` config. `--prune`/`--no-prune` both override that
+    /// config and can be appended to any fetch invocation (global, per-remote,
+    /// or the background auto-fetch), which is why this is one flag rather than
+    /// separate ops the way `pull_mode`'s variants are.
+    pub fn arg(self: FetchPruneMode) ?[]const u8 {
+        return switch (self) {
+            .git => null,
+            .on => "--prune",
+            .off => "--no-prune",
+        };
+    }
+};
+
 /// Ordering of the HEAD commit log: `date` (the default — reverse-chronological
 /// by commit time, git's native order: fastest, no flag), `topo` (keeps a
 /// branch's commits contiguous for a readable graph), or `author_date`
@@ -801,6 +823,12 @@ test "graphOrderFlag spells out date order that --graph would otherwise topo-sor
     try std.testing.expectEqualStrings("--date-order", graphOrderFlag(.date));
     try std.testing.expectEqualStrings("--topo-order", graphOrderFlag(.topo));
     try std.testing.expectEqualStrings("--author-date-order", graphOrderFlag(.author_date));
+}
+
+test "FetchPruneMode.arg forces prune on/off and defers to git config by default" {
+    try std.testing.expectEqual(@as(?[]const u8, null), FetchPruneMode.arg(.git)); // defer to fetch.prune
+    try std.testing.expectEqualStrings("--prune", FetchPruneMode.arg(.on).?);
+    try std.testing.expectEqualStrings("--no-prune", FetchPruneMode.arg(.off).?);
 }
 
 test "RepoData.dupe is an independent deep copy" {

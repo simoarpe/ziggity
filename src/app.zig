@@ -330,6 +330,15 @@ pub const AsyncOp = enum {
         };
     }
 
+    /// A fetch-family op, so `fetch_prune_mode`'s `--prune`/`--no-prune` flag
+    /// applies (appended by the worker). Covers the global and per-remote fetch.
+    pub fn isFetch(self: AsyncOp) bool {
+        return switch (self) {
+            .fetch, .fetch_remote => true,
+            else => false,
+        };
+    }
+
     pub fn label(self: AsyncOp) []const u8 {
         return switch (self) {
             .fetch, .fetch_remote => "fetch",
@@ -352,13 +361,13 @@ pub const AsyncOp = enum {
     /// `push_set_upstream` the worker appends the remote and branch.
     pub fn argv(self: AsyncOp) []const []const u8 {
         return switch (self) {
-            // Plain fetch, honoring the user's `fetch.prune` config (git prunes
-            // automatically when it's set). We don't force `--prune`: it would
-            // override an explicit `fetch.prune=false` and delete remote-tracking
-            // refs without asking. A branch surfaces as "(upstream gone)" once a
-            // prune happens — i.e. exactly when git itself would consider it gone.
+            // Plain fetch. By default (`fetch_prune_mode = git`) it honors the
+            // user's `fetch.prune` config; `fetch_prune_mode = on`/`off` makes the
+            // worker append `--prune`/`--no-prune` to force the choice either way.
+            // A branch surfaces as "(upstream gone)" once a prune happens — i.e.
+            // exactly when git itself would consider it gone.
             .fetch => &.{ "fetch", "--all", "--no-write-fetch-head" },
-            // The remote name is appended by the worker (from `fetch_remote_name`).
+            // The remote name (and any prune flag) is appended by the worker.
             .fetch_remote => &.{"fetch"},
             .pull => &.{ "pull", "--no-edit" },
             // Explicit merge overrides a `pull.rebase = true` config with
@@ -14721,6 +14730,18 @@ test "esc backs out of a commit-files drill before clearing the commit filter" {
     // Back at the log level, a second esc clears the filter.
     try app.handleKey(esc);
     try std.testing.expect(!app.git.hasLogFilter());
+}
+
+test "isFetch groups the fetch ops that honour fetch_prune_mode" {
+    // The worker appends the prune flag for exactly these ops; nothing else.
+    try std.testing.expect(AsyncOp.fetch.isFetch());
+    try std.testing.expect(AsyncOp.fetch_remote.isFetch());
+    try std.testing.expect(!AsyncOp.pull.isFetch());
+    try std.testing.expect(!AsyncOp.push.isFetch());
+    // The prune flag itself: default defers, on/off force it.
+    try std.testing.expectEqual(@as(?[]const u8, null), model.FetchPruneMode.arg(.git));
+    try std.testing.expectEqualStrings("--prune", model.FetchPruneMode.arg(.on).?);
+    try std.testing.expectEqualStrings("--no-prune", model.FetchPruneMode.arg(.off).?);
 }
 
 test "pull_mode routes p to a plain pull or the merge/rebase menu" {

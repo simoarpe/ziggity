@@ -351,6 +351,11 @@ pub const Config = struct {
     /// the current branch and its upstream) or `all` (every branch). `a` toggles
     /// it live; this sets which scope it opens with.
     commit_graph_scope: model.CommitGraphScope = .current,
+    /// Whether `fetch` (`f`) prunes deleted remote-tracking branches: `git`
+    /// (default) defers to your git `fetch.prune` config; `on` always prunes
+    /// (`--prune`); `off` never does (`--no-prune`). Applies to the manual fetch,
+    /// per-remote fetch, and the background auto-fetch alike.
+    fetch_prune_mode: model.FetchPruneMode = .git,
     /// How `pull` behaves: `git` (default) runs `git pull`, honouring your git
     /// `pull.rebase` config; `menu` opens a menu to pick merge / rebase /
     /// fast-forward-only for each pull.
@@ -508,6 +513,10 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "commit_graph_scope")) {
             if (std.meta.stringToEnum(model.CommitGraphScope, value)) |v| self.commit_graph_scope = v;
+            return;
+        }
+        if (std.mem.eql(u8, key, "fetch_prune_mode")) {
+            if (std.meta.stringToEnum(model.FetchPruneMode, value)) |v| self.fetch_prune_mode = v;
             return;
         }
         if (std.mem.eql(u8, key, "pull_mode")) {
@@ -725,6 +734,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
         \\file_sort_order = status
         \\commit_graph = focused
         \\commit_graph_scope = all
+        \\fetch_prune_mode = on
         \\pull_mode = menu
         \\log_order = topo
         \\expand_focused_side_panel = true
@@ -735,6 +745,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     );
     try std.testing.expectEqual(model.CommitGraphMode.focused, cfg.commit_graph);
     try std.testing.expectEqual(model.CommitGraphScope.all, cfg.commit_graph_scope);
+    try std.testing.expectEqual(model.FetchPruneMode.on, cfg.fetch_prune_mode); // default git, overridden
     try std.testing.expectEqual(model.PullMode.menu, cfg.pull_mode);
     try std.testing.expectEqual(model.LogOrder.topo, cfg.log_order);
     try std.testing.expect(cfg.aiConfigured());
@@ -756,6 +767,17 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     try std.testing.expectEqual(@as(u8, 3), cfg.expanded_side_panel_weight);
     try std.testing.expect(cfg.show_file_tree);
     try std.testing.expect(!cfg.pr_status); // default true, overridden to false
+}
+
+test "fetch_prune_mode defaults to git and parses on, off, and bad values" {
+    var cfg: Config = .{};
+    try std.testing.expectEqual(model.FetchPruneMode.git, cfg.fetch_prune_mode); // default
+    cfg.applyBytes("fetch_prune_mode = off");
+    try std.testing.expectEqual(model.FetchPruneMode.off, cfg.fetch_prune_mode);
+    cfg.applyBytes("fetch_prune_mode = on");
+    try std.testing.expectEqual(model.FetchPruneMode.on, cfg.fetch_prune_mode);
+    cfg.applyBytes("fetch_prune_mode = nonsense"); // unknown: left unchanged
+    try std.testing.expectEqual(model.FetchPruneMode.on, cfg.fetch_prune_mode);
 }
 
 test "footer_hint_rows defaults to 1 and parses a number, 0, or full" {

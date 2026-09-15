@@ -91,6 +91,10 @@ const AsyncJob = struct {
     /// `freeTargets` once the future has been awaited.
     upstream_remote: ?[]const u8 = null,
     upstream_branch: ?[]const u8 = null,
+    /// For fetch ops: the `--prune`/`--no-prune` flag forced by `fetch_prune_mode`,
+    /// or null to defer to the user's `fetch.prune` config. A static string (no
+    /// allocation), appended to the fetch argv by the worker.
+    fetch_prune_arg: ?[]const u8 = null,
     result: ?git_mod.ExecResult = null,
 
     fn freeTargets(self: *AsyncJob) void {
@@ -106,6 +110,9 @@ fn asyncWorker(job: *AsyncJob) void {
     defer argv.deinit(async_allocator);
     argv.append(async_allocator, "git") catch return postDone(job);
     argv.appendSlice(async_allocator, job.op.argv()) catch return postDone(job);
+    // A fetch forced on/off by `fetch_prune_mode` appends `--prune`/`--no-prune`
+    // (before any remote name, so `git fetch --prune <remote>` stays valid).
+    if (job.fetch_prune_arg) |p| argv.append(async_allocator, p) catch return postDone(job);
     // A first push of an upstream-less branch appends "<remote> <branch>".
     if (job.upstream_remote) |r| argv.append(async_allocator, r) catch return postDone(job);
     if (job.upstream_branch) |b| argv.append(async_allocator, b) catch return postDone(job);
@@ -284,12 +291,23 @@ const BgFetchRun = struct {
     loop: *vaxis.Loop(Event),
     root: []const u8,
     environ: *std.process.Environ.Map,
+    /// The `--prune`/`--no-prune` flag forced by `fetch_prune_mode`, or null to
+    /// defer to the user's `fetch.prune` config. Keeps the background auto-fetch
+    /// consistent with the manual fetch (so a `= on` user prunes stale branches
+    /// automatically over time). A static string, no allocation.
+    prune_arg: ?[]const u8 = null,
 };
 
 fn bgFetchWorker(fr: *BgFetchRun) void {
-    const argv = [_][]const u8{ "git", "--no-optional-locks", "fetch", "--all", "--no-write-fetch-head" };
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(async_allocator);
+    argv.appendSlice(async_allocator, &.{ "git", "--no-optional-locks", "fetch", "--all", "--no-write-fetch-head" }) catch {
+        _ = fr.loop.tryPostEvent(.bg_fetch_done) catch false;
+        return;
+    };
+    if (fr.prune_arg) |p| argv.append(async_allocator, p) catch {};
     if (git_mod.runWithLockRetry(async_allocator, fr.io, .{
-        .argv = &argv,
+        .argv = argv.items,
         .cwd = .{ .path = fr.root },
         .environ_map = fr.environ,
         .stdout_limit = .limited(1024 * 1024),
@@ -872,6 +890,8 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 if (op == .fetch_remote) {
                     if (app.fetch_remote_name) |r| async_job.upstream_remote = async_allocator.dupe(u8, r) catch null;
                 }
+                // Fetch ops carry the prune flag forced by `fetch_prune_mode`, if any.
+                if (op.isFetch()) async_job.fetch_prune_arg = app.config.fetch_prune_mode.arg();
                 // Attach entered credentials (a cloned, askpass-wired env) when
                 // available; on clone failure fall back to the bare env.
                 if (credentials_mod.gitCredentialsSet(app)) {
@@ -952,7 +972,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
         // user's own network op is in flight (they'd contend / double-prompt).
         if (bg_fetch_future == null and app.bg_fetch_requested and !app.async_active) {
             app.bg_fetch_requested = false;
-            bg_fetch_run = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ };
+            bg_fetch_run = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ, .prune_arg = app.config.fetch_prune_mode.arg() };
             bg_fetch_future = io.concurrent(bgFetchWorker, .{&bg_fetch_run}) catch null;
         }
 
