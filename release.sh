@@ -213,12 +213,17 @@ verify_brew() {
   command -v brew >/dev/null || { warn "brew not installed — skipping verification"; return 0; }
 
   # This step installs and removes ziggity on its own, so Homebrew must never
-  # stop to prompt ("Do you want to proceed with the installation? [Y/n]") —
-  # that would hang the release. NONINTERACTIVE makes brew assume the default
-  # answer; the NO_AUTO_UPDATE/NO_INSTALL_CLEANUP vars keep it from wandering
-  # off to update or clean unrelated things mid-verification. `local -x` scopes
-  # them to this function while still exporting them to the brew subprocesses.
-  local -x NONINTERACTIVE=1 HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+  # stop to prompt ("Do you want to proceed with the installation? [y/n]") —
+  # that would hang the release. Recent Homebrew makes "ask mode" the default
+  # (HOMEBREW_ASK defaults on), so `brew install`/`upgrade`/`reinstall` prompt
+  # before proceeding when the plan pulls in dependencies. HOMEBREW_NO_ASK turns
+  # that off — NONINTERACTIVE does NOT (it only governs sudo/other prompts).
+  # NO_AUTO_UPDATE/NO_INSTALL_CLEANUP keep brew from wandering off to update or
+  # clean unrelated things mid-verification. `local -x` scopes these to this
+  # function while still exporting them to the brew subprocesses. Env vars (not
+  # flags like --no-ask) so this stays compatible with brew versions that
+  # predate the flag.
+  local -x HOMEBREW_NO_ASK=1 NONINTERACTIVE=1 HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
 
   local vis
   vis=$(gh repo view "$REPO" --json isPrivate --jq .isPrivate 2>/dev/null || echo "true")
