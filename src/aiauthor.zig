@@ -96,7 +96,7 @@ pub fn generate(allocator: std.mem.Allocator, git: *git_mod.Git, command: []cons
     };
 
     // Optional per-project / global commit-instructions file, scoped to this field.
-    const raw_instr = loadInstructions(allocator, git);
+    const raw_instr = loadInstructions(allocator, git, "commit-instructions.md");
     defer if (raw_instr) |r| allocator.free(r);
     const instr = if (raw_instr) |r| try composeFieldInstructions(allocator, r, field) else try allocator.dupe(u8, "");
     defer allocator.free(instr);
@@ -150,13 +150,14 @@ fn configDir(allocator: std.mem.Allocator, environ: *std.process.Environ.Map) !?
     return null;
 }
 
-/// Load the custom commit-instructions file, if any. Whole-file resolution, first
-/// match wins (no merge): the repo file completely overrides the global one.
-///   1. <repo>/.ziggity/commit-instructions.md
-///   2. <config dir>/commit-instructions.md   (see `configDir`)
+/// Load a custom instructions file (`filename`, e.g. "commit-instructions.md" or
+/// "pr-instructions.md"), if any. Whole-file resolution, first match wins (no
+/// merge): the repo file completely overrides the global one.
+///   1. <repo>/.ziggity/<filename>
+///   2. <config dir>/<filename>   (see `configDir`)
 /// Returns owned bytes, or null when neither exists or is readable.
-fn loadInstructions(allocator: std.mem.Allocator, git: *git_mod.Git) ?[]u8 {
-    if (std.fs.path.join(allocator, &.{ git.root, ".ziggity", "commit-instructions.md" })) |repo_path| {
+pub fn loadInstructions(allocator: std.mem.Allocator, git: *git_mod.Git, filename: []const u8) ?[]u8 {
+    if (std.fs.path.join(allocator, &.{ git.root, ".ziggity", filename })) |repo_path| {
         defer allocator.free(repo_path);
         if (std.Io.Dir.readFileAlloc(.cwd(), git.io, repo_path, allocator, .limited(max_instructions_bytes))) |bytes| {
             return bytes;
@@ -164,7 +165,7 @@ fn loadInstructions(allocator: std.mem.Allocator, git: *git_mod.Git) ?[]u8 {
     } else |_| {}
     if (configDir(allocator, git.environ) catch null) |dir| {
         defer allocator.free(dir);
-        if (std.fs.path.join(allocator, &.{ dir, "commit-instructions.md" })) |gpath| {
+        if (std.fs.path.join(allocator, &.{ dir, filename })) |gpath| {
             defer allocator.free(gpath);
             if (std.Io.Dir.readFileAlloc(.cwd(), git.io, gpath, allocator, .limited(max_instructions_bytes))) |bytes| {
                 return bytes;
@@ -310,6 +311,114 @@ pub fn buildDescPrompt(allocator: std.mem.Allocator, ctx: Context, body_wrap: us
     return out.toOwnedSlice(allocator);
 }
 
+// ---- Pull request document generation -------------------------------------
+
+/// A generated document: a title line plus a markdown body. Owned; free both.
+pub const DocResult = struct {
+    title: []u8,
+    body: []u8,
+
+    pub fn deinit(self: *DocResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.title);
+        allocator.free(self.body);
+    }
+};
+
+/// The git context a PR document is generated from.
+pub const DocContext = struct {
+    /// What the changes are, for the prompt header (e.g. "branch `feature` against
+    /// `origin/main`" or "commit abc1234").
+    subject: []const u8,
+    /// Commit list (see git.refLog): one "- <subject>" per commit plus bodies.
+    commit_log: []const u8,
+    /// The diff (see git.refDiff), already bounded; only its first 16 KB is used.
+    diff: []const u8,
+};
+
+/// Cap on the commit-log block put in the prompt (a long branch can have many).
+const max_commit_log_bytes: usize = 8 * 1024;
+
+/// Generate a pull request title + markdown body from `ctx`, honoring an optional
+/// `pr-instructions.md` (repo overrides global; `# Title` / `# Body` sections
+/// route to the title vs the body). One AI call returns "title\n\n<body>", which
+/// is split. Runs off the UI thread. Caller owns the result.
+pub fn generatePrDoc(allocator: std.mem.Allocator, git: *git_mod.Git, command: []const u8, ctx: DocContext) !DocResult {
+    const raw_instr = loadInstructions(allocator, git, "pr-instructions.md");
+    defer if (raw_instr) |r| allocator.free(r);
+    const title_instr = if (raw_instr) |r| try composeFieldInstructions(allocator, r, .title) else try allocator.dupe(u8, "");
+    defer allocator.free(title_instr);
+    const body_instr = if (raw_instr) |r| try composeFieldInstructions(allocator, r, .description) else try allocator.dupe(u8, "");
+    defer allocator.free(body_instr);
+
+    const prompt = try buildPrPrompt(allocator, ctx, title_instr, body_instr);
+    defer allocator.free(prompt);
+
+    var res = git.runAiCommand(command, "pr", prompt) catch return GenError.AiCommandFailed;
+    defer res.deinit(allocator);
+    if (!res.ok()) return GenError.AiCommandFailed;
+    const out = std.mem.trim(u8, res.stdout, " \t\r\n");
+    if (out.len == 0) return GenError.EmptyResponse;
+    return splitTitleBody(allocator, out);
+}
+
+fn buildPrPrompt(allocator: std.mem.Allocator, ctx: DocContext, title_instr: []const u8, body_instr: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "Write a GitHub pull request TITLE and DESCRIPTION for the changes below.\n\nRules:\n");
+    try out.appendSlice(allocator,
+        \\- First line: the PR title only — a concise, imperative summary. Plain text, no markdown, no quotes, no "Title:" prefix.
+        \\- Then one blank line.
+        \\- Then the description in GitHub-flavored markdown: a short summary of what the PR does and why, then the notable changes. Be concise; do not restate the diff line by line.
+        \\- Output only the title line, a blank line, and the body. No preamble, no code fences around the whole thing.
+        \\
+    );
+    if (title_instr.len > 0) {
+        try out.appendSlice(allocator, "\nTitle guidance (follow it): ");
+        try out.appendSlice(allocator, title_instr);
+        try out.appendSlice(allocator, "\n");
+    }
+    if (body_instr.len > 0) {
+        try out.appendSlice(allocator, "\nDescription guidance (follow it): ");
+        try out.appendSlice(allocator, body_instr);
+        try out.appendSlice(allocator, "\n");
+    }
+    try out.appendSlice(allocator, "\nThe changes are ");
+    try out.appendSlice(allocator, ctx.subject);
+    try out.appendSlice(allocator, ".\n\nCommits:\n");
+    const log = if (ctx.commit_log.len > max_commit_log_bytes) ctx.commit_log[0..max_commit_log_bytes] else ctx.commit_log;
+    try out.appendSlice(allocator, log);
+    try out.appendSlice(allocator, "\nDiff:\n");
+    try appendDiff(&out, allocator, ctx.diff);
+    try out.appendSlice(allocator, "\n\nTitle line, blank line, then the markdown body:\n");
+    return out.toOwnedSlice(allocator);
+}
+
+/// Split a "title\n\n<body>" response into an owned title + body. The first
+/// non-empty line is the title (a leading markdown `#` or `Title:` and wrapping
+/// quotes are stripped); everything after it is the body.
+fn splitTitleBody(allocator: std.mem.Allocator, out: []const u8) !DocResult {
+    const nl = std.mem.indexOfScalar(u8, out, '\n') orelse out.len;
+    var title = std.mem.trim(u8, out[0..nl], " \t\r");
+    title = stripTitlePrefix(title);
+    title = std.mem.trim(u8, stripWrappingQuotes(title), " \t");
+    const rest = if (nl < out.len) std.mem.trim(u8, out[nl + 1 ..], " \t\r\n") else "";
+    return DocResult{
+        .title = try allocator.dupe(u8, title),
+        .body = try allocator.dupe(u8, rest),
+    };
+}
+
+/// Strip a leading markdown heading marker (`#`, `##`, …) or a `Title:` label from
+/// a title line the model may have added despite the prompt.
+fn stripTitlePrefix(line: []const u8) []const u8 {
+    var s = std.mem.trimStart(u8, line, "#");
+    s = std.mem.trimStart(u8, s, " \t");
+    if (s.len >= 6 and std.ascii.eqlIgnoreCase(s[0..6], "title:")) {
+        s = std.mem.trimStart(u8, s[6..], " \t");
+    }
+    return s;
+}
+
 // ---- Response normalization ----------------------------------------------
 
 fn trimEnd(s: []const u8, chars: []const u8) []const u8 {
@@ -436,6 +545,28 @@ test "composeFieldInstructions routes shared/title/body sections per field" {
     try std.testing.expect(std.mem.indexOf(u8, b, "Conventional Commits") != null); // shared
     try std.testing.expect(std.mem.indexOf(u8, b, "reference issues") != null); // body section
     try std.testing.expect(std.mem.indexOf(u8, b, "under 60 characters") == null); // NOT the title section
+}
+
+test "splitTitleBody separates the title line from the markdown body" {
+    const a = std.testing.allocator;
+    {
+        var r = try splitTitleBody(a, "Add dark mode toggle\n\n## Summary\nAdds a toggle.");
+        defer r.deinit(a);
+        try std.testing.expectEqualStrings("Add dark mode toggle", r.title);
+        try std.testing.expectEqualStrings("## Summary\nAdds a toggle.", r.body);
+    }
+    { // strips a stray markdown "# " and wrapping quotes from the title
+        var r = try splitTitleBody(a, "# \"Fix the crash\"\n\nBody here.");
+        defer r.deinit(a);
+        try std.testing.expectEqualStrings("Fix the crash", r.title);
+        try std.testing.expectEqualStrings("Body here.", r.body);
+    }
+    { // strips a "Title:" label, tolerates a title-only response (empty body)
+        var r = try splitTitleBody(a, "Title: Bump deps");
+        defer r.deinit(a);
+        try std.testing.expectEqualStrings("Bump deps", r.title);
+        try std.testing.expectEqualStrings("", r.body);
+    }
 }
 
 test "capFileList keeps a short list and summarizes a long one" {

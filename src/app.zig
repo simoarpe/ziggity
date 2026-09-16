@@ -15116,6 +15116,73 @@ test "stagedDiff falls back to a stat summary when the full diff overflows exec'
     try std.testing.expect(std.mem.indexOf(u8, diff, "big.txt") != null); // names the staged file
 }
 
+test "refDiff / refLog / defaultBranch gather a branch's changes for PR generation" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q -b main
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf 'base\n' > f.txt && git add f.txt && git commit -qm base
+        \\git checkout -q -b feature
+        \\printf 'feature line\n' >> f.txt && git add f.txt && git commit -qm "Add feature line"
+    );
+    var g = try git_mod.Git.initAt(a, tio, &env, dir_path);
+    defer g.deinit();
+
+    const diff = try g.refDiff("main", "feature", true);
+    defer a.free(diff);
+    try std.testing.expect(std.mem.indexOf(u8, diff, "feature line") != null); // three-dot diff of the branch
+
+    const log = try g.refLog("main", "feature", 50);
+    defer a.free(log);
+    try std.testing.expect(std.mem.indexOf(u8, log, "Add feature line") != null); // the branch's commit
+
+    const def = try g.defaultBranch();
+    defer a.free(def);
+    try std.testing.expectEqualStrings("main", def); // no origin/HEAD, local main exists
+}
+
+test "generatePrDoc runs the ai_command and returns a split title + body" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q -b main
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf 'x\n' > f.txt && git add f.txt && git commit -qm base
+    );
+    var g = try git_mod.Git.initAt(a, tio, &env, dir_path); // sets git_dir for runAiCommand
+    defer g.deinit();
+
+    const ctx = aiauthor_mod.DocContext{ .subject = "branch feature vs main", .commit_log = "- add feature", .diff = "diff --git a/f b/f" };
+    // Fake ai_command: ignores stdin (the piped prompt), prints a title + body.
+    var doc = try aiauthor_mod.generatePrDoc(a, &g, "printf 'Add the feature\\n\\n## Summary\\nDoes the thing.'", ctx);
+    defer doc.deinit(a);
+    try std.testing.expectEqualStrings("Add the feature", doc.title);
+    try std.testing.expectEqualStrings("## Summary\nDoes the thing.", doc.body);
+}
+
 test "merge commit's per-file preview shows the brought-in file (issue #22 follow-up)" {
     const a = std.testing.allocator;
     const tio = std.testing.io;
