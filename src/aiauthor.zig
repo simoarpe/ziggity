@@ -19,6 +19,13 @@ pub const Field = enum { title, description };
 pub const Limits = struct {
     title_max: usize = 50,
     body_wrap: usize = 72,
+    /// Include ziggity's built-in soft style guidance (imperative mood, no
+    /// trailing period, follow recent-commit conventions for the subject; don't
+    /// restate the subject and explain motivation for the body). From
+    /// `ai_commit_style_defaults`. When false, only the hard output contract and
+    /// the length/wrap numbers remain ours, and any custom instructions file is
+    /// the sole style voice. The contract and 50/72 numbers always apply.
+    style_defaults: bool = true,
 };
 
 /// Cap on how much of the staged diff we put in a prompt, so a huge staged
@@ -54,9 +61,16 @@ pub fn generate(allocator: std.mem.Allocator, git: *git_mod.Git, command: []cons
         .recent_subjects = subjects,
         .current_title = current_title,
     };
+
+    // Optional per-project / global commit-instructions file, scoped to this field.
+    const raw_instr = loadInstructions(allocator, git);
+    defer if (raw_instr) |r| allocator.free(r);
+    const instr = if (raw_instr) |r| try composeFieldInstructions(allocator, r, field) else try allocator.dupe(u8, "");
+    defer allocator.free(instr);
+
     const prompt = switch (field) {
-        .title => try buildTitlePrompt(allocator, ctx, limits.title_max),
-        .description => try buildDescPrompt(allocator, ctx, limits.body_wrap),
+        .title => try buildTitlePrompt(allocator, ctx, limits.title_max, limits.style_defaults, instr),
+        .description => try buildDescPrompt(allocator, ctx, limits.body_wrap, limits.style_defaults, instr),
     };
     defer allocator.free(prompt);
 
@@ -76,6 +90,107 @@ pub fn generate(allocator: std.mem.Allocator, git: *git_mod.Git, command: []cons
     };
 }
 
+// ---- Custom commit instructions (optional user file) ----------------------
+
+/// A commit-instructions file is a prompt fragment, not data; bound its size.
+const max_instructions_bytes: usize = 16 * 1024;
+
+/// Which prompt a section of the instructions file applies to. Text with no
+/// heading is `shared` (goes to both title and body).
+const Bucket = enum { shared, title, body };
+
+/// The global config directory ziggity looks in, mirroring the state-dir logic
+/// in recentrepos: `$XDG_CONFIG_HOME/ziggity`, else on Windows `%APPDATA%\ziggity`,
+/// else `$HOME/.config/ziggity`. Caller frees. Null when no home is configured.
+fn configDir(allocator: std.mem.Allocator, environ: *std.process.Environ.Map) !?[]u8 {
+    if (environ.get("XDG_CONFIG_HOME")) |x| {
+        if (x.len > 0) return try std.fs.path.join(allocator, &.{ x, "ziggity" });
+    }
+    if (@import("builtin").os.tag == .windows) {
+        if (environ.get("APPDATA")) |a| {
+            if (a.len > 0) return try std.fs.path.join(allocator, &.{ a, "ziggity" });
+        }
+    }
+    if (environ.get("HOME")) |h| {
+        if (h.len > 0) return try std.fs.path.join(allocator, &.{ h, ".config", "ziggity" });
+    }
+    return null;
+}
+
+/// Load the custom commit-instructions file, if any. Whole-file resolution, first
+/// match wins (no merge): the repo file completely overrides the global one.
+///   1. <repo>/.ziggity/commit-instructions.md
+///   2. <config dir>/commit-instructions.md   (see `configDir`)
+/// Returns owned bytes, or null when neither exists or is readable.
+fn loadInstructions(allocator: std.mem.Allocator, git: *git_mod.Git) ?[]u8 {
+    if (std.fs.path.join(allocator, &.{ git.root, ".ziggity", "commit-instructions.md" })) |repo_path| {
+        defer allocator.free(repo_path);
+        if (std.Io.Dir.readFileAlloc(.cwd(), git.io, repo_path, allocator, .limited(max_instructions_bytes))) |bytes| {
+            return bytes;
+        } else |_| {}
+    } else |_| {}
+    if (configDir(allocator, git.environ) catch null) |dir| {
+        defer allocator.free(dir);
+        if (std.fs.path.join(allocator, &.{ dir, "commit-instructions.md" })) |gpath| {
+            defer allocator.free(gpath);
+            if (std.Io.Dir.readFileAlloc(.cwd(), git.io, gpath, allocator, .limited(max_instructions_bytes))) |bytes| {
+                return bytes;
+            } else |_| {}
+        } else |_| {}
+    }
+    return null;
+}
+
+/// Recognize a section-heading line, or null for ordinary content. Accepts a
+/// markdown heading (`# Title`, `## Subject`) or a `Label:` line, case-insensitive:
+/// Title/Titles/Subject -> title, Body/Description -> body, Shared/Both -> shared.
+fn headingBucket(line: []const u8) ?Bucket {
+    var s = std.mem.trim(u8, line, " \t\r");
+    if (s.len == 0) return null;
+    var had_hash = false;
+    while (s.len > 0 and s[0] == '#') : (s = s[1..]) had_hash = true;
+    s = std.mem.trimStart(u8, s, " \t");
+    var is_label = false;
+    if (std.mem.lastIndexOfScalar(u8, s, ':')) |c| {
+        // A "Label:" heading has nothing but spaces after the colon; a prose line
+        // like "Explain why: it does X" keeps content there and is not a heading.
+        if (std.mem.trim(u8, s[c + 1 ..], " \t").len == 0) {
+            s = s[0..c];
+            is_label = true;
+        }
+    }
+    if (!had_hash and !is_label) return null;
+    s = std.mem.trim(u8, s, " \t");
+    if (std.ascii.eqlIgnoreCase(s, "title") or std.ascii.eqlIgnoreCase(s, "titles") or std.ascii.eqlIgnoreCase(s, "subject")) return .title;
+    if (std.ascii.eqlIgnoreCase(s, "body") or std.ascii.eqlIgnoreCase(s, "description")) return .body;
+    if (std.ascii.eqlIgnoreCase(s, "shared") or std.ascii.eqlIgnoreCase(s, "both")) return .shared;
+    return null;
+}
+
+/// Build the instruction text for `field` from a raw commit-instructions file:
+/// the shared (pre/unheaded) lines plus the lines under the matching Title/Body
+/// section, in file order. Owned result, trimmed, possibly empty. Handles repeated
+/// or interleaved headings line by line.
+pub fn composeFieldInstructions(allocator: std.mem.Allocator, raw: []const u8, field: Field) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    var cur: Bucket = .shared;
+    var lines = std.mem.splitScalar(u8, raw, '\n');
+    while (lines.next()) |line| {
+        if (headingBucket(line)) |b| {
+            cur = b;
+            continue; // the heading itself is a marker, not content
+        }
+        const want = cur == .shared or
+            (field == .title and cur == .title) or
+            (field == .description and cur == .body);
+        if (!want) continue;
+        if (out.items.len > 0) try out.append(allocator, '\n');
+        try out.appendSlice(allocator, line);
+    }
+    return allocator.dupe(u8, std.mem.trim(u8, out.items, " \t\r\n"));
+}
+
 // ---- Prompt construction --------------------------------------------------
 
 fn appendDiff(out: *std.ArrayList(u8), allocator: std.mem.Allocator, diff: []const u8) !void {
@@ -87,53 +202,78 @@ fn appendDiff(out: *std.ArrayList(u8), allocator: std.mem.Allocator, diff: []con
     }
 }
 
-pub fn buildTitlePrompt(allocator: std.mem.Allocator, ctx: Context, title_max: usize) ![]u8 {
+pub fn buildTitlePrompt(allocator: std.mem.Allocator, ctx: Context, title_max: usize, style_defaults: bool, instructions: []const u8) ![]u8 {
     const max = if (title_max == 0) 50 else title_max;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator, "Write a git commit SUBJECT LINE for the staged changes below.\n\nRules:\n");
+    // Hard output contract + length: always ours (the parser keeps the first line
+    // only, so a preamble would corrupt the title).
     try out.appendSlice(allocator, "- Output ONLY the subject line. No quotes, no markdown, no code fences, no preamble or explanation.\n");
     var nbuf: [96]u8 = undefined;
     try out.appendSlice(allocator, std.fmt.bufPrint(&nbuf, "- At most {d} characters when reasonable; never wrap to multiple lines.\n", .{max}) catch "- Keep the subject short; never wrap to multiple lines.\n");
-    try out.appendSlice(allocator,
-        \\- Imperative mood, e.g. "Fix wallet layout in landscape" not "Fixed the wallet layout.".
-        \\- No trailing period unless the recent subjects clearly use one.
-        \\- Follow the conventions visible in the recent subjects (prefixes, casing) when there is a clear pattern.
-        \\
-        \\Recent commit subjects (for style):
-        \\
-    );
+    // Soft style defaults: gated by `ai_commit_style_defaults` so a custom file
+    // can be the sole style voice when it is turned off.
+    if (style_defaults) {
+        try out.appendSlice(allocator,
+            \\- Imperative mood, e.g. "Fix wallet layout in landscape" not "Fixed the wallet layout.".
+            \\- No trailing period unless the recent subjects clearly use one.
+            \\- Follow the conventions visible in the recent subjects (prefixes, casing) when there is a clear pattern.
+            \\
+        );
+    }
+    // Project instructions come last (after our defaults) so they win by recency
+    // and can override the soft rules above; the hard contract is re-asserted at
+    // the tail so it always has the final word.
+    try appendInstructions(&out, allocator, instructions);
+    try out.appendSlice(allocator, "\nRecent commit subjects (for style):\n");
     try out.appendSlice(allocator, ctx.recent_subjects);
     try out.appendSlice(allocator, "\nStaged files:\n");
     try out.appendSlice(allocator, ctx.staged_files);
     try out.appendSlice(allocator, "\nStaged diff:\n");
     try appendDiff(&out, allocator, ctx.staged_diff);
-    try out.appendSlice(allocator, "\n\nSubject line:");
+    try out.appendSlice(allocator, "\n\nOutput only the single subject line, nothing else.\nSubject line:");
     return out.toOwnedSlice(allocator);
 }
 
-pub fn buildDescPrompt(allocator: std.mem.Allocator, ctx: Context, body_wrap: usize) ![]u8 {
+/// Append the project's custom instructions as a distinct, authoritative section,
+/// or nothing when there are none.
+fn appendInstructions(out: *std.ArrayList(u8), allocator: std.mem.Allocator, instructions: []const u8) !void {
+    if (instructions.len == 0) return;
+    try out.appendSlice(allocator, "\nProject commit instructions (follow these; they take precedence over the defaults above):\n");
+    try out.appendSlice(allocator, instructions);
+    try out.appendSlice(allocator, "\n");
+}
+
+pub fn buildDescPrompt(allocator: std.mem.Allocator, ctx: Context, body_wrap: usize, style_defaults: bool, instructions: []const u8) ![]u8 {
     const wrap = if (body_wrap == 0) 72 else body_wrap;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator, "Write a git commit MESSAGE BODY (description) for the staged changes below.\n\nRules:\n");
+    // Hard output contract: always ours.
     try out.appendSlice(allocator, "- Output ONLY the body. No subject line, no quotes, no markdown headings, no code fences, no preamble.\n");
-    try out.appendSlice(allocator, "- Do not repeat or restate the subject.\n");
-    try out.appendSlice(allocator, "- Explain the motivation and the resulting behavior, not a line-by-line restatement of the diff.\n");
+    // Soft style defaults: gated by `ai_commit_style_defaults`.
+    if (style_defaults) {
+        try out.appendSlice(allocator, "- Do not repeat or restate the subject.\n");
+        try out.appendSlice(allocator, "- Explain the motivation and the resulting behavior, not a line-by-line restatement of the diff.\n");
+    }
+    // Wrap width is ours and also code-enforced (normalizeBody), so it stays even
+    // when style defaults are off.
     var nbuf: [96]u8 = undefined;
     try out.appendSlice(allocator, std.fmt.bufPrint(&nbuf, "- Plain-text git style, wrapped at {d} columns, short paragraphs separated by a blank line.\n", .{wrap}) catch "- Plain-text git style, wrapped at 72 columns, short paragraphs separated by a blank line.\n");
+    try appendInstructions(&out, allocator, instructions);
     if (std.mem.trim(u8, ctx.current_title, " \t\r\n").len > 0) {
-        try out.appendSlice(allocator, "The commit subject is: ");
+        try out.appendSlice(allocator, "\nThe commit subject is: ");
         try out.appendSlice(allocator, ctx.current_title);
-        try out.appendSlice(allocator, "\nWrite a body that complements it.\n\n");
+        try out.appendSlice(allocator, "\nWrite a body that complements it.\n");
     }
-    try out.appendSlice(allocator, "Recent commit subjects (for style):\n");
+    try out.appendSlice(allocator, "\nRecent commit subjects (for style):\n");
     try out.appendSlice(allocator, ctx.recent_subjects);
     try out.appendSlice(allocator, "\nStaged files:\n");
     try out.appendSlice(allocator, ctx.staged_files);
     try out.appendSlice(allocator, "\nStaged diff:\n");
     try appendDiff(&out, allocator, ctx.staged_diff);
-    try out.appendSlice(allocator, "\n\nBody:");
+    try out.appendSlice(allocator, "\n\nOutput only the body, nothing else.\nBody:");
     return out.toOwnedSlice(allocator);
 }
 
@@ -239,6 +379,79 @@ fn isListItem(t: []const u8) bool {
     var i: usize = 0;
     while (i < t.len and t[i] >= '0' and t[i] <= '9') i += 1;
     return i > 0 and i + 1 < t.len and (t[i] == '.' or t[i] == ')') and t[i + 1] == ' ';
+}
+
+test "composeFieldInstructions routes shared/title/body sections per field" {
+    const a = std.testing.allocator;
+    const raw =
+        \\Use Conventional Commits with a scope.
+        \\
+        \\# Title
+        \\Keep it under 60 characters.
+        \\
+        \\# Body
+        \\Explain why, reference issues at the end.
+    ;
+    const t = try composeFieldInstructions(a, raw, .title);
+    defer a.free(t);
+    try std.testing.expect(std.mem.indexOf(u8, t, "Conventional Commits") != null); // shared
+    try std.testing.expect(std.mem.indexOf(u8, t, "under 60 characters") != null); // title section
+    try std.testing.expect(std.mem.indexOf(u8, t, "reference issues") == null); // NOT the body section
+
+    const b = try composeFieldInstructions(a, raw, .description);
+    defer a.free(b);
+    try std.testing.expect(std.mem.indexOf(u8, b, "Conventional Commits") != null); // shared
+    try std.testing.expect(std.mem.indexOf(u8, b, "reference issues") != null); // body section
+    try std.testing.expect(std.mem.indexOf(u8, b, "under 60 characters") == null); // NOT the title section
+}
+
+test "composeFieldInstructions with no headings: everything is shared" {
+    const a = std.testing.allocator;
+    const raw = "No emoji. Mention the affected module.";
+    const t = try composeFieldInstructions(a, raw, .title);
+    defer a.free(t);
+    const b = try composeFieldInstructions(a, raw, .description);
+    defer a.free(b);
+    try std.testing.expectEqualStrings(raw, t);
+    try std.testing.expectEqualStrings(raw, b);
+}
+
+test "headingBucket recognizes markdown and label forms, ignores prose colons" {
+    try std.testing.expectEqual(Bucket.title, headingBucket("# Title").?);
+    try std.testing.expectEqual(Bucket.title, headingBucket("## Subject").?);
+    try std.testing.expectEqual(Bucket.body, headingBucket("Body:").?);
+    try std.testing.expectEqual(Bucket.body, headingBucket("Description:").?);
+    try std.testing.expectEqual(Bucket.shared, headingBucket("# Shared").?);
+    try std.testing.expect(headingBucket("Explain why: it fixes the crash") == null); // prose colon
+    try std.testing.expect(headingBucket("Keep it short.") == null);
+    try std.testing.expect(headingBucket("# Notes") == null); // unrecognized heading = content
+}
+
+test "buildTitlePrompt gates the style defaults and injects project instructions" {
+    const a = std.testing.allocator;
+    const ctx = Context{ .staged_diff = "diff", .staged_files = "f.zig", .recent_subjects = "Fix x" };
+
+    // Defaults on, no custom file: our imperative rule is present.
+    const p1 = try buildTitlePrompt(a, ctx, 50, true, "");
+    defer a.free(p1);
+    try std.testing.expect(std.mem.indexOf(u8, p1, "Imperative mood") != null);
+    try std.testing.expect(std.mem.indexOf(u8, p1, "Output ONLY the subject line") != null); // hard contract
+    try std.testing.expect(std.mem.indexOf(u8, p1, "Project commit instructions") == null);
+
+    // Defaults off: the imperative rule is gone, contract + length stay.
+    const p2 = try buildTitlePrompt(a, ctx, 50, false, "");
+    defer a.free(p2);
+    try std.testing.expect(std.mem.indexOf(u8, p2, "Imperative mood") == null);
+    try std.testing.expect(std.mem.indexOf(u8, p2, "Output ONLY the subject line") != null);
+    try std.testing.expect(std.mem.indexOf(u8, p2, "At most 50 characters") != null);
+
+    // Custom instructions appear as an authoritative section, and the contract is
+    // still re-asserted at the tail.
+    const p3 = try buildTitlePrompt(a, ctx, 50, true, "Use Conventional Commits.");
+    defer a.free(p3);
+    try std.testing.expect(std.mem.indexOf(u8, p3, "Project commit instructions") != null);
+    try std.testing.expect(std.mem.indexOf(u8, p3, "Use Conventional Commits.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, p3, "Output only the single subject line") != null); // tail re-assert
 }
 
 test "normalizeTitle strips quotes and takes the first line" {

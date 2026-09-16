@@ -52,6 +52,36 @@ ai_command =
 # automatic start; ctrl+g manual generation is always available when configured).
 auto_generate_commit_title = false
 auto_generate_commit_description = false
+# Include ziggity's built-in commit-style guidance in the AI prompts. For the
+# subject: imperative mood, no trailing period, and following the conventions in
+# your recent commits. For the body: don't restate the subject, and explain the
+# motivation rather than the diff. On by default. Set false to hand style entirely
+# to a commit-instructions file (below) or the model. Either way the output format
+# and the commit_summary_limit / commit_body_guide lengths still apply.
+ai_commit_style_defaults = true
+#
+# Extra, free-form instructions (style, tone, Conventional Commits, ticket refs,
+# what to emphasize) live in a separate Markdown file, not here, so this file
+# stays small. Ziggity looks for it in this order, and the FIRST it finds wins
+# outright (no merging):
+#   1. <repo>/.ziggity/commit-instructions.md          (per project)
+#   2. <config dir>/ziggity/commit-instructions.md      (global default)
+# where <config dir> is $XDG_CONFIG_HOME (else ~/.config on macOS/Linux, or
+# %APPDATA% on Windows). So a repo file completely overrides your global one.
+# The file is injected into the AI prompt AFTER the built-in rules, so it takes
+# precedence over the soft style defaults above (but never over the output format
+# or the length limits). Use optional "# Title" and "# Body" section headings to
+# aim guidance at just the subject or just the body; text with no heading applies
+# to both. Widths belong in commit_summary_limit / commit_body_guide, not the file
+# (the body is re-wrapped to commit_body_guide regardless). Example file:
+#
+#   Use Conventional Commits (feat/fix/docs/refactor/chore) with an optional scope.
+#
+#   # Title
+#   Keep it under 60 characters. Present tense is fine.
+#
+#   # Body
+#   Explain why the change was made. Put "Fixes #123" on its own line at the end.
 
 # Seconds between idle background working tree refreshes (git status, run
 # off the interface thread). On a big repo a tight interval makes git status

@@ -320,6 +320,14 @@ pub const Config = struct {
     ai_command: FixedStr(256) = .{},
     auto_generate_commit_title: bool = false,
     auto_generate_commit_description: bool = false,
+    /// Include ziggity's built-in soft commit-style guidance in the AI prompts:
+    /// for the subject, imperative mood, no trailing period, and following your
+    /// recent-commit conventions; for the body, don't restate the subject and
+    /// explain the motivation rather than the diff. Default true. Set false to let
+    /// a commit-instructions file (or the model) own the style entirely. The hard
+    /// output format and the `commit_summary_limit` / `commit_body_guide` lengths
+    /// always apply either way. See docs for the commit-instructions file.
+    ai_commit_style_defaults: bool = true,
     /// Accordion mode: when true, the focused side-panel list grows to
     /// `expanded_side_panel_weight` while the others shrink. Default off.
     expand_focused_side_panel: bool = false,
@@ -466,6 +474,10 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "auto_generate_commit_description")) {
             if (parseBool(value)) |on| self.auto_generate_commit_description = on;
+            return;
+        }
+        if (std.mem.eql(u8, key, "ai_commit_style_defaults")) {
+            if (parseBool(value)) |on| self.ai_commit_style_defaults = on;
             return;
         }
         if (std.mem.eql(u8, key, "prepare_commit_msg_hook")) {
@@ -721,6 +733,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     try std.testing.expect(!cfg.aiConfigured()); // no ai_command -> AI unavailable
     try std.testing.expect(!cfg.auto_generate_commit_title);
     try std.testing.expect(!cfg.auto_generate_commit_description);
+    try std.testing.expect(cfg.ai_commit_style_defaults); // built-in style guidance on by default
 
     cfg.applyBytes(
         \\result_dialog = always
@@ -728,6 +741,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
         \\ai_command = pi -p
         \\auto_generate_commit_title = true
         \\auto_generate_commit_description = yes
+        \\ai_commit_style_defaults = false
         \\skip_confirm.discard_all = true
         \\skip_confirm.amend = true
         \\skip_confirm.undo = yes
@@ -755,6 +769,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     try std.testing.expectEqualStrings("pi -p", cfg.ai_command.get());
     try std.testing.expect(cfg.auto_generate_commit_title);
     try std.testing.expect(cfg.auto_generate_commit_description);
+    try std.testing.expect(!cfg.ai_commit_style_defaults); // default true, overridden to false
     try std.testing.expectEqual(StagingSplitMode.on, cfg.staging_split);
     try std.testing.expectEqual(ResultDialog.always, cfg.result_dialog); // valid set; bad value ignored
     try std.testing.expectEqual(CommandOutput.silent, cfg.command_output);

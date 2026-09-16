@@ -10657,6 +10657,7 @@ pub const App = struct {
                 // summary counter / body guide (0).
                 .title_max = if (self.config.commit_summary_limit > 0) self.config.commit_summary_limit else 50,
                 .body_wrap = if (self.config.commit_body_guide > 0) self.config.commit_body_guide else 72,
+                .style_defaults = self.config.ai_commit_style_defaults,
             },
             .current_title = title_copy,
         };
