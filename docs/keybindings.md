@@ -133,8 +133,9 @@ the written reference. Every binding is remappable, see
 - `f` / `p` / `P`: fetch / pull / push. `fetch` follows your git `fetch.prune`
   config by default; set `fetch_prune_mode = on` (or `off`) to always (or never)
   prune deleted remote branches. `pull` follows your git `pull.rebase` config by
-  default; set `pull_mode = menu` to pick merge/rebase/fast-forward when a pull
-  has local commits to integrate (see [Configuration](configuration.md))
+  default; set `pull_mode = menu` to pick merge/rebase/fast-forward, or reset the
+  branch to its upstream (discarding local commits and changes), when a pull has
+  local commits to integrate (see [Configuration](configuration.md))
 - `esc`: step back one level (deselect, clear a filter, exit diffing, cancel
   a prompt, leave a panel); never quits, only `q` does
 

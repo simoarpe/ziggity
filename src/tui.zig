@@ -2696,6 +2696,7 @@ fn drawConfirmPopup(root: vaxis.Window, app: *app_mod.App) void {
         .delete_index_lock => "Git locked",
         .reset_patch => "Discard patch",
         .remove_recent_repo => "Remove from recent list",
+        .pull_reset_upstream => "Reset to remote",
     };
     // Wrap the message so a long prompt (e.g. a worktree path) stays readable
     // inside the box instead of being clipped, growing the popup's height.

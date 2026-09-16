@@ -259,6 +259,9 @@ pub const ConfirmSkips = struct {
     /// Field exists so `shouldSkipConfirm`'s comptime lookup covers every
     /// Confirmation tag; the dead recent-repo prompt is never auto-skipped.
     remove_recent_repo: bool = false,
+    /// Skip the confirmation before the pull menu's "Reset to remote" hard reset.
+    /// Off by default: it discards local commits, so it asks first.
+    pull_reset_upstream: bool = false,
 };
 
 pub const Config = struct {

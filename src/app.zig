@@ -271,6 +271,10 @@ pub const Confirmation = enum {
     /// Offered when a ctrl+r recent repository no longer resolves as a git repo.
     /// Confirming drops it from the recent list (nothing on disk is touched).
     remove_recent_repo,
+    /// Offered by the pull menu's "Reset to remote": a hard reset of the current
+    /// branch onto its upstream, discarding local commits and uncommitted tracked
+    /// changes. Recoverable via the reflog, but destructive enough to confirm.
+    pull_reset_upstream,
 };
 
 /// What to re-run after the user confirms deleting a stale git lock file. Only
@@ -551,6 +555,7 @@ pub const MenuAction = enum {
     pull_merge,
     pull_rebase,
     pull_ff_only,
+    pull_reset_upstream,
     reset_soft,
     reset_mixed,
     reset_hard,
@@ -760,6 +765,7 @@ pub const pull_menu = [_]MenuItem{
     .{ .label = "Merge", .action = .pull_merge },
     .{ .label = "Rebase", .action = .pull_rebase },
     .{ .label = "Fast-forward only", .action = .pull_ff_only },
+    .{ .label = "Reset to remote (discard local commits & changes)", .action = .pull_reset_upstream },
 };
 
 pub const commit_reset_menu = [_]MenuItem{
@@ -6603,6 +6609,11 @@ pub const App = struct {
             },
             .reset_patch => "You can only build a patch from one commit at a time. Discard the current patch?",
             .remove_recent_repo => "not a git repository, do you want to remove it from recent list? (this action won't remove anything from disk)",
+            .pull_reset_upstream => blk: {
+                const upstream = self.data.upstream orelse break :blk "Reset the current branch to its upstream, discarding local commits and changes?";
+                const n = self.data.ahead orelse 0;
+                break :blk std.fmt.bufPrint(buf, "Discard {d} local commit(s) and all uncommitted changes, resetting {s} to {s}? (recoverable via git reflog)", .{ n, self.data.current_branch, upstream }) catch "Reset to upstream, discarding local commits and changes?";
+            },
         };
     }
 
@@ -8595,6 +8606,13 @@ pub const App = struct {
             .pull_merge => return self.requestAsync(.pull_merge),
             .pull_rebase => return self.requestAsync(.pull_rebase),
             .pull_ff_only => return self.requestAsync(.pull_ff_only),
+            .pull_reset_upstream => {
+                if (!self.currentBranchHasUpstream()) {
+                    try self.setMessage("current branch has no upstream to reset to", .{});
+                    return;
+                }
+                return self.requestConfirmation(.pull_reset_upstream, "reset {s} to its upstream?", .{self.data.current_branch});
+            },
             .fixup_down => return commitops_mod.rebaseSelectedCommit(self, .fixup),
             .fixup_down_keep => return commitops_mod.rebaseSelectedCommit(self, .fixup_keep),
             .autosquash_above => return commitops_mod.autosquashFixups(self),
@@ -9338,6 +9356,17 @@ pub const App = struct {
                     self.recent_remove_path = null;
                 }
                 return self.setMessage("removed from recent list", .{});
+            },
+            .pull_reset_upstream => {
+                // Reset onto the local remote-tracking ref (`origin/<branch>`),
+                // which git resolves without a network round trip; ziggity's
+                // background fetch keeps it current. A hard reset drops local
+                // commits and tracked working changes (untracked files survive).
+                const upstream = self.data.upstream orelse {
+                    try self.setMessage("current branch has no upstream to reset to", .{});
+                    return;
+                };
+                return self.runMutationScoped(try self.git.resetTo(upstream, .hard), Refresh.checkout, "reset {s} to {s}", .{ self.data.current_branch, upstream });
             },
         }
     }
@@ -14843,6 +14872,7 @@ test "pull_mode routes p to a plain pull or the merge/rebase menu" {
     try std.testing.expectEqual(MenuAction.pull_merge, app.active_menu.?.items[0].action);
     try std.testing.expectEqual(MenuAction.pull_rebase, app.active_menu.?.items[1].action);
     try std.testing.expectEqual(MenuAction.pull_ff_only, app.active_menu.?.items[2].action);
+    try std.testing.expectEqual(MenuAction.pull_reset_upstream, app.active_menu.?.items[3].action);
 
     // Selecting Rebase queues an explicit `git pull --rebase`.
     try app.runMenuAction(.pull_rebase);
@@ -14850,6 +14880,73 @@ test "pull_mode routes p to a plain pull or the merge/rebase menu" {
     try std.testing.expectEqualStrings("--rebase", AsyncOp.pull_rebase.argv()[1]);
     // "Merge" forces --no-rebase so it beats a pull.rebase=true git config.
     try std.testing.expectEqualStrings("--no-rebase", AsyncOp.pull_merge.argv()[1]);
+}
+
+test "pull menu 'Reset to remote' confirms, then hard-resets onto the upstream" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    // A local branch tracking origin/main, diverged: one extra local commit plus
+    // an uncommitted tracked change to discard.
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q --bare origin.git
+        \\git clone -q origin.git work
+        \\cd work
+        \\git checkout -q -b main
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf 'base\n' > f.txt
+        \\git add f.txt
+        \\git commit -qm base
+        \\git push -q -u origin main
+        \\git commit -q --allow-empty -m "local only"
+        \\printf 'dirty\n' >> f.txt
+    );
+
+    var pbuf2: [200]u8 = undefined;
+    const work_path = try std.fmt.bufPrint(&pbuf2, "{s}/work", .{dir_path});
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    app.git = try git_mod.Git.initAt(a, tio, &env, work_path);
+    defer app.git.deinit();
+    defer app.data.deinit(a);
+
+    // Populate the status fields the reset reads (branch, upstream, ahead).
+    app.allocator.free(app.data.current_branch);
+    app.data.current_branch = try a.dupe(u8, "main");
+    app.data.upstream = try a.dupe(u8, "origin/main");
+    app.data.ahead = 1;
+    try std.testing.expect(app.currentBranchHasUpstream());
+
+    // Selecting the menu item asks first (destructive), it does not reset yet.
+    try app.runMenuAction(.pull_reset_upstream);
+    try std.testing.expectEqual(Confirmation.pull_reset_upstream, app.pending_confirmation.?);
+    var pre = try app.git.exec(&.{ "rev-list", "--count", "HEAD" });
+    defer pre.deinit(a);
+    try std.testing.expectEqualStrings("2", std.mem.trim(u8, pre.stdout, " \n")); // base + local only
+
+    // Confirming hard-resets onto origin/main: the local commit is gone and the
+    // tracked file matches the remote again.
+    try app.confirmPendingAction();
+    var post = try app.git.exec(&.{ "rev-list", "--count", "HEAD" });
+    defer post.deinit(a);
+    try std.testing.expectEqualStrings("1", std.mem.trim(u8, post.stdout, " \n")); // just base
+    var show = try app.git.exec(&.{ "show", "HEAD:f.txt" });
+    defer show.deinit(a);
+    try std.testing.expectEqualStrings("base\n", show.stdout);
+    var st = try app.git.exec(&.{ "status", "--porcelain" });
+    defer st.deinit(a);
+    try std.testing.expectEqualStrings("", std.mem.trim(u8, st.stdout, " \n")); // clean tree
 }
 
 test "activeFilterCount counts the file, branch and commit filters together" {

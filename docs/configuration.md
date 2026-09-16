@@ -112,9 +112,11 @@ commit_graph_scope = current       # current (default) | all
 fetch_prune_mode = git             # git (default: follow git's fetch.prune) | on | off
 # How `p` (pull) behaves. `git` (default) runs `git pull`, which follows your own
 # git `pull.rebase` config (set `git config pull.rebase true` for rebase pulls).
-# `menu` opens a menu to pick merge, rebase, or fast-forward-only — but only when
-# the branch has local commits to integrate, since a pull with none can only
-# fast-forward and there is nothing to choose.
+# `menu` opens a menu to pick merge, rebase, fast-forward-only, or "Reset to
+# remote" (a hard reset of the branch onto its upstream that discards local
+# commits and uncommitted changes, asked for first). The menu only appears when
+# the branch has local commits, since a pull with none can only fast-forward and
+# there is nothing to choose.
 pull_mode = git                    # git (default: follow git's pull.rebase) | menu
 # HEAD log ordering. `date` (default) is git's native reverse-chronological
 # order, newest commit first. `topo` keeps a branch's commits contiguous so the
@@ -168,6 +170,7 @@ skip_confirm.remove_remote = false
 skip_confirm.undo = false
 skip_confirm.force_push = false        # auto --force-with-lease when a push is rejected
 skip_confirm.force_push_plain = false  # auto --force when force-with-lease is rejected
+skip_confirm.pull_reset_upstream = false  # confirm the pull menu's "Reset to remote"
 
 # Any keymap field can be remapped with key.<name>:
 key.quit = q
