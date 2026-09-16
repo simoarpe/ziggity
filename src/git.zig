@@ -977,7 +977,26 @@ pub const Git = struct {
     /// The staged patch (`git diff --cached`), the AI context for commit
     /// authoring. Owned by the caller; empty on failure.
     pub fn stagedDiff(self: *Git) ![]u8 {
-        var res = try self.exec(&.{ "diff", "--cached", "--no-color", "--no-ext-diff" });
+        // The full staged diff can be enormous (e.g. a vendored toolchain: tens of
+        // thousands of files, hundreds of MB), overflowing exec's 16 MB output cap.
+        // Only the first ~16 KB is ever used in the AI prompt, so rather than fail
+        // the whole generation, fall back to a compact `--stat` summary on overflow.
+        if (self.exec(&.{ "diff", "--cached", "--no-color", "--no-ext-diff" })) |ok_res| {
+            var res = ok_res;
+            defer res.deinit(self.allocator);
+            if (!res.ok()) return self.allocator.dupe(u8, "");
+            return self.allocator.dupe(u8, res.stdout);
+        } else |_| {
+            return self.stagedDiffStat();
+        }
+    }
+
+    /// A bounded `--stat` summary of the staged changes (up to 1024 files plus the
+    /// totals). Small even for a commit that stages thousands of files, so AI
+    /// generation still has useful context when the full diff is too big to read.
+    fn stagedDiffStat(self: *Git) ![]u8 {
+        var res = self.exec(&.{ "diff", "--cached", "--no-color", "--stat", "--stat-count=1024" }) catch
+            return self.allocator.dupe(u8, "");
         defer res.deinit(self.allocator);
         if (!res.ok()) return self.allocator.dupe(u8, "");
         return self.allocator.dupe(u8, res.stdout);

@@ -32,6 +32,37 @@ pub const Limits = struct {
 /// change doesn't send megabytes to the provider.
 const max_diff_bytes: usize = 16 * 1024;
 
+/// Max staged file names listed in the prompt; beyond this the rest are summarized
+/// as a count, so a commit that stages thousands of files (e.g. a vendored
+/// toolchain) doesn't push a megabyte of paths into the prompt.
+const max_staged_files_listed: usize = 1024;
+
+/// Cap a newline-separated file list to the first `max_staged_files_listed`
+/// entries, appending an "... and N more files" line. Owned result.
+fn capFileList(allocator: std.mem.Allocator, list: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, list, " \t\r\n");
+    if (trimmed.len == 0) return allocator.dupe(u8, "");
+    var total: usize = 1;
+    for (trimmed) |c| {
+        if (c == '\n') total += 1;
+    }
+    if (total <= max_staged_files_listed) return allocator.dupe(u8, trimmed);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    var it = std.mem.splitScalar(u8, trimmed, '\n');
+    var i: usize = 0;
+    while (i < max_staged_files_listed) : (i += 1) {
+        const line = it.next() orelse break;
+        if (i > 0) try out.append(allocator, '\n');
+        try out.appendSlice(allocator, line);
+    }
+    var nbuf: [80]u8 = undefined;
+    const more = std.fmt.bufPrint(&nbuf, "\n... and {d} more files", .{total - max_staged_files_listed}) catch "\n... and more files";
+    try out.appendSlice(allocator, more);
+    return allocator.dupe(u8, out.items);
+}
+
 pub const GenError = error{ NothingStaged, AiCommandFailed, EmptyResponse };
 
 pub const Context = struct {
@@ -52,12 +83,14 @@ pub fn generate(allocator: std.mem.Allocator, git: *git_mod.Git, command: []cons
 
     const files = try git.stagedFileNames();
     defer allocator.free(files);
+    const files_listed = try capFileList(allocator, files);
+    defer allocator.free(files_listed);
     const subjects = try git.recentSubjects(10);
     defer allocator.free(subjects);
 
     const ctx = Context{
         .staged_diff = diff,
-        .staged_files = files,
+        .staged_files = files_listed,
         .recent_subjects = subjects,
         .current_title = current_title,
     };
@@ -403,6 +436,34 @@ test "composeFieldInstructions routes shared/title/body sections per field" {
     try std.testing.expect(std.mem.indexOf(u8, b, "Conventional Commits") != null); // shared
     try std.testing.expect(std.mem.indexOf(u8, b, "reference issues") != null); // body section
     try std.testing.expect(std.mem.indexOf(u8, b, "under 60 characters") == null); // NOT the title section
+}
+
+test "capFileList keeps a short list and summarizes a long one" {
+    const a = std.testing.allocator;
+
+    // Under the cap: returned as-is (trimmed of the trailing newline).
+    const short = try capFileList(a, "a.zig\nb.zig\n");
+    defer a.free(short);
+    try std.testing.expectEqualStrings("a.zig\nb.zig", short);
+
+    // 1500 names: keep the first 1024, summarize the remaining 476.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(a);
+    var i: usize = 0;
+    while (i < 1500) : (i += 1) {
+        var nb: [32]u8 = undefined;
+        try buf.appendSlice(a, try std.fmt.bufPrint(&nb, "file{d}.txt\n", .{i}));
+    }
+    const capped = try capFileList(a, buf.items);
+    defer a.free(capped);
+    try std.testing.expect(std.mem.indexOf(u8, capped, "file0.txt") != null); // first kept
+    try std.testing.expect(std.mem.indexOf(u8, capped, "file1499.txt") == null); // tail dropped
+    try std.testing.expect(std.mem.indexOf(u8, capped, "and 476 more files") != null); // 1500 - 1024
+    var newlines: usize = 0;
+    for (capped) |c| {
+        if (c == '\n') newlines += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1024), newlines); // 1024 names, then the summary line
 }
 
 test "composeFieldInstructions with no headings: everything is shared" {

@@ -15083,6 +15083,39 @@ test "real threaded load then App.deinit is allocator-clean (issue #19)" {
     app.deinit();
 }
 
+test "stagedDiff falls back to a stat summary when the full diff overflows exec's cap" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    // Stage a ~20 MB text file so `git diff --cached` output exceeds exec's 16 MB
+    // read cap. A normal read would error; stagedDiff must fall back to `--stat`.
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q -b main
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\yes 'a line of text repeated many times to inflate the staged diff well past sixteen megabytes' | head -c 20000000 > big.txt
+        \\git add big.txt
+    );
+
+    var g = try git_mod.Git.initAt(a, tio, &env, dir_path);
+    defer g.deinit();
+
+    const diff = try g.stagedDiff(); // must not error despite the 20 MB diff
+    defer a.free(diff);
+    try std.testing.expect(diff.len > 0); // fell back to a summary, not empty/failed
+    try std.testing.expect(diff.len < 1 * 1024 * 1024); // the stat is compact, not the 20 MB body
+    try std.testing.expect(std.mem.indexOf(u8, diff, "big.txt") != null); // names the staged file
+}
+
 test "merge commit's per-file preview shows the brought-in file (issue #22 follow-up)" {
     const a = std.testing.allocator;
     const tio = std.testing.io;
