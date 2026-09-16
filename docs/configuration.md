@@ -40,7 +40,7 @@ highlight_conventional_commits = true
 prepare_commit_msg_hook = true
 
 # AI-assisted commit authoring. `ai_command` is a shell command that reads a
-# prompt on stdin and prints a completion on stdout — ziggity treats it as a
+# prompt on stdin and prints a completion on stdout. ziggity treats it as a
 # black box, so the provider, model, key, or subscription all live in that tool,
 # never in ziggity. AI features (the ctrl+g shortcut in the commit dialog, and
 # the two flags below) appear only when this is set. Examples:

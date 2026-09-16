@@ -393,7 +393,13 @@ subscriptions you may already have, so there is no per-token bill.
 contract is open: any command that reads a prompt on stdin and prints the
 completion on stdout works. Want a specific provider through an API key? Use
 [`llm`](https://github.com/simonw/llm). Want a fully local model?
-[`ollama run <model>`](https://github.com/ollama/ollama). See
+[`ollama run <model>`](https://github.com/ollama/ollama).
+
+To steer the style, drop a `commit-instructions.md` file in `<repo>/.ziggity/`
+(or your global config dir) with your conventions, tone, or Conventional Commits
+rules; it feeds into the prompt and supports `# Title` and `# Body` sections. Turn
+off ziggity's built-in style guidance with `ai_commit_style_defaults = false` if
+you want your file (or the model) to decide everything. See
 [docs/configuration.md](docs/configuration.md) for the full setting reference.
 
 ## Keybindings

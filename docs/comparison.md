@@ -256,6 +256,11 @@ different? [`llm`](https://github.com/simonw/llm) drives any provider you hold a
 API key for. Want it fully local? [`ollama run <model>`](https://github.com/ollama/ollama)
 keeps it on your machine. Nothing is baked into ziggity either way.
 
+The style is steerable too: drop a `commit-instructions.md` in `<repo>/.ziggity/`
+(or your global config dir) for per-project conventions, tone, or Conventional
+Commits rules, and turn ziggity's built-in guidance off with
+`ai_commit_style_defaults = false` when you want your file to decide everything.
+
 lazygit has no built-in commit message drafting; you would bolt an external
 tool on through a custom command, without the in-dialog per-field generation,
 the spinners, or the guarantee that a result never clobbers what you typed.

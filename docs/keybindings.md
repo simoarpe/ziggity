@@ -114,6 +114,9 @@ the written reference. Every binding is remappable, see
 - `a`: stage all (or unstage all) · `s` (Files): stash menu
 - `d` / `D`: discard menu for the file / discard all (confirmed)
 - `c` · `w` (Files): commit · commit `--no-verify`
+- `ctrl+g` (commit dialog): generate (or regenerate) the focused field, subject or
+  body, from the staged diff. Only available when `ai_command` is configured (see
+  [Configuration](configuration.md))
 - `i` / `y` / `ctrl+f` (Files): ignore or exclude the file (a menu: add to the
   shared `.gitignore`, or to the local, uncommitted `.git/info/exclude`) / copy
   path / make a `fixup!`

@@ -49,7 +49,7 @@ behind by are visible right away; `a` toggles all branches, and
 checked-out commit (HEAD) is drawn as a hollow node (`○`), which stands out most
 in the all-branches view where HEAD sits among the other refs. Jump to HEAD with
 `@`, or to a commit's first parent with `p`. `space` resets the current branch
-to the commit under the cursor (soft / mixed / hard) — handy for rewinding to
+to the commit under the cursor (soft / mixed / hard), handy for rewinding to
 the last merge; the hint only appears for a commit on the current branch, since
 that is the only valid `git reset` target.
 
@@ -110,6 +110,13 @@ live in that tool; nothing AI-related appears until it is configured. Then:
 - You can type at any time; a generated result never overwrites text you have
   edited, and a failure is a small in-field note (`ctrl+g` to retry), never a
   blocker. Generated text is ordinary editable text once inserted.
+- The style is steerable. By default ziggity adds its own guidance (imperative
+  subject, no trailing period, follow your recent commits; a body that explains
+  the motivation), which you can turn off with `ai_commit_style_defaults = false`.
+  For project or personal conventions (Conventional Commits, tone, ticket refs),
+  drop a `commit-instructions.md` file in `<repo>/.ziggity/` or your global config
+  dir; it is fed into the prompt and can use `# Title` / `# Body` sections. See
+  [configuration.md](configuration.md) for the resolution order and an example.
 
 ### Branches & Tags
 
