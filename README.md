@@ -407,8 +407,15 @@ base ref (prefilled with the default branch) and describes the branch against it
 on a commit it describes that commit or the selected range. The result, a title
 and a markdown body, opens in a preview you can copy from (`y` body, `t` title,
 `a` both, or drag to select), regenerate with `r`, or change the base with `b`. It
-is kept for the session, and flags itself as outdated if the branch moves on. Customize
-the style with a `pr-instructions.md` file, resolved just like
+is kept for the session, and flags itself as outdated if the branch moves on.
+
+<p align="center">
+  <img src="docs/assets/ziggity-pr-generation.gif" alt="Ziggity drafting a pull request title and markdown body for a branch" width="900">
+</p>
+
+<p align="center"><i><code>ctrl+g</code> on a branch drafts a PR title and markdown body against the base you pick, in a preview you copy from.</i></p>
+
+Customize the style with a `pr-instructions.md` file, resolved just like
 `commit-instructions.md`. See [docs/configuration.md](docs/configuration.md) for
 the full setting reference.
 
