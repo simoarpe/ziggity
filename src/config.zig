@@ -62,6 +62,9 @@ pub const KeyMap = struct {
     recent_repos: Binding = .{ .codepoint = 'r', .ctrl = true },
     // Toggle soft-wrapping of long lines in the diff panels (session-wide).
     toggle_wrap: Binding = .{ .codepoint = 'w', .ctrl = true },
+    // Open the AI-generate menu on the Branches/Commits panels (PR description).
+    // Only acts when `ai_command` is set. Mirrors the commit dialog's ctrl+g.
+    ai_generate: Binding = .{ .codepoint = 'g', .ctrl = true },
     // In the staging view: jump the cursor to the next / previous hunk header.
     // shift+down / shift+up trigger these too (see the key handler).
     staging_next_hunk: Binding = .{ .codepoint = 'J' },
