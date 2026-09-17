@@ -65,7 +65,7 @@ they improve the user experience. See
 - 🚀 Starts in ~3.7 ms
 - 🔄 Non-blocking Git operations
 - 🖱️ First-class keyboard and mouse interaction
-- 🤖 Optional AI commit messages, using the model or subscription you already have
+- 🤖 Optional AI commit messages and pull request descriptions, using the model or subscription you already have
 - 🐙 Uses your existing `git` installation
 - 🧩 No libgit2 dependency
 - ⚙️ Written entirely in Zig
@@ -340,7 +340,7 @@ point, with demos:
 [docs/features.md](docs/features.md) has the full per panel breakdown and the
 rest of the screenshots.
 
-## AI-Assisted Commit Messages
+## AI-Assisted Commit Messages & PR Descriptions
 
 <p align="center">
   <img src="docs/assets/ziggity-ai-commit.gif" alt="Ziggity drafting a commit subject and body from the staged diff" width="900">
@@ -399,8 +399,18 @@ To steer the style, drop a `commit-instructions.md` file in `<repo>/.ziggity/`
 (or your global config dir) with your conventions, tone, or Conventional Commits
 rules; it feeds into the prompt and supports `# Title` and `# Body` sections. Turn
 off ziggity's built-in style guidance with `ai_commit_style_defaults = false` if
-you want your file (or the model) to decide everything. See
-[docs/configuration.md](docs/configuration.md) for the full setting reference.
+you want your file (or the model) to decide everything.
+
+The same `ai_command` also drafts **pull request descriptions**. On the Branches
+or Commits panel, `ctrl+g` opens an "AI generate" menu. On a branch it asks for a
+base ref (prefilled with the default branch) and describes the branch against it;
+on a commit it describes that commit or the selected range. The result, a title
+and a markdown body, opens in a preview you can copy from (`y` body, `t` title,
+`a` both, or drag to select), regenerate with `r`, or change the base with `b`. It
+is kept for the session, and flags itself as outdated if the branch moves on. Customize
+the style with a `pr-instructions.md` file, resolved just like
+`commit-instructions.md`. See [docs/configuration.md](docs/configuration.md) for
+the full setting reference.
 
 ## Keybindings
 
