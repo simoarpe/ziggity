@@ -2406,7 +2406,12 @@ fn drawPrPreviewPopup(root: vaxis.Window, app: *app_mod.App) void {
         row += 1;
     }
     drawScrollbarRange(root, px0 + w - 1, py0 + 1 + hr, avail, total, app.pr_doc_scroll, true);
-    print(win, footer_row, 0, "y/t/a copy body/title/both   r regenerate   up/down scroll   esc close", st.bottom_accent);
+    // "b change base" only applies to a branch PR (a commit's base is its parent).
+    const hint = if (app.pr_ctx_three_dot)
+        "y/t/a copy body/title/both   b change base   r regenerate   scroll j/k   esc close"
+    else
+        "y/t/a copy body/title/both   r regenerate   scroll j/k   esc close";
+    print(win, footer_row, 0, hint, st.bottom_accent);
 }
 
 fn drawOperationPopup(root: vaxis.Window, app: *app_mod.App) void {

@@ -121,7 +121,8 @@ the written reference. Every binding is remappable, see
   pull request description (title + markdown body) from the selected branch
   (against a base you pick) or commit. The result opens in a preview you copy
   from (`y` body, `t` title, `a` both, or drag to select and release to copy),
-  regenerate with `r`, and scroll with `j`/`k`. The result is kept for the session,
+  regenerate with `r`, change the base with `b` (branch), and scroll with `j`/`k`.
+  The result is kept for the session,
   so reopening the same source shows it without regenerating. Only when
   `ai_command` is set; style is customizable via a `pr-instructions.md` file (see
   [Configuration](configuration.md))

@@ -2572,6 +2572,10 @@ pub const App = struct {
     pr_doc_failed: bool = false,
     /// The branch ref being described, held while the base-ref prompt is open.
     pr_prompt_target: []u8 = &.{},
+    /// When set (owned), the base-ref prompt prefills with this instead of the
+    /// default branch. Used by "change base" from the preview to prefill the
+    /// current base; consumed (freed) when the prompt opens.
+    pr_base_prefill: []u8 = &.{},
     /// The last generation's context, retained (independent of the consumed
     /// request) so `r` in the preview can regenerate, and so reopening the menu
     /// for the same source restores the saved doc instead of regenerating.
@@ -3064,6 +3068,7 @@ pub const App = struct {
         self.allocator.free(self.pr_doc_body);
         self.allocator.free(self.pr_doc_subject);
         self.allocator.free(self.pr_prompt_target);
+        self.allocator.free(self.pr_base_prefill);
         self.allocator.free(self.pr_ctx_base);
         self.allocator.free(self.pr_ctx_target);
         self.allocator.free(self.pr_doc_key);
@@ -7467,11 +7472,18 @@ pub const App = struct {
                 self.focus = .stash;
                 if (self.selectedStash()) |s| prefill = s.message;
             },
-            // Prefill the PR base with the detected default branch; the target
-            // branch was stashed in `pr_prompt_target` by startPrGeneration.
+            // Prefill the PR base: the current base when changing it from the
+            // preview (`pr_base_prefill`), else the detected default branch. The
+            // target branch was stashed in `pr_prompt_target` by the caller.
             .pr_base => {
                 self.focus = .branches;
-                if (self.git.defaultBranch()) |def| {
+                if (self.pr_base_prefill.len > 0) {
+                    const n = @min(self.pr_base_prefill.len, date_buf.len);
+                    @memcpy(date_buf[0..n], self.pr_base_prefill[0..n]);
+                    prefill = date_buf[0..n];
+                    self.allocator.free(self.pr_base_prefill);
+                    self.pr_base_prefill = &.{};
+                } else if (self.git.defaultBranch()) |def| {
                     defer self.allocator.free(def);
                     const n = @min(def.len, date_buf.len);
                     @memcpy(date_buf[0..n], def[0..n]);
@@ -8786,7 +8798,24 @@ pub const App = struct {
             // context; requestPrGeneration dupes them before replacing it.
             if (self.pr_ctx_target.len > 0)
                 try self.requestPrGeneration(self.pr_ctx_base, self.pr_ctx_target, self.pr_ctx_three_dot, self.pr_doc_subject);
+        } else if (key.matches('b', .{})) {
+            try self.changePrBase();
         }
+    }
+
+    /// Re-pick the base ref for the current branch PR description (branch docs
+    /// only) and regenerate against it. Reopens the base prompt prefilled with the
+    /// current base.
+    fn changePrBase(self: *App) !void {
+        if (!self.pr_ctx_three_dot or self.pr_ctx_target.len == 0) {
+            try self.setMessage("changing the base applies to a branch PR description", .{});
+            return;
+        }
+        self.allocator.free(self.pr_prompt_target);
+        self.pr_prompt_target = try self.allocator.dupe(u8, self.pr_ctx_target);
+        self.allocator.free(self.pr_base_prefill);
+        self.pr_base_prefill = self.allocator.dupe(u8, self.pr_ctx_base) catch &.{};
+        try self.startTextPrompt(.pr_base);
     }
 
     fn copyPrDoc(self: *App, which: enum { title, body, both }) !void {
@@ -15880,6 +15909,7 @@ fn deinitTestApp(app: *App) void {
     app.allocator.free(app.pr_doc_body);
     app.allocator.free(app.pr_doc_subject);
     app.allocator.free(app.pr_prompt_target);
+    app.allocator.free(app.pr_base_prefill);
     app.allocator.free(app.pr_ctx_base);
     app.allocator.free(app.pr_ctx_target);
     app.allocator.free(app.pr_doc_key);
