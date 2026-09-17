@@ -3665,6 +3665,19 @@ pub const App = struct {
             return self.toggleTreeView();
         }
 
+        // In a commit's / branch's file list, the copy-file key yanks the selected
+        // file's path (like the Files panel), overriding the Commits copy menu that
+        // `y` maps to there (issue #39).
+        if (self.config.keymap.copy_file_info.matches(key) and
+            ((self.focus == .commits and self.commitsFilesActive()) or
+                (self.focus == .branches and self.branchFilesActive())))
+        {
+            const cf = self.selectedCommitFile() orelse return self.setMessage("no file selected", .{});
+            if (self.clipboard_request) |old| self.allocator.free(old);
+            self.clipboard_request = try self.allocator.dupe(u8, cf.path);
+            return self.setMessage("copied to clipboard: {s}", .{cf.path});
+        }
+
         // The Files panel's Worktrees / Submodules tabs add their own context
         // keys, resolved here before the file-list bindings.
         if (self.focus == .files) {
@@ -7462,6 +7475,9 @@ pub const App = struct {
                 if (self.branches_tab != .remotes) self.branches_tab = .remotes;
                 self.focus = .branches;
             },
+            // Commit-log filters route through startCommitFilterPrompt (which
+            // handles prefill, including the drilled file's path for issue #39);
+            // reached here only defensively, so just focus the Commits panel.
             .commit_grep, .commit_author, .commit_path => self.focus = .commits,
             // Keep focus on the Commits panel (Reflog tab) so the frozen list
             // selection still names the entry the branch is created from.
@@ -8841,6 +8857,11 @@ pub const App = struct {
     /// Apply a Commits-list filter and reload. An empty value clears just that
     /// filter. Selection resets to the top since the list changes.
     fn applyCommitFilter(self: *App, which: git_mod.Git.LogFilter, value: []const u8) !void {
+        // The filter is applied to the main commit log, so leave any file-list
+        // drill (e.g. `/` from a commit's files) to show the filtered log rather
+        // than staying stuck on one commit's files (issue #39).
+        if (self.commit_files_active) drills_mod.deactivateCommitFiles(self);
+        if (self.branch_files_active) drills_mod.deactivateBranchFiles(self);
         try self.git.setLogFilter(which, value);
         self.commit_index = 0;
         self.refreshViews(ScopeSet.init(.{ .commits = true }));
@@ -9416,7 +9437,13 @@ pub const App = struct {
             else => "",
         };
         if (kind == .commit_path and prefill.len == 0) {
-            if (self.selectedFile()) |file| prefill = file.path;
+            // In a commit-files drill, prefill with the drilled file's path
+            // (issue #39); otherwise fall back to the Files panel selection.
+            if (self.selectedCommitFile()) |cf| {
+                prefill = cf.path;
+            } else if (self.selectedFile()) |file| {
+                prefill = file.path;
+            }
         }
         self.focus = .commits;
         self.mode = .text_prompt;
@@ -10935,6 +10962,13 @@ pub const App = struct {
         self.inline_graph = null;
         if (self.config.commit_graph == .off) return;
         if (self.data.commits.len == 0) return;
+        // A filtered log (path/grep/author) elides commits, so most parent hashes
+        // point outside the visible list. Building a DAG from those dangling links
+        // accumulates lanes without bound (worst case a new lane per commit), which
+        // blows up the pipe arrays and can overflow the i16 lane positions and
+        // abort under ReleaseSafe. The graph is meaningless for a filtered log
+        // anyway, so skip it while any filter is active (issue #39).
+        if (self.git.hasLogFilter()) return;
         self.inline_graph = graphlanes_mod.build(self.allocator, self.data.commits) catch null;
     }
 
@@ -15196,6 +15230,76 @@ test "esc backs out of a commit-files drill before clearing the commit filter" {
     // Back at the log level, a second esc clears the filter.
     try app.handleKey(esc);
     try std.testing.expect(!app.git.hasLogFilter());
+}
+
+test "inline graph is skipped while a commit-log filter is active (issue #39)" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    defer app.git.clearLogFilters();
+    defer app.data.commits = &.{};
+
+    // Commits whose parents are NOT in the list, as a path-filtered log produces.
+    var p0 = [_][]u8{@constCast("zzz1")};
+    var p1 = [_][]u8{@constCast("zzz2")};
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("aaa"), .short_hash = @constCast("aaa"), .author = @constCast("A"), .time = @constCast(""), .refs = @constCast(""), .subject = @constCast("s"), .parents = &p0 },
+        .{ .hash = @constCast("bbb"), .short_hash = @constCast("bbb"), .author = @constCast("A"), .time = @constCast(""), .refs = @constCast(""), .subject = @constCast("s"), .parents = &p1 },
+    };
+    app.data.commits = &commits;
+    app.config.commit_graph = .on;
+
+    // No filter: the graph builds.
+    app.rebuildInlineGraph();
+    try std.testing.expect(app.inline_graph != null);
+
+    // A path filter is active: skip the graph (dangling parents would blow up the
+    // lane builder), leaving a clean filtered list.
+    try app.git.setLogFilter(.path, "src/app.zig");
+    app.rebuildInlineGraph();
+    try std.testing.expect(app.inline_graph == null);
+}
+
+test "applying a commit filter exits the commit-files drill (issue #39)" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    defer app.git.clearLogFilters();
+
+    // Drilled into a commit's file list (commit_files empty -> teardown is a no-op).
+    app.focus = .commits;
+    app.commits_tab = .commits;
+    app.commit_files_active = true;
+
+    try app.applyCommitFilter(.path, "src/app.zig");
+    try std.testing.expect(!app.commit_files_active); // left the drill for the filtered log
+    try std.testing.expect(app.git.hasLogFilter()); // filter applied
+}
+
+test "path filter prefills the drilled commit-file path (issue #39)" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    defer app.git.clearLogFilters();
+
+    // Drilled into a commit's file list with one file selected.
+    var path_buf = "src/main.zig".*;
+    var files = [_]model.CommitFile{.{ .status = 'M', .path = &path_buf }};
+    app.commit_files = &files;
+    app.commit_files_active = true;
+    app.focus = .commits;
+    app.commits_tab = .commits;
+    app.commit_file_index = 0;
+
+    try app.startCommitFilterPrompt(.commit_path);
+    try std.testing.expectEqual(Mode.text_prompt, app.mode);
+    // Prefilled with the drilled file's path, not the Files panel selection.
+    try std.testing.expectEqualStrings("src/main.zig", app.input_buffer.items);
+
+    app.commit_files = &.{}; // stack-backed slice; keep teardown away from it
 }
 
 test "isFetch groups the fetch ops that honour fetch_prune_mode" {
