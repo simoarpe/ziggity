@@ -4995,7 +4995,7 @@ pub const App = struct {
         // While a foreground op runs — or a preview is still loading off-thread
         // — the ticker fires fast to animate the spinner; advance it and skip the
         // (paused) background refresh.
-        if (self.foregroundBusy() or self.preview_loading or self.commitAiGenerating()) {
+        if (self.foregroundBusy() or self.preview_loading or self.commitAiGenerating() or self.pr_gen_active) {
             self.spinner_frame +%= 1;
             return;
         }
