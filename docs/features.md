@@ -124,7 +124,8 @@ live in that tool; nothing AI-related appears until it is configured. Then:
   commit or the selected range. The generated title and markdown body open in a
   preview you copy from (`y` body, `t` title, `a` both, or drag to select), with
   `r` to regenerate. It is kept for the session, so reopening the same branch or
-  commit shows it without a new call. Style is customizable with a
+  commit shows it without a new call; if the branch has moved on since, the
+  preview flags it as outdated so you can regenerate. Style is customizable with a
   `pr-instructions.md` file, resolved like `commit-instructions.md`.
 
 ### Branches & Tags

@@ -2580,6 +2580,12 @@ pub const App = struct {
     pr_ctx_three_dot: bool = false,
     /// Source key of the saved doc ("b:<branch>" or "c:<hash>") for the reopen match.
     pr_doc_key: []u8 = &.{},
+    /// The target-ref and base SHAs when the saved doc was generated. Reopening
+    /// re-resolves them; a difference (a new commit on the branch, or the base
+    /// moving) flags the saved description as possibly outdated.
+    pr_doc_target_sha: []u8 = &.{},
+    pr_doc_base_sha: []u8 = &.{},
+    pr_doc_stale: bool = false,
     // Skip pre-commit hooks for the commit being composed (the Files panel `w`).
     commit_no_verify: bool = false,
     commit_reword_index: usize = 0,
@@ -3061,6 +3067,8 @@ pub const App = struct {
         self.allocator.free(self.pr_ctx_base);
         self.allocator.free(self.pr_ctx_target);
         self.allocator.free(self.pr_doc_key);
+        self.allocator.free(self.pr_doc_target_sha);
+        self.allocator.free(self.pr_doc_base_sha);
         if (self.editor_request) |r| {
             self.allocator.free(r.command);
             if (r.resolve_conflict_path) |p| self.allocator.free(p);
@@ -8595,6 +8603,24 @@ pub const App = struct {
         }
     }
 
+    /// Whether the saved doc's source has moved since it was generated: the
+    /// target ref (branch tip) or the base now resolves to a different SHA. A
+    /// commit-level doc is immutable (its hash never moves), so this only fires
+    /// for branches (or a base like `main` advancing). Conservative: any resolve
+    /// failure returns false (don't cry wolf).
+    fn prSavedIsStale(self: *App) bool {
+        if (self.pr_ctx_target.len == 0 or self.pr_doc_target_sha.len == 0) return false;
+        const cur_t = self.git.revParse(self.pr_ctx_target) orelse return false;
+        defer self.allocator.free(cur_t);
+        if (!std.mem.eql(u8, cur_t, self.pr_doc_target_sha)) return true;
+        if (self.pr_ctx_base.len > 0 and self.pr_doc_base_sha.len > 0) {
+            const cur_b = self.git.revParse(self.pr_ctx_base) orelse return false;
+            defer self.allocator.free(cur_b);
+            if (!std.mem.eql(u8, cur_b, self.pr_doc_base_sha)) return true;
+        }
+        return false;
+    }
+
     /// Pick the source (branch vs commit) and either reopen a saved doc for the
     /// same source, open the base-ref prompt (branch), or generate (commit).
     fn startPrGeneration(self: *App) !void {
@@ -8603,15 +8629,20 @@ pub const App = struct {
             return;
         }
         // Session save: a previously generated doc for this exact source reopens
-        // instantly (no AI call); `r` in the preview regenerates it.
+        // instantly (no AI call); `r` in the preview regenerates it. If the branch
+        // tip or base has moved since, it is flagged as possibly outdated.
         if (!self.pr_gen_active and (self.pr_doc_title.len > 0 or self.pr_doc_body.len > 0)) {
             var kbuf: [128]u8 = undefined;
             if (self.currentPrKey(&kbuf)) |k| {
                 if (std.mem.eql(u8, k, self.pr_doc_key)) {
+                    self.pr_doc_stale = self.prSavedIsStale();
                     self.pr_doc_failed = false;
                     self.pr_doc_scroll = 0;
                     self.mode = .pr_preview;
-                    try self.setMessage("saved PR description — r regenerate, y/t/a copy, esc close", .{});
+                    if (self.pr_doc_stale)
+                        try self.setMessage("saved PR description (may be outdated) — r regenerate, esc close", .{})
+                    else
+                        try self.setMessage("saved PR description — r regenerate, y/t/a copy, esc close", .{});
                     return;
                 }
             }
@@ -8678,6 +8709,12 @@ pub const App = struct {
         self.pr_ctx_three_dot = three_dot;
         self.allocator.free(self.pr_doc_key);
         self.pr_doc_key = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ if (three_dot) "b:" else "c:", t }) catch &.{};
+        // Snapshot the tip/base SHAs so a later reopen can detect staleness.
+        self.allocator.free(self.pr_doc_target_sha);
+        self.pr_doc_target_sha = self.git.revParse(t) orelse &.{};
+        self.allocator.free(self.pr_doc_base_sha);
+        self.pr_doc_base_sha = self.git.revParse(b) orelse &.{};
+        self.pr_doc_stale = false;
 
         self.pr_gen_active = true;
         self.pr_doc_failed = false;
@@ -15846,6 +15883,8 @@ fn deinitTestApp(app: *App) void {
     app.allocator.free(app.pr_ctx_base);
     app.allocator.free(app.pr_ctx_target);
     app.allocator.free(app.pr_doc_key);
+    app.allocator.free(app.pr_doc_target_sha);
+    app.allocator.free(app.pr_doc_base_sha);
     if (app.editor_request) |r| {
         app.allocator.free(r.command);
         if (r.resolve_conflict_path) |p| app.allocator.free(p);

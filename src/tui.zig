@@ -2346,8 +2346,13 @@ fn drawPrPreviewPopup(root: vaxis.Window, app: *app_mod.App) void {
         return;
     }
 
-    // Header (not scrolled): the source subject, then the generated title.
+    // Header (not scrolled): an outdated warning (if the source moved since it was
+    // generated), the source subject, then the generated title.
     var hr: u16 = 0;
+    if (app.pr_doc_stale and hr < footer_row) {
+        drawDialogRow(win, app, hr, "! Outdated: new commits since this was generated. Press r to regenerate.", st.warning);
+        hr += 1;
+    }
     {
         var buf: [200]u8 = undefined;
         const s = std.fmt.bufPrint(&buf, "From {s}", .{app.pr_doc_subject}) catch "";

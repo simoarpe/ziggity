@@ -915,6 +915,18 @@ pub const Git = struct {
         return self.allocator.dupe(u8, hash);
     }
 
+    /// The full commit SHA `ref` resolves to (owned), or null if it doesn't
+    /// resolve. Used to snapshot the branch tip / base so a saved PR description
+    /// can be flagged stale when they later move.
+    pub fn revParse(self: *Git, ref: []const u8) ?[]u8 {
+        var res = self.exec(&.{ "rev-parse", "--verify", "--quiet", ref }) catch return null;
+        defer res.deinit(self.allocator);
+        if (!res.ok()) return null;
+        const sha = std.mem.trim(u8, res.stdout, " \t\r\n");
+        if (sha.len == 0) return null;
+        return self.allocator.dupe(u8, sha) catch null;
+    }
+
     /// Whether `date` is a form git will accept for author/committer dates.
     /// Validated with `git var GIT_AUTHOR_IDENT` (which parses `GIT_AUTHOR_DATE`
     /// through the same strict date parser the committer-date path uses), so a
