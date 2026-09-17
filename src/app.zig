@@ -2572,6 +2572,14 @@ pub const App = struct {
     pr_doc_failed: bool = false,
     /// The branch ref being described, held while the base-ref prompt is open.
     pr_prompt_target: []u8 = &.{},
+    /// The last generation's context, retained (independent of the consumed
+    /// request) so `r` in the preview can regenerate, and so reopening the menu
+    /// for the same source restores the saved doc instead of regenerating.
+    pr_ctx_base: []u8 = &.{},
+    pr_ctx_target: []u8 = &.{},
+    pr_ctx_three_dot: bool = false,
+    /// Source key of the saved doc ("b:<branch>" or "c:<hash>") for the reopen match.
+    pr_doc_key: []u8 = &.{},
     // Skip pre-commit hooks for the commit being composed (the Files panel `w`).
     commit_no_verify: bool = false,
     commit_reword_index: usize = 0,
@@ -3050,6 +3058,9 @@ pub const App = struct {
         self.allocator.free(self.pr_doc_body);
         self.allocator.free(self.pr_doc_subject);
         self.allocator.free(self.pr_prompt_target);
+        self.allocator.free(self.pr_ctx_base);
+        self.allocator.free(self.pr_ctx_target);
+        self.allocator.free(self.pr_doc_key);
         if (self.editor_request) |r| {
             self.allocator.free(r.command);
             if (r.resolve_conflict_path) |p| self.allocator.free(p);
@@ -4728,6 +4739,10 @@ pub const App = struct {
             },
             .command_log => {
                 self.command_log_scroll = if (down) @min(self.command_log_scroll +| lines, self.command_log_max_scroll) else self.command_log_scroll -| lines;
+                return true;
+            },
+            .pr_preview => {
+                self.pr_doc_scroll = if (down) @min(self.pr_doc_scroll + lines, self.pr_doc_max_scroll) else self.pr_doc_scroll -| lines;
                 return true;
             },
             .commit_graph => {
@@ -8562,12 +8577,44 @@ pub const App = struct {
         try self.setMessage("AI generate", .{});
     }
 
-    /// Pick the source (branch vs commit) and either open the base-ref prompt
-    /// (branch level) or generate directly (commit level).
+    /// The source key ("b:<branch>" / "c:<hash>") for the current selection, or
+    /// null if nothing describable is selected. Matched against `pr_doc_key` to
+    /// decide whether to reopen a saved doc instead of regenerating.
+    fn currentPrKey(self: *App, buf: []u8) ?[]const u8 {
+        switch (self.focus) {
+            .branches => {
+                const b = self.selectedBranchRefName() orelse return null;
+                return std.fmt.bufPrint(buf, "b:{s}", .{b}) catch null;
+            },
+            .commits => {
+                const c = self.selectedCommit() orelse return null;
+                if (self.commitRangeEndpoints()) |r| return std.fmt.bufPrint(buf, "c:{s}", .{r.to}) catch null;
+                return std.fmt.bufPrint(buf, "c:{s}", .{c.hash}) catch null;
+            },
+            else => return null,
+        }
+    }
+
+    /// Pick the source (branch vs commit) and either reopen a saved doc for the
+    /// same source, open the base-ref prompt (branch), or generate (commit).
     fn startPrGeneration(self: *App) !void {
         if (!self.config.aiConfigured()) {
             try self.setMessage("set ai_command to enable AI generation", .{});
             return;
+        }
+        // Session save: a previously generated doc for this exact source reopens
+        // instantly (no AI call); `r` in the preview regenerates it.
+        if (!self.pr_gen_active and (self.pr_doc_title.len > 0 or self.pr_doc_body.len > 0)) {
+            var kbuf: [128]u8 = undefined;
+            if (self.currentPrKey(&kbuf)) |k| {
+                if (std.mem.eql(u8, k, self.pr_doc_key)) {
+                    self.pr_doc_failed = false;
+                    self.pr_doc_scroll = 0;
+                    self.mode = .pr_preview;
+                    try self.setMessage("saved PR description — r regenerate, y/t/a copy, esc close", .{});
+                    return;
+                }
+            }
         }
         switch (self.focus) {
             .branches => {
@@ -8604,22 +8651,40 @@ pub const App = struct {
     }
 
     /// Queue a PR-doc generation and open the preview (spinner until it returns).
+    /// Args are duped up front because `r`-regenerate passes `pr_ctx_*`/
+    /// `pr_doc_subject`, which this function then frees and replaces.
     pub fn requestPrGeneration(self: *App, base: []const u8, target: []const u8, three_dot: bool, subject: []const u8) !void {
+        const b = try self.allocator.dupe(u8, base);
+        errdefer self.allocator.free(b);
+        const t = try self.allocator.dupe(u8, target);
+        errdefer self.allocator.free(t);
+        const s = try self.allocator.dupe(u8, subject);
+        errdefer self.allocator.free(s);
+
         self.clearPrRequest();
         self.pr_gen_generation +%= 1;
         self.pr_gen_requested = .{
-            .base = try self.allocator.dupe(u8, base),
-            .target = try self.allocator.dupe(u8, target),
-            .subject = try self.allocator.dupe(u8, subject),
+            .base = b,
+            .target = t,
+            .subject = s,
             .three_dot = three_dot,
             .generation = self.pr_gen_generation,
         };
+        // Retain the context (own copies) for regenerate and the session-save match.
+        self.allocator.free(self.pr_ctx_base);
+        self.pr_ctx_base = self.allocator.dupe(u8, b) catch &.{};
+        self.allocator.free(self.pr_ctx_target);
+        self.pr_ctx_target = self.allocator.dupe(u8, t) catch &.{};
+        self.pr_ctx_three_dot = three_dot;
+        self.allocator.free(self.pr_doc_key);
+        self.pr_doc_key = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ if (three_dot) "b:" else "c:", t }) catch &.{};
+
         self.pr_gen_active = true;
         self.pr_doc_failed = false;
         self.pr_doc_scroll = 0;
         self.freePrDoc();
         self.allocator.free(self.pr_doc_subject);
-        self.pr_doc_subject = self.allocator.dupe(u8, subject) catch &.{};
+        self.pr_doc_subject = self.allocator.dupe(u8, s) catch &.{};
         self.mode = .pr_preview;
         try self.setMessage("generating PR description...", .{});
     }
@@ -8679,6 +8744,11 @@ pub const App = struct {
             try self.copyPrDoc(.title);
         } else if (key.matches('a', .{})) {
             try self.copyPrDoc(.both);
+        } else if (key.matches('r', .{})) {
+            // Regenerate the same source (no re-prompt). Args alias the retained
+            // context; requestPrGeneration dupes them before replacing it.
+            if (self.pr_ctx_target.len > 0)
+                try self.requestPrGeneration(self.pr_ctx_base, self.pr_ctx_target, self.pr_ctx_three_dot, self.pr_doc_subject);
         }
     }
 
@@ -15773,6 +15843,9 @@ fn deinitTestApp(app: *App) void {
     app.allocator.free(app.pr_doc_body);
     app.allocator.free(app.pr_doc_subject);
     app.allocator.free(app.pr_prompt_target);
+    app.allocator.free(app.pr_ctx_base);
+    app.allocator.free(app.pr_ctx_target);
+    app.allocator.free(app.pr_doc_key);
     if (app.editor_request) |r| {
         app.allocator.free(r.command);
         if (r.resolve_conflict_path) |p| app.allocator.free(p);

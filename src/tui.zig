@@ -1189,7 +1189,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
         // Reflect foreground-busy state for the ticker (spinner animation speed).
         // Speed the ticker up (to animate the spinner + repaint) while a
         // foreground op runs OR a preview is still loading off-thread.
-        app.busy_flag.store(app.foregroundBusy() or app.preview_loading or app.commitAiGenerating(), .release);
+        app.busy_flag.store(app.foregroundBusy() or app.preview_loading or app.commitAiGenerating() or app.pr_gen_active, .release);
         // Reflect whether the about-splash animation wants continuous ticks.
         app.animate_flag.store(app.wantsAnimation(), .release);
 
@@ -2326,19 +2326,23 @@ fn drawPrPreviewPopup(root: vaxis.Window, app: *app_mod.App) void {
     const py0: u16 = (root.height - h) / 2;
     const footer_row: u16 = win.height -| 1;
     const cw = win.width;
+    // Capture the content grid so the popup text can be mouse-selected and copied
+    // on release, like the other popups.
+    app.beginDialogGrid(px0 + 1, py0 + 1, win.height);
 
     if (app.pr_gen_active) {
         app.pr_doc_max_scroll = 0;
         var buf: [160]u8 = undefined;
-        const line = std.fmt.bufPrint(&buf, "Generating PR description for {s}...", .{app.pr_doc_subject}) catch "Generating PR description...";
-        print(win, 0, 0, line, st.normal);
+        // Same spinner glyph + muted colour as the commit dialog's generation line.
+        const line = std.fmt.bufPrint(&buf, "{s} Generating PR description for {s}...", .{ spinnerGlyph(app.spinner_frame), app.pr_doc_subject }) catch "Generating PR description...";
+        print(win, 0, 0, line, st.muted);
         print(win, footer_row, 0, "esc cancel", st.bottom_accent);
         return;
     }
     if (app.pr_doc_failed) {
         app.pr_doc_max_scroll = 0;
         print(win, 0, 0, "PR generation failed (check that ai_command works).", st.warning);
-        print(win, footer_row, 0, "esc close", st.bottom_accent);
+        print(win, footer_row, 0, "r retry   esc close", st.bottom_accent);
         return;
     }
 
@@ -2348,7 +2352,7 @@ fn drawPrPreviewPopup(root: vaxis.Window, app: *app_mod.App) void {
         var buf: [200]u8 = undefined;
         const s = std.fmt.bufPrint(&buf, "From {s}", .{app.pr_doc_subject}) catch "";
         if (hr < footer_row) {
-            print(win, hr, 0, s, st.muted);
+            drawDialogRow(win, app, hr, s, st.muted);
             hr += 1;
         }
     }
@@ -2357,12 +2361,15 @@ fn drawPrPreviewPopup(root: vaxis.Window, app: *app_mod.App) void {
         const tn = wrapText(app.pr_doc_title, cw, &tl);
         for (tl[0..tn]) |l| {
             if (hr < footer_row) {
-                print(win, hr, 0, l, st.bottom_accent);
+                drawDialogRow(win, app, hr, l, st.bottom_accent);
                 hr += 1;
             }
         }
     }
-    if (hr < footer_row) hr += 1; // blank separator before the body
+    if (hr < footer_row) {
+        drawDialogRow(win, app, hr, "", st.normal); // blank separator before the body
+        hr += 1;
+    }
 
     // Body: split on newlines, wrap long lines, scroll the window.
     var vis: [512][]const u8 = undefined;
@@ -2390,11 +2397,11 @@ fn drawPrPreviewPopup(root: vaxis.Window, app: *app_mod.App) void {
     var idx: usize = app.pr_doc_scroll;
     var row: u16 = hr;
     while (idx < total and row < footer_row) : (idx += 1) {
-        print(win, row, 0, vis[idx], st.normal);
+        drawDialogRow(win, app, row, vis[idx], st.normal);
         row += 1;
     }
     drawScrollbarRange(root, px0 + w - 1, py0 + 1 + hr, avail, total, app.pr_doc_scroll, true);
-    print(win, footer_row, 0, "y/t/a copy body/title/both   up/down scroll   esc close", st.bottom_accent);
+    print(win, footer_row, 0, "y/t/a copy body/title/both   r regenerate   up/down scroll   esc close", st.bottom_accent);
 }
 
 fn drawOperationPopup(root: vaxis.Window, app: *app_mod.App) void {

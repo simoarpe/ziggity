@@ -88,8 +88,10 @@ ai_commit_style_defaults = true
 # description". On a branch it asks for a base ref (prefilled with the default
 # branch) and describes the branch against it; on a commit it describes that
 # commit (or the current range). The result, a title and a markdown body, opens
-# in a preview you can copy from (y body, t title, a both). Customize the style
-# with a `pr-instructions.md` file resolved exactly like commit-instructions.md
+# in a preview you can copy from (y body, t title, a both, or drag to select) and
+# regenerate with r; it is kept for the session, so reopening the same source
+# shows it again without another call. Customize the style with a
+# `pr-instructions.md` file resolved exactly like commit-instructions.md
 # above (repo `<repo>/.ziggity/` overrides the global one), with the same optional
 # `# Title` / `# Body` sections. Remap the key with `key.ai_generate`.
 
