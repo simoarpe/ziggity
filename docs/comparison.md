@@ -261,9 +261,15 @@ The style is steerable too: drop a `commit-instructions.md` in `<repo>/.ziggity/
 Commits rules, and turn ziggity's built-in guidance off with
 `ai_commit_style_defaults = false` when you want your file to decide everything.
 
-lazygit has no built-in commit message drafting; you would bolt an external
-tool on through a custom command, without the in-dialog per-field generation,
-the spinners, or the guarantee that a result never clobbers what you typed.
+The same command drafts pull request descriptions. On the Branches or Commits
+panel, `ctrl+g` generates a title and markdown body from a branch (against a base
+you pick) or a commit, in a preview you copy from, regenerate, or change the base
+of. A `pr-instructions.md` file steers it the same way.
+
+lazygit has no built-in commit message or PR description drafting; you would bolt
+an external tool on through a custom command, without the in-dialog per-field
+generation, the spinners, or the guarantee that a result never clobbers what you
+typed.
 
 ## A Force Push That Never Dead Ends
 

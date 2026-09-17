@@ -59,6 +59,7 @@ const Event = union(enum) {
     pr_status_done,
     ai_title_done,
     ai_desc_done,
+    pr_gen_done,
 };
 
 /// A network op run off the UI loop. Allocations use the SMP allocator, which is
@@ -476,6 +477,63 @@ fn aiDescWorker(ag: *AiGenRun) void {
     _ = ag.loop.tryPostEvent(.ai_desc_done) catch false;
 }
 
+/// Off-loop PR-description generation: gather `refLog`/`refDiff` for the range,
+/// run `generatePrDoc`, and post `.pr_gen_done`. Result strings are async-owned.
+const PrGenRun = struct {
+    io: std.Io,
+    loop: *vaxis.Loop(Event),
+    root: []u8,
+    git_dir: []const u8,
+    environ: *std.process.Environ.Map,
+    command: []u8,
+    base: []u8,
+    target: []u8,
+    subject: []u8,
+    three_dot: bool,
+    generation: u64,
+    title: ?[]u8 = null,
+    body: ?[]u8 = null,
+    failed: bool = false,
+
+    fn free(self: *PrGenRun) void {
+        async_allocator.free(self.command);
+        async_allocator.free(self.base);
+        async_allocator.free(self.target);
+        async_allocator.free(self.subject);
+        if (self.title) |t| async_allocator.free(t);
+        if (self.body) |b| async_allocator.free(b);
+        self.title = null;
+        self.body = null;
+    }
+};
+
+fn prGenWorker(pr: *PrGenRun) void {
+    var wgit = git_mod.Git{
+        .allocator = async_allocator,
+        .io = pr.io,
+        .environ = pr.environ,
+        .root = pr.root,
+        .git_dir = @constCast(pr.git_dir),
+    };
+    defer {
+        for (wgit.command_log.items) |e| async_allocator.free(e);
+        wgit.command_log.deinit(async_allocator);
+    }
+    const log: []const u8 = wgit.refLog(pr.base, pr.target, 200) catch "";
+    defer if (log.len != 0) async_allocator.free(@constCast(log));
+    const diff: []const u8 = wgit.refDiff(pr.base, pr.target, pr.three_dot) catch "";
+    defer if (diff.len != 0) async_allocator.free(@constCast(diff));
+    const ctx = aiauthor_mod.DocContext{ .subject = pr.subject, .commit_log = log, .diff = diff };
+    if (aiauthor_mod.generatePrDoc(async_allocator, &wgit, pr.command, ctx)) |doc| {
+        pr.title = doc.title;
+        pr.body = doc.body;
+        pr.failed = false;
+    } else |_| {
+        pr.failed = true;
+    }
+    _ = pr.loop.tryPostEvent(.pr_gen_done) catch false;
+}
+
 // The ticker always wakes at this fast cadence so the spinner animates smoothly
 // and a newly-started op begins spinning within one tick — instead of staying
 // stuck on the first frame until a long idle sleep finishes.
@@ -625,6 +683,13 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     defer if (ai_desc_future) |*f| {
         f.await(io);
         ai_desc_run.free();
+    };
+
+    var pr_gen_run: PrGenRun = undefined;
+    var pr_gen_future: ?std.Io.Future(void) = null;
+    defer if (pr_gen_future) |*f| {
+        f.await(io);
+        pr_gen_run.free();
     };
 
     var render_ctx = RenderCtx{ .vx = &vx, .writer = writer, .app = app };
@@ -784,6 +849,15 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     ai_desc_future = null;
                     app.applyAiResult(.description, ai_desc_run.dialog_generation, ai_desc_run.revision, ai_desc_run.staged_signature, if (ai_desc_run.failed) null else ai_desc_run.result) catch {};
                     ai_desc_run.free();
+                    render_needed = true;
+                }
+            },
+            .pr_gen_done => {
+                if (pr_gen_future) |*f| {
+                    f.await(io);
+                    pr_gen_future = null;
+                    app.applyPrDoc(pr_gen_run.generation, if (pr_gen_run.failed) null else pr_gen_run.title, if (pr_gen_run.failed) null else pr_gen_run.body) catch {};
+                    pr_gen_run.free();
                     render_needed = true;
                 }
             },
@@ -1086,10 +1160,36 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             }
         }
 
+        // Start a queued AI PR-description generation off the loop (single-flight).
+        if (pr_gen_future == null) {
+            if (app.pr_gen_requested) |req| {
+                pr_gen_run = .{
+                    .io = io,
+                    .loop = &loop,
+                    .root = app.git.root,
+                    .git_dir = app.git.git_dir,
+                    .environ = app.git.environ,
+                    .command = async_allocator.dupe(u8, app.config.ai_command.get()) catch "",
+                    .base = async_allocator.dupe(u8, req.base) catch "",
+                    .target = async_allocator.dupe(u8, req.target) catch "",
+                    .subject = async_allocator.dupe(u8, req.subject) catch "",
+                    .three_dot = req.three_dot,
+                    .generation = req.generation,
+                };
+                app.clearPrRequest();
+                pr_gen_future = io.concurrent(prGenWorker, .{&pr_gen_run}) catch blk: {
+                    app.applyPrDoc(pr_gen_run.generation, null, null) catch {};
+                    pr_gen_run.free();
+                    break :blk null;
+                };
+                render_needed = true;
+            }
+        }
+
         // Reflect foreground-busy state for the ticker (spinner animation speed).
         // Speed the ticker up (to animate the spinner + repaint) while a
         // foreground op runs OR a preview is still loading off-thread.
-        app.busy_flag.store(app.foregroundBusy() or app.preview_loading or app.commitAiGenerating(), .release);
+        app.busy_flag.store(app.foregroundBusy() or app.preview_loading or app.commitAiGenerating() or app.pr_gen_active, .release);
         // Reflect whether the about-splash animation wants continuous ticks.
         app.animate_flag.store(app.wantsAnimation(), .release);
 
@@ -1572,6 +1672,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         .commit_graph => drawCommitGraphPopup(root, app),
         .recent_repos => drawRecentReposPopup(root, app),
         .conflict_resolve => drawConflicts(root, app),
+        .pr_preview => drawPrPreviewPopup(root, app),
         else => {},
     }
 }
@@ -2214,6 +2315,103 @@ fn drawCommandLogPopup(root: vaxis.Window, app: *app_mod.App) void {
     }
     drawScrollbarRange(root, px0 + w - 1, py0 + 1, avail, total, app.command_log_scroll, true);
     print(win, footer_row, 0, "up/down scroll   enter/esc close", st.bottom_accent);
+}
+
+fn drawPrPreviewPopup(root: vaxis.Window, app: *app_mod.App) void {
+    const st = styles();
+    const w: u16 = @min(@as(u16, 100), root.width -| 4);
+    const h: u16 = @min(@as(u16, 28), root.height -| 2);
+    const win = popup(root, w, h, "PR description", null);
+    const px0: u16 = (root.width - w) / 2;
+    const py0: u16 = (root.height - h) / 2;
+    const footer_row: u16 = win.height -| 1;
+    const cw = win.width;
+    // Capture the content grid so the popup text can be mouse-selected and copied
+    // on release, like the other popups.
+    app.beginDialogGrid(px0 + 1, py0 + 1, win.height);
+
+    if (app.pr_gen_active) {
+        app.pr_doc_max_scroll = 0;
+        var buf: [160]u8 = undefined;
+        // Same spinner glyph + muted colour as the commit dialog's generation line.
+        const line = std.fmt.bufPrint(&buf, "{s} Generating PR description for {s}...", .{ spinnerGlyph(app.spinner_frame), app.pr_doc_subject }) catch "Generating PR description...";
+        print(win, 0, 0, line, st.muted);
+        print(win, footer_row, 0, "esc cancel", st.bottom_accent);
+        return;
+    }
+    if (app.pr_doc_failed) {
+        app.pr_doc_max_scroll = 0;
+        print(win, 0, 0, "PR generation failed (check that ai_command works).", st.warning);
+        print(win, footer_row, 0, "r retry   esc close", st.bottom_accent);
+        return;
+    }
+
+    // Header (not scrolled): an outdated warning (if the source moved since it was
+    // generated), the source subject, then the generated title.
+    var hr: u16 = 0;
+    if (app.pr_doc_stale and hr < footer_row) {
+        drawDialogRow(win, app, hr, "! Outdated: new commits since this was generated. Press r to regenerate.", st.warning);
+        hr += 1;
+    }
+    {
+        var buf: [200]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "From {s}", .{app.pr_doc_subject}) catch "";
+        if (hr < footer_row) {
+            drawDialogRow(win, app, hr, s, st.muted);
+            hr += 1;
+        }
+    }
+    {
+        var tl: [3][]const u8 = undefined;
+        const tn = wrapText(app.pr_doc_title, cw, &tl);
+        for (tl[0..tn]) |l| {
+            if (hr < footer_row) {
+                drawDialogRow(win, app, hr, l, st.bottom_accent);
+                hr += 1;
+            }
+        }
+    }
+    if (hr < footer_row) {
+        drawDialogRow(win, app, hr, "", st.normal); // blank separator before the body
+        hr += 1;
+    }
+
+    // Body: split on newlines, wrap long lines, scroll the window.
+    var vis: [512][]const u8 = undefined;
+    var total: usize = 0;
+    var lines = std.mem.splitScalar(u8, app.pr_doc_body, '\n');
+    while (lines.next()) |ln| {
+        if (ln.len == 0) {
+            if (total < vis.len) {
+                vis[total] = "";
+                total += 1;
+            }
+            continue;
+        }
+        var segs: [16][]const u8 = undefined;
+        const n = wrapText(ln, cw, &segs);
+        for (segs[0..n]) |s| {
+            if (total >= vis.len) break;
+            vis[total] = s;
+            total += 1;
+        }
+    }
+    const avail: usize = footer_row -| hr;
+    app.pr_doc_max_scroll = total -| avail;
+    app.pr_doc_scroll = @min(app.pr_doc_scroll, app.pr_doc_max_scroll);
+    var idx: usize = app.pr_doc_scroll;
+    var row: u16 = hr;
+    while (idx < total and row < footer_row) : (idx += 1) {
+        drawDialogRow(win, app, row, vis[idx], st.normal);
+        row += 1;
+    }
+    drawScrollbarRange(root, px0 + w - 1, py0 + 1 + hr, avail, total, app.pr_doc_scroll, true);
+    // "b change base" only applies to a branch PR (a commit's base is its parent).
+    const hint = if (app.pr_ctx_three_dot)
+        "y/t/a copy body/title/both   b change base   r regenerate   scroll j/k   esc close"
+    else
+        "y/t/a copy body/title/both   r regenerate   scroll j/k   esc close";
+    print(win, footer_row, 0, hint, st.bottom_accent);
 }
 
 fn drawOperationPopup(root: vaxis.Window, app: *app_mod.App) void {
@@ -4301,7 +4499,7 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
     // overlays with their own footers, so the panel hints below them are just
     // noise — keep the main bar clean while they're open (the normal footer
     // returns automatically once they close).
-    if (app.mode == .commit_graph or app.mode == .recent_repos) return;
+    if (app.mode == .commit_graph or app.mode == .recent_repos or app.mode == .pr_preview) return;
     if (app.mode == .commit_prompt) {
         print(win, 0, 0, "tab switch field  -  enter commit/newline  -  esc cancel", st.bottom_accent);
         return;

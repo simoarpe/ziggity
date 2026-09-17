@@ -117,6 +117,17 @@ live in that tool; nothing AI-related appears until it is configured. Then:
   drop a `commit-instructions.md` file in `<repo>/.ziggity/` or your global config
   dir; it is fed into the prompt and can use `# Title` / `# Body` sections. See
   [configuration.md](configuration.md) for the resolution order and an example.
+- The same `ai_command` also drafts pull request descriptions. On the Branches or
+  Commits panel, `ctrl+g` opens an AI-generate menu with "Generate PR
+  description": on a branch it asks for a base ref (prefilled with the default
+  branch) and describes the branch against it; on a commit it describes that
+  commit or the selected range. The generated title and markdown body open in a
+  preview you copy from (`y` body, `t` title, `a` both, or drag to select), with
+  `r` to regenerate and `b` to re-pick the base (branch). It is kept for the
+  session, so reopening the same branch or
+  commit shows it without a new call; if the branch has moved on since, the
+  preview flags it as outdated so you can regenerate. Style is customizable with a
+  `pr-instructions.md` file, resolved like `commit-instructions.md`.
 
 ### Branches & Tags
 

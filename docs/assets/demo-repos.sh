@@ -51,10 +51,20 @@ git add src/lexer.zig
 
 cat > /tmp/zdemo-ai.sh <<'AISTUB'
 #!/usr/bin/env bash
-# Stub ai_command for the demo: prompt on stdin, completion on stdout.
+# Stub ai_command for the demo: prompt on stdin, completion on stdout. Branches
+# on the prompt's own wording (pull request TITLE+DESCRIPTION, commit SUBJECT
+# LINE, or commit MESSAGE BODY). A short pause so the spinner is visible.
 prompt="$(cat)"
 sleep 1.2
-if printf '%s' "$prompt" | grep -q 'SUBJECT LINE'; then
+if printf '%s' "$prompt" | grep -q 'pull request'; then
+  printf 'Track line and column positions in the lexer\n\n'
+  printf '## Summary\n'
+  printf 'Adds line and column tracking to the lexer so diagnostics can point at\n'
+  printf 'the exact source location, and exposes a next() helper for pulling tokens.\n\n'
+  printf '## Changes\n'
+  printf -- '- record the line and column as the lexer scans\n'
+  printf -- '- add a next() token helper\n'
+elif printf '%s' "$prompt" | grep -q 'SUBJECT LINE'; then
   printf 'Track line and column positions in the lexer\n'
 else
   printf 'Record the line and column for each token as the lexer scans, so\n'
@@ -66,6 +76,30 @@ chmod +x /tmp/zdemo-ai.sh
 printf 'ai_command = bash /tmp/zdemo-ai.sh\n' > /tmp/zdemo-commit-ai/.ziggity.ini
 # Keep the config out of the Files panel so the recording shows only the change.
 printf '.ziggity.ini\n' >> /tmp/zdemo-commit-ai/.git/info/exclude
+
+# --- /tmp/zdemo-pr: a feature branch ahead of main, wired to the stub ai_command
+# Records the AI PR-description demo offline: on the Branches panel, ctrl+g drafts
+# a title + markdown body for the branch against its base (main).
+rm -rf /tmp/zdemo-pr
+mkdir -p /tmp/zdemo-pr/src
+cd /tmp/zdemo-pr
+git init -q -b main
+git config user.email demo@ziggity.dev
+git config user.name "Demo"
+printf 'const std = @import("std");\n\npub fn main() !void {\n    try run();\n}\n' > src/main.zig
+printf 'pub fn tokenize(src: []const u8) Lexer {\n    return .{ .src = src, .pos = 0 };\n}\n' > src/lexer.zig
+printf '# aurora\nA tiny expression evaluator.\n' > README.md
+git add .
+git commit -q -m "Initial project skeleton"
+git checkout -q -b feature/lexer-positions
+printf 'pub fn tokenize(src: []const u8) Lexer {\n    return .{ .src = src, .pos = 0, .line = 1, .col = 1 };\n}\n' > src/lexer.zig
+git add src/lexer.zig
+git commit -q -m "Track line and column in the lexer"
+printf 'pub fn next(l: *Lexer) ?Token {\n    return l.scan();\n}\n' >> src/lexer.zig
+git add src/lexer.zig
+git commit -q -m "Add next() token helper"
+printf 'ai_command = bash /tmp/zdemo-ai.sh\n' > /tmp/zdemo-pr/.ziggity.ini
+printf '.ziggity.ini\n' >> /tmp/zdemo-pr/.git/info/exclude
 
 # --- /tmp/zdemo-co: an origin with a feature branch not present locally ------
 rm -rf /tmp/zdemo-co

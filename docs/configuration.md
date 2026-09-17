@@ -82,6 +82,18 @@ ai_commit_style_defaults = true
 #
 #   # Body
 #   Explain why the change was made. Put "Fixes #123" on its own line at the end.
+#
+# The same ai_command also powers pull request descriptions. On the Branches or
+# Commits panel, `ctrl+g` opens an "AI generate" menu with "Generate PR
+# description". On a branch it asks for a base ref (prefilled with the default
+# branch) and describes the branch against it; on a commit it describes that
+# commit (or the current range). The result, a title and a markdown body, opens
+# in a preview you can copy from (y body, t title, a both, or drag to select) and
+# regenerate with r; it is kept for the session, so reopening the same source
+# shows it again without another call. Customize the style with a
+# `pr-instructions.md` file resolved exactly like commit-instructions.md
+# above (repo `<repo>/.ziggity/` overrides the global one), with the same optional
+# `# Title` / `# Body` sections. Remap the key with `key.ai_generate`.
 
 # Seconds between idle background working tree refreshes (git status, run
 # off the interface thread). On a big repo a tight interval makes git status

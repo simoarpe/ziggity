@@ -45,6 +45,8 @@ pub const Mode = enum {
     commit_graph,
     conflict_resolve,
     recent_repos,
+    /// AI-generated PR description preview (title + scrollable markdown body).
+    pr_preview,
 };
 
 /// Environment variable names for the credential bridge. When the user has
@@ -134,6 +136,18 @@ pub const AiRequest = struct {
     current_title: []u8,
 };
 
+/// A queued PR-description generation. The worker gathers `refLog`/`refDiff` for
+/// `base`..`target` (three-dot when `three_dot`) and runs `generatePrDoc`.
+/// `subject` is the header label. All strings are gpa-owned and freed by
+/// `clearPrRequest` once the loop has copied them to the worker.
+pub const PrRequest = struct {
+    base: []u8,
+    target: []u8,
+    subject: []u8,
+    three_dot: bool,
+    generation: u64,
+};
+
 /// A reusable single-line text-input popup. Each kind knows its title and what
 /// An editor launch requested by the edit action, performed by the TUI loop.
 /// `command` is a `sh -c` line (owned); `suspend_tui` means the TUI must give
@@ -191,6 +205,9 @@ pub const TextPromptKind = enum {
     set_both_date,
     rename_stash,
     stash_message,
+    /// Base ref to generate a branch's PR description against (prefilled with the
+    /// default branch); the selected branch is held in `pr_prompt_target`.
+    pr_base,
 
     pub fn title(self: TextPromptKind) []const u8 {
         return switch (self) {
@@ -225,6 +242,7 @@ pub const TextPromptKind = enum {
             .set_both_date => "Both dates (ISO 8601, e.g. 2024-01-31T14:00:00+01:00)",
             .rename_stash => "Rename stash",
             .stash_message => "Stash message (empty = default WIP name)",
+            .pr_base => "Generate PR description against base (branch/ref)",
         };
     }
 };
@@ -556,6 +574,7 @@ pub const MenuAction = enum {
     pull_rebase,
     pull_ff_only,
     pull_reset_upstream,
+    gen_pr_description,
     reset_soft,
     reset_mixed,
     reset_hard,
@@ -761,6 +780,12 @@ pub const branch_delete_menu = [_]MenuItem{
 
 /// Shown by `p` when `pull_mode = menu`: pick how to integrate the fetched
 /// commits. "Merge" forces `--no-rebase`, "Rebase" forces `--rebase`.
+/// Opened by `ctrl+g` on the Branches/Commits panels (only when `ai_command` is
+/// set). One item for now; a home for future AI-generated documents.
+const ai_generate_menu = [_]MenuItem{
+    .{ .label = "Generate PR description", .action = .gen_pr_description },
+};
+
 pub const pull_menu = [_]MenuItem{
     .{ .label = "Merge", .action = .pull_merge },
     .{ .label = "Rebase", .action = .pull_rebase },
@@ -2530,6 +2555,41 @@ pub const App = struct {
     // request carries the revision tokens captured at request time.
     commit_ai_title_req: ?AiRequest = null,
     commit_ai_desc_req: ?AiRequest = null,
+    // ---- AI PR-description generation (ctrl+g -> menu -> PR description) ----
+    /// A queued PR-doc generation the TUI loop should start (dupes to a worker).
+    pr_gen_requested: ?PrRequest = null,
+    /// True while a PR-doc worker is in flight (drives the preview spinner).
+    pr_gen_active: bool = false,
+    /// Bumped per request so a late worker result for a superseded request (or a
+    /// closed preview) is discarded.
+    pr_gen_generation: u64 = 0,
+    /// The generated document (owned) and the header label for the preview.
+    pr_doc_title: []u8 = &.{},
+    pr_doc_body: []u8 = &.{},
+    pr_doc_subject: []u8 = &.{},
+    pr_doc_scroll: usize = 0,
+    pr_doc_max_scroll: usize = 0,
+    pr_doc_failed: bool = false,
+    /// The branch ref being described, held while the base-ref prompt is open.
+    pr_prompt_target: []u8 = &.{},
+    /// When set (owned), the base-ref prompt prefills with this instead of the
+    /// default branch. Used by "change base" from the preview to prefill the
+    /// current base; consumed (freed) when the prompt opens.
+    pr_base_prefill: []u8 = &.{},
+    /// The last generation's context, retained (independent of the consumed
+    /// request) so `r` in the preview can regenerate, and so reopening the menu
+    /// for the same source restores the saved doc instead of regenerating.
+    pr_ctx_base: []u8 = &.{},
+    pr_ctx_target: []u8 = &.{},
+    pr_ctx_three_dot: bool = false,
+    /// Source key of the saved doc ("b:<branch>" or "c:<hash>") for the reopen match.
+    pr_doc_key: []u8 = &.{},
+    /// The target-ref and base SHAs when the saved doc was generated. Reopening
+    /// re-resolves them; a difference (a new commit on the branch, or the base
+    /// moving) flags the saved description as possibly outdated.
+    pr_doc_target_sha: []u8 = &.{},
+    pr_doc_base_sha: []u8 = &.{},
+    pr_doc_stale: bool = false,
     // Skip pre-commit hooks for the commit being composed (the Files panel `w`).
     commit_no_verify: bool = false,
     commit_reword_index: usize = 0,
@@ -3003,6 +3063,17 @@ pub const App = struct {
         self.copied_commits.deinit(self.allocator);
         if (self.marked_base) |b| self.allocator.free(b);
         if (self.clipboard_request) |c| self.allocator.free(c);
+        self.clearPrRequest();
+        self.allocator.free(self.pr_doc_title);
+        self.allocator.free(self.pr_doc_body);
+        self.allocator.free(self.pr_doc_subject);
+        self.allocator.free(self.pr_prompt_target);
+        self.allocator.free(self.pr_base_prefill);
+        self.allocator.free(self.pr_ctx_base);
+        self.allocator.free(self.pr_ctx_target);
+        self.allocator.free(self.pr_doc_key);
+        self.allocator.free(self.pr_doc_target_sha);
+        self.allocator.free(self.pr_doc_base_sha);
         if (self.editor_request) |r| {
             self.allocator.free(r.command);
             if (r.resolve_conflict_path) |p| self.allocator.free(p);
@@ -3474,6 +3545,10 @@ pub const App = struct {
             try self.handleRecentKey(key);
             return;
         }
+        if (self.mode == .pr_preview) {
+            try self.handlePrPreviewKey(key);
+            return;
+        }
         if (self.mode == .text_prompt) {
             try self.handleTextPromptKey(key);
             return;
@@ -3560,6 +3635,13 @@ pub const App = struct {
                 if (self.foregroundBusy()) return self.setMessage("operation in progress...", .{});
                 return self.runCustomCommand(cc.command());
             }
+        }
+
+        // ctrl+g opens the AI-generate menu on the Branches/Commits panels (the
+        // sources a PR description can be generated from). Gated on `ai_command`
+        // by startAiGenerateMenu.
+        if (self.config.keymap.ai_generate.matches(key) and (self.focus == .branches or self.focus == .commits)) {
+            return self.startAiGenerateMenu();
         }
 
         // `e` opens the selected file in the editor. Beyond the Files panel
@@ -4672,6 +4754,10 @@ pub const App = struct {
                 self.command_log_scroll = if (down) @min(self.command_log_scroll +| lines, self.command_log_max_scroll) else self.command_log_scroll -| lines;
                 return true;
             },
+            .pr_preview => {
+                self.pr_doc_scroll = if (down) @min(self.pr_doc_scroll + lines, self.pr_doc_max_scroll) else self.pr_doc_scroll -| lines;
+                return true;
+            },
             .commit_graph => {
                 // The wheel scrolls the view only; the cursor stays put.
                 const max_scroll = self.commit_graph_lines -| self.commit_graph_view_h;
@@ -4922,7 +5008,7 @@ pub const App = struct {
         // While a foreground op runs — or a preview is still loading off-thread
         // — the ticker fires fast to animate the spinner; advance it and skip the
         // (paused) background refresh.
-        if (self.foregroundBusy() or self.preview_loading or self.commitAiGenerating()) {
+        if (self.foregroundBusy() or self.preview_loading or self.commitAiGenerating() or self.pr_gen_active) {
             self.spinner_frame +%= 1;
             return;
         }
@@ -7386,6 +7472,24 @@ pub const App = struct {
                 self.focus = .stash;
                 if (self.selectedStash()) |s| prefill = s.message;
             },
+            // Prefill the PR base: the current base when changing it from the
+            // preview (`pr_base_prefill`), else the detected default branch. The
+            // target branch was stashed in `pr_prompt_target` by the caller.
+            .pr_base => {
+                self.focus = .branches;
+                if (self.pr_base_prefill.len > 0) {
+                    const n = @min(self.pr_base_prefill.len, date_buf.len);
+                    @memcpy(date_buf[0..n], self.pr_base_prefill[0..n]);
+                    prefill = date_buf[0..n];
+                    self.allocator.free(self.pr_base_prefill);
+                    self.pr_base_prefill = &.{};
+                } else if (self.git.defaultBranch()) |def| {
+                    defer self.allocator.free(def);
+                    const n = @min(def.len, date_buf.len);
+                    @memcpy(date_buf[0..n], def[0..n]);
+                    prefill = date_buf[0..n];
+                } else |_| {}
+            },
             // Prefill handled below (it needs to format remote + branch).
             .push_upstream => {},
             // Diff against a typed ref: no focus change or prefill.
@@ -8075,6 +8179,17 @@ pub const App = struct {
                 }
                 return self.requestMutation(.{ .rename_stash = .{ .index = entry.index, .hash = entry.hash, .message = value } }, .{ .gerund = "renaming stash", .command = "git stash store", .refresh = Refresh.stash }, "renamed stash", .{});
             },
+            // The entered base ref; generate the PR description for the branch
+            // stashed in `pr_prompt_target` against it. `value` aliases the input
+            // buffer, so requestPrGeneration dupes it before it is cleared.
+            .pr_base => {
+                self.text_prompt_kind = null;
+                var sbuf: [200]u8 = undefined;
+                const subject = std.fmt.bufPrint(&sbuf, "branch `{s}` against `{s}`", .{ self.pr_prompt_target, value }) catch "the selected branch";
+                try self.requestPrGeneration(value, self.pr_prompt_target, true, subject);
+                self.input_buffer.clearRetainingCapacity();
+                return;
+            },
             // Accepts an empty value; fully handled in the first switch above.
             .stash_message => unreachable,
             // Checkout by typed name: `git checkout <value>` resolves a local
@@ -8464,6 +8579,257 @@ pub const App = struct {
         try self.setMessage("bisect", .{});
     }
 
+    // ---- AI PR-description generation ----------------------------------------
+
+    /// `ctrl+g` on the Branches/Commits panels: open the AI-generate menu (only
+    /// when `ai_command` is set and there's a branch/commit to describe).
+    fn startAiGenerateMenu(self: *App) !void {
+        if (!self.config.aiConfigured()) {
+            try self.setMessage("set ai_command to enable AI generation", .{});
+            return;
+        }
+        if (self.focus != .branches and self.focus != .commits) {
+            try self.setMessage("select a branch or commit to generate from", .{});
+            return;
+        }
+        self.mode = .menu;
+        self.active_menu = .{ .title = "AI generate", .items = &ai_generate_menu, .index = 0 };
+        try self.setMessage("AI generate", .{});
+    }
+
+    /// The source key ("b:<branch>" / "c:<hash>") for the current selection, or
+    /// null if nothing describable is selected. Matched against `pr_doc_key` to
+    /// decide whether to reopen a saved doc instead of regenerating.
+    fn currentPrKey(self: *App, buf: []u8) ?[]const u8 {
+        switch (self.focus) {
+            .branches => {
+                const b = self.selectedBranchRefName() orelse return null;
+                return std.fmt.bufPrint(buf, "b:{s}", .{b}) catch null;
+            },
+            .commits => {
+                const c = self.selectedCommit() orelse return null;
+                if (self.commitRangeEndpoints()) |r| return std.fmt.bufPrint(buf, "c:{s}", .{r.to}) catch null;
+                return std.fmt.bufPrint(buf, "c:{s}", .{c.hash}) catch null;
+            },
+            else => return null,
+        }
+    }
+
+    /// Whether the saved doc's source has moved since it was generated: the
+    /// target ref (branch tip) or the base now resolves to a different SHA. A
+    /// commit-level doc is immutable (its hash never moves), so this only fires
+    /// for branches (or a base like `main` advancing). Conservative: any resolve
+    /// failure returns false (don't cry wolf).
+    fn prSavedIsStale(self: *App) bool {
+        if (self.pr_ctx_target.len == 0 or self.pr_doc_target_sha.len == 0) return false;
+        const cur_t = self.git.revParse(self.pr_ctx_target) orelse return false;
+        defer self.allocator.free(cur_t);
+        if (!std.mem.eql(u8, cur_t, self.pr_doc_target_sha)) return true;
+        if (self.pr_ctx_base.len > 0 and self.pr_doc_base_sha.len > 0) {
+            const cur_b = self.git.revParse(self.pr_ctx_base) orelse return false;
+            defer self.allocator.free(cur_b);
+            if (!std.mem.eql(u8, cur_b, self.pr_doc_base_sha)) return true;
+        }
+        return false;
+    }
+
+    /// Pick the source (branch vs commit) and either reopen a saved doc for the
+    /// same source, open the base-ref prompt (branch), or generate (commit).
+    fn startPrGeneration(self: *App) !void {
+        if (!self.config.aiConfigured()) {
+            try self.setMessage("set ai_command to enable AI generation", .{});
+            return;
+        }
+        // Session save: a previously generated doc for this exact source reopens
+        // instantly (no AI call); `r` in the preview regenerates it. If the branch
+        // tip or base has moved since, it is flagged as possibly outdated.
+        if (!self.pr_gen_active and (self.pr_doc_title.len > 0 or self.pr_doc_body.len > 0)) {
+            var kbuf: [128]u8 = undefined;
+            if (self.currentPrKey(&kbuf)) |k| {
+                if (std.mem.eql(u8, k, self.pr_doc_key)) {
+                    self.pr_doc_stale = self.prSavedIsStale();
+                    self.pr_doc_failed = false;
+                    self.pr_doc_scroll = 0;
+                    self.mode = .pr_preview;
+                    if (self.pr_doc_stale)
+                        try self.setMessage("saved PR description (may be outdated) — r regenerate, esc close", .{})
+                    else
+                        try self.setMessage("saved PR description — r regenerate, y/t/a copy, esc close", .{});
+                    return;
+                }
+            }
+        }
+        switch (self.focus) {
+            .branches => {
+                const name = self.selectedBranchRefName() orelse {
+                    try self.setMessage("no branch selected", .{});
+                    return;
+                };
+                self.allocator.free(self.pr_prompt_target);
+                self.pr_prompt_target = try self.allocator.dupe(u8, name);
+                try self.startTextPrompt(.pr_base);
+            },
+            .commits => {
+                const commit = self.selectedCommit() orelse {
+                    try self.setMessage("no commit selected", .{});
+                    return;
+                };
+                // A v-range describes from^..to; a single commit its own diff.
+                if (self.commitRangeEndpoints()) |r| {
+                    var bbuf: [96]u8 = undefined;
+                    const base = std.fmt.bufPrint(&bbuf, "{s}^", .{r.from}) catch return;
+                    var sbuf: [128]u8 = undefined;
+                    const subject = std.fmt.bufPrint(&sbuf, "commits {s}..{s}", .{ r.from, r.to }) catch "the selected commits";
+                    try self.requestPrGeneration(base, r.to, false, subject);
+                } else {
+                    var bbuf: [96]u8 = undefined;
+                    const base = std.fmt.bufPrint(&bbuf, "{s}^", .{commit.hash}) catch return;
+                    var sbuf: [96]u8 = undefined;
+                    const subject = std.fmt.bufPrint(&sbuf, "commit {s}", .{commit.short_hash}) catch "the selected commit";
+                    try self.requestPrGeneration(base, commit.hash, false, subject);
+                }
+            },
+            else => try self.setMessage("select a branch or commit first", .{}),
+        }
+    }
+
+    /// Queue a PR-doc generation and open the preview (spinner until it returns).
+    /// Args are duped up front because `r`-regenerate passes `pr_ctx_*`/
+    /// `pr_doc_subject`, which this function then frees and replaces.
+    pub fn requestPrGeneration(self: *App, base: []const u8, target: []const u8, three_dot: bool, subject: []const u8) !void {
+        const b = try self.allocator.dupe(u8, base);
+        errdefer self.allocator.free(b);
+        const t = try self.allocator.dupe(u8, target);
+        errdefer self.allocator.free(t);
+        const s = try self.allocator.dupe(u8, subject);
+        errdefer self.allocator.free(s);
+
+        self.clearPrRequest();
+        self.pr_gen_generation +%= 1;
+        self.pr_gen_requested = .{
+            .base = b,
+            .target = t,
+            .subject = s,
+            .three_dot = three_dot,
+            .generation = self.pr_gen_generation,
+        };
+        // Retain the context (own copies) for regenerate and the session-save match.
+        self.allocator.free(self.pr_ctx_base);
+        self.pr_ctx_base = self.allocator.dupe(u8, b) catch &.{};
+        self.allocator.free(self.pr_ctx_target);
+        self.pr_ctx_target = self.allocator.dupe(u8, t) catch &.{};
+        self.pr_ctx_three_dot = three_dot;
+        self.allocator.free(self.pr_doc_key);
+        self.pr_doc_key = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ if (three_dot) "b:" else "c:", t }) catch &.{};
+        // Snapshot the tip/base SHAs so a later reopen can detect staleness.
+        self.allocator.free(self.pr_doc_target_sha);
+        self.pr_doc_target_sha = self.git.revParse(t) orelse &.{};
+        self.allocator.free(self.pr_doc_base_sha);
+        self.pr_doc_base_sha = self.git.revParse(b) orelse &.{};
+        self.pr_doc_stale = false;
+
+        self.pr_gen_active = true;
+        self.pr_doc_failed = false;
+        self.pr_doc_scroll = 0;
+        self.freePrDoc();
+        self.allocator.free(self.pr_doc_subject);
+        self.pr_doc_subject = self.allocator.dupe(u8, s) catch &.{};
+        self.mode = .pr_preview;
+        try self.setMessage("generating PR description...", .{});
+    }
+
+    pub fn clearPrRequest(self: *App) void {
+        if (self.pr_gen_requested) |req| {
+            self.allocator.free(req.base);
+            self.allocator.free(req.target);
+            self.allocator.free(req.subject);
+        }
+        self.pr_gen_requested = null;
+    }
+
+    fn freePrDoc(self: *App) void {
+        self.allocator.free(self.pr_doc_title);
+        self.allocator.free(self.pr_doc_body);
+        self.pr_doc_title = &.{};
+        self.pr_doc_body = &.{};
+    }
+
+    /// TUI-loop hook: a PR-doc worker finished (`title`/`body` null on failure).
+    /// A result for a superseded request or a closed preview is discarded.
+    pub fn applyPrDoc(self: *App, generation: u64, title: ?[]const u8, body: ?[]const u8) !void {
+        self.pr_gen_active = false;
+        if (generation != self.pr_gen_generation or self.mode != .pr_preview) return;
+        if (title == null or body == null) {
+            self.pr_doc_failed = true;
+            try self.setMessage("PR generation failed", .{});
+            return;
+        }
+        self.freePrDoc();
+        self.pr_doc_title = try self.allocator.dupe(u8, title.?);
+        self.pr_doc_body = try self.allocator.dupe(u8, body.?);
+        self.pr_doc_failed = false;
+        self.pr_doc_scroll = 0;
+        try self.setMessage("PR description ready — y/t/a copy body/title/both, esc close", .{});
+    }
+
+    fn handlePrPreviewKey(self: *App, key: vaxis.Key) !void {
+        if (self.isDialogCloseKey(key) or key.matches('q', .{})) {
+            self.mode = .normal;
+            try self.setMessage("", .{});
+            return;
+        }
+        if (self.pr_gen_active) return; // still generating: only esc/q close
+        if (self.config.keymap.down.matches(key) or key.matches(vaxis.Key.down, .{})) {
+            self.pr_doc_scroll = @min(self.pr_doc_scroll + 1, self.pr_doc_max_scroll);
+        } else if (self.config.keymap.up.matches(key) or key.matches(vaxis.Key.up, .{})) {
+            self.pr_doc_scroll -|= 1;
+        } else if (key.matches(vaxis.Key.page_down, .{})) {
+            self.pr_doc_scroll = @min(self.pr_doc_scroll + 10, self.pr_doc_max_scroll);
+        } else if (key.matches(vaxis.Key.page_up, .{})) {
+            self.pr_doc_scroll -|= 10;
+        } else if (key.matches('y', .{})) {
+            try self.copyPrDoc(.body);
+        } else if (key.matches('t', .{})) {
+            try self.copyPrDoc(.title);
+        } else if (key.matches('a', .{})) {
+            try self.copyPrDoc(.both);
+        } else if (key.matches('r', .{})) {
+            // Regenerate the same source (no re-prompt). Args alias the retained
+            // context; requestPrGeneration dupes them before replacing it.
+            if (self.pr_ctx_target.len > 0)
+                try self.requestPrGeneration(self.pr_ctx_base, self.pr_ctx_target, self.pr_ctx_three_dot, self.pr_doc_subject);
+        } else if (key.matches('b', .{})) {
+            try self.changePrBase();
+        }
+    }
+
+    /// Re-pick the base ref for the current branch PR description (branch docs
+    /// only) and regenerate against it. Reopens the base prompt prefilled with the
+    /// current base.
+    fn changePrBase(self: *App) !void {
+        if (!self.pr_ctx_three_dot or self.pr_ctx_target.len == 0) {
+            try self.setMessage("changing the base applies to a branch PR description", .{});
+            return;
+        }
+        self.allocator.free(self.pr_prompt_target);
+        self.pr_prompt_target = try self.allocator.dupe(u8, self.pr_ctx_target);
+        self.allocator.free(self.pr_base_prefill);
+        self.pr_base_prefill = self.allocator.dupe(u8, self.pr_ctx_base) catch &.{};
+        try self.startTextPrompt(.pr_base);
+    }
+
+    fn copyPrDoc(self: *App, which: enum { title, body, both }) !void {
+        if (self.pr_doc_failed or (self.pr_doc_title.len == 0 and self.pr_doc_body.len == 0)) return;
+        const text = switch (which) {
+            .title => try self.allocator.dupe(u8, self.pr_doc_title),
+            .body => try self.allocator.dupe(u8, self.pr_doc_body),
+            .both => try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ self.pr_doc_title, self.pr_doc_body }),
+        };
+        if (self.clipboard_request) |c| self.allocator.free(c);
+        self.clipboard_request = text;
+        try self.setMessage("copied {s} to clipboard", .{@tagName(which)});
+    }
+
     fn startCommitFilterMenu(self: *App) !void {
         self.focus = .commits;
         self.commits_tab = .commits;
@@ -8613,6 +8979,7 @@ pub const App = struct {
                 }
                 return self.requestConfirmation(.pull_reset_upstream, "reset {s} to its upstream?", .{self.data.current_branch});
             },
+            .gen_pr_description => return self.startPrGeneration(),
             .fixup_down => return commitops_mod.rebaseSelectedCommit(self, .fixup),
             .fixup_down_keep => return commitops_mod.rebaseSelectedCommit(self, .fixup_keep),
             .autosquash_above => return commitops_mod.autosquashFixups(self),
@@ -15116,6 +15483,73 @@ test "stagedDiff falls back to a stat summary when the full diff overflows exec'
     try std.testing.expect(std.mem.indexOf(u8, diff, "big.txt") != null); // names the staged file
 }
 
+test "refDiff / refLog / defaultBranch gather a branch's changes for PR generation" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q -b main
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf 'base\n' > f.txt && git add f.txt && git commit -qm base
+        \\git checkout -q -b feature
+        \\printf 'feature line\n' >> f.txt && git add f.txt && git commit -qm "Add feature line"
+    );
+    var g = try git_mod.Git.initAt(a, tio, &env, dir_path);
+    defer g.deinit();
+
+    const diff = try g.refDiff("main", "feature", true);
+    defer a.free(diff);
+    try std.testing.expect(std.mem.indexOf(u8, diff, "feature line") != null); // three-dot diff of the branch
+
+    const log = try g.refLog("main", "feature", 50);
+    defer a.free(log);
+    try std.testing.expect(std.mem.indexOf(u8, log, "Add feature line") != null); // the branch's commit
+
+    const def = try g.defaultBranch();
+    defer a.free(def);
+    try std.testing.expectEqualStrings("main", def); // no origin/HEAD, local main exists
+}
+
+test "generatePrDoc runs the ai_command and returns a split title + body" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q -b main
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf 'x\n' > f.txt && git add f.txt && git commit -qm base
+    );
+    var g = try git_mod.Git.initAt(a, tio, &env, dir_path); // sets git_dir for runAiCommand
+    defer g.deinit();
+
+    const ctx = aiauthor_mod.DocContext{ .subject = "branch feature vs main", .commit_log = "- add feature", .diff = "diff --git a/f b/f" };
+    // Fake ai_command: ignores stdin (the piped prompt), prints a title + body.
+    var doc = try aiauthor_mod.generatePrDoc(a, &g, "printf 'Add the feature\\n\\n## Summary\\nDoes the thing.'", ctx);
+    defer doc.deinit(a);
+    try std.testing.expectEqualStrings("Add the feature", doc.title);
+    try std.testing.expectEqualStrings("## Summary\nDoes the thing.", doc.body);
+}
+
 test "merge commit's per-file preview shows the brought-in file (issue #22 follow-up)" {
     const a = std.testing.allocator;
     const tio = std.testing.io;
@@ -15470,6 +15904,17 @@ fn deinitTestApp(app: *App) void {
     app.allocator.free(app.op_summary);
     app.allocator.free(app.op_output);
     if (app.clipboard_request) |c| app.allocator.free(c);
+    app.clearPrRequest();
+    app.allocator.free(app.pr_doc_title);
+    app.allocator.free(app.pr_doc_body);
+    app.allocator.free(app.pr_doc_subject);
+    app.allocator.free(app.pr_prompt_target);
+    app.allocator.free(app.pr_base_prefill);
+    app.allocator.free(app.pr_ctx_base);
+    app.allocator.free(app.pr_ctx_target);
+    app.allocator.free(app.pr_doc_key);
+    app.allocator.free(app.pr_doc_target_sha);
+    app.allocator.free(app.pr_doc_base_sha);
     if (app.editor_request) |r| {
         app.allocator.free(r.command);
         if (r.resolve_conflict_path) |p| app.allocator.free(p);

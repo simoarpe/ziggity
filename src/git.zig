@@ -915,6 +915,18 @@ pub const Git = struct {
         return self.allocator.dupe(u8, hash);
     }
 
+    /// The full commit SHA `ref` resolves to (owned), or null if it doesn't
+    /// resolve. Used to snapshot the branch tip / base so a saved PR description
+    /// can be flagged stale when they later move.
+    pub fn revParse(self: *Git, ref: []const u8) ?[]u8 {
+        var res = self.exec(&.{ "rev-parse", "--verify", "--quiet", ref }) catch return null;
+        defer res.deinit(self.allocator);
+        if (!res.ok()) return null;
+        const sha = std.mem.trim(u8, res.stdout, " \t\r\n");
+        if (sha.len == 0) return null;
+        return self.allocator.dupe(u8, sha) catch null;
+    }
+
     /// Whether `date` is a form git will accept for author/committer dates.
     /// Validated with `git var GIT_AUTHOR_IDENT` (which parses `GIT_AUTHOR_DATE`
     /// through the same strict date parser the committer-date path uses), so a
@@ -1000,6 +1012,79 @@ pub const Git = struct {
         defer res.deinit(self.allocator);
         if (!res.ok()) return self.allocator.dupe(u8, "");
         return self.allocator.dupe(u8, res.stdout);
+    }
+
+    /// Run `full_args`, returning its stdout, or `stat_args` output as a bounded
+    /// fallback if the full command overflows exec's 16 MB cap (a branch/commit
+    /// diff can be as huge as a staged one). Empty on failure. Owned.
+    fn diffWithFallback(self: *Git, full_args: []const []const u8, stat_args: []const []const u8) ![]u8 {
+        if (self.exec(full_args)) |ok_res| {
+            var res = ok_res;
+            defer res.deinit(self.allocator);
+            if (!res.ok()) return self.allocator.dupe(u8, "");
+            return self.allocator.dupe(u8, res.stdout);
+        } else |_| {
+            var res = self.exec(stat_args) catch return self.allocator.dupe(u8, "");
+            defer res.deinit(self.allocator);
+            if (!res.ok()) return self.allocator.dupe(u8, "");
+            return self.allocator.dupe(u8, res.stdout);
+        }
+    }
+
+    /// Diff between two refs, bounded like `stagedDiff`. `three_dot` uses
+    /// `base...target` (the merge-base diff: what `target` added), else a two-dot
+    /// `base target`. For PR/commit document generation. Owned.
+    pub fn refDiff(self: *Git, base: []const u8, target: []const u8, three_dot: bool) ![]u8 {
+        if (three_dot) {
+            const spec = try std.fmt.allocPrint(self.allocator, "{s}...{s}", .{ base, target });
+            defer self.allocator.free(spec);
+            return self.diffWithFallback(
+                &.{ "diff", "--no-color", "--no-ext-diff", spec },
+                &.{ "diff", "--no-color", "--stat", "--stat-count=1024", spec },
+            );
+        }
+        return self.diffWithFallback(
+            &.{ "diff", "--no-color", "--no-ext-diff", base, target },
+            &.{ "diff", "--no-color", "--stat", "--stat-count=1024", base, target },
+        );
+    }
+
+    /// Commit list for a document: `git log base..target` as "<hash> <subject>"
+    /// followed by each commit body, newest first, capped at `limit`. Empty on
+    /// overflow or failure. Owned.
+    pub fn refLog(self: *Git, base: []const u8, target: []const u8, limit: usize) ![]u8 {
+        var nbuf: [16]u8 = undefined;
+        const narg = std.fmt.bufPrint(&nbuf, "-{d}", .{limit}) catch "-200";
+        const range = try std.fmt.allocPrint(self.allocator, "{s}..{s}", .{ base, target });
+        defer self.allocator.free(range);
+        var res = self.exec(&.{ "log", narg, "--no-color", "--format=- %s%n%b", range }) catch
+            return self.allocator.dupe(u8, "");
+        defer res.deinit(self.allocator);
+        if (!res.ok()) return self.allocator.dupe(u8, "");
+        return self.allocator.dupe(u8, res.stdout);
+    }
+
+    /// A default base ref to compare a branch against: `origin/HEAD`'s target if
+    /// set (e.g. "origin/main"), else a local "main"/"master" if it exists, else
+    /// "main". Used to prefill the PR-generation base prompt. Owned.
+    pub fn defaultBranch(self: *Git) ![]u8 {
+        if (self.exec(&.{ "symbolic-ref", "--short", "refs/remotes/origin/HEAD" })) |ok_res| {
+            var res = ok_res;
+            defer res.deinit(self.allocator);
+            if (res.ok()) {
+                const name = std.mem.trim(u8, res.stdout, " \t\r\n");
+                if (name.len > 0) return self.allocator.dupe(u8, name);
+            }
+        } else |_| {}
+        for ([_][]const u8{ "main", "master" }) |m| {
+            if (self.exec(&.{ "rev-parse", "--verify", "--quiet", m })) |ok_res| {
+                var res = ok_res;
+                defer res.deinit(self.allocator);
+                if (res.ok() and std.mem.trim(u8, res.stdout, " \t\r\n").len > 0)
+                    return self.allocator.dupe(u8, m);
+            } else |_| {}
+        }
+        return self.allocator.dupe(u8, "main");
     }
 
     /// Newline-separated names of staged files (`git diff --cached --name-only`).
