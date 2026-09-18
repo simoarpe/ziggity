@@ -25,6 +25,7 @@ installation and a quick tour. The pages below go deeper.
 | Page | What it covers |
 | --- | --- |
 | [Features](features.md) | A tour of the whole workflow: staging by line and hunk, the inline commit graph, interactive rebase, worktrees, stashes, bisect, and the live diff preview. |
+| [Resolving merge conflicts](conflict-resolution.md) | The in-app conflict workflow: the per-conflict resolver, keeping ours, theirs, or both, editing by hand, and finishing the merge or rebase. |
 | [Keybindings](keybindings.md) | The complete key reference for every panel and mode. |
 | [Configuration](configuration.md) | Every setting, key remap, and color. The `.ziggity.ini` format, custom commands, and editor setup. |
 

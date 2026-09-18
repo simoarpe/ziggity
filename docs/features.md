@@ -329,6 +329,8 @@ The animation itself is in the [README](../README.md).
   in your editor, ziggity re-reads the file on exit and stages it for you the
   moment the conflict markers are gone. `m` still offers the whole operation
   continue and abort actions; `MERGING` or `REBASING` shows in the Status panel.
+  See [Resolving merge conflicts](conflict-resolution.md) for a full walkthrough
+  with screenshots.
 
 ### Multi selection, diffing & stash
 

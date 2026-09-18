@@ -333,5 +333,26 @@ git tag v0.1.0
 git tag v0.2.0
 git push -q origin main --tags 2>/dev/null || true
 
-echo "demo repos ready: /tmp/zdemo-commit, /tmp/zdemo-co/clone, /tmp/zdemo-fetch, /tmp/zhero/ziggity, /tmp/zdemo-auth, /tmp/zdemo-graph, /tmp/zrecent, /tmp/zword, /tmp/zwrap, /tmp/ztabs"
+# --- /tmp/zconflict: a repo left mid-merge with a conflicted file -----------
+# For conflicts.tape (the conflict-resolution doc screenshots). Two branches
+# each change the same two non-adjacent lines of settings.conf, so the merge
+# leaves two separate conflict blocks in one file.
+rm -rf /tmp/zconflict
+mkdir -p /tmp/zconflict
+cd /tmp/zconflict
+git init -q -b main
+git config user.email demo@ziggity.dev
+git config user.name "Demo"
+printf '# Editor settings\ntheme = light\nfont_size = 12\nshow_line_numbers = true\nword_wrap = false\nhighlight_current_line = true\nautosave_interval = 30\ntab_width = 4\ntrim_whitespace = false\n' > settings.conf
+git add settings.conf
+git commit -q -m "Add editor settings"
+git checkout -q -b feature
+sed -i.bak 's/theme = light/theme = solarized/; s/tab_width = 4/tab_width = 8/' settings.conf && rm -f settings.conf.bak
+git commit -q -am "Feature: solarized theme, wider tabs"
+git checkout -q main
+sed -i.bak 's/theme = light/theme = dark/; s/tab_width = 4/tab_width = 2/' settings.conf && rm -f settings.conf.bak
+git commit -q -am "Dark theme, narrower tabs"
+git merge -q feature 2>/dev/null || true
+
+echo "demo repos ready: /tmp/zdemo-commit, /tmp/zdemo-co/clone, /tmp/zdemo-fetch, /tmp/zhero/ziggity, /tmp/zdemo-auth, /tmp/zdemo-graph, /tmp/zrecent, /tmp/zword, /tmp/zwrap, /tmp/ztabs, /tmp/zconflict"
 echo "for credentials.tape, also start:  python3 /tmp/auth401.py &"
