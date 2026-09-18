@@ -89,14 +89,6 @@ pub fn diffAgainstRef(app: *App, ref: []const u8) !void {
 fn openDiffingDialog(app: *App) !void {
     const base = app.diff_base.?;
     const dots: []const u8 = if (app.diff_three_dot) "..." else "..";
-    const active: []const u8 = if (app.diff_three_dot)
-        "only the selected side's own changes since the refs\n    diverged (the view a pull request shows)"
-    else
-        "the full difference between the two refs";
-    const other: []const u8 = if (app.diff_three_dot)
-        "switch to .. (the full difference between the two refs)"
-    else
-        "switch to ... (only the selected side's changes since\n               diverging - the view a pull request shows)";
     app.allocator.free(app.op_command);
     app.op_command = try std.fmt.allocPrint(app.allocator, "git diff {s}{s}<selected>", .{ base, dots });
     app.allocator.free(app.op_summary);
@@ -106,12 +98,17 @@ fn openDiffingDialog(app: *App) !void {
         "Base marked: {s} (its row shows a \u{25C6})\n\n" ++
         "Select any other commit, branch or tag; the Diff panel follows,\n" ++
         "showing:\n\n" ++
-        "    git diff {s}{s}selected\n    {s}\n\n" ++
+        "    git diff {s}{s}selected\n\n" ++
+        "What the dots mean:\n\n" ++
+        "    ..    every change between base and selected.\n" ++
+        "    ...   only the changes on selected, leaving out anything\n" ++
+        "          base did after the two split. This is what a pull\n" ++
+        "          request shows.\n\n" ++
         "Press W again for options:\n\n" ++
-        "    invert     swap the two sides (selected{s}{s})\n" ++
-        "    dots       {s}\n\n" ++
+        "    invert     swap the sides (show selected{s}base)\n" ++
+        "    dots       switch between .. and ...\n\n" ++
         "Branches default to three dots, commits and tags to two.\n" ++
-        "Enter or esc closes this note; esc again exits diffing mode.", .{ base, base, dots, active, dots, base, other });
+        "Enter or esc closes this note; esc again exits diffing mode.", .{ base, base, dots, dots });
     app.op_ok = true;
     app.op_running = false;
     app.op_scroll = 0;
