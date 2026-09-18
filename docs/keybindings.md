@@ -137,7 +137,8 @@ the written reference. Every binding is remappable, see
   to Files to continue or abort. Continue is refused (with a hint) until every
   conflict is resolved and staged
 - Conflicted files (Files panel): `enter` opens the per-conflict resolver (`o` /
-  `t` / `b` take ours / theirs / both, `u` undo). `space` opens a menu with every
+  `t` take ours / theirs, `b` / `B` keep both with ours or theirs first, `u`
+  undo). `space` opens a menu with every
   way to resolve the file: resolve conflicts one by one (the same per-conflict
   resolver), take ours / theirs for the whole file, **edit in your editor**
   (ziggity re-reads the file when the editor closes and stages it automatically

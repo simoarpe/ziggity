@@ -1858,7 +1858,7 @@ fn drawConflicts(root: vaxis.Window, app: *app_mod.App) void {
     const win = popup(root, w, h, title, null);
 
     const footer_row: u16 = win.height -| 1;
-    print(win, footer_row, 0, "j/k conflict  o ours  t theirs  b both  u undo  esc back", st.bottom_accent);
+    print(win, footer_row, 0, "j/k next/prev conflict  o ours  t theirs  b/B both (ours/theirs first)  u undo  esc back", st.bottom_accent);
 
     const avail: usize = footer_row; // content rows above the footer
     if (avail == 0 or app.conflicts.len == 0) return;
@@ -1943,6 +1943,20 @@ fn drawConflicts(root: vaxis.Window, app: *app_mod.App) void {
             }
         }
         print(win, row, gutter, text, line_style);
+
+        // On the active conflict's outer markers, name which side is ours and
+        // which is theirs (tinted to match the body lines they head), so there
+        // is no need to recall that `<<<<<<< HEAD` is ours. VS Code marks the
+        // same split with its "Current"/"Incoming" labels.
+        if (in_block and is_marker and (line_no == cur.start or line_no == cur.end)) {
+            const is_ours = line_no == cur.start;
+            var lbl_style = base;
+            lbl_style.fg = if (is_ours) st.added.fg else st.removed.fg;
+            lbl_style.bold = true;
+            const lbl: []const u8 = if (is_ours) "\u{25C0} ours (o)" else "\u{25C0} theirs (t)";
+            const lbl_col = gutter + @as(u16, @intCast(text.len)) + 2;
+            if (lbl_col < win.width) print(win, row, lbl_col, lbl, lbl_style);
+        }
         row += 1;
     }
 
@@ -2016,8 +2030,8 @@ const help_lines = [_][]const u8{
     "  ctrl+b         status filter",
     "  `              toggle the directory tree",
     "  enter          open the hunk/line staging view (a conflicted file opens",
-    "                 the per-conflict resolver: j/k between conflicts, o/t/b",
-    "                 pick ours/theirs/both, u undo)",
+    "                 the per-conflict resolver: j/k between conflicts, o/t pick",
+    "                 ours/theirs, b/B both with ours/theirs first, u undo)",
     "  space          on a conflicted file: resolve menu (block by block, take",
     "                 ours/theirs, edit in your editor, or mark it resolved). Editing",
     "                 stages the file automatically once the markers are gone",
@@ -4794,8 +4808,10 @@ fn footerHints(c: FooterCtx) []const u8 {
     }
     if (c.conflict and c.focus == .files) {
         // No "esc back" here: the Files panel is at the top level during a
-        // conflict, so esc has nothing to back out to (only `q` quits).
-        return "space resolve (ours/theirs)  m menu (continue/abort)  d discard" ++ global;
+        // conflict, so esc has nothing to back out to (only `q` quits). `enter`
+        // opens the per-conflict resolver directly; `space` opens the menu with
+        // every route (one by one, take ours/theirs, edit, mark resolved).
+        return "enter resolve one by one  space resolve menu  m continue/abort  d discard" ++ global;
     }
     if (c.focus == .branches) {
         return switch (c.branches_tab) {

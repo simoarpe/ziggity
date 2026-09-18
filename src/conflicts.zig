@@ -19,9 +19,10 @@ pub const Conflict = struct {
     end: usize, // `>>>>>>>`
 };
 
-/// Which side(s) of a conflict to keep. `both` keeps ours then theirs (dropping
-/// the diff3 base and all markers).
-pub const Choice = enum { ours, theirs, both };
+/// Which side(s) of a conflict to keep. `both_ours_first` keeps ours then
+/// theirs, `both_theirs_first` keeps theirs then ours; both drop the diff3 base
+/// region and all markers. `ours`/`theirs` keep just that one side.
+pub const Choice = enum { ours, theirs, both_ours_first, both_theirs_first };
 
 fn isStart(l: []const u8) bool {
     return std.mem.startsWith(u8, l, "<<<<<<<");
@@ -104,32 +105,49 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) ![]Conflict {
     return conflicts.toOwnedSlice(allocator);
 }
 
-/// True if line `idx` survives resolving conflict `c` with `choice`.
-fn keepLine(c: Conflict, choice: Choice, idx: usize) bool {
-    if (idx < c.start or idx > c.end) return true; // outside the conflict: keep
-    // Marker lines are always dropped.
-    if (idx == c.start or idx == c.target or idx == c.end) return false;
-    if (c.ancestor) |a| if (idx == a) return false;
-
-    const ours_end = c.ancestor orelse c.target; // ours = (start, ancestor|target)
-    const in_ours = idx > c.start and idx < ours_end;
-    const in_theirs = idx > c.target and idx < c.end;
-    return switch (choice) {
-        .ours => in_ours,
-        .theirs => in_theirs,
-        .both => in_ours or in_theirs, // ours then theirs, base dropped
-    };
+/// Append file lines `[from, to)` (0-based, `to` exclusive) verbatim to `out`.
+fn appendLines(out: *std.ArrayList(u8), allocator: std.mem.Allocator, content: []const u8, ranges: []const LineRange, from: usize, to: usize) !void {
+    var i = from;
+    while (i < to) : (i += 1) try out.appendSlice(allocator, content[ranges[i].start..ranges[i].end]);
 }
 
 /// New file content after resolving conflict `c` with `choice` (owned). Other
-/// conflicts are left untouched.
+/// conflicts are left untouched. The conflict's marker lines (and the diff3 base
+/// region between `|||||||` and `=======`) are dropped; the `both_*` choices
+/// keep both sides, in the order the choice names.
 pub fn resolveContent(allocator: std.mem.Allocator, content: []const u8, c: Conflict, choice: Choice) ![]u8 {
     const ranges = try lineRanges(allocator, content);
     defer allocator.free(ranges);
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    for (ranges, 0..) |r, idx| {
-        if (keepLine(c, choice, idx)) try out.appendSlice(allocator, content[r.start..r.end]);
+
+    // Marker-excluded body ranges: ours = (start, ancestor|target), theirs =
+    // (target, end). The diff3 base region (ancestor, target) is never kept.
+    const ours_from = c.start + 1;
+    const ours_to = c.ancestor orelse c.target;
+    const theirs_from = c.target + 1;
+    const theirs_to = c.end;
+
+    var idx: usize = 0;
+    while (idx < ranges.len) : (idx += 1) {
+        if (idx < c.start or idx > c.end) {
+            try out.appendSlice(allocator, content[ranges[idx].start..ranges[idx].end]);
+            continue;
+        }
+        // Emit the whole resolved block once, at the opening marker, in the
+        // chosen side order; every other line inside the conflict is skipped.
+        if (idx == c.start) switch (choice) {
+            .ours => try appendLines(&out, allocator, content, ranges, ours_from, ours_to),
+            .theirs => try appendLines(&out, allocator, content, ranges, theirs_from, theirs_to),
+            .both_ours_first => {
+                try appendLines(&out, allocator, content, ranges, ours_from, ours_to);
+                try appendLines(&out, allocator, content, ranges, theirs_from, theirs_to);
+            },
+            .both_theirs_first => {
+                try appendLines(&out, allocator, content, ranges, theirs_from, theirs_to);
+                try appendLines(&out, allocator, content, ranges, ours_from, ours_to);
+            },
+        };
     }
     return out.toOwnedSlice(allocator);
 }
@@ -165,7 +183,7 @@ pub fn open(app: *App, path: []const u8) !void {
     app.conflicts = parsed;
     app.conflict_index = 0;
     app.mode = .conflict_resolve;
-    try app.setMessage("resolving {s}: o ours / t theirs / b both / u undo / esc back", .{path});
+    try app.setMessage("resolving {s}: o ours / t theirs / b both (ours first) / B both (theirs first) / u undo / esc back", .{path});
 }
 
 /// Free the conflict session state (safe when none is active).
@@ -258,7 +276,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     if (km.down.matches(key) or key.matches(vaxis.Key.down, .{})) return move(app, true);
     if (matchesChar(key, 'o')) return pick(app, .ours);
     if (matchesChar(key, 't')) return pick(app, .theirs);
-    if (matchesChar(key, 'b')) return pick(app, .both);
+    if (matchesChar(key, 'b')) return pick(app, .both_ours_first);
+    if (matchesChar(key, 'B')) return pick(app, .both_theirs_first);
     if (matchesChar(key, 'u')) return undo(app);
 }
 
@@ -288,7 +307,7 @@ test "parse finds a single 2-way conflict" {
     try testing.expectEqual(@as(usize, 6), c[0].end);
 }
 
-test "resolveContent ours/theirs/both" {
+test "resolveContent ours/theirs/both (ours-first and theirs-first)" {
     const c = try parse(testing.allocator, sample_2way);
     defer testing.allocator.free(c);
 
@@ -300,9 +319,14 @@ test "resolveContent ours/theirs/both" {
     defer testing.allocator.free(theirs);
     try testing.expectEqualStrings("line 1\ntheirs a\nline 8\n", theirs);
 
-    const both = try resolveContent(testing.allocator, sample_2way, c[0], .both);
-    defer testing.allocator.free(both);
-    try testing.expectEqualStrings("line 1\nours a\nours b\ntheirs a\nline 8\n", both);
+    const both_ours = try resolveContent(testing.allocator, sample_2way, c[0], .both_ours_first);
+    defer testing.allocator.free(both_ours);
+    try testing.expectEqualStrings("line 1\nours a\nours b\ntheirs a\nline 8\n", both_ours);
+
+    // theirs-first keeps both sides but flips the order within the block.
+    const both_theirs = try resolveContent(testing.allocator, sample_2way, c[0], .both_theirs_first);
+    defer testing.allocator.free(both_theirs);
+    try testing.expectEqualStrings("line 1\ntheirs a\nours a\nours b\nline 8\n", both_theirs);
 }
 
 test "parse handles diff3 ancestor and multiple conflicts" {

@@ -317,10 +317,13 @@ The animation itself is in the [README](../README.md).
 - `rebase --onto` from a marked base (`B`), and mid rebase amend (`m` can
   amend the stopped `edit` commit and continue).
 - Conflict resolution: `enter` on a conflicted file opens a per conflict
-  resolver with line numbers. `j` and `k` walk between conflicts, `o`, `t`
-  and `b` keep ours, theirs or both for the current one, `u` undoes the last
-  pick, and the file is staged automatically once the last conflict is
-  resolved. `space` opens a menu with every route to a resolution: the same
+  resolver with line numbers. `j` and `k` walk between conflicts, `o` and `t`
+  keep ours or theirs for the current one, `b` and `B` keep both sides with
+  ours or theirs first (so you can combine them without an editor), `u` undoes
+  the last pick, and the file is staged automatically once the last conflict is
+  resolved. The selected conflict tints ours green and theirs red and labels
+  each side on its marker, so you never have to remember that `<<<<<<< HEAD`
+  is ours. `space` opens a menu with every route to a resolution: the same
   per conflict resolver, take ours or theirs for the whole file, open the file
   in your editor, or mark a file you already fixed as resolved. When you edit
   in your editor, ziggity re-reads the file on exit and stages it for you the

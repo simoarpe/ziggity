@@ -8898,7 +8898,7 @@ pub const App = struct {
             return;
         }
         self.mode = .menu;
-        self.active_menu = .{ .title = "Resolve conflict", .items = &conflict_resolve_menu, .index = 0 };
+        self.active_menu = .{ .title = "Resolve conflicts", .items = &conflict_resolve_menu, .index = 0 };
         try self.setMessage("resolve {s}", .{file.path});
     }
 
