@@ -5281,6 +5281,13 @@ pub const App = struct {
         return n;
     }
 
+    /// Content rows the Status panel shows below the repo + summary lines: one
+    /// per active filter, plus one for the diffing-mode indicator. Drives the
+    /// panel's extra height so none of them is clipped.
+    pub fn statusIndicatorRows(self: *const App) u16 {
+        return self.activeFilterCount() + @intFromBool(self.diff_base != null);
+    }
+
     /// How many working-tree files currently have a merge conflict.
     fn conflictFileCount(self: *const App) usize {
         var n: usize = 0;
@@ -13018,6 +13025,29 @@ test "diffing mode marks a ref base and clears cleanly" {
     // when interpolated into `git diff <base> <target>`).
     try diffmode_mod.diffAgainstRef(&app, "--output=/tmp/x");
     try std.testing.expect(app.diff_base == null);
+}
+
+test "statusIndicatorRows reserves a Status row for the diffing banner" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // No filters, no diff base: nothing extra in the Status panel.
+    try std.testing.expectEqual(@as(u16, 0), app.statusIndicatorRows());
+
+    // A marked diff base adds one indicator row so the banner is never clipped.
+    try diffmode_mod.diffAgainstRef(&app, "main");
+    try std.testing.expectEqual(@as(u16, 1), app.statusIndicatorRows());
+
+    // A commit-log filter stacks on top of the diffing banner (its own row).
+    try app.git.setLogFilter(.path, "src/app.zig");
+    defer app.git.clearLogFilters();
+    try std.testing.expectEqual(@as(u16, 2), app.statusIndicatorRows());
+
+    // Exiting diffing mode drops its row again.
+    diffmode_mod.clearDiffBase(&app);
+    try std.testing.expectEqual(@as(u16, 1), app.statusIndicatorRows());
 }
 
 test "annotateByteSizes appends a human-readable size after each byte count" {

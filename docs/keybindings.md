@@ -39,7 +39,8 @@ the written reference. Every binding is remappable, see
   (GitHub, GitLab and Codeberg URL styles are handled)
 - `W`: diffing mode. Marks the selected ref as the base; select another to
   diff, `W` again for options (invert, switch the dots, arbitrary ref, exit;
-  esc also exits)
+  esc also exits). While it is on, the Status panel shows a diamond-marked
+  banner naming the base, with the `esc` exit reminder
 - mouse: click a panel to focus; wheel to navigate and scroll; drag over the
   diff or a dialog to select and copy text
 - `/`: filter files by path live; enter accepts; esc clears

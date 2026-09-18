@@ -1475,7 +1475,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         app.contentFocus(),
         app.config.expand_focused_side_panel,
         app.config.expanded_side_panel_weight,
-        app.activeFilterCount() -| 1, // one filter fits the base height; the rest add a row each
+        app.statusIndicatorRows() -| 1, // one indicator line fits the base height; the rest add a row each
     );
     const status_h = heights.status;
     const files_h = heights.files;
@@ -3177,10 +3177,19 @@ fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
         print(win, 1, 0, line, st.muted);
     }
 
-    // Lines 2+: every active filter, one per line, in the warning colour so a
-    // filtered panel is obvious at a glance. The Files, Branches and Commits
-    // panels can all be filtered at once, so the lines stack.
+    // Lines 2+: mode indicators, one per line. First the diffing-mode banner
+    // (when a base is marked), then every active filter. The diffing base takes
+    // over the main panel, so it is easy to forget you are in it; flag it here
+    // with the same ◆ its base row carries, and spell out that esc leaves the
+    // mode. Header colour, distinct from the warning-coloured filters below.
     var filter_row: u16 = 2;
+    if (app.diff_base) |diff_ref| {
+        const dots: []const u8 = if (app.diff_three_dot) "..." else "..";
+        var dbuf: [256]u8 = undefined;
+        const line = std.fmt.bufPrint(&dbuf, "{s} diffing from {s}{s} (esc exits, W options)", .{ glyph_diff_base, diffTitleRef(diff_ref), dots }) catch "diffing (esc exits)";
+        print(win, filter_row, 0, line, withFg(st.normal, ui_theme.header));
+        filter_row += 1;
+    }
     if (app.anyFileFilterActive()) {
         var fbuf: [256]u8 = undefined;
         const line = if (app.fileDisplayFilterActive() and app.fileFilterActive())

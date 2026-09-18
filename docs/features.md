@@ -345,7 +345,11 @@ The animation itself is in the [README](../README.md).
   dot difference, `base...selected` the three dot view (only the selected
   side's changes since the refs diverged, what a pull request shows), and
   inverting swaps the order around the dots. Branch bases default to three
-  dots, commit and tag bases to two.
+  dots, commit and tag bases to two. While diffing mode is on, the Status
+  panel keeps a diamond-marked banner naming the base and the dot mode, with
+  a reminder that `esc` exits and `W` opens the options, so the mode is never
+  hidden. Diffing is only a view: commit, push, pull and the other actions
+  keep working normally on the current branch and leave the mode untouched.
 - Stash menu (`s`): stash all, all plus untracked, staged only, just the
   selected file, or keep everything (snapshot into a stash, untracked files
   included, while leaving the working tree untouched). Each asks for an
