@@ -287,6 +287,11 @@ point, with demos:
   and reword across a range of commits in a plan editor, then run the lot as
   one rebase. Cherry picking, autosquash, custom patch building and
   `rebase --onto` from a marked base are all there.
+- **Conflicts resolved without leaving the TUI**: a per conflict resolver
+  walks a file one block at a time, keeping ours, theirs, or both in either
+  order, each side labeled so you never lose track of which is which. Take
+  ours or theirs for the whole file, edit by hand, or mark a file you already
+  fixed. See [Resolving merge conflicts](docs/conflict-resolution.md).
 - **History and diffing**: the real `git log --graph` DAG in git's own
   colors, first parent jumps for walking a merge heavy history, and branch
   comparisons that default to the merge base, the same diff a pull request
