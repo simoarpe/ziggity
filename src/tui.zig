@@ -1787,7 +1787,7 @@ fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
         // and the horizontal pan applied. On HEAD's row the node glyph is swapped
         // to the hollow marker (same width, so columns and colour are preserved).
         const draw_line = if (app.commit_graph_head_row == idx) markHeadNode(line, &head_buf) else line;
-        printAnsi(win, row, draw_line, base, lo, hi, h_off);
+        printAnsiRefBadged(win, row, draw_line, base, lo, hi, h_off);
         row += 1;
     }
     drawScrollbarRange(root, px0 + w - 1, py0 + 1, avail, app.commit_graph_lines, app.commit_graph_scroll, true);
@@ -4388,7 +4388,7 @@ fn drawDiffContent(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
             const line = text[wr.start..wr.end];
             const em = emphFor(emph_lines, wr.line);
             const sg = segSel(selColsFor(sel, wr.line), wr.vis_start, wr.vis_end);
-            printAnsiEmph(win, screen_row, line, base, sg.lo, sg.hi, wr.vis_start, em.spans, wordBg(em), wr.vis_end - wr.vis_start);
+            printAnsiEmph(win, screen_row, line, base, sg.lo, sg.hi, wr.vis_start, em.spans, wordBg(em), wr.vis_end - wr.vis_start, false);
         }
         return;
     }
@@ -4405,7 +4405,7 @@ fn drawDiffContent(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
         const abs_line = app.main_scroll + row;
         const em = emphFor(emph_lines, abs_line);
         const sg = segSel(selColsFor(sel, abs_line), h_off, h_off +| win.width);
-        printAnsiEmph(win, row, line, base, sg.lo, sg.hi, h_off, em.spans, wordBg(em), std.math.maxInt(u16));
+        printAnsiEmph(win, row, line, base, sg.lo, sg.hi, h_off, em.spans, wordBg(em), std.math.maxInt(u16), false);
     }
 }
 
@@ -4459,7 +4459,7 @@ fn drawStagingPane(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
             if (std.meta.activeTag(base.bg) != .default) fillRow(win, screen_row, base);
             const em = emphFor(emph_lines, wr.line);
             const sg = segSel(selColsFor(sel, wr.line), wr.vis_start, wr.vis_end);
-            printAnsiEmph(win, screen_row, line, base, sg.lo, sg.hi, wr.vis_start, em.spans, wordBg(em), wr.vis_end - wr.vis_start);
+            printAnsiEmph(win, screen_row, line, base, sg.lo, sg.hi, wr.vis_start, em.spans, wordBg(em), wr.vis_end - wr.vis_start, false);
         }
         return;
     }
@@ -4477,7 +4477,7 @@ fn drawStagingPane(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
         if (std.meta.activeTag(base.bg) != .default) fillRow(win, row, base);
         const em = emphFor(emph_lines, abs_line);
         const sg = segSel(selColsFor(sel, abs_line), h_off, h_off +| win.width);
-        printAnsiEmph(win, row, line, base, sg.lo, sg.hi, h_off, em.spans, wordBg(em), std.math.maxInt(u16));
+        printAnsiEmph(win, row, line, base, sg.lo, sg.hi, h_off, em.spans, wordBg(em), std.math.maxInt(u16), false);
     }
 }
 
@@ -5082,7 +5082,27 @@ fn drawDialogRow(win: vaxis.Window, app: *app_mod.App, win_row: u16, text: []con
 /// whose on-screen column falls in `[sel_lo, sel_hi)` get the selection
 /// background (mouse text selection); pass an empty range (0,0) for none.
 fn printAnsi(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, sel_lo: u16, sel_hi: u16, h_off: u16) void {
-    printAnsiEmph(win, row, line, base, sel_lo, sel_hi, h_off, &.{}, 0, std.math.maxInt(u16));
+    printAnsiEmph(win, row, line, base, sel_lo, sel_hi, h_off, &.{}, 0, std.math.maxInt(u16), false);
+}
+
+/// Like `printAnsi`, but the ref decoration (git's bold magenta branch/tag
+/// names) is drawn as a label badge — magenta background, light text — so it
+/// stays readable over the cursor row and reads like a label (issue #28). Used
+/// by the commit-graph viewer, the only place that carries those decorations.
+fn printAnsiRefBadged(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, sel_lo: u16, sel_hi: u16, h_off: u16) void {
+    printAnsiEmph(win, row, line, base, sel_lo, sel_hi, h_off, &.{}, 0, std.math.maxInt(u16), true);
+}
+
+/// True when a style is git's decoration magenta: the graph format assigns
+/// branch/tag names a *bold* magenta (`%C(bold magenta)`). The `--graph` lane
+/// colours also cycle through a non-bold magenta, so the bold flag is what keeps
+/// a magenta merge lane from being mistaken for a ref label.
+fn cellFgIsMagenta(s: vaxis.Style) bool {
+    if (!s.bold) return false;
+    return switch (s.fg) {
+        .index => |ix| ix == 5,
+        else => false,
+    };
 }
 
 /// Like `printAnsi`, plus word-level emphasis: cells whose character ordinal
@@ -5093,7 +5113,7 @@ fn printAnsi(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, s
 /// tab-space), not visual column, so it stays aligned through wide characters
 /// (CJK, emoji), combining marks and zero-width codepoints: `worddiff` counts
 /// characters the same way this loop draws them, whatever each one's width.
-fn printAnsiEmph(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, sel_lo: u16, sel_hi: u16, h_off: u16, emph: []const worddiff.Span, emph_bg: u8, max_cols: u16) void {
+fn printAnsiEmph(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Style, sel_lo: u16, sel_hi: u16, h_off: u16, emph: []const worddiff.Span, emph_bg: u8, max_cols: u16, ref_badge: bool) void {
     if (row >= win.height) return;
     var style = base;
     var vis_col: u16 = 0; // column in the unscrolled line
@@ -5103,11 +5123,24 @@ fn printAnsiEmph(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Styl
     // it falls off the left (vc < h) or right edge. `co` is the cell's character
     // ordinal, matched against the emphasis spans.
     const emit = struct {
-        fn f(w: vaxis.Window, vc: u16, co: u16, h: u16, r: u16, g: []const u8, width: u16, s: vaxis.Style, lo: u16, hi: u16, em: []const worddiff.Span, ebg: u8) void {
+        fn f(w: vaxis.Window, vc: u16, co: u16, h: u16, r: u16, g: []const u8, width: u16, s: vaxis.Style, lo: u16, hi: u16, em: []const worddiff.Span, ebg: u8, badge: bool) void {
             if (vc < h) return;
             const c = vc - h;
             if (c >= w.width) return;
             var cell_style = s;
+            // Ref decoration as a label: the graph draws branch/tag names in a
+            // fixed bold magenta (index 5), which is hard to read as coloured
+            // text over the blue cursor row. Flip those cells to a magenta
+            // background with light text so they read like a badge on any row
+            // background (issue #28).
+            if (badge and cellFgIsMagenta(s)) {
+                // Dark text on the magenta fill reads well whether the terminal's
+                // magenta is dark (e.g. #8E44AD) or a light pastel; white would
+                // wash out on a light magenta.
+                cell_style.bg = .{ .index = 5 };
+                cell_style.fg = .{ .index = 0 };
+                cell_style.bold = false;
+            }
             // Word-level highlight background for a changed word...
             for (em) |sp| {
                 if (co >= sp.start and co < sp.end) {
@@ -5145,7 +5178,7 @@ fn printAnsiEmph(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Styl
         if (byte == '\t') {
             var spaces: u8 = 0;
             while (spaces < 4 and vis_col < last_col) : (spaces += 1) {
-                emit(win, vis_col, char_ord, h_off, row, " ", 1, style, sel_lo, sel_hi, emph, emph_bg);
+                emit(win, vis_col, char_ord, h_off, row, " ", 1, style, sel_lo, sel_hi, emph, emph_bg, ref_badge);
                 vis_col += 1;
                 char_ord += 1;
             }
@@ -5153,7 +5186,7 @@ fn printAnsiEmph(win: vaxis.Window, row: u16, line: []const u8, base: vaxis.Styl
             continue;
         }
         const dc = decodeCell(win, line, i);
-        emit(win, vis_col, char_ord, h_off, row, dc.grapheme, dc.width, style, sel_lo, sel_hi, emph, emph_bg);
+        emit(win, vis_col, char_ord, h_off, row, dc.grapheme, dc.width, style, sel_lo, sel_hi, emph, emph_bg, ref_badge);
         vis_col += dc.width;
         char_ord += 1;
         i += dc.len;

@@ -47,7 +47,9 @@ default it shows the current branch **and its upstream**, so the commits you are
 behind by are visible right away; `a` toggles all branches, and
 `commit_graph_scope = all` makes it open in the all-branches view. The
 checked-out commit (HEAD) is drawn as a hollow node (`○`), which stands out most
-in the all-branches view where HEAD sits among the other refs. Jump to HEAD with
+in the all-branches view where HEAD sits among the other refs. Branch and tag
+names are drawn as filled labels rather than plain colored text, so they read
+clearly even on the highlighted cursor row. Jump to HEAD with
 `@`, or to a commit's first parent with `p`. `space` resets the current branch
 to the commit under the cursor (soft / mixed / hard), handy for rewinding to
 the last merge; the hint only appears for a commit on the current branch, since
