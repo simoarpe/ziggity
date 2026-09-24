@@ -28,6 +28,12 @@ const diffwrap = @import("diffwrap.zig");
 const staging_mod = @import("staging.zig");
 const textmatch = @import("textmatch.zig");
 
+/// Screen mode of the focused SIDE panel: the standard layout, the panel
+/// enlarged (half), or the panel filling the terminal (full). Cycled by `+`/`_`
+/// only (`esc` is left out of it). The main panel is a separate special case
+/// (`z`/`esc` fullscreen) and is never affected by this.
+pub const ScreenMode = enum { normal, half, full };
+
 pub const Mode = enum {
     normal,
     commit_prompt,
@@ -2377,10 +2383,15 @@ pub const App = struct {
     // current end; `dragged` distinguishes a real drag from a plain click.
     diff_sel_active: bool = false,
     diff_sel_dragged: bool = false,
-    // Full-screen the Diff/main panel: the side panels are hidden and the main
-    // panel fills the terminal. Toggled by `toggle_fullscreen` (default `z`);
-    // `esc` also exits it.
+    // Full-screen the Diff/main panel: the side panels hide and the main panel
+    // fills the terminal. Its own special case, toggled by `z` and exited by `z`
+    // or `esc` (the `+`/`_` screen-mode cycle never touches the main panel).
     diff_fullscreen: bool = false,
+    // Screen mode of the focused SIDE panel (lazygit's `+`/`_` cycle): `normal`,
+    // `half` (the focused side panel is enlarged), or `full` (it fills the
+    // terminal, others hidden). Only meaningful while a side panel is focused;
+    // `+`/`_` are no-ops on the main panel, and `esc` never touches it.
+    screen_mode: ScreenMode = .normal,
     // Whether a non-empty selection was visible when the current click began —
     // so clicking to deselect just clears it, without also focusing the panel.
     diff_sel_had_span: bool = false,
@@ -3836,6 +3847,10 @@ pub const App = struct {
                     self.diff_fullscreen = false; // esc shrinks the maximised diff back
                     return;
                 }
+                // Note: `esc` intentionally does NOT change the `+`/`_` screen
+                // mode of the side panels — that stays overloaded enough already
+                // (drilling out of panels, clearing filters). Only the main
+                // panel's fullscreen (above) responds to `esc`.
                 if (self.rangeActive()) {
                     self.clearRange(); // esc cancels a multi-range selection
                     try self.updatePreview();
@@ -3944,6 +3959,8 @@ pub const App = struct {
                 }
             },
             .toggle_fullscreen => try self.toggleDiffFullscreen(),
+            .screen_mode_next => self.cycleScreenMode(true),
+            .screen_mode_prev => self.cycleScreenMode(false),
             // Toggle the staging view between single and split layouts.
             .toggle_staging_split => if (self.staging_active and !self.staging_patch_mode) try staging_mod.toggleStagingSplit(self),
             .select => {
@@ -6768,9 +6785,35 @@ pub const App = struct {
         try self.updatePreview();
     }
 
+    /// The main/diff panel fills the terminal (side column hidden). Its own
+    /// special case, driven by `z` (not the `+`/`_` screen-mode cycle).
+    pub fn mainFullscreen(self: *const App) bool {
+        return self.diff_fullscreen;
+    }
+
+    /// A focused side panel fills the terminal (main + the other side panels
+    /// hidden): screen mode `full` while a side panel is focused.
+    pub fn sidePanelFullscreen(self: *const App) bool {
+        return !self.diff_fullscreen and self.screen_mode == .full and self.focus != .main;
+    }
+
+    /// The focused side panel is enlarged (accordion): the config option
+    /// `expand_focused_side_panel`, or half screen mode while a side panel is
+    /// focused.
+    pub fn accordionActive(self: *const App) bool {
+        return self.config.expand_focused_side_panel or (self.screen_mode == .half and self.focus != .main);
+    }
+
+    /// Whether the `+`/`_` screen mode is actively shaping the layout (a side
+    /// panel is focused and enlarged) — drives the footer badge.
+    pub fn screenModeActive(self: *const App) bool {
+        return self.screen_mode != .normal and self.focus != .main;
+    }
+
     /// Toggle the Diff/main panel between full-screen (side panels hidden, main
     /// fills the terminal) and the normal layout. Entering it focuses the main
-    /// panel so there's something to read/scroll.
+    /// panel so there's something to read/scroll. Its own state, exited by `z`
+    /// or `esc`; the `+`/`_` cycle never touches the main panel.
     fn toggleDiffFullscreen(self: *App) !void {
         if (self.diff_fullscreen) {
             self.diff_fullscreen = false;
@@ -6778,6 +6821,23 @@ pub const App = struct {
             if (self.focus != .main) try self.enterMain();
             self.diff_fullscreen = true;
         }
+    }
+
+    /// Cycle the focused SIDE panel's screen mode (lazygit's `+`/`_`): forward
+    /// steps normal -> half -> full, backward steps full -> half -> normal,
+    /// clamped at each end. The main panel is a special case (`z`) and is never
+    /// affected, so this is a no-op while the main panel is focused.
+    fn cycleScreenMode(self: *App, forward: bool) void {
+        if (self.focus == .main) return;
+        self.screen_mode = if (forward) switch (self.screen_mode) {
+            .normal => .half,
+            .half => .full,
+            .full => .full,
+        } else switch (self.screen_mode) {
+            .full => .half,
+            .half => .normal,
+            .normal => .normal,
+        };
     }
 
     fn focusNext(self: *App) !void {
@@ -15380,6 +15440,57 @@ test "path filter prefills the drilled commit-file path (issue #39)" {
     try std.testing.expectEqualStrings("src/main.zig", app.input_buffer.items);
 
     app.commit_files = &.{}; // stack-backed slice; keep teardown away from it
+}
+
+test "screen mode cycles side panels only; main is z's special case (issue #38)" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+
+    app.focus = .commits;
+    try std.testing.expectEqual(ScreenMode.normal, app.screen_mode);
+    try std.testing.expect(!app.accordionActive());
+    try std.testing.expect(!app.screenModeActive());
+
+    // `+` steps up; half turns on the accordion, full fills the terminal.
+    app.cycleScreenMode(true);
+    try std.testing.expectEqual(ScreenMode.half, app.screen_mode);
+    try std.testing.expect(app.accordionActive());
+    try std.testing.expect(app.screenModeActive());
+    app.cycleScreenMode(true);
+    try std.testing.expectEqual(ScreenMode.full, app.screen_mode);
+    try std.testing.expect(app.sidePanelFullscreen()); // a side panel is focused
+    try std.testing.expect(!app.mainFullscreen());
+    app.cycleScreenMode(true); // clamps at full
+    try std.testing.expectEqual(ScreenMode.full, app.screen_mode);
+
+    // The main panel is a special case: `+`/`_` are no-ops there, and the side
+    // screen mode has no effect on the layout while it is focused.
+    app.focus = .main;
+    try std.testing.expect(!app.sidePanelFullscreen());
+    try std.testing.expect(!app.accordionActive());
+    try std.testing.expect(!app.screenModeActive());
+    app.cycleScreenMode(true);
+    try std.testing.expectEqual(ScreenMode.full, app.screen_mode); // unchanged on main
+    app.cycleScreenMode(false);
+    try std.testing.expectEqual(ScreenMode.full, app.screen_mode); // still unchanged
+
+    // `z` drives the main panel's own fullscreen, independent of screen mode.
+    try std.testing.expect(!app.mainFullscreen());
+    try app.toggleDiffFullscreen();
+    try std.testing.expect(app.mainFullscreen());
+    try app.toggleDiffFullscreen();
+    try std.testing.expect(!app.mainFullscreen());
+
+    // Back on a side panel, `_` steps down, clamped at normal.
+    app.focus = .commits;
+    app.cycleScreenMode(false);
+    app.cycleScreenMode(false);
+    try std.testing.expectEqual(ScreenMode.normal, app.screen_mode);
+    app.cycleScreenMode(false);
+    try std.testing.expectEqual(ScreenMode.normal, app.screen_mode);
+    try std.testing.expect(!app.accordionActive());
 }
 
 test "isFetch groups the fetch ops that honour fetch_prune_mode" {

@@ -1464,24 +1464,34 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     const footer_w = root.width -| 1; // the footer child is indented one column
     const bottom_h: u16 = @min(footerHeight(app, footer_w), @max(1, root.height / 2));
     const body_h = root.height - bottom_h;
-    // Full-screen mode hides the side column so the Diff/main panel fills the
-    // terminal (side_w = 0 → the main panel is drawn at x=0, full width).
-    const side_w = if (app.diff_fullscreen) 0 else sidePanelWidth(root.width, app.config.side_panel_width_percent);
+    // Screen mode drives the split: `full` on the main panel hides the side
+    // column (side_w = 0, main fills); `full` on a side panel hides the main
+    // panel instead (side_w = full width, main_w = 0). `half` just enlarges the
+    // focused side panel via the accordion.
+    const side_w = if (app.mainFullscreen())
+        0
+    else if (app.sidePanelFullscreen())
+        root.width
+    else
+        sidePanelWidth(root.width, app.config.side_panel_width_percent);
     const main_w = root.width - side_w;
 
     var y: u16 = 0;
     const heights = sidePanelHeights(
         body_h,
         app.contentFocus(),
-        app.config.expand_focused_side_panel,
+        app.accordionActive(),
         app.config.expanded_side_panel_weight,
         app.statusIndicatorRows() -| 1, // one indicator line fits the base height; the rest add a row each
     );
-    const status_h = heights.status;
-    const files_h = heights.files;
-    const branches_h = heights.branches;
-    const commits_h = heights.commits;
-    const stash_h = heights.stash;
+    // Full mode on a side panel gives that one panel the whole body; the others
+    // collapse to nothing (their draw calls are height-guarded below).
+    const fs: ?model.Focus = if (app.sidePanelFullscreen()) app.contentFocus() else null;
+    const status_h = if (fs) |f| (if (f == .status) body_h else 0) else heights.status;
+    const files_h = if (fs) |f| (if (f == .files) body_h else 0) else heights.files;
+    const branches_h = if (fs) |f| (if (f == .branches) body_h else 0) else heights.branches;
+    const commits_h = if (fs) |f| (if (f == .commits) body_h else 0) else heights.commits;
+    const stash_h = if (fs) |f| (if (f == .stash) body_h else 0) else heights.stash;
 
     // Sync each list panel's view scroll to its visible height (inner = panel
     // height minus the border) before drawing: re-anchors to the selection if it
@@ -1502,10 +1512,10 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     };
     app.panel_rect_count = 6;
 
-    if (!app.diff_fullscreen) {
-        drawStatus(panel(root, 0, y, side_w, status_h, "[1] Status", app.focus == .status, null), app);
+    if (!app.mainFullscreen()) {
+        if (status_h > 0) drawStatus(panel(root, 0, y, side_w, status_h, "[1] Status", app.focus == .status, null), app);
         y += status_h;
-        {
+        if (files_h > 0) {
             const files_tabs = [_][]const u8{ "Files", "Worktrees", "Submodules" };
             // A filtered Files list carries the same yellow title hint as the
             // Commits/Branches panels. Esc clears the path filter (`/`) while the
@@ -1526,7 +1536,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
             endListPan(app, .files, w.width);
         }
         y += files_h;
-        {
+        if (branches_h > 0) {
             // Drilled into a branch's sub-commits / files: a plain descriptive title.
             // Otherwise the title is the tab strip (Local / Remotes / Tags / …).
             const branches_tabs = [_][]const u8{ "Local", "Remotes", "Tags" };
@@ -1557,7 +1567,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
             endListPan(app, .branches, w.width);
         }
         y += branches_h;
-        {
+        if (commits_h > 0) {
             const commits_tabs = [_][]const u8{ "Commits", "Reflog", "Divergence" };
             const w = if (app.mode == .rebase_plan) blk: {
                 break :blk panel(root, 0, y, side_w, commits_h, "[4] Interactive rebase (enter run, esc cancel)", app.focus == .commits, listScrollInfo(app, .commits));
@@ -1583,7 +1593,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
             endListPan(app, .commits, w.width);
         }
         y += commits_h;
-        {
+        if (stash_h > 0) {
             const w = panel(root, 0, y, side_w, stash_h, "[5] Stash", app.focus == .stash, listScrollInfo(app, .stash));
             beginListPan(app, .stash);
             drawStash(w, app);
@@ -1591,6 +1601,8 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         }
     }
 
+    // The main/diff panel, unless a side panel is full-screen (main_w == 0).
+    if (main_w > 0) {
     const main_title = if (app.staging_patch_mode)
         "Building patch (esc back)"
     else if (app.staging_active)
@@ -1652,6 +1664,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
             refreshOnDiffChange(vx, app);
             drawDiff(main, app);
         }
+    }
     }
     // Indent the footer by one column so it lines up with the panel content
     // (just inside the left `│` border) and clears the terminal's rounded
@@ -1981,6 +1994,7 @@ const help_lines = [_][]const u8{
     "  enter          inspect the selection in the main panel",
     "  esc            go back or cancel",
     "  z              maximize the Diff panel to full screen (z or esc exits)",
+    "  + / _          cycle the focused side panel's size: normal, half, full",
     "  @              command log",
     "  ?              this help",
     "  ctrl+z         undo the last operation (reflog reset)",
@@ -4597,7 +4611,24 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
         }
         col = printSpan(win, 0, col, "  |  ", st.bottom);
     }
-    drawHints(win, 0, col, contextHints(app), st.hint_key, st.hint_desc);
+    // Screen-mode badge, right-aligned so the current mode is visible even in
+    // full mode, where only the focused panel and this bar remain on screen. The
+    // hints draw into a window narrowed to leave room, so they never collide.
+    const mode_label: []const u8 = if (!app.screenModeActive()) "" else switch (app.screen_mode) {
+        .normal => "",
+        .half => "[half]",
+        .full => "[full]",
+    };
+    if (mode_label.len > 0 and win.width > mode_label.len + 1) {
+        const bw: u16 = @intCast(mode_label.len + 1); // +1 leading gap
+        drawHints(win.child(.{ .x_off = 0, .y_off = 0, .width = win.width - bw, .height = win.height }), 0, col, contextHints(app), st.hint_key, st.hint_desc);
+        var badge = st.bottom;
+        badge.fg = st.bottom_accent.fg;
+        badge.bold = true;
+        _ = printSpan(win, 0, win.width - @as(u16, @intCast(mode_label.len)), mode_label, badge);
+    } else {
+        drawHints(win, 0, col, contextHints(app), st.hint_key, st.hint_desc);
+    }
 }
 
 /// Render keybinding hints: each "<key> <description>" group (groups separated
@@ -4780,8 +4811,11 @@ const FooterCtx = struct {
 /// those keys apply everywhere — except in the Branches list, where `R` renames
 /// rather than refreshes, so that footer uses a suffix without "R refresh".
 fn footerHints(c: FooterCtx) []const u8 {
-    const global = "  @ log  ? help  ^z undo  R refresh  q quit";
-    const global_branches = "  @ log  ? help  ^z undo  q quit";
+    const global = "  +/_ size  @ log  ? help  ^z undo  R refresh  q quit";
+    const global_branches = "  +/_ size  @ log  ? help  ^z undo  q quit";
+    // The main panel is the `z` fullscreen special case; `+`/`_` are inert
+    // there, so its footer drops the `+/_ size` hint.
+    const global_main = "  @ log  ? help  ^z undo  R refresh  q quit";
     if (c.rebase_plan) {
         return "j/k move  p pick  d drop  s squash  f fixup  e edit  ^j/^k reorder  enter run  esc cancel";
     }
@@ -4843,13 +4877,13 @@ fn footerHints(c: FooterCtx) []const u8 {
         .stash => "space apply  g pop  d drop  r rename  w patch  enter view" ++ global,
         .main => if (c.fullscreen)
             (if (c.main_file)
-                "enter stage  j/k scroll  H/L pan  ^w wrap  e edit  PgUp/PgDn page  drag select  ^o copy all  z exit full  esc back" ++ global
+                "enter stage  j/k scroll  H/L pan  ^w wrap  e edit  PgUp/PgDn page  drag select  ^o copy all  z exit full  esc back" ++ global_main
             else
-                "j/k scroll  H/L pan  ^w wrap  PgUp/PgDn page  drag select  ^o copy all  z exit full  esc back" ++ global)
+                "j/k scroll  H/L pan  ^w wrap  PgUp/PgDn page  drag select  ^o copy all  z exit full  esc back" ++ global_main)
         else if (c.main_file)
-            "enter stage  j/k scroll  H/L pan  ^w wrap  e edit  PgUp/PgDn page  drag select  ^o copy all  z full  esc back" ++ global
+            "enter stage  j/k scroll  H/L pan  ^w wrap  e edit  PgUp/PgDn page  drag select  ^o copy all  z full  esc back" ++ global_main
         else
-            "j/k scroll  H/L pan  ^w wrap  PgUp/PgDn page  drag select  ^o copy all  z full  esc back" ++ global,
+            "j/k scroll  H/L pan  ^w wrap  PgUp/PgDn page  drag select  ^o copy all  z full  esc back" ++ global_main,
     };
 }
 
@@ -4872,7 +4906,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
         // `e` edits the file when the Diff panel shows a working-tree file.
         .main_file = app.focus == .main and !app.staging_active and
             app.contentFocus() == .files and app.selectedFile() != null,
-        .fullscreen = app.diff_fullscreen,
+        .fullscreen = app.mainFullscreen(),
     });
 }
 

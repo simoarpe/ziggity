@@ -152,6 +152,8 @@ lazygit feature roadmap that followed it. Done since the async work:
 - A Files-panel stash menu (all / +untracked / staged / selected file).
 - Diffing mode (`W`, ref-to-ref diff), commit log filtering (`/`, grep/author/
   path), git bisect (`b`), and custom patch building (`ctrl+p`).
+- Screen modes: `+`/`_` cycle the focused side panel through normal/half/full;
+  `z` fullscreens the Diff panel (its own special case).
 
 Remaining smaller gaps: redo, moving a custom patch to a different commit, full
 lazygit config compatibility, and score-based fuzzy ranking. Re-run `zig fmt`,

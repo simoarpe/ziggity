@@ -13,6 +13,7 @@ the written reference. Every binding is remappable, see
 | `j` `k` / arrows | Move selection |
 | `tab` | Focus the Diff panel (and back) |
 | `z` | Maximize the Diff panel to full screen (`z` or `esc` to exit) |
+| `+` `_` | Cycle the focused side panel's size: normal, half, full |
 | `[` `]` | Switch the focused panel's tabs (or staging side) |
 | `enter` / `esc` | Inspect in the main panel / step back |
 | `space` | Stage file · checkout branch · apply stash (by focus) |
@@ -58,7 +59,14 @@ the written reference. Every binding is remappable, see
   Over a working tree file, `enter` there opens its staging view (the panel
   title and footer show the hint)
 - `z`: maximize the Diff panel to full screen; the side panels hide and the
-  diff fills the terminal; press `z` again or `esc` to restore the layout
+  diff fills the terminal; press `z` again or `esc` to restore the layout. The
+  main panel is a special case handled only by `z`, never by `+`/`_`
+- `+` / `_`: cycle the focused **side** panel's screen mode. `+` grows it
+  (normal to half to full), `_` shrinks it back. In half the focused side panel
+  takes about half the column with the rest still visible; in full it fills the
+  whole terminal. `esc` is deliberately left out of this, so it keeps its
+  single meaning of stepping back out of drilled-in panels and selections. The
+  current mode shows as a `[half]`/`[full]` badge in the footer
 - `1`–`5`: focus status / files / branches / commits / stash; pressing the
   number of the already-focused panel cycles its tabs (so `3` walks
   Local/Remotes/Tags), the same way `]` does. Turn this off with

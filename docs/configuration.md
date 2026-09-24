@@ -232,6 +232,8 @@ key.paste_commits = V
 key.select_branch_commits = *
 key.toggle_tree = `
 key.toggle_fullscreen = z
+key.screen_mode_next = +
+key.screen_mode_prev = _
 key.conflict_menu = m
 key.command_log = @
 

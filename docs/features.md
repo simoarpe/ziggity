@@ -397,5 +397,9 @@ The animation itself is in the [README](../README.md).
   256 color set, so the interface is readable on a stock terminal as well as
   a truecolor one (see
   [comparison.md](comparison.md#at-home-in-any-terminal)).
+- Panel sizing: `z` maximizes the Diff panel to full screen (`z` or `esc` to
+  exit); `+` and `_` cycle the focused side panel through normal, half and full,
+  with a `[half]`/`[full]` badge in the footer while it is enlarged. The
+  `expand_focused_side_panel` option grows the focused list panel by default.
 - Command log overlay (`@`), themeable colors, fully remappable keys, and
   user defined custom commands.

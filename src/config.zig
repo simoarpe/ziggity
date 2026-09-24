@@ -43,6 +43,10 @@ pub const KeyMap = struct {
     toggle_tree: Binding = .{ .codepoint = '`' },
     staging_split: Binding = .{ .codepoint = '\\' },
     toggle_fullscreen: Binding = .{ .codepoint = 'z' },
+    // lazygit-style screen-mode cycle for the focused panel: normal -> half
+    // (enlarged) -> full (fills the terminal), and back.
+    screen_mode_next: Binding = .{ .codepoint = '+' },
+    screen_mode_prev: Binding = .{ .codepoint = '_' },
     open_status_filter: Binding = .{ .codepoint = 'b', .ctrl = true },
     discard: Binding = .{ .codepoint = 'd' },
     discard_all: Binding = .{ .codepoint = 'D' },
