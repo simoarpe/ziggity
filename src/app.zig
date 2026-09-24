@@ -2976,6 +2976,26 @@ pub const App = struct {
         // errors. Read-only views don't need the refreshed index written back.
         env_map.put("GIT_OPTIONAL_LOCKS", "0") catch {};
 
+        // ssh ignores GIT_TERMINAL_PROMPT: for an SSH remote it would prompt for
+        // a key passphrase (or an unknown-host confirmation) straight on our
+        // controlling terminal, drawing over the TUI and leaving the user unable
+        // to type (issue #41). Force ssh BatchMode so it never prompts: agent
+        // auth (ssh-agent, gnome-keyring) still works, and anything that would
+        // need an interactive prompt fails with a clear message instead. Respect
+        // a user's own GIT_SSH_COMMAND, and fold `core.sshCommand` (which may
+        // select a key) into the base so BatchMode is added without dropping it.
+        if (env_map.get("GIT_SSH_COMMAND") == null) {
+            if (git.coreSshCommand()) |base| {
+                defer allocator.free(base);
+                if (std.fmt.allocPrint(allocator, "{s} -o BatchMode=yes", .{base})) |cmd| {
+                    defer allocator.free(cmd);
+                    env_map.put("GIT_SSH_COMMAND", cmd) catch {};
+                } else |_| {}
+            } else {
+                env_map.put("GIT_SSH_COMMAND", "ssh -o BatchMode=yes") catch {};
+            }
+        }
+
         const cfg = try config_mod.Config.load(allocator, io, env_map, git.root);
         git.branch_sort = cfg.branch_sort_order;
         git.log_order = cfg.log_order;
@@ -10350,6 +10370,16 @@ pub const App = struct {
                     try self.requestConfirmation(.force_push, "push rejected — force push with lease? (y/n)", .{});
                 } else if (pushNeedsForce(raw) and op == .push_force) {
                     try self.requestConfirmation(.force_push_plain, "force push with lease rejected — force push? (y/n)", .{});
+                } else if (credentials_mod.isSshKeyFailure(raw)) {
+                    // SSH key / host failure: a username/password prompt can't
+                    // help, so report the actual fix (an agent, or trusting the
+                    // host) instead of looping the user through credentials.
+                    var ssh_buf: [192]u8 = undefined;
+                    const summary = std.fmt.bufPrint(&ssh_buf, "{s} failed: {s}", .{
+                        op.label(),
+                        credentials_mod.sshFailureReason(raw),
+                    }) catch "SSH authentication failed";
+                    try self.reportFailure(summary, raw);
                 } else if (credentials_mod.isAuthFailure(raw) and self.exe_path != null) {
                     if (credentials_mod.gitCredentialsSet(self)) {
                         // We already supplied credentials and they were STILL
@@ -11659,13 +11689,33 @@ test "pushNeedsForce detects diverged-remote rejections only" {
     try std.testing.expect(!pushNeedsForce("Everything up-to-date"));
 }
 
-test "isAuthFailure matches credential errors but not other failures" {
+test "isAuthFailure matches HTTPS credential errors, not SSH or other failures" {
     try std.testing.expect(credentials_mod.isAuthFailure("fatal: could not read Username for 'https://github.com': terminal prompts disabled"));
     try std.testing.expect(credentials_mod.isAuthFailure("remote: Invalid username or password.\nfatal: Authentication failed for 'https://github.com/o/r'"));
-    try std.testing.expect(credentials_mod.isAuthFailure("git@github.com: Permission denied (publickey)."));
+    // SSH key denial is NOT an HTTPS auth failure — a username/password can't
+    // fix it, so it must not open the credential prompt (issue #41).
+    try std.testing.expect(!credentials_mod.isAuthFailure("git@github.com: Permission denied (publickey)."));
     try std.testing.expect(!credentials_mod.isAuthFailure(" ! [rejected]        main -> main (non-fast-forward)"));
     try std.testing.expect(!credentials_mod.isAuthFailure("Everything up-to-date"));
     try std.testing.expect(!credentials_mod.isAuthFailure("fatal: unable to access: Could not resolve host: github.com"));
+}
+
+test "isSshKeyFailure matches SSH key/host errors, not HTTPS or other failures (issue #41)" {
+    try std.testing.expect(credentials_mod.isSshKeyFailure("git@github.com: Permission denied (publickey)."));
+    try std.testing.expect(credentials_mod.isSshKeyFailure("Host key verification failed."));
+    try std.testing.expect(credentials_mod.isSshKeyFailure("Could not open a connection to your authentication agent."));
+    // HTTPS auth failures and ordinary rejections are not SSH-key failures.
+    try std.testing.expect(!credentials_mod.isSshKeyFailure("fatal: Authentication failed for 'https://github.com/o/r'"));
+    try std.testing.expect(!credentials_mod.isSshKeyFailure(" ! [rejected]        main -> main (non-fast-forward)"));
+    // The reason string points at the right fix per failure kind.
+    try std.testing.expectEqualStrings(
+        "host key not trusted (connect once outside ziggity to add it)",
+        credentials_mod.sshFailureReason("Host key verification failed."),
+    );
+    try std.testing.expectEqualStrings(
+        "SSH key rejected (load it with ssh-add, or check it is authorized on the remote)",
+        credentials_mod.sshFailureReason("git@github.com: Permission denied (publickey)."),
+    );
 }
 
 test "tokenHintSuffix nudges toward a token only when the host rejected a password" {

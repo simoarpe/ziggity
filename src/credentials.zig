@@ -29,9 +29,11 @@ pub fn clearGitCredentials(app: *App) void {
     }
 }
 
-/// Whether a failed network op's output indicates an authentication problem
-/// (rather than e.g. a diverged remote or a network error), so the credential
-/// prompt should open. Matches git's English messages.
+/// Whether a failed network op's output indicates an HTTPS authentication
+/// problem (rather than e.g. a diverged remote or a network error), so the
+/// username/password prompt should open. Matches git's English messages.
+/// SSH key failures are deliberately excluded (see `isSshKeyFailure`): a
+/// username/password can't resolve them.
 pub fn isAuthFailure(output: []const u8) bool {
     const needles = [_][]const u8{
         "could not read Username",
@@ -39,13 +41,40 @@ pub fn isAuthFailure(output: []const u8) bool {
         "Authentication failed",
         "terminal prompts disabled",
         "Invalid username or password",
-        "Permission denied (publickey",
         "fatal: Authentication",
     };
     for (needles) |n| {
         if (std.ascii.indexOfIgnoreCase(output, n) != null) return true;
     }
     return false;
+}
+
+/// Whether a failed network op's output indicates an SSH key / host problem.
+/// These are distinct from HTTPS auth failures: no username or password can fix
+/// them, so we surface a targeted hint instead of opening the credential prompt.
+pub fn isSshKeyFailure(output: []const u8) bool {
+    const needles = [_][]const u8{
+        "Permission denied (publickey",
+        "Host key verification failed",
+        "Could not open a connection to your authentication agent",
+        "Too many authentication failures",
+        "Enter passphrase for key",
+    };
+    for (needles) |n| {
+        if (std.ascii.indexOfIgnoreCase(output, n) != null) return true;
+    }
+    return false;
+}
+
+/// A short, actionable reason for an SSH key / host failure, to show in the
+/// failure summary. No username/password prompt can help here, so the message
+/// points at the actual fix (an agent, or trusting the host).
+pub fn sshFailureReason(output: []const u8) []const u8 {
+    if (std.ascii.indexOfIgnoreCase(output, "Host key verification failed") != null)
+        return "host key not trusted (connect once outside ziggity to add it)";
+    if (std.ascii.indexOfIgnoreCase(output, "authentication agent") != null)
+        return "no SSH agent running (start one and run ssh-add)";
+    return "SSH key rejected (load it with ssh-add, or check it is authorized on the remote)";
 }
 
 /// A short, actionable suffix for the failure summary when the host rejected a

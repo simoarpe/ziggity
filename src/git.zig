@@ -1351,6 +1351,18 @@ pub const Git = struct {
         return self.allocator.dupe(u8, trimmed) catch null;
     }
 
+    /// The configured `core.sshCommand` (or null if unset), allocated by the
+    /// Git's allocator — caller frees. Used to preserve a user's ssh command
+    /// (e.g. a key selection) when forcing ssh BatchMode for the TUI.
+    pub fn coreSshCommand(self: *Git) ?[]u8 {
+        var res = self.exec(&.{ "config", "--get", "core.sshCommand" }) catch return null;
+        defer res.deinit(self.allocator);
+        if (!res.ok()) return null;
+        const trimmed = std.mem.trim(u8, res.stdout, " \t\r\n");
+        if (trimmed.len == 0) return null;
+        return self.allocator.dupe(u8, trimmed) catch null;
+    }
+
     pub fn stagePaths(self: *Git, paths: []const []const u8) !ExecResult {
         if (paths.len == 0) return self.successResult();
         var args: std.ArrayList([]const u8) = .empty;

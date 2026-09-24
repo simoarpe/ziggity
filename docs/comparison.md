@@ -130,6 +130,13 @@ it wants a token, Ziggity says so instead of asking again in a loop.
 
 <p align="center"><i>An HTTPS remote asked for credentials. The token field masks as you type, and the fetch retries in place.</i></p>
 
+SSH remotes are handled by your SSH agent, as git and ssh always intend. Ziggity
+runs ssh in batch mode so it never stops to ask for a key passphrase or a host
+confirmation on the terminal it is drawing over. Load your key into an agent
+(`ssh-add`, or a keyring like gnome-keyring) once, and pushes and fetches just
+work. If a key is not available, the operation fails with a short message
+pointing at the fix rather than freezing on a prompt you cannot answer.
+
 ## Copy Text Straight from the Screen
 
 Terminal UIs usually make copying painful: the terminal's own selection grabs
