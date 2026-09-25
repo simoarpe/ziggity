@@ -5899,21 +5899,15 @@ pub const App = struct {
             try self.setMessage("you are already in this worktree", .{});
             return;
         }
-        if (self.foregroundBusy()) {
-            try self.setMessage("operation in progress...", .{});
-            return;
-        }
         // Worktrees are siblings, not a hierarchy: switching between them is a
-        // flat switch (like the recent-repos switcher), not a drill. Drop the
-        // drill stack and re-root without pushing, so the Status path shows just
-        // the worktree rather than an accumulating "repo / w2 / repo" breadcrumb
-        // (issue #32). The Worktrees panel still lists every worktree to switch
-        // back through, so nothing is stranded.
-        const dup = try self.allocator.dupe(u8, wt.path);
-        self.clearRepoStack();
-        if (self.reroot_request) |old| self.allocator.free(old);
-        self.reroot_request = dup;
-        self.reroot_push = false;
+        // flat switch (`push = false`), not a drill. Nothing is pushed onto the
+        // drill stack, so the Status path shows just the worktree rather than an
+        // accumulating "repo / w2 / repo" breadcrumb (issue #32), and the
+        // Worktrees panel still lists every worktree to switch back through. Not
+        // clearing the stack keeps a genuine parent breadcrumb intact: if you
+        // drilled into a submodule and then switch to one of its worktrees, the
+        // submodule's parent stays on the stack for `esc` to walk back to.
+        return self.requestReRoot(wt.path, false);
     }
 
     /// `enter` on an (initialised) submodule: switch the whole app into it.
@@ -5928,20 +5922,23 @@ pub const App = struct {
         }
         const abs = try std.fs.path.join(self.allocator, &.{ self.git.root, sm.path });
         defer self.allocator.free(abs);
-        return self.requestReRoot(abs);
+        // A submodule is a real nesting, so drill in (`push = true`): the parent
+        // goes on the stack and `esc` walks back out.
+        return self.requestReRoot(abs, true);
     }
 
-    /// Queue a re-root onto `path` (an absolute repo directory), pushing the
-    /// current root so <esc> returns. Refused mid-operation. The TUI loop drains
-    /// its workers, then runs `reRootTo`.
-    fn requestReRoot(self: *App, path: []const u8) !void {
+    /// Queue a re-root onto `path` (an absolute repo directory). `push` records
+    /// the current root on the drill stack (so <esc> returns) for a true nesting
+    /// like a submodule; a lateral worktree switch passes false. Refused
+    /// mid-operation. The TUI loop drains its workers, then runs `reRootTo`.
+    fn requestReRoot(self: *App, path: []const u8, push: bool) !void {
         if (self.foregroundBusy()) {
             try self.setMessage("operation in progress...", .{});
             return;
         }
         if (self.reroot_request) |old| self.allocator.free(old);
         self.reroot_request = try self.allocator.dupe(u8, path);
-        self.reroot_push = true;
+        self.reroot_push = push;
     }
 
     /// <esc> at the top level when inside a sub-repo: walk back out to the parent.
@@ -15366,34 +15363,38 @@ test "stashUnstaged stashes only the unstaged change, keeping staged (issue #30)
     try std.testing.expect(std.mem.indexOf(u8, st3.stdout, "M  f.txt") != null); // still staged
 }
 
-test "switching worktrees is a flat switch, not a drill (issue #32)" {
+test "switching worktrees is a flat switch that keeps a real breadcrumb (issue #32)" {
     const a = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
     var app = try testApp(a, &no_files);
     defer deinitTestApp(&app);
     defer if (app.reroot_request) |r| a.free(r);
-    defer app.repo_stack.deinit(a);
+    defer {
+        for (app.repo_stack.items) |p| a.free(p);
+        app.repo_stack.deinit(a);
+    }
 
     app.initial_load_pending = false; // not busy, so the switch is not deferred
 
-    // A stale drill-stack entry, as if a previous worktree switch had pushed.
-    try app.repo_stack.append(a, try a.dupe(u8, "/repo/old"));
+    // A genuine parent breadcrumb, as if we had drilled into a submodule first.
+    try app.repo_stack.append(a, try a.dupe(u8, "/repo"));
 
     var wts = [_]model.Worktree{
-        .{ .path = @constCast("/repo"), .branch = @constCast("main"), .is_current = true },
-        .{ .path = @constCast("/repo/w2"), .branch = @constCast("w2"), .is_current = false },
+        .{ .path = @constCast("/repo/sub"), .branch = @constCast("main"), .is_current = true },
+        .{ .path = @constCast("/repo/sub-w2"), .branch = @constCast("w2"), .is_current = false },
     };
     app.data.worktrees = &wts;
-    app.worktree_index = 1; // the non-current worktree (w2)
+    app.worktree_index = 1; // the non-current worktree
 
     try app.enterSelectedWorktree();
 
-    // Flat switch: the drill stack is cleared and nothing is pushed, so the
-    // Status path shows just the worktree instead of an accumulating
-    // "repo / w2 / repo" breadcrumb.
-    try std.testing.expectEqual(@as(usize, 0), app.repo_stack.items.len);
+    // A worktree switch pushes nothing, so the Status path never accumulates a
+    // "repo / w2 / repo" breadcrumb. It also does not clear the stack, so a real
+    // parent (the submodule's) stays put for `esc` to walk back to.
     try std.testing.expect(!app.reroot_push);
-    try std.testing.expectEqualStrings("/repo/w2", app.reroot_request.?);
+    try std.testing.expectEqualStrings("/repo/sub-w2", app.reroot_request.?);
+    try std.testing.expectEqual(@as(usize, 1), app.repo_stack.items.len); // unchanged, not pushed
+    try std.testing.expectEqualStrings("/repo", app.repo_stack.items[0]); // parent preserved
 
     app.data.worktrees = &.{}; // stack-backed; keep teardown away from it
 }
