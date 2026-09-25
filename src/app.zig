@@ -5899,7 +5899,21 @@ pub const App = struct {
             try self.setMessage("you are already in this worktree", .{});
             return;
         }
-        return self.requestReRoot(wt.path);
+        if (self.foregroundBusy()) {
+            try self.setMessage("operation in progress...", .{});
+            return;
+        }
+        // Worktrees are siblings, not a hierarchy: switching between them is a
+        // flat switch (like the recent-repos switcher), not a drill. Drop the
+        // drill stack and re-root without pushing, so the Status path shows just
+        // the worktree rather than an accumulating "repo / w2 / repo" breadcrumb
+        // (issue #32). The Worktrees panel still lists every worktree to switch
+        // back through, so nothing is stranded.
+        const dup = try self.allocator.dupe(u8, wt.path);
+        self.clearRepoStack();
+        if (self.reroot_request) |old| self.allocator.free(old);
+        self.reroot_request = dup;
+        self.reroot_push = false;
     }
 
     /// `enter` on an (initialised) submodule: switch the whole app into it.
@@ -15350,6 +15364,38 @@ test "stashUnstaged stashes only the unstaged change, keeping staged (issue #30)
     var st3 = try git.exec(&.{ "status", "--porcelain" });
     defer st3.deinit(a);
     try std.testing.expect(std.mem.indexOf(u8, st3.stdout, "M  f.txt") != null); // still staged
+}
+
+test "switching worktrees is a flat switch, not a drill (issue #32)" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    defer if (app.reroot_request) |r| a.free(r);
+    defer app.repo_stack.deinit(a);
+
+    app.initial_load_pending = false; // not busy, so the switch is not deferred
+
+    // A stale drill-stack entry, as if a previous worktree switch had pushed.
+    try app.repo_stack.append(a, try a.dupe(u8, "/repo/old"));
+
+    var wts = [_]model.Worktree{
+        .{ .path = @constCast("/repo"), .branch = @constCast("main"), .is_current = true },
+        .{ .path = @constCast("/repo/w2"), .branch = @constCast("w2"), .is_current = false },
+    };
+    app.data.worktrees = &wts;
+    app.worktree_index = 1; // the non-current worktree (w2)
+
+    try app.enterSelectedWorktree();
+
+    // Flat switch: the drill stack is cleared and nothing is pushed, so the
+    // Status path shows just the worktree instead of an accumulating
+    // "repo / w2 / repo" breadcrumb.
+    try std.testing.expectEqual(@as(usize, 0), app.repo_stack.items.len);
+    try std.testing.expect(!app.reroot_push);
+    try std.testing.expectEqualStrings("/repo/w2", app.reroot_request.?);
+
+    app.data.worktrees = &.{}; // stack-backed; keep teardown away from it
 }
 
 test "completeConflictEdit auto-stages only once the editor removed the markers" {
