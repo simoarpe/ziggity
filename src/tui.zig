@@ -1926,7 +1926,12 @@ fn drawConflicts(root: vaxis.Window, app: *app_mod.App) void {
 
         var base = st.normal;
         if (in_block) {
-            applySel(&base, .active);
+            // A subtle fill (the dim, unfocused-selection colour) rather than the
+            // strong cursor colour: the active block can be large, and its ours
+            // (green) / theirs (red) text has to stay readable over it (issue #28).
+            // The accent gutter, bold markers and ours/theirs labels still mark
+            // it clearly as the active conflict.
+            applySel(&base, .inactive);
             fillRow(win, row, base);
         }
 
