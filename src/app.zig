@@ -170,7 +170,7 @@ pub const EditorRequest = struct {
 /// to do with the submitted text.
 /// Which stash-create variant the message prompt is collecting a message for.
 /// `keep` snapshots the changes into a stash but leaves the working tree as-is.
-pub const StashKind = enum { all, untracked, staged, file, keep };
+pub const StashKind = enum { all, untracked, staged, unstaged, file, keep };
 
 /// Wall-clock milliseconds per donut animation frame. Matches the ticker's
 /// spinner cadence, so the rotation runs at the same speed as before but is now
@@ -595,6 +595,7 @@ pub const MenuAction = enum {
     stash_all,
     stash_untracked,
     stash_staged,
+    stash_unstaged,
     stash_file,
     stash_keep,
     filter_commits_message,
@@ -844,6 +845,7 @@ pub const stash_menu = [_]MenuItem{
     .{ .label = "Stash all changes", .action = .stash_all },
     .{ .label = "Stash all changes, including untracked files", .action = .stash_untracked },
     .{ .label = "Stash staged changes only", .action = .stash_staged },
+    .{ .label = "Stash unstaged changes only", .action = .stash_unstaged },
     .{ .label = "Stash the selected file only", .action = .stash_file },
     .{ .label = "Stash everything, but keep it in the working tree", .action = .stash_keep },
 };
@@ -1626,6 +1628,7 @@ pub const Mutation = union(enum) {
     stash_all: ?[]const u8,
     stash_untracked: ?[]const u8,
     stash_staged: ?[]const u8,
+    stash_unstaged: ?[]const u8,
     stash_file: struct { path: []const u8, message: ?[]const u8 },
     stash_keep: ?[]const u8,
     stash_apply: usize,
@@ -1662,7 +1665,7 @@ pub const Mutation = union(enum) {
 
     pub fn isStashCreate(self: Mutation) bool {
         return switch (self) {
-            .stash_all, .stash_untracked, .stash_staged, .stash_file, .stash_keep => true,
+            .stash_all, .stash_untracked, .stash_staged, .stash_unstaged, .stash_file, .stash_keep => true,
             else => false,
         };
     }
@@ -1711,6 +1714,11 @@ pub const Mutation = union(enum) {
             .stash_all => |m| wgit.stashAll(m),
             .stash_untracked => |m| wgit.stashIncludingUntracked(m),
             .stash_staged => |m| wgit.stashStaged(m),
+            .stash_unstaged => |m| (try wgit.stashUnstaged(m)) orelse git_mod.ExecResult{
+                .stdout = try gpa.dupe(u8, "No local changes to save\n"),
+                .stderr = try gpa.alloc(u8, 0),
+                .term = .{ .exited = 0 },
+            },
             .stash_file => |x| wgit.stashFile(x.path, x.message),
             .stash_keep => |m| (try wgit.stashKeeping(m)) orelse git_mod.ExecResult{
                 .stdout = try gpa.dupe(u8, "No local changes to save\n"),
@@ -1787,6 +1795,7 @@ pub const Mutation = union(enum) {
             .stash_all => |m| .{ .stash_all = try dupeOptStr(gpa, m) },
             .stash_untracked => |m| .{ .stash_untracked = try dupeOptStr(gpa, m) },
             .stash_staged => |m| .{ .stash_staged = try dupeOptStr(gpa, m) },
+            .stash_unstaged => |m| .{ .stash_unstaged = try dupeOptStr(gpa, m) },
             .stash_file => |x| .{ .stash_file = .{ .path = try gpa.dupe(u8, x.path), .message = try dupeOptStr(gpa, x.message) } },
             .stash_keep => |m| .{ .stash_keep = try dupeOptStr(gpa, m) },
             .stash_apply => |idx| .{ .stash_apply = idx },
@@ -1840,7 +1849,7 @@ pub const Mutation = union(enum) {
                 gpa.free(x.name);
                 gpa.free(x.original);
             },
-            .stash_all, .stash_untracked, .stash_staged, .stash_keep => |m| freeOptStr(gpa, m),
+            .stash_all, .stash_untracked, .stash_staged, .stash_unstaged, .stash_keep => |m| freeOptStr(gpa, m),
             .stash_file => |x| {
                 gpa.free(x.path);
                 freeOptStr(gpa, x.message);
@@ -8174,6 +8183,7 @@ pub const App = struct {
                     .all => .{ .stash_all = msg },
                     .untracked => .{ .stash_untracked = msg },
                     .staged => .{ .stash_staged = msg },
+                    .unstaged => .{ .stash_unstaged = msg },
                     .file => if (self.stash_path_owned) |path|
                         .{ .stash_file = .{ .path = path, .message = msg } }
                     else {
@@ -8186,6 +8196,7 @@ pub const App = struct {
                     .all => "stashed all changes",
                     .untracked => "stashed (incl. untracked)",
                     .staged => "stashed staged changes",
+                    .unstaged => "stashed unstaged changes",
                     .file => "stashed file",
                     .keep => "stashed (working tree kept)",
                 };
@@ -9275,6 +9286,7 @@ pub const App = struct {
             .stash_all => return self.startStashPrompt(.all),
             .stash_untracked => return self.startStashPrompt(.untracked),
             .stash_staged => return self.startStashPrompt(.staged),
+            .stash_unstaged => return self.startStashPrompt(.unstaged),
             .stash_file => return self.startStashPrompt(.file),
             .stash_keep => return self.startStashPrompt(.keep),
             .filter_commits_message => return self.startCommitFilterPrompt(.commit_grep),
@@ -15279,6 +15291,65 @@ test "markConflictResolved refuses while markers remain, stages once resolved" {
     defer st2.deinit(a);
     try std.testing.expect(std.mem.indexOf(u8, st2.stdout, "UU f.txt") == null); // no longer unmerged
     try std.testing.expect(std.mem.indexOf(u8, st2.stdout, "M  f.txt") != null); // staged
+}
+
+test "stashUnstaged stashes only the unstaged change, keeping staged (issue #30)" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    // f.txt has a staged change (line 1) AND an unstaged change (line 3).
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q -b main
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf 'a\nb\nc\n' > f.txt
+        \\git add f.txt
+        \\git commit -qm base
+        \\printf 'a STAGED\nb\nc\n' > f.txt
+        \\git add f.txt
+        \\printf 'a STAGED\nb\nc UNSTAGED\n' > f.txt
+    );
+
+    var git = try git_mod.Git.initAt(a, tio, &env, dir_path);
+    defer git.deinit();
+
+    // Both sides present: the unstaged change is stashed, the staged stays.
+    var res = (try git.stashUnstaged("only unstaged")).?;
+    defer res.deinit(a);
+    try std.testing.expect(res.ok());
+
+    var st = try git.exec(&.{ "status", "--porcelain" });
+    defer st.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, st.stdout, "M  f.txt") != null); // staged kept
+
+    // The stash holds ONLY the unstaged change, not the staged one.
+    var show = try git.exec(&.{ "stash", "show", "-p", "stash@{0}" });
+    defer show.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, show.stdout, "c UNSTAGED") != null);
+    try std.testing.expect(std.mem.indexOf(u8, show.stdout, "a STAGED") == null);
+
+    // Only a staged change remains now: "unstaged only" has nothing to stash and
+    // must leave the staged change (and the existing stash) untouched.
+    if (try git.stashUnstaged("nothing")) |r| {
+        var rr = r;
+        rr.deinit(a);
+        return error.ExpectedNoStash;
+    }
+    var list = try git.exec(&.{ "stash", "list" });
+    defer list.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, list.stdout, "stash@{"));
+    var st3 = try git.exec(&.{ "status", "--porcelain" });
+    defer st3.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, st3.stdout, "M  f.txt") != null); // still staged
 }
 
 test "completeConflictEdit auto-stages only once the editor removed the markers" {

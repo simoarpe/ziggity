@@ -2056,6 +2056,60 @@ pub const Git = struct {
         return try self.exec(&.{ "stash", "apply", after });
     }
 
+    /// "Stash unstaged changes only": keep the staged changes in the index and
+    /// stash just the unstaged (tracked) modifications, mirroring `--staged`.
+    /// git has no `--unstaged`, so stash the staged aside, stash the unstaged as
+    /// the entry the user keeps, then restore the staged to the index. Returns
+    /// null when there is nothing unstaged to stash (like `stashKeeping`).
+    /// Caller owns the returned result.
+    pub fn stashUnstaged(self: *Git, message: ?[]const u8) !?ExecResult {
+        // Nothing unstaged (tracked) → nothing to do (`--quiet` exits non-zero
+        // only when there is a diff).
+        {
+            var d = try self.exec(&.{ "diff", "--quiet" });
+            const has_unstaged = !d.ok();
+            d.deinit(self.allocator);
+            if (!has_unstaged) return null;
+        }
+        // No staged changes → "unstaged only" is just a plain stash of it all.
+        {
+            var d = try self.exec(&.{ "diff", "--cached", "--quiet" });
+            const has_staged = !d.ok();
+            d.deinit(self.allocator);
+            if (!has_staged) {
+                return if (message) |m|
+                    try self.exec(&.{ "stash", "push", "-m", m })
+                else
+                    try self.exec(&.{ "stash", "push" });
+            }
+        }
+        // Both staged and unstaged present: the three-step dance.
+        // 1. Stash the staged changes aside (temporary).
+        var s1 = try self.exec(&.{ "stash", "push", "--staged", "-m", "ziggity: keep staged" });
+        if (!s1.ok()) return s1; // caller owns and reports the error
+        s1.deinit(self.allocator);
+        // 2. Stash the remaining (unstaged) changes as the user's entry.
+        var s2 = if (message) |m|
+            try self.exec(&.{ "stash", "push", "-m", m })
+        else
+            try self.exec(&.{ "stash", "push" });
+        if (!s2.ok()) {
+            // Best-effort: put the staged changes back before surfacing the error.
+            if (self.exec(&.{ "stash", "pop", "--index", "stash@{0}" })) |undo| {
+                var u = undo;
+                u.deinit(self.allocator);
+            } else |_| {}
+            return s2;
+        }
+        s2.deinit(self.allocator);
+        // 3. Restore the staged changes (now stash@{1}) to the index. `--index`
+        // preserves the staged/unstaged split; a plain pop is the fallback.
+        var restore = try self.exec(&.{ "stash", "pop", "--index", "stash@{1}" });
+        if (restore.ok()) return restore;
+        restore.deinit(self.allocator);
+        return try self.exec(&.{ "stash", "pop", "stash@{1}" });
+    }
+
     /// The top stash commit hash (`refs/stash`), or "" when there is no stash.
     fn stashTop(self: *Git) ![]u8 {
         var r = try self.exec(&.{ "rev-parse", "--quiet", "--verify", "refs/stash" });

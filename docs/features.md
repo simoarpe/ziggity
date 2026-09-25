@@ -144,9 +144,9 @@ tags with their messages.
 ### Stash
 
 A Stash panel with a diff preview. The stash menu (`s`) offers every variant
-(all, plus untracked, staged only, a single file, keep the working tree),
-each with an optional message, and `w` writes any stash to a `git apply`
-ready patch file.
+(all, plus untracked, staged only, unstaged only, a single file, keep the
+working tree), each with an optional message, and `w` writes any stash to a
+`git apply` ready patch file.
 
 ![Stash panel](screenshots/07-stash.png)
 
@@ -357,9 +357,9 @@ The animation itself is in the [README](../README.md).
   a reminder that `esc` exits and `W` opens the options, so the mode is never
   hidden. Diffing is only a view: commit, push, pull and the other actions
   keep working normally on the current branch and leave the mode untouched.
-- Stash menu (`s`): stash all, all plus untracked, staged only, just the
-  selected file, or keep everything (snapshot into a stash, untracked files
-  included, while leaving the working tree untouched). Each asks for an
+- Stash menu (`s`): stash all, all plus untracked, staged only, unstaged only,
+  just the selected file, or keep everything (snapshot into a stash, untracked
+  files included, while leaving the working tree untouched). Each asks for an
   optional message (empty = git's default `WIP on ...` name). Apply, pop,
   drop, rename (`r`), or write to a patch file (`w`, producing
   `stash-<n>.patch`, untracked included, `git apply` ready) on the Stash
