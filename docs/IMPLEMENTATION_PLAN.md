@@ -147,7 +147,7 @@ lazygit feature roadmap that followed it. Done since the async work:
 - A modal result dialog for synchronous git operations (shows the command, its
   output, and outcome); fetch/pull/push remain the only off-loop ops.
 - Mouse click-to-select within panels.
-- System-clipboard copy (`ctrl+o`, OSC 52) and open-in-browser (`o`).
+- System-clipboard copy (`y`, OSC 52) and open-in-browser (`o`).
 - Remote management (Remotes tab: add/edit/remove, set upstream).
 - A Files-panel stash menu (all / +untracked / staged / selected file).
 - Diffing mode (`W`, ref-to-ref diff), commit log filtering (`/`, grep/author/

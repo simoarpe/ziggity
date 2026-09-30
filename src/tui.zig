@@ -1738,9 +1738,9 @@ fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
     // `space reset` appears only when the cursor sits on a current-branch commit
     // (a valid `git reset` target); it is hidden on connector and off-branch rows.
     const footer = if (commitgraph_mod.cursorCommitIndex(app) != null)
-        "j/k move  @ current  p parent  H/L pan  a all/current  ^o copy hash  enter go-to  space reset  esc close"
+        "j/k move  @ current  p parent  H/L pan  a all/current  y copy hash  enter go-to  space reset  esc close"
     else
-        "j/k move  @ current  p parent  H/L pan  a all/current  ^o copy hash  enter go-to  esc close";
+        "j/k move  @ current  p parent  H/L pan  a all/current  y copy hash  enter go-to  esc close";
     print(win, footer_row, 0, footer, st.bottom_accent);
 
     if (app.commit_graph_loading or app.commit_graph == null) {
@@ -2004,7 +2004,9 @@ const help_lines = [_][]const u8{
     "  ?              this help",
     "  ctrl+z         undo the last operation (reflog reset)",
     "  ctrl+r         switch to a recently opened repository",
-    "  ctrl+o         copy the selected hash, branch or tag to the clipboard",
+    "  y              copy the selected item to the clipboard: file path, commit",
+    "                 hash, branch, tag, stash ref or the whole diff, depending",
+    "                 on the focused panel",
     "  o              open the commit/branch on its host (GitHub/GitLab/Codeberg)",
     "  W              mark the selected ref as the diff base (the marked row",
     "                 shows a diamond), then select any other ref to compare. W",
@@ -2102,6 +2104,8 @@ const help_lines = [_][]const u8{
     "  T              tag the branch",
     "  N              move commits onto a new branch",
     "  G              open the branch's pull/merge request, else the new-PR page",
+    "  y              copy the branch / tag / remote name (the commit hash in a",
+    "                 branch's commit drill)",
     "  s              branch sort menu",
     "",
     "Remotes tab — the remotes list",
@@ -2119,6 +2123,7 @@ const help_lines = [_][]const u8{
     "  g              reset",
     "  u              set upstream",
     "  d              delete the remote branch",
+    "  y              copy the remote branch name",
     "  esc            back to the remotes list",
     "",
     "Tags tab",
@@ -2128,6 +2133,7 @@ const help_lines = [_][]const u8{
     "  P              push the tag to a remote",
     "  g              reset menu (soft, mixed, hard) onto the tag",
     "  d              delete menu (local, remote, both)",
+    "  y              copy the tag name",
     "",
     "Commits  (tabs: Commits, Reflog, Divergence)",
     "  enter          view the commit's changed files",
@@ -2183,6 +2189,7 @@ const help_lines = [_][]const u8{
     "  d              drop the stash",
     "  r              rename the selected stash",
     "  w              write the stash's diff to stash-<n>.patch (repo root)",
+    "  y              copy the stash ref (stash@{n})",
     "",
     "Operations",
     "  git actions    succeed silently (summary in the bottom bar); only",
@@ -4843,7 +4850,7 @@ fn footerHints(c: FooterCtx) []const u8 {
         return if (c.branch_files)
             commit_files_hint ++ global
         else
-            "j/k commit  enter files  esc back" ++ global;
+            "j/k commit  enter files  y copy  esc back" ++ global;
     }
     if (c.conflict and c.focus == .files) {
         // No "esc back" here: the Files panel is at the top level during a
@@ -4854,12 +4861,12 @@ fn footerHints(c: FooterCtx) []const u8 {
     }
     if (c.focus == .branches) {
         return switch (c.branches_tab) {
-            .local => "space checkout  c by-name  n new  R rename  d delete  M merge  r rebase  g reset  f ff  F force-co  T tag  N move  G pr  s sort  w worktree  W diff  [/] tabs" ++ global_branches,
+            .local => "space checkout  c by-name  n new  R rename  d delete  M merge  r rebase  g reset  f ff  F force-co  T tag  N move  G pr  y copy  s sort  w worktree  W diff  [/] tabs" ++ global_branches,
             .remotes => if (c.remote_drill)
-                "space checkout  n new-local  M merge  r rebase  g reset  u upstream  d delete  w worktree  W diff  enter commits  esc back" ++ global_branches
+                "space checkout  n new-local  M merge  r rebase  g reset  u upstream  d delete  y copy  w worktree  W diff  enter commits  esc back" ++ global_branches
             else
                 "enter/space branches  n add  e edit  d remove  f fetch  [/] tabs" ++ global_branches,
-            .tags => "space checkout  n new-tag  d delete  P push  g reset  w worktree  W diff  [/] tabs" ++ global_branches,
+            .tags => "space checkout  n new-tag  d delete  P push  g reset  y copy  w worktree  W diff  [/] tabs" ++ global_branches,
         };
     }
     if (c.focus == .files) {
@@ -4878,17 +4885,17 @@ fn footerHints(c: FooterCtx) []const u8 {
         else if (c.reflog)
             "space checkout  g reset  n new-branch  c/v/^r copy/paste/clear  y copy  o browser  W diff  [/] tabs" ++ global
         else
-            "enter files  space checkout  n/N branch/move  T tag  g reset  t revert  x verify-sig  c/v/^r copy/paste/clear  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  G pr  ^l graph  W diff  / filter  b bisect  ^j/^k move" ++ global,
-        .stash => "space apply  g pop  d drop  r rename  w patch  enter view" ++ global,
+            "enter files  space checkout  n/N branch/move  T tag  g reset  t revert  x verify-sig  c/v/^r copy/paste/clear  y copy  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  G pr  ^l graph  W diff  / filter  b bisect  ^j/^k move" ++ global,
+        .stash => "space apply  g pop  d drop  r rename  w patch  y copy  enter view" ++ global,
         .main => if (c.fullscreen)
             (if (c.main_file)
-                "enter stage  j/k scroll  H/L pan  ^w wrap  e edit  PgUp/PgDn page  drag select  ^o copy all  z exit full  esc back" ++ global_main
+                "enter stage  j/k scroll  H/L pan  ^w wrap  e edit  PgUp/PgDn page  drag select  y copy all  z exit full  esc back" ++ global_main
             else
-                "j/k scroll  H/L pan  ^w wrap  PgUp/PgDn page  drag select  ^o copy all  z exit full  esc back" ++ global_main)
+                "j/k scroll  H/L pan  ^w wrap  PgUp/PgDn page  drag select  y copy all  z exit full  esc back" ++ global_main)
         else if (c.main_file)
-            "enter stage  j/k scroll  H/L pan  ^w wrap  e edit  PgUp/PgDn page  drag select  ^o copy all  z full  esc back" ++ global_main
+            "enter stage  j/k scroll  H/L pan  ^w wrap  e edit  PgUp/PgDn page  drag select  y copy all  z full  esc back" ++ global_main
         else
-            "j/k scroll  H/L pan  ^w wrap  PgUp/PgDn page  drag select  ^o copy all  z full  esc back" ++ global_main,
+            "j/k scroll  H/L pan  ^w wrap  PgUp/PgDn page  drag select  y copy all  z full  esc back" ++ global_main,
     };
 }
 

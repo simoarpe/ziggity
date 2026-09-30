@@ -7300,7 +7300,12 @@ pub const App = struct {
         if (self.focus == .main) return self.copyWholeDiff();
         const text: []const u8 = switch (self.focus) {
             .commits => if (self.selectedCommit()) |commit| commit.hash else "",
-            .branches => self.selectedBranchRefName() orelse "",
+            // In a branch's sub-commit drill the list shows commits, so copy the
+            // selected commit's short hash; at the branch list it copies the
+            // branch / remote branch / tag name.
+            .branches => if (self.inBranchCommitContext()) blk: {
+                break :blk if (self.selectedCommit()) |commit| commit.short_hash else "";
+            } else self.selectedBranchRefName() orelse "",
             .stash => if (self.selectedStash()) |entry| entry.selector else "",
             .status, .files, .main => "",
         };

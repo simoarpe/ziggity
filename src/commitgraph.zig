@@ -145,7 +145,7 @@ pub fn handleKey(app: *App, key: anytype) !void {
     }
     // `a` toggles the all-branches / current-branch scope.
     if (km.stage_all.matches(key)) return toggleScope(app);
-    // ctrl+o copies the cursor row's commit hash to the clipboard.
+    // `y` copies the cursor row's commit hash to the clipboard.
     if (km.copy_clipboard.matches(key)) return copyCursorHash(app);
     // `p` jumps the cursor to the current commit's first parent.
     if (km.graph_first_parent.matches(key)) return goToFirstParent(app);
@@ -204,7 +204,7 @@ fn goToHead(app: *App) !void {
     app.commit_graph_recenter = true;
 }
 
-/// ctrl+o: copy the full hash of the commit on the cursor row.
+/// `y`: copy the full hash of the commit on the cursor row.
 fn copyCursorHash(app: *App) !void {
     const short = cursorHash(app) orelse {
         try app.setMessage("no commit on that row", .{});

@@ -23,7 +23,11 @@ pub const KeyMap = struct {
     command_log: Binding = .{ .codepoint = '@' },
     help: Binding = .{ .codepoint = '?' },
     undo: Binding = .{ .codepoint = 'z', .ctrl = true },
-    copy_clipboard: Binding = .{ .codepoint = 'o', .ctrl = true },
+    // `y` yanks the selected item to the system clipboard, everywhere: the
+    // Files panel handles it as `copy_file_info` and the Commits panel as
+    // `copy_commit_attr` (each in their own switch arm), while the Branches,
+    // Stash, Main and commit-graph views fall through to this shared copy.
+    copy_clipboard: Binding = .{ .codepoint = 'y' },
     open_browser: Binding = .{ .codepoint = 'o' },
     diff_mark: Binding = .{ .codepoint = 'W' },
     patch_menu: Binding = .{ .codepoint = 'p', .ctrl = true },

@@ -216,7 +216,7 @@ The animation itself is in the [README](../README.md).
   (`M`), rebase (`r`), fast forward (`f`), checkout by name (`c`), reset
   (`g`), force checkout (`F`), tag (`T`), move commits to a new branch (`N`),
   open the pull request (`G`, the branch's own PR/MR if it has one, else the
-  create page), sort menu (`s`).
+  create page), sort menu (`s`), copy the branch / tag / remote name (`y`).
 - Pull/merge request status per branch: after the sync status, each local
   branch shows its PR/MR as a state coloured `#<number> - <State>` (green Open,
   yellow Draft, purple Merged, red Closed). Fork PRs are ignored so they never
@@ -388,7 +388,8 @@ The animation itself is in the [README](../README.md).
   blame).
 - Mouse text selection with automatic copy in the diff panel, the read only
   dialogs, and the footer message line (drag the lower left log to copy it)
-  (OSC 52); copy a hash, branch or tag (`ctrl+o`); open a commit or branch on
+  (OSC 52); copy the selected item (`y`: a file path, commit, branch, tag,
+  stash ref or the whole diff, by panel); open a commit or branch on
   its remote host (`o`), with the right URL shape for GitHub, GitLab and
   Codeberg.
 - Terminal integration: bracketed paste, so a pasted multiline commit message

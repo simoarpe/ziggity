@@ -35,7 +35,11 @@ the written reference. Every binding is remappable, see
 - `ctrl+w`: toggle soft-wrapping of long lines in the diff panels (see
   [comparison.md](comparison.md#wrap-long-lines-on-demand))
 - `@`: command log (recent git commands ziggity ran)
-- `ctrl+o`: copy the selected hash, branch or tag to the system clipboard
+- `y`: copy the selection to the system clipboard. What it copies follows the
+  focused panel: the file path (Files), a copy menu for the commit hash,
+  subject or author (Commits), the branch, tag or remote branch name
+  (Branches), the stash ref (Stash), or the whole diff (Diff panel). In a
+  branch's commit drill it copies the commit's short hash.
 - `o`: open the selected commit or branch on its remote host in the browser
   (GitHub, GitLab and Codeberg URL styles are handled)
 - `W`: diffing mode. Marks the selected ref as the base; select another to
@@ -98,6 +102,8 @@ the written reference. Every binding is remappable, see
   branch
 - `G` / `s` (Branches Local): open the branch's pull/merge request if it has
   one, otherwise the create page / branch sort menu
+- `y` (Branches/Tags): copy the branch, tag or remote branch name to the
+  clipboard (the commit's short hash while drilled into a branch's commits)
 - `space` (Remotes/Tags): check out the remote branch or tag
 - `n` / `P` / `g` / `d` (Tags): new tag / push to a remote / reset onto it /
   delete
@@ -111,7 +117,7 @@ the written reference. Every binding is remappable, see
 - `y` / `C`: copy menu / clear the cherry pick selection
 - `i` (Commits): interactive rebase plan editor
 - `ctrl+l` (Commits): commit graph viewer (`j` and `k` move, `@` HEAD, `p`
-  first parent, `H` and `L` pan, `a` toggle all branches, `ctrl+o` copy,
+  first parent, `H` and `L` pan, `a` toggle all branches, `y` copy,
   `enter` jump, `esc` close; mouse scroll, drag and click)
 - `G` (Commits): open the current branch's pull/merge request if it has one,
   otherwise the create page (GitHub, GitLab, Codeberg, Bitbucket) · `B`: mark a

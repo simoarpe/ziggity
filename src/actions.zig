@@ -297,7 +297,6 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     if (keymap.undo.matches(key)) return .undo;
     if (keymap.recent_repos.matches(key)) return .recent_repos;
     if (keymap.toggle_wrap.matches(key)) return .toggle_wrap;
-    if (keymap.copy_clipboard.matches(key)) return .copy_to_clipboard;
     if (keymap.open_browser.matches(key)) return .open_browser;
     if (keymap.diff_mark.matches(key)) return .diff_mark;
     if (keymap.patch_menu.matches(key)) return .patch_menu;
@@ -397,6 +396,12 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
         .status, .main => {},
     }
 
+    // `y` copies the selected item. It is checked after the panel switch so the
+    // Files (`copy_file_info`) and Commits (`copy_commit_attr`) `y` handlers,
+    // which offer a richer copy, take precedence in their own panels; the other
+    // panels (Branches, Stash, Main) fall through to this shared clipboard copy.
+    if (keymap.copy_clipboard.matches(key)) return .copy_to_clipboard;
+
     return null;
 }
 
@@ -441,6 +446,15 @@ test "normal key mapping handles global and focused actions" {
     try std.testing.expectEqual(Action.start_commit, fromNormalKey(testKey('c'), keymap, .files).?);
     try std.testing.expectEqual(Action.cherry_pick, fromNormalKey(testKey('c'), keymap, .commits).?);
     try std.testing.expectEqual(Action.checkout_by_name, fromNormalKey(testKey('c'), keymap, .branches).?);
+
+    // `y` copies in every panel. Files and Commits handle it in their own switch
+    // arms (richer copy: file path / copy menu); Branches, Stash and Main fall
+    // through to the shared clipboard copy checked after the panel switch.
+    try std.testing.expectEqual(Action.copy_file_info, fromNormalKey(testKey('y'), keymap, .files).?);
+    try std.testing.expectEqual(Action.copy_commit_attr, fromNormalKey(testKey('y'), keymap, .commits).?);
+    try std.testing.expectEqual(Action.copy_to_clipboard, fromNormalKey(testKey('y'), keymap, .branches).?);
+    try std.testing.expectEqual(Action.copy_to_clipboard, fromNormalKey(testKey('y'), keymap, .stash).?);
+    try std.testing.expectEqual(Action.copy_to_clipboard, fromNormalKey(testKey('y'), keymap, .main).?);
 
     // H/L scroll the focused panel horizontally; lowercase h/l move between panels.
     try std.testing.expectEqual(Action.scroll_left, fromNormalKey(testKey('H'), keymap, .main).?);
