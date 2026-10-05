@@ -14,6 +14,22 @@ pub const Binding = struct {
             .shift = self.shift,
         });
     }
+
+    /// Render the binding as a human-readable key for prose messages, e.g. "r",
+    /// "ctrl+r" or "shift+T". Writes into `buf` (16 bytes is always enough) and
+    /// returns the written slice. Used so messages that name a key stay correct
+    /// when the binding is remapped, instead of hard-coding the default.
+    pub fn label(self: Binding, buf: []u8) []const u8 {
+        var i: usize = 0;
+        inline for (.{ .{ self.ctrl, "ctrl+" }, .{ self.alt, "alt+" }, .{ self.shift, "shift+" } }) |pair| {
+            if (pair[0] and i + pair[1].len <= buf.len) {
+                @memcpy(buf[i..][0..pair[1].len], pair[1]);
+                i += pair[1].len;
+            }
+        }
+        i += std.unicode.utf8Encode(self.codepoint, buf[i..]) catch 0;
+        return buf[0..i];
+    }
 };
 
 pub const KeyMap = struct {
@@ -662,6 +678,16 @@ test "config parser applies key overrides and bounded layout" {
     try std.testing.expectEqual(@as(u21, 'x'), cfg.keymap.quit.codepoint);
     try std.testing.expectEqual(@as(u21, 'p'), cfg.keymap.push.codepoint);
     try std.testing.expect(cfg.keymap.push.ctrl);
+}
+
+test "Binding.label renders the key with its modifiers" {
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("r", (Binding{ .codepoint = 'r' }).label(&buf));
+    try std.testing.expectEqualStrings("ctrl+r", (Binding{ .codepoint = 'r', .ctrl = true }).label(&buf));
+    try std.testing.expectEqualStrings("shift+T", (Binding{ .codepoint = 'T', .shift = true }).label(&buf));
+    try std.testing.expectEqualStrings("@", (Binding{ .codepoint = '@' }).label(&buf));
+    // A remapped reword key is reflected, which is the point of using label().
+    try std.testing.expectEqualStrings("ctrl+w", (Binding{ .codepoint = 'w', .ctrl = true }).label(&buf));
 }
 
 test "fetch_interval_secs defaults to 60 and parses (0 disables)" {

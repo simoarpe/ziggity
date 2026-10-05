@@ -224,7 +224,9 @@ pub fn amendLastCommit(app: *App) !void {
         return;
     }
     if (app.data.stagedCount() == 0) {
-        try app.setMessage("stage changes to amend into the last commit", .{});
+        var key_buf: [16]u8 = undefined;
+        const reword_key = app.config.keymap.commit_reword.label(&key_buf);
+        try app.setMessage("stage changes to amend, or use {s} in the Commits panel to just reword the last commit", .{reword_key});
         return;
     }
     // Confirm first (amend rewrites HEAD and is awkward to undo); the accept
