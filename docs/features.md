@@ -268,6 +268,11 @@ The animation itself is in the [README](../README.md).
   staged), the draft is kept and restored the next time you press `c`, and it
   even survives quitting (persisted under `.git`). It is cleared only once a
   commit actually lands.
+- Amend (`A`) folds the staged changes into the last commit and keeps its
+  message (after a confirmation). Set `reword_on_amend = true` to instead open
+  the message editor prefilled with that commit's message, so you can reword it
+  while amending in one step. To reword a commit without amending, use `r` on
+  the Commits tab.
 - Per commit: reset (`g`, soft, mixed or hard), revert (`t`), checkout
   (`space`, detached), branch from it (`n`), move commits to a new branch
   (`N`), tag (`T`), and a copy menu (`y`: hash, subject, author).

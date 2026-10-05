@@ -355,6 +355,12 @@ pub const Config = struct {
     /// output format and the `commit_summary_limit` / `commit_body_guide` lengths
     /// always apply either way. See docs for the commit-instructions file.
     ai_commit_style_defaults: bool = true,
+    /// When amending (`A`), open the message editor prefilled with the last
+    /// commit's message so you can reword it while folding in the staged
+    /// changes. Default false keeps the classic amend that reuses the message
+    /// untouched (after a confirmation). Rewording a commit on its own is always
+    /// available with `r` on the Commits tab.
+    reword_on_amend: bool = false,
     /// Accordion mode: when true, the focused side-panel list grows to
     /// `expanded_side_panel_weight` while the others shrink. Default off.
     expand_focused_side_panel: bool = false,
@@ -509,6 +515,10 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "prepare_commit_msg_hook")) {
             if (parseBool(value)) |on| self.prepare_commit_msg_hook = on;
+            return;
+        }
+        if (std.mem.eql(u8, key, "reword_on_amend")) {
+            if (parseBool(value)) |on| self.reword_on_amend = on;
             return;
         }
         if (std.mem.eql(u8, key, "expand_focused_side_panel")) {
@@ -688,6 +698,14 @@ test "Binding.label renders the key with its modifiers" {
     try std.testing.expectEqualStrings("@", (Binding{ .codepoint = '@' }).label(&buf));
     // A remapped reword key is reflected, which is the point of using label().
     try std.testing.expectEqualStrings("ctrl+w", (Binding{ .codepoint = 'w', .ctrl = true }).label(&buf));
+}
+
+test "reword_on_amend defaults off and parses" {
+    const def: Config = .{};
+    try std.testing.expect(!def.reword_on_amend);
+    var cfg: Config = .{};
+    cfg.applyBytes("reword_on_amend = true");
+    try std.testing.expect(cfg.reword_on_amend);
 }
 
 test "fetch_interval_secs defaults to 60 and parses (0 disables)" {

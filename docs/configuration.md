@@ -39,6 +39,13 @@ highlight_conventional_commits = true
 # branch), matching an interactive commit. Default on; false skips the hook.
 prepare_commit_msg_hook = true
 
+# When amending (`A` in the Files panel), open the commit message editor
+# prefilled with the last commit's message so you can reword it while folding in
+# the staged changes. Off by default, which keeps the classic amend that reuses
+# the message untouched (after a confirmation). To just reword a commit without
+# amending, use `r` on the Commits tab.
+reword_on_amend = false
+
 # AI-assisted commit authoring. `ai_command` is a shell command that reads a
 # prompt on stdin and prints a completion on stdout. ziggity treats it as a
 # black box, so the provider, model, key, or subscription all live in that tool,

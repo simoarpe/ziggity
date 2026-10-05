@@ -2636,6 +2636,7 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     const title = switch (app.commit_action) {
         .reword => "Reword commit",
         .amend_fixup => "Amend into commit (new message)",
+        .amend => "Amend last commit (message)",
         .create => "Commit message",
     };
     const win = popup(root, w, 12, title, null);

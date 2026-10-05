@@ -1775,6 +1775,11 @@ pub const Git = struct {
         return self.exec(&.{ "commit", "--amend", "--no-edit" });
     }
 
+    /// Amend HEAD with the staged changes and a new message (`reword_on_amend`).
+    pub fn amendCommitMessage(self: *Git, message: []const u8) !ExecResult {
+        return self.exec(&.{ "commit", "--amend", "-m", message });
+    }
+
     /// Commit the staged changes as a `fixup! <subject of hash>` commit.
     pub fn createFixup(self: *Git, hash: []const u8) !ExecResult {
         const arg = try std.fmt.allocPrint(self.allocator, "--fixup={s}", .{hash});

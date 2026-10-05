@@ -113,7 +113,7 @@ pub const CommitField = enum { subject, body };
 /// What the commit-message dialog does on submit: create a new commit, reword an
 /// existing one, or write an `amend!` marker (new message + staged changes, to
 /// be folded into the target on autosquash).
-pub const CommitAction = enum { create, reword, amend_fixup };
+pub const CommitAction = enum { create, reword, amend_fixup, amend };
 
 /// A commit field's AI generation state. No `completed`: once a result lands in
 /// the field it is just normal editable text.
@@ -1605,6 +1605,8 @@ pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process
 pub const Mutation = union(enum) {
     commit: struct { message: []const u8, no_verify: bool },
     amend,
+    /// Amend HEAD with the staged changes and a new message (`reword_on_amend`).
+    amend_message: []const u8,
     checkout: []const u8,
     checkout_track: []const u8,
     revert: []const u8,
@@ -1682,6 +1684,7 @@ pub const Mutation = union(enum) {
         return switch (self) {
             .commit => |x| wgit.commit(x.message, x.no_verify),
             .amend => wgit.amendCommit(),
+            .amend_message => |m| wgit.amendCommitMessage(m),
             .checkout => |b| wgit.checkout(b),
             .checkout_track => |b| wgit.checkoutTrack(b),
             .revert => |h| wgit.revertCommit(h),
@@ -1772,6 +1775,7 @@ pub const Mutation = union(enum) {
         return switch (self) {
             .commit => |x| .{ .commit = .{ .message = try gpa.dupe(u8, x.message), .no_verify = x.no_verify } },
             .amend => .amend,
+            .amend_message => |m| .{ .amend_message = try gpa.dupe(u8, m) },
             .checkout => |b| .{ .checkout = try gpa.dupe(u8, b) },
             .checkout_track => |b| .{ .checkout_track = try gpa.dupe(u8, b) },
             .revert => |h| .{ .revert = try gpa.dupe(u8, h) },
@@ -1826,7 +1830,7 @@ pub const Mutation = union(enum) {
 
     pub fn deinit(self: Mutation, gpa: std.mem.Allocator) void {
         switch (self) {
-            .checkout, .checkout_track, .revert, .create_fixup, .delete_tag, .remove_worktree, .update_submodule, .remove_submodule, .merge, .rebase, .autosquash, .drop_merge => |s| gpa.free(s),
+            .checkout, .checkout_track, .revert, .create_fixup, .delete_tag, .remove_worktree, .update_submodule, .remove_submodule, .merge, .rebase, .autosquash, .drop_merge, .amend_message => |s| gpa.free(s),
             .commit => |x| gpa.free(x.message),
             .amend_marker => |x| {
                 gpa.free(x.subject);
@@ -12480,6 +12484,30 @@ test "amending the last commit asks first, but only with staged changes" {
     try commits_mod.amendLastCommit(&app);
     try std.testing.expect(app.pending_confirmation == null);
     try std.testing.expect(app.mode != .confirmation);
+}
+
+test "reword_on_amend submits the edited message as an amend_message mutation (issue #31)" {
+    const allocator = std.testing.allocator;
+    var staged = [_]model.FileStatus{.{ .path = @constCast("a.txt"), .short_status = .{ 'M', ' ' }, .has_staged = true, .has_unstaged = false, .tracked = true, .added = false, .deleted = false, .conflict = false }};
+    var app = try testApp(allocator, &staged);
+    defer deinitTestApp(&app);
+    // requestMutation records the command into git.command_log (testing alloc).
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    // The editor is open in amend mode (as startAmendReword leaves it) with an
+    // edited subject; submitting folds the staged change in with the new message.
+    app.commit_action = .amend;
+    app.commit_buffer.clearRetainingCapacity();
+    try app.commit_buffer.appendSlice(allocator, "odd numbers");
+    try commits_mod.submitCommit(&app);
+
+    const job = app.takeMutation().?;
+    defer job.deinit(page_alloc);
+    try std.testing.expect(std.meta.activeTag(job) == .amend_message);
+    try std.testing.expectEqualStrings("odd numbers", job.amend_message);
+    // Mode returns to normal and the amend is not routed through a confirmation.
+    try std.testing.expect(app.mode == .normal);
 }
 
 test "a amends the selected commit's author via a rebase exec todo" {

@@ -229,10 +229,45 @@ pub fn amendLastCommit(app: *App) !void {
         try app.setMessage("stage changes to amend, or use {s} in the Commits panel to just reword the last commit", .{reword_key});
         return;
     }
-    // Confirm first (amend rewrites HEAD and is awkward to undo); the accept
-    // path runs the actual `git commit --amend`. `skip_confirm.amend` bypasses
-    // the prompt for anyone who wants the old instant behaviour back.
+    // With `reword_on_amend`, open the message editor prefilled with HEAD's
+    // message so the amend can also reword in one step. Submitting the editor is
+    // the deliberate action here, so it stands in for the confirmation below.
+    if (app.config.reword_on_amend) return startAmendReword(app);
+    // Otherwise confirm first (amend rewrites HEAD and is awkward to undo); the
+    // accept path runs the actual `git commit --amend --no-edit`.
+    // `skip_confirm.amend` bypasses the prompt for the old instant behaviour.
     return app.requestConfirmation(.amend, "confirm amend last commit", .{});
+}
+
+/// Open the commit editor prefilled with HEAD's message so an amend can reword
+/// it while folding in the staged changes (`reword_on_amend`). HEAD is the
+/// newest entry of the Commits log. Submitting runs `git commit --amend -m`.
+fn startAmendReword(app: *App) !void {
+    if (app.data.commits.len == 0) {
+        // No commit to amend into: fall back to the classic confirmed amend.
+        return app.requestConfirmation(.amend, "confirm amend last commit", .{});
+    }
+    const commit = app.data.commits[0];
+    const body = app.git.commitBody(commit.hash) catch try app.allocator.alloc(u8, 0);
+    defer app.allocator.free(body);
+
+    app.mode = .commit_prompt;
+    app.commit_action = .amend;
+    app.resetCommitAiState();
+    app.commit_field = .subject;
+    app.commit_buffer.clearRetainingCapacity();
+    try app.commit_buffer.appendSlice(app.allocator, commit.subject);
+    app.commit_body_buffer.clearRetainingCapacity();
+    try app.commit_body_buffer.appendSlice(app.allocator, body);
+    app.commit_cursor = app.commit_buffer.items.len;
+    app.commit_body_cursor = app.commit_body_buffer.items.len;
+    app.commit_scroll = 0;
+    app.commit_body_scroll_x = 0;
+    app.commit_body_scroll_y = 0;
+    app.commit_body_last_caret = std.math.maxInt(usize); // force the caret into view on open
+    app.commit_sel_anchor = null;
+    app.commit_mouse_selecting = false;
+    try app.setMessage("amend: edit the message", .{});
 }
 
 pub fn handleCommitPromptKey(app: *App, key: vaxis.Key) !void {
@@ -381,6 +416,10 @@ pub fn submitCommit(app: *App) !void {
         // scoped to the views a commit changes.
         .create => return app.requestMutation(.{ .commit = .{ .message = message, .no_verify = app.commit_no_verify } }, .{ .gerund = "committing", .command = if (app.commit_no_verify) "git commit --no-verify" else "git commit", .refresh = App.Refresh.commit }, "commit created", .{}),
         .reword => return commitops_mod.runRebase(app, .reword, reword_index, message),
+        // Amend HEAD with the staged changes and the edited message in one step
+        // (`reword_on_amend`). Like `.create`, `requestMutation` copies the
+        // message synchronously, so passing the soon-to-be-freed slice is fine.
+        .amend => return app.requestMutation(.{ .amend_message = message }, .{ .gerund = "amending", .command = "git commit --amend", .refresh = App.Refresh.commit }, "amended last commit", .{}),
         .amend_fixup => {
             // The marker matches its target by the target's *original* subject
             // (unedited); data.commits isn't touched by the dialog, so read it now.
