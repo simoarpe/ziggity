@@ -10949,6 +10949,14 @@ pub const App = struct {
     /// panel highlights the branch you just switched to (it sits at the front).
     fn selectCurrentBranch(self: *App) void {
         self.branches_tab = .local;
+        // Checking out a remote branch from the Remotes drill lands us back on
+        // the Local tab, so the drill is over: clear it. Otherwise `remote_drill`
+        // lingers and `cycleTab` keeps treating the (now Local) panel as a drill,
+        // which silently swallows `[`/`]` tab switching (issue #34).
+        if (self.remote_drill) |old| {
+            self.allocator.free(old);
+            self.remote_drill = null;
+        }
         // `branch_index` is a visible ordinal, so count only matching branches;
         // if the current branch is hidden by the filter, land on the top row.
         var ord: usize = 0;
@@ -14313,6 +14321,35 @@ test "selectCurrentBranch highlights the current branch in the local tab" {
     app.branch_index = 2;
     app.selectCurrentBranch();
     try std.testing.expectEqual(@as(usize, 0), app.branch_index);
+}
+
+test "checking out a remote branch exits the remote drill so tab switching works (issue #34)" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    var branches = [_]model.Branch{
+        .{ .name = @constCast("main"), .current = true },
+    };
+    app.data.branches = &branches;
+
+    // Simulate being drilled into a remote's branch list.
+    app.focus = .branches;
+    app.branches_tab = .remotes;
+    app.remote_drill = try allocator.dupe(u8, "origin");
+    try std.testing.expect(app.remoteDrillActive());
+
+    // Checking out a remote branch lands us back on Local via selectCurrentBranch.
+    app.selectCurrentBranch();
+
+    // The drill must be cleared, otherwise cycleTab keeps swallowing [ / ].
+    try std.testing.expectEqual(BranchesTab.local, app.branches_tab);
+    try std.testing.expect(!app.remoteDrillActive());
+    try std.testing.expect(app.remote_drill == null);
+
+    // And [ / ] now actually switch tabs again.
+    try app.cycleTab(.next);
+    try std.testing.expectEqual(BranchesTab.remotes, app.branches_tab);
 }
 
 test "list selections follow items by identity across a reload" {
