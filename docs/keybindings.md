@@ -104,6 +104,10 @@ the written reference. Every binding is remappable, see
   one, otherwise the create page / branch sort menu
 - `y` (Branches/Tags): copy the branch, tag or remote branch name to the
   clipboard (the commit's short hash while drilled into a branch's commits)
+- `enter` then `c` / `V` / `C` (Branches, Local or Remotes): drill into a
+  branch's commits, then copy a commit for cherry-pick / paste onto HEAD /
+  clear, so you can cherry-pick a commit from another branch onto the current
+  one
 - `space` (Remotes/Tags): check out the remote branch or tag
 - `n` / `P` / `g` / `d` (Tags): new tag / push to a remote / reset onto it /
   delete

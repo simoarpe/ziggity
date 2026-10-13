@@ -2135,6 +2135,14 @@ const help_lines = [_][]const u8{
     "  d              delete menu (local, remote, both)",
     "  y              copy the tag name",
     "",
+    "Inside a branch's commits (enter on a branch, Local or Remotes tab)",
+    "  enter          view the selected commit's changed files",
+    "  c              copy the commit for cherry-pick (works across branches)",
+    "  V              paste — cherry-pick the copied commit(s) onto HEAD",
+    "  C              clear the cherry-pick copy selection",
+    "  y              copy the commit's short hash",
+    "  esc            back to the branch list",
+    "",
     "Commits  (tabs: Commits, Reflog, Divergence)",
     "  enter          view the commit's changed files",
     "  space          checkout the commit (detached HEAD)",
@@ -4851,7 +4859,7 @@ fn footerHints(c: FooterCtx) []const u8 {
         return if (c.branch_files)
             commit_files_hint ++ global
         else
-            "j/k commit  enter files  y copy  esc back" ++ global;
+            "j/k commit  enter files  c/V/C copy/paste/clear commit  y copy hash  esc back" ++ global;
     }
     if (c.conflict and c.focus == .files) {
         // No "esc back" here: the Files panel is at the top level during a
@@ -4882,11 +4890,11 @@ fn footerHints(c: FooterCtx) []const u8 {
         .files => unreachable,
         .branches => unreachable,
         .commits => if (c.divergence)
-            "\u{2191} ahead / \u{2193} incoming  space checkout  n new-branch  c/v/^r copy/paste/clear  y copy  W diff  [/] tabs" ++ global
+            "\u{2191} ahead / \u{2193} incoming  space checkout  n new-branch  c/V/C copy/paste/clear commit  y copy menu  W diff  [/] tabs" ++ global
         else if (c.reflog)
-            "space checkout  g reset  n new-branch  c/v/^r copy/paste/clear  y copy  o browser  W diff  [/] tabs" ++ global
+            "space checkout  g reset  n new-branch  c/V/C copy/paste/clear commit  y copy menu  o browser  W diff  [/] tabs" ++ global
         else
-            "enter files  space checkout  n/N branch/move  T tag  g reset  t revert  x verify-sig  c/v/^r copy/paste/clear  y copy  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  G pr  ^l graph  W diff  / filter  b bisect  ^j/^k move" ++ global,
+            "enter files  space checkout  n/N branch/move  T tag  g reset  t revert  x verify-sig  c/V/C copy/paste/clear commit  y copy menu  d/s/f/e/r rebase  F fixup  S autosquash  B mark-base  G pr  ^l graph  W diff  / filter  b bisect  ^j/^k move" ++ global,
         .stash => "space apply  g pop  d drop  r rename  w patch  y copy  enter view" ++ global,
         .main => if (c.fullscreen)
             (if (c.main_file)

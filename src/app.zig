@@ -3817,7 +3817,24 @@ pub const App = struct {
         if (key.matches(vaxis.Key.down, .{ .shift = true })) return self.rangeMove(true);
         if (key.matches(vaxis.Key.up, .{ .shift = true })) return self.rangeMove(false);
 
-        var action = actions.fromNormalKey(key, self.config.keymap, self.focus) orelse return;
+        // The Branches sub-commits drill shows a commit list, so the cherry-pick
+        // copy/clear keys act on it like the Commits panel (`c` copies the
+        // selected commit, `C` clears the selection). `c` is checkout-by-name on
+        // the branch list itself, so this override is scoped to the drill's
+        // commit list (not its per-commit file view). Paste (`V`), range (`v`)
+        // and select-branch-commits (`*`) are already global, so they work here
+        // without an override. This lets you cherry-pick a commit from another
+        // branch straight onto the current one (issue #35). The override is
+        // resolved before the `orelse return` because `C` (reset_cherry_pick)
+        // has no meaning in the Branches focus, so it would otherwise bail here.
+        var action = blk: {
+            const base = actions.fromNormalKey(key, self.config.keymap, self.focus);
+            if (self.branch_commits_active and !self.branch_files_active) {
+                if (self.config.keymap.cherry_pick.matches(key)) break :blk actions.Action.cherry_pick;
+                if (self.config.keymap.reset_cherry_pick.matches(key)) break :blk actions.Action.reset_cherry_pick;
+            }
+            break :blk base orelse return;
+        };
         // A panel drilled into a commit's files shows files, not its list, so
         // the list-level bindings don't apply: the Branches sub-commits drill
         // suppresses branch-list keys (rename, fast-forward, new/delete/...), and
@@ -3949,7 +3966,11 @@ pub const App = struct {
                     try self.updatePreview(); // show/clear the combined range diff
                 }
             },
-            .paste_commits => if (self.focus == .commits and !self.staging_active) try self.pasteCopiedCommits(),
+            // Paste cherry-picks the copied commits onto HEAD. Allowed in the
+            // Commits panel and in the Branches sub-commits drill's commit list,
+            // so you can copy a commit from another branch and paste it onto the
+            // current one without leaving the drill (issue #35).
+            .paste_commits => if ((self.focus == .commits or (self.focus == .branches and self.branch_commits_active and !self.branch_files_active)) and !self.staging_active) try self.pasteCopiedCommits(),
             .select_branch_commits => try self.selectBranchCommits(),
             .focus_left => if (self.staging_active) try staging_mod.closeStaging(self) else try self.focusPrevious(),
             .focus_right => if (!self.staging_active) try self.focusNext(),
@@ -11906,6 +11927,41 @@ test "cherry-pick clipboard toggles copied commits" {
     try std.testing.expect(!app.isCommitCopied("aaaaaaa"));
     try std.testing.expect(app.isCommitCopied("bbbbbbb"));
     try std.testing.expectEqual(@as(usize, 1), app.copied_commits.items.len);
+}
+
+test "c cherry-picks in the Branches sub-commits drill, checks out by name on the list (issue #35)" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var sub = [_]model.Commit{
+        .{ .hash = @constCast("ccccccc"), .short_hash = @constCast("ccc"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("from another branch") },
+    };
+    const c_key = vaxis.Key{ .codepoint = 'c' };
+    const clear_key = vaxis.Key{ .codepoint = 'C' };
+
+    // On the branch list, `c` is checkout-by-name, not cherry-pick: nothing copied.
+    app.focus = .branches;
+    app.branches_tab = .local;
+    try app.handleKey(c_key);
+    try std.testing.expectEqual(@as(usize, 0), app.copied_commits.items.len);
+    app.mode = .normal; // drop whatever prompt that opened
+
+    // Drilled into a branch's commits (focus stays .branches): `c` copies the
+    // selected sub-commit for cherry-pick, even though it is on another branch.
+    app.branch_commits_active = true;
+    app.branch_files_active = false;
+    app.branch_commits = &sub;
+    app.branch_commit_index = 0;
+    try app.handleKey(c_key);
+    try std.testing.expect(app.isCommitCopied("ccccccc"));
+    try std.testing.expectEqual(@as(usize, 1), app.copied_commits.items.len);
+    try std.testing.expect(app.mode == .normal); // did not open checkout-by-name
+
+    // `C` clears the cherry-pick selection in the drill.
+    try app.handleKey(clear_key);
+    try std.testing.expectEqual(@as(usize, 0), app.copied_commits.items.len);
 }
 
 test "new-branch prompt remembers a cancelled name and forgets it on create" {
