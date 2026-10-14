@@ -1,0 +1,20 @@
+{
+    "version": "__VERSION__",
+    "description": "A fast terminal UI for Git, written in Zig.",
+    "homepage": "https://ziggity.dev",
+    "license": "MIT",
+    "notes": [
+        "ziggity drives git as a subprocess, so it needs git on your PATH",
+        "(Git for Windows, or `scoop install git`)."
+    ],
+    "suggest": {
+        "git (ziggity runs it as a subprocess)": "git"
+    },
+    "architecture": {
+        "64bit": {
+            "url": "__BASE__/ziggity-__TAG__-x86_64-windows-gnu.zip",
+            "hash": "__SHA_WIN_X64__"
+        }
+    },
+    "bin": "ziggity.exe"
+}

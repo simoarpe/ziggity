@@ -1,6 +1,13 @@
 # Builds Ziggity for every supported OS/arch and publishes a GitHub Release
 # with the binaries attached. Thanks to Zig's cross-compilation, one Linux
 # runner produces all of them.
+#
+# Repo secrets (Settings → Secrets and variables → Actions). Both are optional:
+# the matching step logs and skips when its secret is unset, so a release still
+# succeeds. Each is a fine-grained PAT with Contents: read and write, scoped to
+# ONLY the repo it updates (separate tokens keep the blast radius small):
+#   Z_HOMEBREW_TAP_TOKEN  → simoarpe/homebrew-ziggity  (Update Homebrew tap step)
+#   Z_SCOOP_BUCKET_TOKEN  → simoarpe/scoop-ziggity      (Update Scoop bucket step)
 name: release
 
 # ── When does this run? ───────────────────────────────────────────────────
@@ -133,6 +140,52 @@ jobs:
             echo "Formula already up to date."
           else
             git add Formula/ziggity.rb
+            git commit -m "ziggity ${version}"
+            git push
+          fi
+
+      # 7. Point the Scoop bucket at this release: render bucket/ziggity.json from
+      #    the template (new version + URL + sha256) and push it to
+      #    simoarpe/scoop-ziggity. Like the Homebrew step, needs a token that can
+      #    write to THAT repo — create a fine-grained PAT (contents: write on the
+      #    bucket repo) and add it as the repo secret Z_SCOOP_BUCKET_TOKEN.
+      #    Without it, this step logs and skips (releases still succeed).
+      - name: Update Scoop bucket
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          BUCKET_TOKEN: ${{ secrets.Z_SCOOP_BUCKET_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BUCKET_TOKEN}" ]; then
+            echo "Z_SCOOP_BUCKET_TOKEN not set — skipping the Scoop manifest bump."
+            exit 0
+          fi
+
+          tag="${GITHUB_REF_NAME}"          # v0.2.0
+          version="${tag#v}"                # 0.2.0
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
+
+          # sha256 of a given asset, from the checksums we just generated.
+          sha() { awk -v f="ziggity-${tag}-$1" '$2==f{print $1}' dist/checksums.txt; }
+
+          sed \
+            -e "s|__VERSION__|${version}|g" \
+            -e "s|__TAG__|${tag}|g" \
+            -e "s|__BASE__|${base}|g" \
+            -e "s|__SHA_WIN_X64__|$(sha x86_64-windows-gnu.zip)|g" \
+            .github/scoop/ziggity.json.tmpl > /tmp/ziggity.json
+
+          git clone --depth 1 \
+            "https://x-access-token:${BUCKET_TOKEN}@github.com/simoarpe/scoop-ziggity.git" scoop-bucket
+          mkdir -p scoop-bucket/bucket
+          cp /tmp/ziggity.json scoop-bucket/bucket/ziggity.json
+          cd scoop-bucket
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "Manifest already up to date."
+          else
+            git add bucket/ziggity.json
             git commit -m "ziggity ${version}"
             git push
           fi

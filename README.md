@@ -132,12 +132,20 @@ xattr -d com.apple.quarantine /usr/local/bin/ziggity
 
 #### Windows
 
-Download `ziggity-v0.49.0-x86_64-windows-gnu.zip`, unzip it, and put
-`ziggity.exe` in a folder on your `PATH`. Requires
-[Git for Windows](https://git-scm.com/download/win).
+The easiest way is [Scoop](https://scoop.sh):
 
-> **Note:** Windows builds are cross compiled and not yet smoke tested on
-> Windows. Treat them as experimental for now.
+```powershell
+scoop bucket add ziggity https://github.com/simoarpe/scoop-ziggity
+scoop install ziggity
+```
+
+Upgrade later with `scoop update ziggity`.
+
+Or download it by hand: grab `ziggity-v0.49.0-x86_64-windows-gnu.zip`, unzip it,
+and put `ziggity.exe` in a folder on your `PATH`.
+
+Either way ziggity needs [Git for Windows](https://git-scm.com/download/win) (or
+`scoop install git`) on your `PATH`.
 
 #### Android (Termux)
 
