@@ -1849,6 +1849,31 @@ pub const Git = struct {
         return self.exec(args.items);
     }
 
+    /// Cherry-pick with `--no-commit`: apply the commits' changes to the index
+    /// and working tree without creating any commit. On a clean apply the user
+    /// commits (or amends) the result themselves; a conflict stops mid-pick.
+    pub fn cherryPickManyNoCommit(self: *Git, hashes: []const []const u8) !ExecResult {
+        if (hashes.len == 0) return self.successResult();
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(self.allocator);
+        try args.append(self.allocator, "cherry-pick");
+        try args.append(self.allocator, "--no-commit");
+        try args.appendSlice(self.allocator, hashes);
+        return self.exec(args.items);
+    }
+
+    /// Cherry-pick the commits into the index with `--no-commit`, then commit the
+    /// combined result as one commit with `message`. Lets you reword while
+    /// cherry-picking (and folds several copied commits into one). If the apply
+    /// hits a conflict the commit is skipped and the conflict is returned for the
+    /// user to resolve.
+    pub fn cherryPickManyCommit(self: *Git, hashes: []const []const u8, message: []const u8) !ExecResult {
+        var applied = try self.cherryPickManyNoCommit(hashes);
+        if (!applied.ok()) return applied;
+        applied.deinit(self.allocator);
+        return self.exec(&.{ "commit", "-m", message });
+    }
+
     pub fn cherryPickContinue(self: *Git) !ExecResult {
         return self.exec(&.{ "-c", "core.editor=true", "cherry-pick", "--continue" });
     }
@@ -1895,6 +1920,16 @@ pub const Git = struct {
     /// commit has only a subject. Caller owns the returned slice.
     pub fn commitBody(self: *Git, hash: []const u8) ![]u8 {
         var result = try self.exec(&.{ "log", "-1", "--format=%b", hash });
+        defer result.deinit(self.allocator);
+        if (!result.ok()) return self.allocator.alloc(u8, 0);
+        return self.allocator.dupe(u8, std.mem.trim(u8, result.stdout, " \t\r\n"));
+    }
+
+    /// The full raw message (subject + body) of a commit, trimmed. Caller owns
+    /// the returned slice. Used to prefill the editor when rewording a
+    /// cherry-pick.
+    pub fn commitMessage(self: *Git, hash: []const u8) ![]u8 {
+        var result = try self.exec(&.{ "log", "-1", "--format=%B", hash });
         defer result.deinit(self.allocator);
         if (!result.ok()) return self.allocator.alloc(u8, 0);
         return self.allocator.dupe(u8, std.mem.trim(u8, result.stdout, " \t\r\n"));

@@ -105,9 +105,9 @@ the written reference. Every binding is remappable, see
 - `y` (Branches/Tags): copy the branch, tag or remote branch name to the
   clipboard (the commit's short hash while drilled into a branch's commits)
 - `enter` then `c` / `V` / `C` (Branches, Local or Remotes): drill into a
-  branch's commits, then copy a commit for cherry-pick / paste onto HEAD /
-  clear, so you can cherry-pick a commit from another branch onto the current
-  one
+  branch's commits, then copy a commit for cherry-pick / paste / clear, so you
+  can cherry-pick a commit from another branch onto the current one. `V` opens a
+  menu: plain paste, paste and edit the message, or paste without committing
 - `space` (Remotes/Tags): check out the remote branch or tag
 - `n` / `P` / `g` / `d` (Tags): new tag / push to a remote / reset onto it /
   delete
@@ -119,6 +119,10 @@ the written reference. Every binding is remappable, see
 - `T` / `a` (Commits): tag the commit / edit its metadata (author name & email,
   committer name & email, author date, committer date, or both dates at once)
 - `y` / `C`: copy menu / clear the cherry pick selection
+- `c` / `V` (Commits): copy the commit for cherry-pick / paste. `V` opens a
+  menu: plain paste onto HEAD, paste and edit the message (folds the copied
+  commits into one new commit you reword), or paste without committing
+  (`--no-commit`)
 - `i` (Commits): interactive rebase plan editor
 - `ctrl+l` (Commits): commit graph viewer (`j` and `k` move, `@` HEAD, `p`
   first parent, `H` and `L` pan, `a` toggle all branches, `y` copy,

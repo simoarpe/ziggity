@@ -113,7 +113,7 @@ pub const CommitField = enum { subject, body };
 /// What the commit-message dialog does on submit: create a new commit, reword an
 /// existing one, or write an `amend!` marker (new message + staged changes, to
 /// be folded into the target on autosquash).
-pub const CommitAction = enum { create, reword, amend_fixup, amend };
+pub const CommitAction = enum { create, reword, amend_fixup, amend, cherry_pick_commit };
 
 /// A commit field's AI generation state. No `completed`: once a result lands in
 /// the field it is just normal editable text.
@@ -655,6 +655,9 @@ pub const MenuAction = enum {
     autosquash_to_branch,
     create_fixup_commit,
     create_amend_commit,
+    cherry_pick_paste,
+    cherry_pick_paste_edit,
+    cherry_pick_paste_no_commit,
 };
 
 /// The Files `i` menu: add the selected path to the shared, committed
@@ -685,6 +688,10 @@ pub const autosquash_menu = [_]MenuItem{
     .{ .label = "Squash fixups above the selected commit", .action = .autosquash_above },
     .{ .label = "Squash fixups down to a branch...", .action = .autosquash_to_branch },
 };
+
+// The `V` paste menu is built per-open in `startPasteMenu` (into
+// `paste_menu_items`) because the "edit the message" item's label changes with
+// the number of copied commits: one commit rewords it, several squash into one.
 
 /// The `s` branch-sort menu on the local Branches tab.
 pub const branch_sort_menu = [_]MenuItem{
@@ -1613,6 +1620,11 @@ pub const Mutation = union(enum) {
     revert_many: []const []const u8,
     create_fixup: []const u8,
     cherry_pick_many: []const []const u8,
+    /// Cherry-pick with `--no-commit`: stage the changes without committing.
+    cherry_pick_many_no_commit: []const []const u8,
+    /// Cherry-pick (no-commit) then commit the combined result with a new
+    /// message, so a cherry-pick can be reworded.
+    cherry_pick_message: struct { hashes: []const []const u8, message: []const u8 },
     delete_branch: struct { name: []const u8, force: bool },
     delete_remote_branch: struct { remote: []const u8, ref: []const u8 },
     create_tag: struct { name: []const u8, message: []const u8, force: bool, target: []const u8 },
@@ -1691,6 +1703,8 @@ pub const Mutation = union(enum) {
             .revert_many => |hs| wgit.revertCommits(hs),
             .create_fixup => |h| wgit.createFixup(h),
             .cherry_pick_many => |hs| wgit.cherryPickMany(hs),
+            .cherry_pick_many_no_commit => |hs| wgit.cherryPickManyNoCommit(hs),
+            .cherry_pick_message => |x| wgit.cherryPickManyCommit(x.hashes, x.message),
             .delete_branch => |x| wgit.deleteBranch(x.name, x.force),
             .delete_remote_branch => |x| wgit.deleteRemoteBranch(x.remote, x.ref),
             .create_tag => |x| wgit.createTag(x.name, x.message, x.force, x.target),
@@ -1782,6 +1796,8 @@ pub const Mutation = union(enum) {
             .create_fixup => |h| .{ .create_fixup = try gpa.dupe(u8, h) },
             .revert_many => |hs| .{ .revert_many = try dupeStrList(gpa, hs) },
             .cherry_pick_many => |hs| .{ .cherry_pick_many = try dupeStrList(gpa, hs) },
+            .cherry_pick_many_no_commit => |hs| .{ .cherry_pick_many_no_commit = try dupeStrList(gpa, hs) },
+            .cherry_pick_message => |x| .{ .cherry_pick_message = .{ .hashes = try dupeStrList(gpa, x.hashes), .message = try gpa.dupe(u8, x.message) } },
             .delete_branch => |x| .{ .delete_branch = .{ .name = try gpa.dupe(u8, x.name), .force = x.force } },
             .delete_remote_branch => |x| .{ .delete_remote_branch = .{ .remote = try gpa.dupe(u8, x.remote), .ref = try gpa.dupe(u8, x.ref) } },
             .create_tag => |x| .{ .create_tag = .{ .name = try gpa.dupe(u8, x.name), .message = try gpa.dupe(u8, x.message), .force = x.force, .target = try gpa.dupe(u8, x.target) } },
@@ -1877,6 +1893,11 @@ pub const Mutation = union(enum) {
             },
             .revert_many => |hs| freeStrList(gpa, hs),
             .cherry_pick_many => |hs| freeStrList(gpa, hs),
+            .cherry_pick_many_no_commit => |hs| freeStrList(gpa, hs),
+            .cherry_pick_message => |x| {
+                freeStrList(gpa, x.hashes);
+                gpa.free(x.message);
+            },
             .delete_branch => |x| gpa.free(x.name),
             .delete_remote_branch => |x| {
                 gpa.free(x.remote);
@@ -2795,6 +2816,12 @@ pub const App = struct {
     /// App-owned backing for a menu's optional path subtitle, copied on open so
     /// it survives a background file-list refresh while the menu is open.
     menu_subtitle_buf: [1024]u8 = undefined,
+    /// App-owned backing for the `V` paste menu, whose "edit the message" label
+    /// is built per-open to spell out the squash (and its count) when more than
+    /// one commit is copied. Static arrays can't carry that, so the items and the
+    /// dynamic label live here, outliving the open menu.
+    paste_menu_items: [3]MenuItem = undefined,
+    paste_menu_edit_label_buf: [96]u8 = undefined,
     pending_confirmation: ?Confirmation = null,
     // ctrl+r recent-repository switcher (mode `.recent_repos`): a scrollable,
     // mouse-interactive overlay modeled on the commit-graph viewer. `recent_repos`
@@ -3966,11 +3993,12 @@ pub const App = struct {
                     try self.updatePreview(); // show/clear the combined range diff
                 }
             },
-            // Paste cherry-picks the copied commits onto HEAD. Allowed in the
+            // Paste opens a menu to cherry-pick the copied commits onto HEAD:
+            // plain, editing the message, or without committing. Allowed in the
             // Commits panel and in the Branches sub-commits drill's commit list,
             // so you can copy a commit from another branch and paste it onto the
             // current one without leaving the drill (issue #35).
-            .paste_commits => if ((self.focus == .commits or (self.focus == .branches and self.branch_commits_active and !self.branch_files_active)) and !self.staging_active) try self.pasteCopiedCommits(),
+            .paste_commits => if ((self.focus == .commits or (self.focus == .branches and self.branch_commits_active and !self.branch_files_active)) and !self.staging_active) try self.startPasteMenu(),
             .select_branch_commits => try self.selectBranchCommits(),
             .focus_left => if (self.staging_active) try staging_mod.closeStaging(self) else try self.focusPrevious(),
             .focus_right => if (!self.staging_active) try self.focusNext(),
@@ -7498,9 +7526,16 @@ pub const App = struct {
         try self.setMessage("marked base {s} (rebase a branch to move commits)", .{commit.short_hash});
     }
 
-    /// Cherry-pick all copied commits onto HEAD, oldest-first, then clear.
-    fn pasteCopiedCommits(self: *App) !void {
-        if (self.copied_commits.items.len == 0) {
+    /// `V`: open the paste menu for the copied commits (plain cherry-pick, edit
+    /// the message, or apply without committing). Guards the preconditions once,
+    /// so the individual actions can assume copied commits and a clean repo.
+    /// When more than one commit is copied, the "edit the message" item spells
+    /// out that it squashes them all into one commit, so the result is never a
+    /// surprise (git's own `cherry-pick -e` would keep them separate, but that
+    /// needs a per-commit editor pass ziggity does not do in-app).
+    fn startPasteMenu(self: *App) !void {
+        const count = self.copied_commits.items.len;
+        if (count == 0) {
             try self.setMessage("no commits copied (c to copy)", .{});
             return;
         }
@@ -7508,34 +7543,67 @@ pub const App = struct {
             try self.setMessage("finish the in-progress operation first (m)", .{});
             return;
         }
+        const edit_label: []const u8 = if (count > 1)
+            std.fmt.bufPrint(&self.paste_menu_edit_label_buf, "Squash all {d} commits into one and edit the message", .{count}) catch "Squash the commits into one and edit the message"
+        else
+            "Paste and edit the message";
+        self.paste_menu_items = .{
+            .{ .label = "Paste (cherry-pick onto HEAD)", .action = .cherry_pick_paste },
+            .{ .label = edit_label, .action = .cherry_pick_paste_edit },
+            .{ .label = "Paste without committing (--no-commit)", .action = .cherry_pick_paste_no_commit },
+        };
+        self.mode = .menu;
+        self.active_menu = .{ .title = "Paste copied commits", .items = &self.paste_menu_items, .index = 0 };
+    }
 
-        // Order oldest-first: walk the commit list from the bottom, then append
-        // any copied commits not present in it (e.g. reflog-only) in copy order.
-        var ordered: std.ArrayList([]const u8) = .empty;
-        defer ordered.deinit(self.allocator);
+    /// Fill `out` with the copied commits in oldest-first order: walk the commit
+    /// list from the bottom, then append any copied commits not present in it
+    /// (e.g. from another branch's drill) in copy order. Hashes are borrowed from
+    /// `copied_commits` / `data.commits`, so `out` must not outlive them.
+    pub fn buildPasteOrder(self: *App, out: *std.ArrayList([]const u8)) !void {
         var i = self.data.commits.len;
         while (i > 0) {
             i -= 1;
             const hash = self.data.commits[i].hash;
-            if (self.isCommitCopied(hash)) try ordered.append(self.allocator, hash);
+            if (self.isCommitCopied(hash)) try out.append(self.allocator, hash);
         }
         for (self.copied_commits.items) |h| {
             var present = false;
-            for (ordered.items) |o| {
+            for (out.items) |o| {
                 if (std.mem.eql(u8, o, h)) {
                     present = true;
                     break;
                 }
             }
-            if (!present) try ordered.append(self.allocator, h);
+            if (!present) try out.append(self.allocator, h);
         }
+    }
 
+    /// Cherry-pick all copied commits onto HEAD, oldest-first, then clear.
+    fn pasteCopiedCommits(self: *App) !void {
+        var ordered: std.ArrayList([]const u8) = .empty;
+        defer ordered.deinit(self.allocator);
+        try self.buildPasteOrder(&ordered);
         const count = ordered.items.len;
+        if (count == 0) return self.setMessage("no commits copied (c to copy)", .{});
         var run_buf: [48]u8 = undefined;
         const shown = std.fmt.bufPrint(&run_buf, "git cherry-pick ({d} commit(s))", .{count}) catch "git cherry-pick";
         // Clear the clipboard only on success (post = .clear_copied), mirroring
         // the old sync path. The copied hashes are duped into the job up front.
         return self.requestMutation(.{ .cherry_pick_many = ordered.items }, .{ .gerund = "cherry-picking", .command = shown, .refresh = Refresh.all, .post = .clear_copied }, "cherry-picked {d} commit(s)", .{count});
+    }
+
+    /// Apply all copied commits onto HEAD with `--no-commit`: the changes land
+    /// staged and uncommitted, for you to commit (or amend) yourself.
+    fn pasteCopiedCommitsNoCommit(self: *App) !void {
+        var ordered: std.ArrayList([]const u8) = .empty;
+        defer ordered.deinit(self.allocator);
+        try self.buildPasteOrder(&ordered);
+        const count = ordered.items.len;
+        if (count == 0) return self.setMessage("no commits copied (c to copy)", .{});
+        var run_buf: [56]u8 = undefined;
+        const shown = std.fmt.bufPrint(&run_buf, "git cherry-pick --no-commit ({d})", .{count}) catch "git cherry-pick --no-commit";
+        return self.requestMutation(.{ .cherry_pick_many_no_commit = ordered.items }, .{ .gerund = "cherry-picking", .command = shown, .refresh = Refresh.all, .post = .clear_copied }, "cherry-picked {d} commit(s) without committing", .{count});
     }
 
     /// Open the stash-message prompt for `kind`, capturing the file path first
@@ -9146,6 +9214,9 @@ pub const App = struct {
             .autosquash_to_branch => return self.startTextPrompt(.autosquash_base),
             .create_fixup_commit => return commitops_mod.createFixupCommit(self),
             .create_amend_commit => return commits_mod.startAmendCommit(self),
+            .cherry_pick_paste => return self.pasteCopiedCommits(),
+            .cherry_pick_paste_no_commit => return self.pasteCopiedCommitsNoCommit(),
+            .cherry_pick_paste_edit => return commits_mod.startCherryPickEdit(self),
             .discard_file_all => {
                 if (self.rangeActive()) {
                     var files: std.ArrayList(model.FileStatus) = .empty;
@@ -11927,6 +11998,55 @@ test "cherry-pick clipboard toggles copied commits" {
     try std.testing.expect(!app.isCommitCopied("aaaaaaa"));
     try std.testing.expect(app.isCommitCopied("bbbbbbb"));
     try std.testing.expectEqual(@as(usize, 1), app.copied_commits.items.len);
+}
+
+test "paste menu spells out the squash when multiple commits are copied (issue #35)" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    app.data.state = .clean;
+
+    // One commit copied: the item rewords that single commit.
+    try app.copied_commits.append(allocator, try allocator.dupe(u8, "aaaaaaa"));
+    try app.startPasteMenu();
+    try std.testing.expect(app.active_menu != null);
+    try std.testing.expectEqualStrings("Paste and edit the message", app.active_menu.?.items[1].label);
+
+    // Two commits copied: the item makes clear it squashes them into one.
+    try app.copied_commits.append(allocator, try allocator.dupe(u8, "bbbbbbb"));
+    try app.startPasteMenu();
+    try std.testing.expectEqualStrings("Squash all 2 commits into one and edit the message", app.active_menu.?.items[1].label);
+}
+
+test "paste-and-edit submits a cherry_pick_message mutation with the edited text (issue #35)" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    // requestMutation records the command into git.command_log (testing alloc).
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    var commits = [_]model.Commit{
+        .{ .hash = @constCast("aaaaaaa"), .short_hash = @constCast("aaa"), .author = @constCast("s"), .time = @constCast("now"), .refs = @constCast(""), .subject = @constCast("orig") },
+    };
+    app.data.commits = &commits;
+    try app.copied_commits.append(allocator, try allocator.dupe(u8, "aaaaaaa"));
+
+    // The editor is open in cherry-pick-edit mode with a reworded subject;
+    // submitting folds the copied commit(s) into one commit with that message.
+    app.commit_action = .cherry_pick_commit;
+    app.commit_buffer.clearRetainingCapacity();
+    try app.commit_buffer.appendSlice(allocator, "reworded pick");
+    try commits_mod.submitCommit(&app);
+
+    const job = app.takeMutation().?;
+    defer job.deinit(page_alloc);
+    try std.testing.expect(std.meta.activeTag(job) == .cherry_pick_message);
+    try std.testing.expectEqualStrings("reworded pick", job.cherry_pick_message.message);
+    try std.testing.expectEqual(@as(usize, 1), job.cherry_pick_message.hashes.len);
+    try std.testing.expectEqualStrings("aaaaaaa", job.cherry_pick_message.hashes[0]);
 }
 
 test "c cherry-picks in the Branches sub-commits drill, checks out by name on the list (issue #35)" {

@@ -2138,7 +2138,8 @@ const help_lines = [_][]const u8{
     "Inside a branch's commits (enter on a branch, Local or Remotes tab)",
     "  enter          view the selected commit's changed files",
     "  c              copy the commit for cherry-pick (works across branches)",
-    "  V              paste — cherry-pick the copied commit(s) onto HEAD",
+    "  V              paste menu: cherry-pick onto HEAD, edit the message, or",
+    "                 apply without committing (--no-commit)",
     "  C              clear the cherry-pick copy selection",
     "  y              copy the commit's short hash",
     "  esc            back to the branch list",
@@ -2154,7 +2155,8 @@ const help_lines = [_][]const u8{
     "  t              revert the commit",
     "  x              verify the commit's GPG signature (result in a dialog)",
     "  c              copy the commit (for cherry-pick)",
-    "  V              paste — cherry-pick the copied commit onto HEAD",
+    "  V              paste menu: cherry-pick onto HEAD, edit the message, or",
+    "                 apply without committing (--no-commit)",
     "  C              clear the cherry-pick copy selection",
     "  y              copy menu: commit hash, subject or author",
     "  d              drop the commit (confirms; merge commits handled specially)",
@@ -2645,6 +2647,7 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
         .reword => "Reword commit",
         .amend_fixup => "Amend into commit (new message)",
         .amend => "Amend last commit (message)",
+        .cherry_pick_commit => "Cherry-pick (edit message)",
         .create => "Commit message",
     };
     const win = popup(root, w, 12, title, null);

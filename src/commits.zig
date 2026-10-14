@@ -270,6 +270,48 @@ fn startAmendReword(app: *App) !void {
     try app.setMessage("amend: edit the message", .{});
 }
 
+/// "Paste and edit the message": open the message editor prefilled from the
+/// copied commit, so submitting folds the copied commit(s) into one new commit
+/// with the edited message (`git cherry-pick --no-commit` + `git commit`). The
+/// prefill comes from the newest copied commit (the only one when a single
+/// commit is copied). `submitCommit` rebuilds the ordered hash list on submit,
+/// so `copied_commits` stays intact until the pick succeeds.
+pub fn startCherryPickEdit(app: *App) !void {
+    var ordered: std.ArrayList([]const u8) = .empty;
+    defer ordered.deinit(app.allocator);
+    try app.buildPasteOrder(&ordered);
+    if (ordered.items.len == 0) {
+        try app.setMessage("no commits copied (c to copy)", .{});
+        return;
+    }
+    // Prefill from the newest copied commit (last, since oldest-first).
+    const rep = ordered.items[ordered.items.len - 1];
+    const msg = app.git.commitMessage(rep) catch try app.allocator.alloc(u8, 0);
+    defer app.allocator.free(msg);
+    // Split the raw message into subject (first line) and body (the rest).
+    const nl = std.mem.indexOfScalar(u8, msg, '\n');
+    const subject = std.mem.trim(u8, if (nl) |i| msg[0..i] else msg, " \t\r\n");
+    const body = if (nl) |i| std.mem.trim(u8, msg[i + 1 ..], " \t\r\n") else "";
+
+    app.mode = .commit_prompt;
+    app.commit_action = .cherry_pick_commit;
+    app.resetCommitAiState();
+    app.commit_field = .subject;
+    app.commit_buffer.clearRetainingCapacity();
+    try app.commit_buffer.appendSlice(app.allocator, subject);
+    app.commit_body_buffer.clearRetainingCapacity();
+    try app.commit_body_buffer.appendSlice(app.allocator, body);
+    app.commit_cursor = app.commit_buffer.items.len;
+    app.commit_body_cursor = app.commit_body_buffer.items.len;
+    app.commit_scroll = 0;
+    app.commit_body_scroll_x = 0;
+    app.commit_body_scroll_y = 0;
+    app.commit_body_last_caret = std.math.maxInt(usize); // force the caret into view on open
+    app.commit_sel_anchor = null;
+    app.commit_mouse_selecting = false;
+    try app.setMessage("cherry-pick: edit the message", .{});
+}
+
 pub fn handleCommitPromptKey(app: *App, key: vaxis.Key) !void {
     // Mid-paste, esc is part of the pasted content, not a cancel.
     if (app.isEscapeKey(key) and !app.pasting) {
@@ -420,6 +462,18 @@ pub fn submitCommit(app: *App) !void {
         // (`reword_on_amend`). Like `.create`, `requestMutation` copies the
         // message synchronously, so passing the soon-to-be-freed slice is fine.
         .amend => return app.requestMutation(.{ .amend_message = message }, .{ .gerund = "amending", .command = "git commit --amend", .refresh = App.Refresh.commit }, "amended last commit", .{}),
+        // "Paste and edit the message": cherry-pick the copied commits with
+        // --no-commit, then commit the combined result with this message. The
+        // ordered hash list is rebuilt now (copied_commits is still intact), and
+        // the clipboard is cleared only on success (post = .clear_copied).
+        .cherry_pick_commit => {
+            var ordered: std.ArrayList([]const u8) = .empty;
+            defer ordered.deinit(app.allocator);
+            try app.buildPasteOrder(&ordered);
+            const count = ordered.items.len;
+            if (count == 0) return app.setMessage("no commits copied (c to copy)", .{});
+            return app.requestMutation(.{ .cherry_pick_message = .{ .hashes = ordered.items, .message = message } }, .{ .gerund = "cherry-picking", .command = "git cherry-pick --no-commit + git commit", .refresh = App.Refresh.all, .post = .clear_copied }, "cherry-picked {d} commit(s)", .{count});
+        },
         .amend_fixup => {
             // The marker matches its target by the target's *original* subject
             // (unedited); data.commits isn't touched by the dialog, so read it now.

@@ -317,10 +317,13 @@ The animation itself is in the [README](../README.md).
 - Rebase plan editor (`i`): compose a plan for the commits down to the
   selected one, mark each action (with range select to mark or reorder many
   at once), then run it as one rebase.
-- Cherry picking: copy commits to a clipboard (`c`), paste onto HEAD (`V`),
-  clear (`C`). This also works while drilled into a branch's commits in the
-  Branches panel (Local or Remotes tab), so you can copy a commit from another
-  branch and paste it straight onto the current one.
+- Cherry picking: copy commits to a clipboard (`c`), clear (`C`), and paste with
+  `V`, which opens a menu: plain cherry-pick onto HEAD (keeps each message),
+  paste and edit the message (folds the copied commit(s) into one new commit
+  whose message you write), or paste without committing (`--no-commit`, leaving
+  the changes staged for you to commit). This also works while drilled into a
+  branch's commits in the Branches panel (Local or Remotes tab), so you can copy
+  a commit from another branch and paste it straight onto the current one.
 - Custom patch building (`ctrl+p`): toggle files into a patch (`space` in a
   commit's file list), then apply it to the working tree (forward or
   reverse), remove it from its source commit, or reset it.
