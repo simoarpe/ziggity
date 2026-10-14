@@ -2106,6 +2106,9 @@ const help_lines = [_][]const u8{
     "  G              open the branch's pull/merge request, else the new-PR page",
     "  y              copy the branch / tag / remote name (the commit hash in a",
     "                 branch's commit drill)",
+    "  V              paste copied commits onto the selected branch (cherry-pick;",
+    "                 a non-current branch is checked out first). Shown on the",
+    "                 Local tab once commits are copied",
     "  s              branch sort menu",
     "",
     "Remotes tab — the remotes list",
@@ -4829,6 +4832,9 @@ const FooterCtx = struct {
     main_file: bool = false,
     /// The Diff/main panel is maximised to full screen.
     fullscreen: bool = false,
+    /// Commits are on the cherry-pick clipboard, so `V` can paste them. Shown as
+    /// a `V paste` hint on the Local branches tab (paste onto the current branch).
+    commits_copied: bool = false,
 };
 
 /// Keybinding hints for the current stage. A global suffix is appended since
@@ -4840,6 +4846,10 @@ fn footerHints(c: FooterCtx) []const u8 {
     // The main panel is the `z` fullscreen special case; `+`/`_` are inert
     // there, so its footer drops the `+/_ size` hint.
     const global_main = "  @ log  ? help  ^z undo  R refresh  q quit";
+    // Local branches tab, split so the optional `V paste` hint (shown only when
+    // commits are copied) can be inserted before the tab switcher.
+    const local_branch_hints = "space checkout  c by-name  n new  R rename  d delete  M merge  r rebase  g reset  f ff  F force-co  T tag  N move  G pr  y copy  s sort  w worktree  W diff";
+    const local_branch_tail = "  [/] tabs" ++ global_branches;
     if (c.rebase_plan) {
         return "j/k move  p pick  d drop  s squash  f fixup  e edit  ^j/^k reorder  enter run  esc cancel";
     }
@@ -4873,7 +4883,12 @@ fn footerHints(c: FooterCtx) []const u8 {
     }
     if (c.focus == .branches) {
         return switch (c.branches_tab) {
-            .local => "space checkout  c by-name  n new  R rename  d delete  M merge  r rebase  g reset  f ff  F force-co  T tag  N move  G pr  y copy  s sort  w worktree  W diff  [/] tabs" ++ global_branches,
+            // `V paste` appears only when commits are copied (from the Commits
+            // panel): it cherry-picks them onto the current branch.
+            .local => if (c.commits_copied)
+                local_branch_hints ++ "  V paste" ++ local_branch_tail
+            else
+                local_branch_hints ++ local_branch_tail,
             .remotes => if (c.remote_drill)
                 "space checkout  n new-local  M merge  r rebase  g reset  u upstream  d delete  y copy  w worktree  W diff  enter commits  esc back" ++ global_branches
             else
@@ -4931,6 +4946,7 @@ fn contextHints(app: *const app_mod.App) []const u8 {
         .main_file = app.focus == .main and !app.staging_active and
             app.contentFocus() == .files and app.selectedFile() != null,
         .fullscreen = app.mainFullscreen(),
+        .commits_copied = app.copied_commits.items.len > 0,
     });
 }
 

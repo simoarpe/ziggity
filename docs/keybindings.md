@@ -108,6 +108,10 @@ the written reference. Every binding is remappable, see
   branch's commits, then copy a commit for cherry-pick / paste / clear, so you
   can cherry-pick a commit from another branch onto the current one. `V` opens a
   menu: plain paste, paste and edit the message, or paste without committing
+- `V` (Branches Local): once commits are copied (here or in the Commits panel),
+  paste them onto the selected branch from the branch list; a non-current branch
+  is checked out first (the menu names the target). The footer shows the hint
+  only while something is copied
 - `space` (Remotes/Tags): check out the remote branch or tag
 - `n` / `P` / `g` / `d` (Tags): new tag / push to a remote / reset onto it /
   delete

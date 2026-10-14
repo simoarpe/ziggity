@@ -1619,12 +1619,15 @@ pub const Mutation = union(enum) {
     revert: []const u8,
     revert_many: []const []const u8,
     create_fixup: []const u8,
-    cherry_pick_many: []const []const u8,
+    // `onto` (when set) is a branch to check out before cherry-picking, so a
+    // paste from the Local branch list can target a branch other than the
+    // current one; null pastes onto the current branch (HEAD).
+    cherry_pick_many: struct { hashes: []const []const u8, onto: ?[]const u8 },
     /// Cherry-pick with `--no-commit`: stage the changes without committing.
-    cherry_pick_many_no_commit: []const []const u8,
+    cherry_pick_many_no_commit: struct { hashes: []const []const u8, onto: ?[]const u8 },
     /// Cherry-pick (no-commit) then commit the combined result with a new
     /// message, so a cherry-pick can be reworded.
-    cherry_pick_message: struct { hashes: []const []const u8, message: []const u8 },
+    cherry_pick_message: struct { hashes: []const []const u8, message: []const u8, onto: ?[]const u8 },
     delete_branch: struct { name: []const u8, force: bool },
     delete_remote_branch: struct { remote: []const u8, ref: []const u8 },
     create_tag: struct { name: []const u8, message: []const u8, force: bool, target: []const u8 },
@@ -1702,9 +1705,9 @@ pub const Mutation = union(enum) {
             .revert => |h| wgit.revertCommit(h),
             .revert_many => |hs| wgit.revertCommits(hs),
             .create_fixup => |h| wgit.createFixup(h),
-            .cherry_pick_many => |hs| wgit.cherryPickMany(hs),
-            .cherry_pick_many_no_commit => |hs| wgit.cherryPickManyNoCommit(hs),
-            .cherry_pick_message => |x| wgit.cherryPickManyCommit(x.hashes, x.message),
+            .cherry_pick_many => |x| wgit.cherryPickMany(x.onto, x.hashes),
+            .cherry_pick_many_no_commit => |x| wgit.cherryPickManyNoCommit(x.onto, x.hashes),
+            .cherry_pick_message => |x| wgit.cherryPickManyCommit(x.onto, x.hashes, x.message),
             .delete_branch => |x| wgit.deleteBranch(x.name, x.force),
             .delete_remote_branch => |x| wgit.deleteRemoteBranch(x.remote, x.ref),
             .create_tag => |x| wgit.createTag(x.name, x.message, x.force, x.target),
@@ -1795,9 +1798,9 @@ pub const Mutation = union(enum) {
             .revert => |h| .{ .revert = try gpa.dupe(u8, h) },
             .create_fixup => |h| .{ .create_fixup = try gpa.dupe(u8, h) },
             .revert_many => |hs| .{ .revert_many = try dupeStrList(gpa, hs) },
-            .cherry_pick_many => |hs| .{ .cherry_pick_many = try dupeStrList(gpa, hs) },
-            .cherry_pick_many_no_commit => |hs| .{ .cherry_pick_many_no_commit = try dupeStrList(gpa, hs) },
-            .cherry_pick_message => |x| .{ .cherry_pick_message = .{ .hashes = try dupeStrList(gpa, x.hashes), .message = try gpa.dupe(u8, x.message) } },
+            .cherry_pick_many => |x| .{ .cherry_pick_many = .{ .hashes = try dupeStrList(gpa, x.hashes), .onto = try dupeOptStr(gpa, x.onto) } },
+            .cherry_pick_many_no_commit => |x| .{ .cherry_pick_many_no_commit = .{ .hashes = try dupeStrList(gpa, x.hashes), .onto = try dupeOptStr(gpa, x.onto) } },
+            .cherry_pick_message => |x| .{ .cherry_pick_message = .{ .hashes = try dupeStrList(gpa, x.hashes), .message = try gpa.dupe(u8, x.message), .onto = try dupeOptStr(gpa, x.onto) } },
             .delete_branch => |x| .{ .delete_branch = .{ .name = try gpa.dupe(u8, x.name), .force = x.force } },
             .delete_remote_branch => |x| .{ .delete_remote_branch = .{ .remote = try gpa.dupe(u8, x.remote), .ref = try gpa.dupe(u8, x.ref) } },
             .create_tag => |x| .{ .create_tag = .{ .name = try gpa.dupe(u8, x.name), .message = try gpa.dupe(u8, x.message), .force = x.force, .target = try gpa.dupe(u8, x.target) } },
@@ -1892,11 +1895,18 @@ pub const Mutation = union(enum) {
                 gpa.free(x.url);
             },
             .revert_many => |hs| freeStrList(gpa, hs),
-            .cherry_pick_many => |hs| freeStrList(gpa, hs),
-            .cherry_pick_many_no_commit => |hs| freeStrList(gpa, hs),
+            .cherry_pick_many => |x| {
+                freeStrList(gpa, x.hashes);
+                if (x.onto) |o| gpa.free(o);
+            },
+            .cherry_pick_many_no_commit => |x| {
+                freeStrList(gpa, x.hashes);
+                if (x.onto) |o| gpa.free(o);
+            },
             .cherry_pick_message => |x| {
                 freeStrList(gpa, x.hashes);
                 gpa.free(x.message);
+                if (x.onto) |o| gpa.free(o);
             },
             .delete_branch => |x| gpa.free(x.name),
             .delete_remote_branch => |x| {
@@ -3994,11 +4004,8 @@ pub const App = struct {
                 }
             },
             // Paste opens a menu to cherry-pick the copied commits onto HEAD:
-            // plain, editing the message, or without committing. Allowed in the
-            // Commits panel and in the Branches sub-commits drill's commit list,
-            // so you can copy a commit from another branch and paste it onto the
-            // current one without leaving the drill (issue #35).
-            .paste_commits => if ((self.focus == .commits or (self.focus == .branches and self.branch_commits_active and !self.branch_files_active)) and !self.staging_active) try self.startPasteMenu(),
+            // plain, editing the message, or without committing (issue #35).
+            .paste_commits => if (self.canPasteCommits()) try self.startPasteMenu(),
             .select_branch_commits => try self.selectBranchCommits(),
             .focus_left => if (self.staging_active) try staging_mod.closeStaging(self) else try self.focusPrevious(),
             .focus_right => if (!self.staging_active) try self.focusNext(),
@@ -7526,6 +7533,36 @@ pub const App = struct {
         try self.setMessage("marked base {s} (rebase a branch to move commits)", .{commit.short_hash});
     }
 
+    /// Where `V` can paste the cherry-pick clipboard onto the current branch:
+    /// the Commits panel, the Branches sub-commits drill's commit list, or the
+    /// Local branches tab (so commits copied in the Commits panel can be pasted
+    /// straight from the branch list). Paste always lands on HEAD, not the row
+    /// the cursor is on. Not in the staging view.
+    pub fn canPasteCommits(self: *const App) bool {
+        if (self.staging_active) return false;
+        return switch (self.focus) {
+            .commits => true,
+            .branches => if (self.branch_commits_active)
+                !self.branch_files_active
+            else
+                self.branches_tab == .local,
+            else => false,
+        };
+    }
+
+    /// The branch `V` pastes onto: the selected Local-tab branch when it is not
+    /// the current one, in which case paste checks it out first and the copied
+    /// commits land there. Null everywhere else (Commits panel, the sub-commits
+    /// drill, or when the current branch is selected), meaning paste onto HEAD.
+    pub fn pasteTargetBranch(self: *const App) ?[]const u8 {
+        if (self.focus == .branches and self.branches_tab == .local and !self.branch_commits_active) {
+            if (self.selectedBranch()) |b| {
+                if (!b.current) return b.name;
+            }
+        }
+        return null;
+    }
+
     /// `V`: open the paste menu for the copied commits (plain cherry-pick, edit
     /// the message, or apply without committing). Guards the preconditions once,
     /// so the individual actions can assume copied commits and a clean repo.
@@ -7552,8 +7589,14 @@ pub const App = struct {
             .{ .label = edit_label, .action = .cherry_pick_paste_edit },
             .{ .label = "Paste without committing (--no-commit)", .action = .cherry_pick_paste_no_commit },
         };
+        // When a non-current Local branch is selected, paste targets it (checking
+        // it out first); make that explicit so switching branches is no surprise.
+        const subtitle: ?[]const u8 = if (self.pasteTargetBranch()) |b|
+            std.fmt.bufPrint(&self.menu_subtitle_buf, "onto {s} (checks it out first)", .{b}) catch null
+        else
+            null;
         self.mode = .menu;
-        self.active_menu = .{ .title = "Paste copied commits", .items = &self.paste_menu_items, .index = 0 };
+        self.active_menu = .{ .title = "Paste copied commits", .items = &self.paste_menu_items, .index = 0, .subtitle = subtitle };
     }
 
     /// Fill `out` with the copied commits in oldest-first order: walk the commit
@@ -7579,31 +7622,38 @@ pub const App = struct {
         }
     }
 
-    /// Cherry-pick all copied commits onto HEAD, oldest-first, then clear.
+    /// Cherry-pick all copied commits oldest-first, then clear. Pastes onto the
+    /// selected Local-tab branch (checked out first) when one is targeted, else
+    /// onto the current branch (HEAD).
     fn pasteCopiedCommits(self: *App) !void {
         var ordered: std.ArrayList([]const u8) = .empty;
         defer ordered.deinit(self.allocator);
         try self.buildPasteOrder(&ordered);
         const count = ordered.items.len;
         if (count == 0) return self.setMessage("no commits copied (c to copy)", .{});
+        const onto = self.pasteTargetBranch();
         var run_buf: [48]u8 = undefined;
         const shown = std.fmt.bufPrint(&run_buf, "git cherry-pick ({d} commit(s))", .{count}) catch "git cherry-pick";
         // Clear the clipboard only on success (post = .clear_copied), mirroring
         // the old sync path. The copied hashes are duped into the job up front.
-        return self.requestMutation(.{ .cherry_pick_many = ordered.items }, .{ .gerund = "cherry-picking", .command = shown, .refresh = Refresh.all, .post = .clear_copied }, "cherry-picked {d} commit(s)", .{count});
+        if (onto) |b|
+            return self.requestMutation(.{ .cherry_pick_many = .{ .hashes = ordered.items, .onto = b } }, .{ .gerund = "cherry-picking", .command = shown, .refresh = Refresh.all, .post = .clear_copied }, "cherry-picked {d} commit(s) onto {s}", .{ count, b });
+        return self.requestMutation(.{ .cherry_pick_many = .{ .hashes = ordered.items, .onto = null } }, .{ .gerund = "cherry-picking", .command = shown, .refresh = Refresh.all, .post = .clear_copied }, "cherry-picked {d} commit(s)", .{count});
     }
 
-    /// Apply all copied commits onto HEAD with `--no-commit`: the changes land
-    /// staged and uncommitted, for you to commit (or amend) yourself.
+    /// Apply all copied commits with `--no-commit`: the changes land staged and
+    /// uncommitted, for you to commit (or amend) yourself. Targets the selected
+    /// Local-tab branch (checked out first) when one is targeted, else HEAD.
     fn pasteCopiedCommitsNoCommit(self: *App) !void {
         var ordered: std.ArrayList([]const u8) = .empty;
         defer ordered.deinit(self.allocator);
         try self.buildPasteOrder(&ordered);
         const count = ordered.items.len;
         if (count == 0) return self.setMessage("no commits copied (c to copy)", .{});
+        const onto = self.pasteTargetBranch();
         var run_buf: [56]u8 = undefined;
         const shown = std.fmt.bufPrint(&run_buf, "git cherry-pick --no-commit ({d})", .{count}) catch "git cherry-pick --no-commit";
-        return self.requestMutation(.{ .cherry_pick_many_no_commit = ordered.items }, .{ .gerund = "cherry-picking", .command = shown, .refresh = Refresh.all, .post = .clear_copied }, "cherry-picked {d} commit(s) without committing", .{count});
+        return self.requestMutation(.{ .cherry_pick_many_no_commit = .{ .hashes = ordered.items, .onto = onto } }, .{ .gerund = "cherry-picking", .command = shown, .refresh = Refresh.all, .post = .clear_copied }, "cherry-picked {d} commit(s) without committing", .{count});
     }
 
     /// Open the stash-message prompt for `kind`, capturing the file path first
@@ -11998,6 +12048,74 @@ test "cherry-pick clipboard toggles copied commits" {
     try std.testing.expect(!app.isCommitCopied("aaaaaaa"));
     try std.testing.expect(app.isCommitCopied("bbbbbbb"));
     try std.testing.expectEqual(@as(usize, 1), app.copied_commits.items.len);
+}
+
+test "V can paste onto the current branch from the Local branch list (issue #35)" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // Commits panel: always a paste target.
+    app.focus = .commits;
+    try std.testing.expect(app.canPasteCommits());
+
+    // Local branches tab (branch list): a paste target, so commits copied in the
+    // Commits panel can be pasted onto the current branch from here.
+    app.focus = .branches;
+    app.branches_tab = .local;
+    app.branch_commits_active = false;
+    try std.testing.expect(app.canPasteCommits());
+
+    // Remotes / Tags branch lists are not paste targets.
+    app.branches_tab = .remotes;
+    try std.testing.expect(!app.canPasteCommits());
+    app.branches_tab = .tags;
+    try std.testing.expect(!app.canPasteCommits());
+
+    // The sub-commits drill's commit list is a target; its per-commit file view is not.
+    app.branches_tab = .local;
+    app.branch_commits_active = true;
+    app.branch_files_active = false;
+    try std.testing.expect(app.canPasteCommits());
+    app.branch_files_active = true;
+    try std.testing.expect(!app.canPasteCommits());
+
+    // Never in the staging view.
+    app.branch_files_active = false;
+    app.staging_active = true;
+    try std.testing.expect(!app.canPasteCommits());
+}
+
+test "V targets the selected non-current Local branch, else HEAD (issue #35)" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var branches = [_]model.Branch{
+        .{ .name = @constCast("main"), .current = true },
+        .{ .name = @constCast("feature/x"), .current = false },
+    };
+    app.data.branches = &branches;
+    app.focus = .branches;
+    app.branches_tab = .local;
+    app.branch_commits_active = false;
+
+    // Current branch selected: paste onto HEAD (no checkout).
+    app.branch_index = 0;
+    try std.testing.expect(app.pasteTargetBranch() == null);
+
+    // A different local branch selected: that branch is the paste target.
+    app.branch_index = 1;
+    try std.testing.expectEqualStrings("feature/x", app.pasteTargetBranch().?);
+
+    // Commits panel and the sub-commits drill always paste onto HEAD.
+    app.focus = .commits;
+    try std.testing.expect(app.pasteTargetBranch() == null);
+    app.focus = .branches;
+    app.branch_commits_active = true;
+    try std.testing.expect(app.pasteTargetBranch() == null);
 }
 
 test "paste menu spells out the squash when multiple commits are copied (issue #35)" {

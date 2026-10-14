@@ -323,7 +323,10 @@ The animation itself is in the [README](../README.md).
   whose message you write), or paste without committing (`--no-commit`, leaving
   the changes staged for you to commit). This also works while drilled into a
   branch's commits in the Branches panel (Local or Remotes tab), so you can copy
-  a commit from another branch and paste it straight onto the current one.
+  a commit from another branch and paste it straight onto the current one. Once
+  commits are copied, `V` also pastes from the Local branch list itself (the
+  footer shows the hint): it cherry-picks onto the selected branch, checking out
+  a non-current branch first (the menu says which branch it targets).
 - Custom patch building (`ctrl+p`): toggle files into a patch (`space` in a
   commit's file list), then apply it to the working tree (forward or
   reverse), remove it from its source commit, or reset it.

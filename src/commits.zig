@@ -472,7 +472,8 @@ pub fn submitCommit(app: *App) !void {
             try app.buildPasteOrder(&ordered);
             const count = ordered.items.len;
             if (count == 0) return app.setMessage("no commits copied (c to copy)", .{});
-            return app.requestMutation(.{ .cherry_pick_message = .{ .hashes = ordered.items, .message = message } }, .{ .gerund = "cherry-picking", .command = "git cherry-pick --no-commit + git commit", .refresh = App.Refresh.all, .post = .clear_copied }, "cherry-picked {d} commit(s)", .{count});
+            const onto = app.pasteTargetBranch();
+            return app.requestMutation(.{ .cherry_pick_message = .{ .hashes = ordered.items, .message = message, .onto = onto } }, .{ .gerund = "cherry-picking", .command = "git cherry-pick --no-commit + git commit", .refresh = App.Refresh.all, .post = .clear_copied }, "cherry-picked {d} commit(s)", .{count});
         },
         .amend_fixup => {
             // The marker matches its target by the target's *original* subject

@@ -1840,7 +1840,21 @@ pub const Git = struct {
     }
 
     /// Cherry-pick several commits in one go (apply in the given order).
-    pub fn cherryPickMany(self: *Git, hashes: []const []const u8) !ExecResult {
+    /// Check out `onto` first when set (so a paste can target a branch other
+    /// than the current one). Returns the failed checkout result for the caller
+    /// to surface, or null when there was nothing to do / the checkout succeeded.
+    fn checkoutForPaste(self: *Git, onto: ?[]const u8) !?ExecResult {
+        const branch = onto orelse return null;
+        var res = try self.checkout(branch);
+        if (res.ok()) {
+            res.deinit(self.allocator);
+            return null;
+        }
+        return res;
+    }
+
+    pub fn cherryPickMany(self: *Git, onto: ?[]const u8, hashes: []const []const u8) !ExecResult {
+        if (try self.checkoutForPaste(onto)) |failed| return failed;
         if (hashes.len == 0) return self.successResult();
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(self.allocator);
@@ -1852,7 +1866,8 @@ pub const Git = struct {
     /// Cherry-pick with `--no-commit`: apply the commits' changes to the index
     /// and working tree without creating any commit. On a clean apply the user
     /// commits (or amends) the result themselves; a conflict stops mid-pick.
-    pub fn cherryPickManyNoCommit(self: *Git, hashes: []const []const u8) !ExecResult {
+    pub fn cherryPickManyNoCommit(self: *Git, onto: ?[]const u8, hashes: []const []const u8) !ExecResult {
+        if (try self.checkoutForPaste(onto)) |failed| return failed;
         if (hashes.len == 0) return self.successResult();
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(self.allocator);
@@ -1867,8 +1882,8 @@ pub const Git = struct {
     /// cherry-picking (and folds several copied commits into one). If the apply
     /// hits a conflict the commit is skipped and the conflict is returned for the
     /// user to resolve.
-    pub fn cherryPickManyCommit(self: *Git, hashes: []const []const u8, message: []const u8) !ExecResult {
-        var applied = try self.cherryPickManyNoCommit(hashes);
+    pub fn cherryPickManyCommit(self: *Git, onto: ?[]const u8, hashes: []const []const u8, message: []const u8) !ExecResult {
+        var applied = try self.cherryPickManyNoCommit(onto, hashes);
         if (!applied.ok()) return applied;
         applied.deinit(self.allocator);
         return self.exec(&.{ "commit", "-m", message });
