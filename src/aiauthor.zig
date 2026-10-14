@@ -76,7 +76,8 @@ pub const Context = struct {
 
 /// Gather the git context, build the field's prompt, run `command`, and return
 /// the normalized result (caller owns it). Runs off the UI thread.
-pub fn generate(allocator: std.mem.Allocator, git: *git_mod.Git, command: []const u8, field: Field, current_title: []const u8, limits: Limits) ![]u8 {
+pub fn generate(allocator: std.mem.Allocator, git: *git_mod.Git, command: []const u8, field: Field, current_title: []const u8, limits: Limits, err_out: *?[]u8) ![]u8 {
+    err_out.* = null;
     const diff = try git.stagedDiff();
     defer allocator.free(diff);
     if (std.mem.trim(u8, diff, " \t\r\n").len == 0) return GenError.NothingStaged;
@@ -113,7 +114,12 @@ pub fn generate(allocator: std.mem.Allocator, git: *git_mod.Git, command: []cons
     };
     var res = git.runAiCommand(command, slot, prompt) catch return GenError.AiCommandFailed;
     defer res.deinit(allocator);
-    if (!res.ok()) return GenError.AiCommandFailed;
+    if (!res.ok()) {
+        // The command ran but exited non-zero: carry its first stderr line out so
+        // the UI can show *why* (e.g. a provider/model error), not just "failed".
+        err_out.* = failureDetail(allocator, res.stderr) catch null;
+        return GenError.AiCommandFailed;
+    }
     const out = std.mem.trim(u8, res.stdout, " \t\r\n");
     if (out.len == 0) return GenError.EmptyResponse;
 
@@ -121,6 +127,19 @@ pub fn generate(allocator: std.mem.Allocator, git: *git_mod.Git, command: []cons
         .title => try normalizeTitle(allocator, out),
         .description => try normalizeBody(allocator, out, limits.body_wrap),
     };
+}
+
+/// The first non-empty line of `stderr`, trimmed and length-capped, duped for
+/// the caller — a short, user-facing reason for an AI command failure. Null when
+/// there is nothing useful to show.
+fn failureDetail(allocator: std.mem.Allocator, stderr: []const u8) !?[]u8 {
+    var it = std.mem.splitScalar(u8, stderr, '\n');
+    while (it.next()) |line| {
+        const t = std.mem.trim(u8, line, " \t\r");
+        if (t.len == 0) continue;
+        return try allocator.dupe(u8, t[0..@min(t.len, 200)]);
+    }
+    return null;
 }
 
 // ---- Custom commit instructions (optional user file) ----------------------

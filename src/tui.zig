@@ -437,12 +437,17 @@ const AiGenRun = struct {
     staged_signature: u64 = 0,
     result: ?[]u8 = null,
     failed: bool = false,
+    /// On failure, a short reason from the ai_command's stderr (owned), surfaced
+    /// in the status bar so the user sees *why* generation failed. Null if none.
+    error_detail: ?[]u8 = null,
 
     fn free(self: *AiGenRun) void {
         async_allocator.free(self.command);
         async_allocator.free(self.current_title);
         if (self.result) |r| async_allocator.free(r);
         self.result = null;
+        if (self.error_detail) |e| async_allocator.free(e);
+        self.error_detail = null;
     }
 };
 
@@ -458,7 +463,7 @@ fn runAiGen(ag: *AiGenRun) void {
         for (wgit.command_log.items) |e| async_allocator.free(e);
         wgit.command_log.deinit(async_allocator);
     }
-    if (aiauthor_mod.generate(async_allocator, &wgit, ag.command, ag.field, ag.current_title, ag.limits)) |text| {
+    if (aiauthor_mod.generate(async_allocator, &wgit, ag.command, ag.field, ag.current_title, ag.limits, &ag.error_detail)) |text| {
         ag.result = text;
         ag.failed = false;
     } else |_| {
@@ -838,7 +843,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 if (ai_title_future) |*f| {
                     f.await(io);
                     ai_title_future = null;
-                    app.applyAiResult(.title, ai_title_run.dialog_generation, ai_title_run.revision, ai_title_run.staged_signature, if (ai_title_run.failed) null else ai_title_run.result) catch {};
+                    app.applyAiResult(.title, ai_title_run.dialog_generation, ai_title_run.revision, ai_title_run.staged_signature, if (ai_title_run.failed) null else ai_title_run.result, ai_title_run.error_detail) catch {};
                     ai_title_run.free();
                     render_needed = true;
                 }
@@ -847,7 +852,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 if (ai_desc_future) |*f| {
                     f.await(io);
                     ai_desc_future = null;
-                    app.applyAiResult(.description, ai_desc_run.dialog_generation, ai_desc_run.revision, ai_desc_run.staged_signature, if (ai_desc_run.failed) null else ai_desc_run.result) catch {};
+                    app.applyAiResult(.description, ai_desc_run.dialog_generation, ai_desc_run.revision, ai_desc_run.staged_signature, if (ai_desc_run.failed) null else ai_desc_run.result, ai_desc_run.error_detail) catch {};
                     ai_desc_run.free();
                     render_needed = true;
                 }
@@ -1125,7 +1130,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 };
                 app.clearAiRequest(.title);
                 ai_title_future = io.concurrent(aiTitleWorker, .{&ai_title_run}) catch blk: {
-                    app.applyAiResult(.title, ai_title_run.dialog_generation, ai_title_run.revision, ai_title_run.staged_signature, null) catch {};
+                    app.applyAiResult(.title, ai_title_run.dialog_generation, ai_title_run.revision, ai_title_run.staged_signature, null, null) catch {};
                     ai_title_run.free();
                     break :blk null;
                 };
@@ -1152,7 +1157,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 };
                 app.clearAiRequest(.description);
                 ai_desc_future = io.concurrent(aiDescWorker, .{&ai_desc_run}) catch blk: {
-                    app.applyAiResult(.description, ai_desc_run.dialog_generation, ai_desc_run.revision, ai_desc_run.staged_signature, null) catch {};
+                    app.applyAiResult(.description, ai_desc_run.dialog_generation, ai_desc_run.revision, ai_desc_run.staged_signature, null, null) catch {};
                     ai_desc_run.free();
                     break :blk null;
                 };
@@ -2640,6 +2645,34 @@ fn selCols(app: *const app_mod.App, focused: bool, base: usize, vis_len: usize) 
     return .{ .lo = @intCast(lo), .hi = @intCast(hi) };
 }
 
+/// Render the AI-generation failure line into a commit field, appending the
+/// short reason from `detail` (e.g. the ai_command's error) when present,
+/// truncated with an ellipsis so the `ctrl+g to retry` hint stays visible.
+/// Mirrors `print`'s (row, col) placement.
+fn drawAiFailure(win: vaxis.Window, row: u16, col: u16, detail: ?[]const u8, style: vaxis.Style) void {
+    const prefix = "AI generation failed";
+    const suffix = "  (ctrl+g to retry)";
+    if (detail) |d| {
+        const fixed = prefix.len + 2 + suffix.len; // ": " joins prefix and detail
+        const avail: usize = if (win.width > col) win.width - col else 0;
+        if (avail > fixed + 2) {
+            const budget = avail - fixed;
+            var shown = d;
+            var ellipsis = false;
+            if (shown.len > budget) {
+                shown = d[0 .. budget -| 1];
+                ellipsis = true;
+            }
+            var buf: [256]u8 = undefined;
+            if (std.fmt.bufPrint(&buf, "{s}: {s}{s}{s}", .{ prefix, shown, if (ellipsis) "\u{2026}" else "", suffix })) |m| {
+                print(win, row, col, m, style);
+                return;
+            } else |_| {}
+        }
+    }
+    print(win, row, col, prefix ++ suffix, style);
+}
+
 fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
     const subject_focused = app.commit_field == .subject;
@@ -2702,7 +2735,7 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
         const m = std.fmt.bufPrint(&sb, "{s} Generating commit title...", .{spinnerGlyph(app.spinner_frame)}) catch "Generating...";
         print(win, 1, 0, m, st.muted);
     } else if (app.commit_ai_title_state == .failed and subj.len == 0) {
-        print(win, 1, 0, "AI generation failed  (ctrl+g to retry)", st.warning);
+        drawAiFailure(win, 1, 0, app.commit_ai_error, st.warning);
     } else {
         const vis = subj[subj_sc.origin..];
         const sel = selCols(app, subject_focused, subj_sc.origin, vis.len);
@@ -2770,7 +2803,7 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
         const m = std.fmt.bufPrint(&sb, "{s} Generating commit description...", .{spinnerGlyph(app.spinner_frame)}) catch "Generating...";
         print(win, body_top, 0, m, st.muted);
     } else if (app.commit_ai_desc_state == .failed and body.len == 0) {
-        print(win, body_top, 0, "AI generation failed  (ctrl+g to retry)", st.warning);
+        drawAiFailure(win, body_top, 0, app.commit_ai_error, st.warning);
     } else {
         var lines = std.mem.splitScalar(u8, body, '\n');
         var idx: usize = 0;

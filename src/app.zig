@@ -2591,6 +2591,10 @@ pub const App = struct {
     // Per-field generation state, driving the in-field spinner / failure line.
     commit_ai_title_state: GenState = .idle,
     commit_ai_desc_state: GenState = .idle,
+    /// On the most recent failure, a short reason from the ai_command's stderr
+    /// (owned), shown in the dialog's failure line so the user sees *why* (e.g. a
+    /// provider/model error). Null when there is no detail.
+    commit_ai_error: ?[]u8 = null,
     // A field's revision bumps on every user edit. A generation request captures
     // the revision at start; its result is applied only if the revision (and the
     // dialog generation and staged signature) still match — so an AI result can
@@ -3104,6 +3108,7 @@ pub const App = struct {
         if (self.inline_graph) |*g| g.deinit();
         self.clearAiRequest(.title);
         self.clearAiRequest(.description);
+        if (self.commit_ai_error) |e| self.allocator.free(e);
         self.data.deinit(self.allocator);
         model.deinitCommitFiles(self.allocator, self.commit_files);
         model.deinitCommitFiles(self.allocator, self.branch_files);
@@ -11289,6 +11294,8 @@ pub const App = struct {
         self.commit_ai_desc_state = .idle;
         self.clearAiRequest(.title);
         self.clearAiRequest(.description);
+        if (self.commit_ai_error) |e| self.allocator.free(e);
+        self.commit_ai_error = null;
     }
 
     /// Bump a commit field's revision on a user edit, so an AI result generated
@@ -11362,7 +11369,7 @@ pub const App = struct {
     /// dialog the generated text is inserted only if the field revision and
     /// staged signature still match — otherwise the user edited or restaged, so
     /// the text is dropped, but the spinner still clears.
-    pub fn applyAiResult(self: *App, field: aiauthor_mod.Field, dialog_generation: u64, revision: u64, staged_signature: u64, result_opt: ?[]const u8) !void {
+    pub fn applyAiResult(self: *App, field: aiauthor_mod.Field, dialog_generation: u64, revision: u64, staged_signature: u64, result_opt: ?[]const u8, err_detail: ?[]const u8) !void {
         if (dialog_generation != self.commit_dialog_generation) return; // old dialog
         const current_rev = switch (field) {
             .title => self.commit_title_revision,
@@ -11392,6 +11399,7 @@ pub const App = struct {
                 .title => self.commit_ai_title_state = .idle,
                 .description => self.commit_ai_desc_state = .idle,
             }
+            try self.setCommitAiError(null); // a good result clears any prior error
         } else {
             // Failure: surface it only if the user was still waiting for it.
             const new_state: GenState = if (text_stale) .idle else .failed;
@@ -11399,7 +11407,25 @@ pub const App = struct {
                 .title => self.commit_ai_title_state = new_state,
                 .description => self.commit_ai_desc_state = new_state,
             }
+            // Remember *why* so the dialog's failure line can show it (e.g. a
+            // provider/model error from the ai_command), and echo it to the status
+            // bar for any non-modal context. Stale results are no longer wanted.
+            if (text_stale) {
+                try self.setCommitAiError(null);
+            } else {
+                try self.setCommitAiError(err_detail);
+                if (err_detail) |d|
+                    try self.setMessage("AI generation failed: {s}", .{d})
+                else
+                    try self.setMessage("AI generation failed", .{});
+            }
         }
+    }
+
+    /// Replace the remembered AI failure detail (owned copy of `detail`, or null).
+    fn setCommitAiError(self: *App, detail: ?[]const u8) !void {
+        if (self.commit_ai_error) |e| self.allocator.free(e);
+        self.commit_ai_error = if (detail) |d| try self.allocator.dupe(u8, d) else null;
     }
 
     /// Whether either commit field is mid AI generation — drives the spinner
@@ -12664,7 +12690,7 @@ test "AI commit authoring: availability, request, and stale-result protection" {
     const r1 = app.commit_ai_title_req.?;
 
     // Matching tokens: the generated title populates the field, spinner clears.
-    try app.applyAiResult(.title, r1.dialog_generation, r1.revision, r1.staged_signature, "Fix wallet layout");
+    try app.applyAiResult(.title, r1.dialog_generation, r1.revision, r1.staged_signature, "Fix wallet layout", null);
     try std.testing.expectEqualStrings("Fix wallet layout", app.commit_buffer.items);
     try std.testing.expectEqual(GenState.idle, app.commit_ai_title_state);
 
@@ -12675,7 +12701,7 @@ test "AI commit authoring: availability, request, and stale-result protection" {
     const r2 = app.commit_ai_title_req.?;
     try app.commit_buffer.appendSlice(allocator, "User typed");
     app.bumpCommitFieldRevision(.subject);
-    try app.applyAiResult(.title, r2.dialog_generation, r2.revision, r2.staged_signature, "AI title");
+    try app.applyAiResult(.title, r2.dialog_generation, r2.revision, r2.staged_signature, "AI title", null);
     try std.testing.expectEqualStrings("User typed", app.commit_buffer.items); // user wins
 
     // A result for a closed/previous dialog instance is ignored.
@@ -12684,15 +12710,24 @@ test "AI commit authoring: availability, request, and stale-result protection" {
     try app.requestAiGeneration(.title);
     const r3 = app.commit_ai_title_req.?;
     app.resetCommitAiState(); // dialog closes
-    try app.applyAiResult(.title, r3.dialog_generation, r3.revision, r3.staged_signature, "Late title");
+    try app.applyAiResult(.title, r3.dialog_generation, r3.revision, r3.staged_signature, "Late title", null);
     try std.testing.expectEqual(@as(usize, 0), app.commit_buffer.items.len);
 
     // Failure surfaces a non-modal failed state (commit still possible).
     app.resetCommitAiState();
     try app.requestAiGeneration(.title);
     const r4 = app.commit_ai_title_req.?;
-    try app.applyAiResult(.title, r4.dialog_generation, r4.revision, r4.staged_signature, null);
+    try app.applyAiResult(.title, r4.dialog_generation, r4.revision, r4.staged_signature, null, null);
     try std.testing.expectEqual(GenState.failed, app.commit_ai_title_state);
+
+    // A failure detail (from the ai_command's stderr) is shown in the status bar,
+    // so the user sees *why* it failed, not just that it did.
+    app.resetCommitAiState();
+    try app.requestAiGeneration(.title);
+    const r5 = app.commit_ai_title_req.?;
+    try app.applyAiResult(.title, r5.dialog_generation, r5.revision, r5.staged_signature, null, "Codex error: model not supported");
+    try std.testing.expectEqual(GenState.failed, app.commit_ai_title_state);
+    try std.testing.expect(std.mem.indexOf(u8, app.message, "Codex error: model not supported") != null);
     app.resetCommitAiState();
 }
 
@@ -16669,6 +16704,7 @@ fn testApp(allocator: std.mem.Allocator, files: []model.FileStatus) !App {
 fn deinitTestApp(app: *App) void {
     app.clearAiRequest(.title);
     app.clearAiRequest(.description);
+    if (app.commit_ai_error) |e| app.allocator.free(e);
     if (app.inline_graph) |*g| g.deinit();
     app.allocator.free(app.diff);
     app.allocator.free(app.message);
