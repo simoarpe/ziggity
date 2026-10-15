@@ -81,8 +81,8 @@ they improve the user experience. See
 ## Installation
 
 Ziggity needs the `git` command on your `PATH` at runtime, since it drives
-git as a subprocess. Install via Homebrew, grab a prebuilt binary, or build
-from source.
+git as a subprocess. Install via Homebrew (macOS / Linux), Scoop (Windows),
+grab a prebuilt binary, or build from source.
 
 ### Homebrew (macOS / Linux)
 
@@ -100,6 +100,17 @@ brew install ziggity
 
 Upgrade with `brew upgrade ziggity`. Unlike a downloaded binary, a Homebrew
 install is not quarantined, so it runs on macOS without a Gatekeeper prompt.
+
+### Scoop (Windows)
+
+```powershell
+scoop bucket add ziggity https://github.com/simoarpe/scoop-ziggity
+scoop install ziggity
+```
+
+Upgrade later with `scoop update ziggity`. Needs
+[Git for Windows](https://git-scm.com/download/win) (or `scoop install git`) on
+your `PATH`.
 
 ### Prebuilt Binaries
 
@@ -132,20 +143,10 @@ xattr -d com.apple.quarantine /usr/local/bin/ziggity
 
 #### Windows
 
-The easiest way is [Scoop](https://scoop.sh):
-
-```powershell
-scoop bucket add ziggity https://github.com/simoarpe/scoop-ziggity
-scoop install ziggity
-```
-
-Upgrade later with `scoop update ziggity`.
-
-Or download it by hand: grab `ziggity-v0.52.0-x86_64-windows-gnu.zip`, unzip it,
-and put `ziggity.exe` in a folder on your `PATH`.
-
-Either way ziggity needs [Git for Windows](https://git-scm.com/download/win) (or
-`scoop install git`) on your `PATH`.
+For most installs use [Scoop](#scoop-windows) above (it also handles updates).
+To use a prebuilt binary directly, grab `ziggity-v0.52.0-x86_64-windows-gnu.zip`,
+unzip it, and put `ziggity.exe` in a folder on your `PATH`. Needs
+[Git for Windows](https://git-scm.com/download/win) on your `PATH`.
 
 #### Android (Termux)
 
