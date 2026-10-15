@@ -1148,7 +1148,10 @@ const PreviewKind = union(enum) {
     /// Combined diff across a selected range of commits (oldest `from` to newest
     /// `to`): `git diff <from>^ <to>`.
     commit_range: struct { from: []const u8, to: []const u8 },
-    stash: usize,
+    /// A stash preview. `index` drives the `stash@{n}` command; `hash` (the
+    /// stash commit's SHA) keys the cache, so a stash at a reused index after a
+    /// drop/pop doesn't serve the previous occupant's diff (issue #30).
+    stash: struct { index: usize, hash: []const u8 },
     diff_refs: struct { base: []const u8, target: []const u8, three_dot: bool = false },
 };
 
@@ -10150,7 +10153,7 @@ pub const App = struct {
                 return self.requestGitPreview(.{ .commit = commit.hash });
             },
             .stash => {
-                if (self.selectedStash()) |entry| return self.requestGitPreview(.{ .stash = entry.index });
+                if (self.selectedStash()) |entry| return self.requestGitPreview(.{ .stash = .{ .index = entry.index, .hash = entry.hash } });
                 return self.setCheapPreview(try self.allocator.dupe(u8, "No stash entries.\n"));
             },
         }
@@ -10238,7 +10241,7 @@ pub const App = struct {
             .commit_file => |cf| std.fmt.allocPrint(gpa, "cf:{d}:{s}:{s}", .{ ctx, cf.hash, cf.path }),
             .commit_dir => |cd| std.fmt.allocPrint(gpa, "cd:{d}:{s}:{s}", .{ ctx, cd.hash, cd.path }),
             .commit_range => |r| std.fmt.allocPrint(gpa, "crg:{d}:{s}:{s}", .{ ctx, r.from, r.to }),
-            .stash => |idx| std.fmt.allocPrint(gpa, "s:{d}:{d}", .{ ctx, idx }),
+            .stash => |s| std.fmt.allocPrint(gpa, "s:{d}:{s}", .{ ctx, s.hash }),
             .diff_refs => |dr| std.fmt.allocPrint(gpa, "dr:{d}:{c}:{s}:{s}", .{ ctx, @as(u8, if (dr.three_dot) '3' else '2'), dr.base, dr.target }),
         };
     }
@@ -10404,10 +10407,10 @@ pub const App = struct {
                     .argv = try dupArgv(&.{ "show", "-m", "--first-parent", cd.hash, "--no-ext-diff", "--color=always", "--stat", "--patch", ctx_arg, "--format=", "--", cd.path }),
                 });
             },
-            .stash => |idx| {
+            .stash => |s| {
                 empty_msg = "No changes in stash.\n";
                 var sel_buf: [32]u8 = undefined;
-                const selector = try std.fmt.bufPrint(&sel_buf, "stash@{{{d}}}", .{idx});
+                const selector = try std.fmt.bufPrint(&sel_buf, "stash@{{{d}}}", .{s.index});
                 try sections.append(page_alloc, .{
                     .argv = try dupArgv(&.{ "stash", "show", "-p", "--stat", "-u", "--no-ext-diff", "--color=always", ctx_arg, selector }),
                 });
@@ -15295,6 +15298,28 @@ test "a branches refresh drops the cached branch log preview, keeps commit previ
 
     try std.testing.expect(app.preview_cache.get("b:main") == null);
     try std.testing.expect(app.preview_cache.get("c:3:deadbeef") != null);
+}
+
+test "stash preview cache key is content-addressed by hash, not index (issue #30)" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // After dropping stash@{0} and creating a new one, two different stashes
+    // occupy the same index. Keying the preview on the index would serve the
+    // dropped stash's cached diff, so the key must be the stash commit's hash.
+    const k_a = try app.previewKey(allocator, .{ .stash = .{ .index = 0, .hash = "aaaaaaa" } });
+    defer allocator.free(k_a);
+    const k_b = try app.previewKey(allocator, .{ .stash = .{ .index = 0, .hash = "bbbbbbb" } });
+    defer allocator.free(k_b);
+    try std.testing.expect(!std.mem.eql(u8, k_a, k_b)); // same index, different stash -> different key
+
+    // And the same stash keeps one stable key even if a drop shifts it to a new
+    // index, so its valid preview survives reindexing instead of being refetched.
+    const k_a2 = try app.previewKey(allocator, .{ .stash = .{ .index = 2, .hash = "aaaaaaa" } });
+    defer allocator.free(k_a2);
+    try std.testing.expectEqualStrings(k_a, k_a2);
 }
 
 test "select_top_commit_pending lands the cursor on the new top commit after a reload" {
