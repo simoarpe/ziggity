@@ -168,8 +168,9 @@ the written reference. Every binding is remappable, see
   way to resolve the file: resolve conflicts one by one (the same per-conflict
   resolver), take ours / theirs for the whole file, **edit in your editor**
   (ziggity re-reads the file when the editor closes and stages it automatically
-  once the markers are gone), and **mark as resolved**, which stages a file you
-  already fixed by hand (both refuse while conflict markers remain)
+  once the markers are gone), and **mark as resolved**, which stages the file
+  as it is now (`git add`) — the deliberate "accept as-is" choice, so it stages
+  even with conflict markers still present
 - `f` / `p` / `P`: fetch / pull / push. `fetch` follows your git `fetch.prune`
   config by default; set `fetch_prune_mode = on` (or `off`) to always (or never)
   prune deleted remote branches. `pull` follows your git `pull.rebase` config by

@@ -341,9 +341,10 @@ The animation itself is in the [README](../README.md).
   each side on its marker, so you never have to remember that `<<<<<<< HEAD`
   is ours. `space` opens a menu with every route to a resolution: the same
   per conflict resolver, take ours or theirs for the whole file, open the file
-  in your editor, or mark a file you already fixed as resolved. When you edit
-  in your editor, ziggity re-reads the file on exit and stages it for you the
-  moment the conflict markers are gone. `m` still offers the whole operation
+  in your editor, or mark a file as resolved by staging it as it is now (even
+  with markers still in it, if that is what you want). When you edit in your
+  editor, ziggity re-reads the file on exit and stages it for you the moment
+  the conflict markers are gone. `m` still offers the whole operation
   continue and abort actions; `MERGING` or `REBASING` shows in the Status panel.
   See [Resolving merge conflicts](conflict-resolution.md) for a full walkthrough
   with screenshots.

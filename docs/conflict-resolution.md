@@ -35,9 +35,12 @@ and staged, so you never hit git's raw "you have unmerged files" error.
   closes, Ziggity re-reads the file and, if the conflict markers are gone,
   stages it as resolved automatically. If markers remain, the file stays
   conflicted and every option is still available.
-- **Mark as resolved** stages a file you already fixed by hand. It refuses,
-  with a hint, while conflict markers remain, so a half-merged file is never
-  staged by accident.
+- **Mark as resolved** stages the file exactly as it is now (`git add`),
+  marking it resolved. This is the deliberate "accept the file as it stands"
+  choice, so it stages even if conflict markers are still present (git itself
+  lets you do this); the status line notes when markers were kept. The
+  automatic staging after an editor edit is the cautious one: it only stages
+  once the markers are gone.
 
 ## Resolving block by block
 

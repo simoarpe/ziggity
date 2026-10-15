@@ -9160,10 +9160,14 @@ pub const App = struct {
         try self.setMessage("resolve {s}", .{file.path});
     }
 
-    /// Stage a conflicted file as resolved (`git add`), but only once its conflict
-    /// markers are gone — i.e. after you resolved it by hand, in the editor, or
-    /// externally. Refuses (with a hint) while `<<<<<<< / ======= / >>>>>>>`
-    /// blocks remain, so half-merged markers are never committed by accident.
+    /// "Mark as resolved": stage the conflicted file exactly as it is now
+    /// (`git add`), the way git itself lets you accept a conflicted file as-is —
+    /// even with `<<<<<<< / ======= / >>>>>>>` markers still in it. This is the
+    /// deliberate "I'll take the file as it stands" escape hatch from the resolve
+    /// menu, so it trusts the explicit choice rather than refusing; it just notes
+    /// when markers are being kept. The *silent* auto-stage after an in-app edit
+    /// (`completeConflictEdit`) keeps its own markers-gone guard, so markers are
+    /// never staged by accident there.
     pub fn markConflictResolved(self: *App) !void {
         const file = self.selectedFile() orelse {
             try self.setMessage("no file selected", .{});
@@ -9173,21 +9177,19 @@ pub const App = struct {
             try self.setMessage("{s} is not conflicted", .{file.path});
             return;
         }
-        const content = self.git.readWorkingFile(file.path) catch {
-            try self.setMessage("could not read {s}", .{file.path});
-            return;
+        // Detect remaining markers only to tailor the message (not to refuse).
+        // A read/parse failure is non-fatal here — fall back to the plain wording.
+        const markers_kept = blk: {
+            const content = self.git.readWorkingFile(file.path) catch break :blk false;
+            defer self.allocator.free(content);
+            const blocks = conflicts_mod.parse(self.allocator, content) catch break :blk false;
+            defer self.allocator.free(blocks);
+            break :blk blocks.len > 0;
         };
-        defer self.allocator.free(content);
-        const blocks = conflicts_mod.parse(self.allocator, content) catch {
-            try self.setMessage("could not parse {s}", .{file.path});
-            return;
-        };
-        defer self.allocator.free(blocks);
-        if (blocks.len > 0) {
-            try self.setMessage("{s} still has {d} unresolved conflict(s) — resolve them first (enter, or edit the file)", .{ file.path, blocks.len });
-            return;
-        }
-        return self.runMutationFiles(try self.git.stagePaths(&.{file.path}), "marked {s} resolved", .{file.path});
+        const res = try self.git.stagePaths(&.{file.path});
+        if (markers_kept)
+            return self.runMutationFiles(res, "marked {s} resolved (conflict markers kept)", .{file.path});
+        return self.runMutationFiles(res, "marked {s} resolved", .{file.path});
     }
 
     /// TUI-loop hook after the editor closes on a conflicted file: if the conflict
@@ -15670,7 +15672,7 @@ fn testRunSetup(allocator: std.mem.Allocator, tio: std.Io, env: *std.process.Env
     }
 }
 
-test "markConflictResolved refuses while markers remain, stages once resolved" {
+test "markConflictResolved stages the file as-is, even with conflict markers (issue #43)" {
     const a = std.testing.allocator;
     const tio = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -15713,19 +15715,23 @@ test "markConflictResolved refuses while markers remain, stages once resolved" {
     app.file_index = 0;
     try std.testing.expect(app.selectedFile().?.conflict); // f.txt is conflicted
 
-    // Markers still present: refuse to stage, leave it unmerged.
-    try app.markConflictResolved();
-    var st1 = try app.git.exec(&.{ "status", "--porcelain" });
-    defer st1.deinit(a);
-    try std.testing.expect(std.mem.indexOf(u8, st1.stdout, "UU f.txt") != null); // still unmerged
+    // The working file still carries conflict markers.
+    const before = try app.git.readWorkingFile("f.txt");
+    defer a.free(before);
+    try std.testing.expect(std.mem.indexOf(u8, before, "<<<<<<<") != null);
 
-    // Resolve it by hand (no markers), then mark resolved: it gets staged.
-    try app.git.writeWorkingFile("f.txt", "merged by hand\n");
+    // "Mark as resolved" stages the file exactly as it is now (git add), markers
+    // and all — the explicit "accept as-is" choice, matching git's own behavior.
     try app.markConflictResolved();
-    var st2 = try app.git.exec(&.{ "status", "--porcelain" });
-    defer st2.deinit(a);
-    try std.testing.expect(std.mem.indexOf(u8, st2.stdout, "UU f.txt") == null); // no longer unmerged
-    try std.testing.expect(std.mem.indexOf(u8, st2.stdout, "M  f.txt") != null); // staged
+    var st = try app.git.exec(&.{ "status", "--porcelain" });
+    defer st.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, st.stdout, "UU f.txt") == null); // no longer unmerged
+    try std.testing.expect(std.mem.indexOf(u8, st.stdout, "M  f.txt") != null); // staged
+
+    // Staging was as-is: the markers are still in the working tree (not resolved).
+    const after = try app.git.readWorkingFile("f.txt");
+    defer a.free(after);
+    try std.testing.expect(std.mem.indexOf(u8, after, "<<<<<<<") != null);
 }
 
 test "stashUnstaged stashes only the unstaged change, keeping staged (issue #30)" {
