@@ -49,6 +49,7 @@ const Event = union(enum) {
     anim_tick,
     fetch_tick,
     bg_fetch_done,
+    commit_graph_done,
     command_done,
     preview_done,
     worktree_done,
@@ -320,6 +321,25 @@ fn bgFetchWorker(fr: *BgFetchRun) void {
     _ = fr.loop.tryPostEvent(.bg_fetch_done) catch false;
 }
 
+/// A background refresh of git's commit-graph cache (see `Git.ensureCommitGraph`),
+/// run after the first paint so it never delays startup. Posts
+/// `.commit_graph_done`.
+const CommitGraphRun = struct {
+    io: std.Io,
+    loop: *vaxis.Loop(Event),
+    root: []u8,
+    git_dir: []const u8,
+    environ: *std.process.Environ.Map,
+};
+
+fn commitGraphWorker(cr: *CommitGraphRun) void {
+    var g = git_mod.Git{ .allocator = async_allocator, .io = cr.io, .environ = cr.environ, .root = cr.root, .git_dir = @constCast(cr.git_dir) };
+    g.ensureCommitGraph();
+    for (g.command_log.items) |e| async_allocator.free(e);
+    g.command_log.deinit(async_allocator);
+    _ = cr.loop.tryPostEvent(.commit_graph_done) catch false;
+}
+
 /// A background pull/merge-request status fetch (via the `gh`/`glab` CLI), run
 /// off the UI loop so the network call never blocks navigation. Posts
 /// `.pr_status_done`; the result is applied on the UI thread.
@@ -367,14 +387,11 @@ const RepoLoadRun = struct {
     log_order: model.LogOrder = .date,
     untracked: git_mod.Git.UntrackedFiles = .all,
     commit_limit: usize = app_mod.commit_load_batch,
-    // Set once, for the initial load: refresh git's commit-graph so topo-order
-    // stays fast. Left false for subsequent refreshes.
-    write_commit_graph: bool = false,
     result: ?model.RepoData = null,
 };
 
 fn repoLoadWorker(rl: *RepoLoadRun) void {
-    rl.result = app_mod.loadRepoDataAsync(async_allocator, rl.io, rl.environ, rl.root, rl.git_dir, rl.branch_sort, rl.log_order, rl.untracked, rl.commit_limit, rl.write_commit_graph);
+    rl.result = app_mod.loadRepoDataAsync(async_allocator, rl.io, rl.environ, rl.root, rl.git_dir, rl.branch_sort, rl.log_order, rl.untracked, rl.commit_limit);
     _ = rl.loop.tryPostEvent(.repo_load_done) catch false;
 }
 
@@ -658,6 +675,9 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     var bg_fetch_run: BgFetchRun = undefined;
     var bg_fetch_future: ?std.Io.Future(void) = null;
     defer if (bg_fetch_future) |*f| f.cancel(io);
+    var commit_graph_run: CommitGraphRun = undefined;
+    var commit_graph_future: ?std.Io.Future(void) = null;
+    defer if (commit_graph_future) |*f| f.cancel(io); // a pure cache, safe to interrupt
 
     var pr_status_run: PrStatusRun = undefined;
     var pr_status_future: ?std.Io.Future(void) = null;
@@ -704,7 +724,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     // Load the repo off-thread: the loop's initial winsize event
     // paints the skeleton with "Loading…" placeholders right away, and the
     // panels fill in when `repo_load_done` lands — no startup freeze, no flash.
-    var repo_load_run: RepoLoadRun = .{ .io = io, .loop = &loop, .root = app.git.root, .git_dir = app.git.git_dir, .environ = app.git.environ, .branch_sort = app.git.branch_sort, .log_order = app.git.log_order, .untracked = app.git.untracked_files, .commit_limit = app.commit_limit, .write_commit_graph = true };
+    var repo_load_run: RepoLoadRun = .{ .io = io, .loop = &loop, .root = app.git.root, .git_dir = app.git.git_dir, .environ = app.git.environ, .branch_sort = app.git.branch_sort, .log_order = app.git.log_order, .untracked = app.git.untracked_files, .commit_limit = app.commit_limit };
     var repo_load_future: ?std.Io.Future(void) = null;
     defer if (repo_load_future) |*f| {
         f.cancel(io);
@@ -754,6 +774,12 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     // New remote-tracking refs: refresh the status summary
                     // (ahead/behind) and the branch list (its arrows).
                     app.refreshViews(app_mod.ScopeSet.init(.{ .files = true, .branches = true }));
+                }
+            },
+            .commit_graph_done => {
+                if (commit_graph_future) |*f| {
+                    f.await(io);
+                    commit_graph_future = null;
                 }
             },
             .pr_status_done => {
@@ -916,6 +942,13 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 f.await(io);
                 bg_fetch_future = null;
             }
+            // The worker borrows the old root. A first write can take tens of
+            // seconds on a huge repo, so cancel rather than wait; it's a cache.
+            if (commit_graph_future) |*f| {
+                f.cancel(io);
+                commit_graph_future = null;
+            }
+            app.commit_graph_requested = false;
             if (pr_status_future) |*f| {
                 f.await(io);
                 pr_status_future = null;
@@ -1053,6 +1086,13 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             app.bg_fetch_requested = false;
             bg_fetch_run = .{ .io = io, .loop = &loop, .root = app.git.root, .environ = app.git.environ, .prune_arg = app.config.fetch_prune_mode.arg() };
             bg_fetch_future = io.concurrent(bgFetchWorker, .{&bg_fetch_run}) catch null;
+        }
+
+        // Start a queued background commit-graph refresh off the loop.
+        if (commit_graph_future == null and app.commit_graph_requested) {
+            app.commit_graph_requested = false;
+            commit_graph_run = .{ .io = io, .loop = &loop, .root = app.git.root, .git_dir = app.git.git_dir, .environ = app.git.environ };
+            commit_graph_future = io.concurrent(commitGraphWorker, .{&commit_graph_run}) catch null;
         }
 
         // Start a queued background PR-status fetch (via `gh`/`glab`) off the
@@ -3625,7 +3665,7 @@ fn drawRemotesList(win: vaxis.Window, app: *const app_mod.App) void {
 
 fn drawTags(win: vaxis.Window, app: *const app_mod.App) void {
     if (app.data.tags.len == 0) {
-        print(win, 0, 0, "No tags", styles().muted);
+        print(win, 0, 0, if (app.initial_load_pending or app.tags_loading) "Loading..." else "No tags", styles().muted);
         return;
     }
     // Align every subject into one column at the widest tag name (+2 gap), so
