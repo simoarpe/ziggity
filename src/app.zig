@@ -1365,7 +1365,6 @@ const RepoLoadCtx = struct {
     branches: ?[]model.Branch = null,
     remote_branches: ?[]model.Branch = null,
     remotes: ?[]model.Remote = null,
-    tags: ?[]model.Tag = null,
     worktrees: ?[]model.Worktree = null,
     submodules: ?[]model.Submodule = null,
     commits: ?[]model.Commit = null,
@@ -1399,10 +1398,6 @@ fn loadRemotesW(ctx: *RepoLoadCtx) void {
     var g = ctx.git();
     ctx.remotes = g.loadRemotes() catch null;
 }
-fn loadTagsW(ctx: *RepoLoadCtx) void {
-    var g = ctx.git();
-    ctx.tags = g.loadTags() catch null;
-}
 fn loadWorktreesW(ctx: *RepoLoadCtx) void {
     var g = ctx.git();
     ctx.worktrees = g.loadWorktrees() catch null;
@@ -1430,22 +1425,16 @@ fn loadStashW(ctx: *RepoLoadCtx) void {
 /// instead of the sum of them all. The result is page-owned; the UI thread
 /// deep-copies it into the gpa (see `App.applyRepoLoad`). `root`/`environ` are
 /// borrowed read-only.
-pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, git_dir: []const u8, branch_sort: model.BranchSortOrder, log_order: model.LogOrder, untracked: git_mod.Git.UntrackedFiles, commit_limit: usize, write_commit_graph: bool) ?model.RepoData {
+pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process.Environ.Map, root: []u8, git_dir: []const u8, branch_sort: model.BranchSortOrder, log_order: model.LogOrder, untracked: git_mod.Git.UntrackedFiles, commit_limit: usize) ?model.RepoData {
     var ctx = RepoLoadCtx{ .gpa = gpa, .io = io, .environ = environ, .root = root, .git_dir = git_dir, .branch_sort = branch_sort, .log_order = log_order, .untracked = untracked, .commit_limit = commit_limit };
 
-    // Once per session (the initial load), refresh git's commit-graph cache
-    // before loading commits so `--topo-order` is fast — off the UI thread.
-    if (write_commit_graph) {
-        var g = ctx.git();
-        g.ensureCommitGraph();
-        for (g.command_log.items) |e| gpa.free(e);
-        g.command_log.deinit(gpa);
-    }
-
+    // Tags are left out: `tag --sort=-creatordate` peels every annotated tag,
+    // which on a repo like linux.git is the slowest command of the lot and would
+    // gate the first paint. `applyRepoLoad` queues them as a scoped load instead.
     // Ordered slowest-first (status/files/commits/branches are the heavy ones on
     // a big repo) so that when the concurrency limit is reached, it's the cheap
     // commands that fall back to running inline.
-    const workers = .{ loadStatusW, loadFilesW, loadCommitsW, loadBranchesW, loadReflogW, loadRemoteBranchesW, loadRemotesW, loadTagsW, loadWorktreesW, loadSubmodulesW, loadStashW };
+    const workers = .{ loadStatusW, loadFilesW, loadCommitsW, loadBranchesW, loadReflogW, loadRemoteBranchesW, loadRemotesW, loadWorktreesW, loadSubmodulesW, loadStashW };
     var futures: [workers.len]?std.Io.Future(void) = .{null} ** workers.len;
     // Spawn concurrently; `concurrent` never blocks — it only fails when the
     // runtime can't take another task (with `std.Io.Threaded`'s default
@@ -1477,7 +1466,6 @@ pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.proce
     data.branches = ctx.branches orelse &.{};
     data.remote_branches = ctx.remote_branches orelse &.{};
     data.remotes = ctx.remotes orelse &.{};
-    data.tags = ctx.tags orelse &.{};
     data.worktrees = ctx.worktrees orelse &.{};
     data.submodules = ctx.submodules orelse &.{};
     data.commits = ctx.commits orelse &.{};
@@ -2947,6 +2935,12 @@ pub const App = struct {
     /// refreshed synchronously, so they never appear here and never race.
     pending_scopes: ScopeSet = ScopeSet.initEmpty(),
     scoped_load_active: bool = false,
+    /// True from startup until the tags, which load after the rest of the repo
+    /// (see `loadRepoDataAsync`), land; the Tags panel shows "Loading…" meanwhile.
+    tags_loading: bool = false,
+    /// Set when a repo load lands with `log_order = topo`: the TUI loop then
+    /// refreshes git's commit-graph cache off-thread, after the first paint.
+    commit_graph_requested: bool = false,
     /// HEAD's commit hash as of the last working-tree snapshot. When a later
     /// snapshot sees a different hash, history moved out from under us (e.g. a
     /// commit or rebase in another terminal), so the branch/commit views are
@@ -3210,6 +3204,7 @@ pub const App = struct {
     /// `applyRepoLoad` lands the data when the worker finishes.
     pub fn beginInitialLoad(self: *App) void {
         self.initial_load_pending = true;
+        self.tags_loading = true;
         self.setMessage("loading repository...", .{}) catch {};
     }
 
@@ -3219,6 +3214,7 @@ pub const App = struct {
     pub fn applyRepoLoad(self: *App, page_data_opt: ?model.RepoData, gpa: std.mem.Allocator) void {
         self.initial_load_pending = false;
         var page_data = page_data_opt orelse {
+            self.tags_loading = false;
             self.setMessage("repository load failed", .{}) catch {};
             return;
         };
@@ -3265,6 +3261,11 @@ pub const App = struct {
         self.setMessage("ready", .{}) catch {};
         // Kick a first PR-status fetch (off-thread) now that branches are loaded.
         self.requestPrStatus();
+        // The initial load skips tags (see `loadRepoDataAsync`); fetch them now.
+        self.refreshViews(ScopeSet.init(.{ .tags = true }));
+        // Only `--topo-order` benefits from the commit-graph's generation
+        // numbers, so only then refresh it, and only now that the panels are up.
+        if (self.git.log_order == .topo) self.commit_graph_requested = true;
     }
 
     /// Fast, scoped reload of just the working tree (status + file list), the
@@ -3352,6 +3353,9 @@ pub const App = struct {
     /// untouched, so concurrent refreshes of other views don't conflict.
     pub fn applyScopedLoad(self: *App, sd_opt: ?ScopedData, gpa: std.mem.Allocator) void {
         self.scoped_load_active = false;
+        // Loads are single in-flight, so unless tags are still queued, the load
+        // that just finished was the one carrying them (loaded or failed).
+        if (!self.pending_scopes.contains(.tags)) self.tags_loading = false;
         var sd = sd_opt orelse return;
         defer sd.deinit(gpa);
         const a = self.allocator;
@@ -16288,7 +16292,7 @@ test "real threaded load then App.deinit is allocator-clean (issue #19)" {
     // payload) applied through `applyRepoLoad`, which deep-copies into gpa-owned
     // `data`. Then the full `App.deinit` runs under the checking allocator, which
     // panics on any invalid/double free — reproducing issue #19 if present.
-    const loaded = loadRepoDataAsync(page_alloc, tio, &env, app.git.root, app.git.git_dir, app.git.branch_sort, app.git.log_order, app.git.untracked_files, app.commit_limit, true);
+    const loaded = loadRepoDataAsync(page_alloc, tio, &env, app.git.root, app.git.git_dir, app.git.branch_sort, app.git.log_order, app.git.untracked_files, app.commit_limit);
     app.applyRepoLoad(loaded, page_alloc);
     app.deinit();
 }

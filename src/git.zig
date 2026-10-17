@@ -856,11 +856,13 @@ pub const Git = struct {
     /// Best-effort: write git's commit-graph cache (commit generation numbers)
     /// so the `topo` log-order option stays fast on large repos — the same cache
     /// a gc/fetch-maintained repo already has. It's a pure cache under
-    /// `.git/objects/info`, incremental (cheap when already current), and any
-    /// failure (read-only repo, old git, shallow clone) is silently ignored.
-    /// Runs off the UI thread.
+    /// `.git/objects/info`, and any failure (read-only repo, old git, shallow
+    /// clone) is silently ignored. `--split` keeps it incremental: it adds a
+    /// layer for just the new commits, where a plain write rewrites the whole
+    /// graph (and recomputes any changed-path Bloom filters) every time — about
+    /// 27s on linux.git. Runs off the UI thread.
     pub fn ensureCommitGraph(self: *Git) void {
-        var res = self.exec(&.{ "commit-graph", "write", "--reachable" }) catch return;
+        var res = self.exec(&.{ "commit-graph", "write", "--reachable", "--split" }) catch return;
         res.deinit(self.allocator);
     }
 
