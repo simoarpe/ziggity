@@ -119,7 +119,10 @@ fetch_interval_secs = 60
 # and Commits lists share the rest equally, and Stash stays small unless it
 # is focused. Enable the accordion to grow the focused list panel.
 expand_focused_side_panel = false  # focused list panel expands, others shrink
-expanded_side_panel_weight = 2     # how much bigger the focused panel gets
+# How much bigger the focused panel gets. It is a weight, so higher values make
+# the focused panel dominate and the others shrink further (they never go below
+# a readable minimum). Try 5 or more for a strong effect; 2 is a gentle nudge.
+expanded_side_panel_weight = 2
 staging_split = auto               # staging layout: off | on | auto (default)
 
 # Open the file lists (the Files panel and a commit's or branch's changed
