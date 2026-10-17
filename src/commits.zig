@@ -444,8 +444,14 @@ pub fn submitCommit(app: *App) !void {
     // Preserve the draft across the async commit so a failure (a rejecting
     // pre-commit hook, a signing error, nothing staged…) keeps the message
     // instead of discarding it — `completeMutation` drops it once the commit
-    // actually lands. A reword's text is tied to its commit, so it isn't kept.
-    if (action == .create) try savePreservedCommitMessage(app) else clearPreservedCommitMessage(app);
+    // actually lands. Also for `.cherry_pick_commit`: when the --no-commit
+    // cherry-pick conflicts, the commit step is skipped, so preserving the
+    // message lets `c` restore it after the conflicts are resolved (issue #35).
+    // A reword's text is tied to its commit, so it isn't kept.
+    if (action == .create or action == .cherry_pick_commit)
+        try savePreservedCommitMessage(app)
+    else
+        clearPreservedCommitMessage(app);
     app.commit_buffer.clearRetainingCapacity();
     app.commit_body_buffer.clearRetainingCapacity();
     app.commit_sel_anchor = null;

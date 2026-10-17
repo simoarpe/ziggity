@@ -5614,6 +5614,14 @@ pub const App = struct {
         return null;
     }
 
+    /// True when git command output reports a merge conflict (vs a hard error),
+    /// matching git's wording for a conflicted cherry-pick/merge apply.
+    fn isConflictOutput(output: []const u8) bool {
+        return std.mem.indexOf(u8, output, "CONFLICT") != null or
+            std.mem.indexOf(u8, output, "Merge conflict") != null or
+            std.mem.indexOf(u8, output, "could not apply") != null;
+    }
+
     /// Explain, plainly, why git cannot stash while intent-to-add files are
     /// present, listing the offending files and how to resolve them. Shown up
     /// front when the stash menu is opened, and as a backstop if a stash still
@@ -10969,8 +10977,13 @@ pub const App = struct {
             if (mutable.ok()) {
                 // The commit landed: drop the preserved draft that submitCommit
                 // kept in case this failed. (On failure it stays, so reopening
-                // the commit dialog restores the message.)
-                if (std.meta.activeTag(job) == .commit) commits_mod.clearPreservedCommitMessage(self);
+                // the commit dialog restores the message.) `cherry_pick_message`
+                // is the "paste and edit the message" path — same contract, so a
+                // conflict in its --no-commit step keeps the message for `c`.
+                switch (std.meta.activeTag(job)) {
+                    .commit, .cherry_pick_message => commits_mod.clearPreservedCommitMessage(self),
+                    else => {},
+                }
                 switch (self.mutation_post) {
                     .none => {},
                     .clear_patch => patch_mod.clearPatch(self),
@@ -10996,6 +11009,7 @@ pub const App = struct {
                     .revert_many,
                     .create_fixup,
                     .cherry_pick_many,
+                    .cherry_pick_message,
                     .merge,
                     .fast_forward_current,
                     => self.select_top_commit_pending = true,
@@ -11004,7 +11018,22 @@ pub const App = struct {
             } else {
                 const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
                 const raw = if (stderr.len > 0) mutable.stderr else mutable.stdout;
-                if (stashNoChangesMessage(job, raw)) |msg| {
+                if (std.meta.activeTag(job) == .cherry_pick_message and isConflictOutput(raw)) {
+                    // The "paste and edit the message" cherry-pick hit conflicts
+                    // in its --no-commit step, so nothing was committed. Unlike a
+                    // plain cherry-pick, `--no-commit` leaves no CHERRY_PICK_HEAD,
+                    // so `m` has nothing to continue: the finish is a plain commit.
+                    // The edited message was preserved (see submitCommit), so point
+                    // the user at `c`, which restores it (issue #35).
+                    self.select_commit_pending = null;
+                    self.dismissOpFrame();
+                    // Land on the Files panel's working-tree list, where the
+                    // conflicts get resolved and `c` then commits — the paste was
+                    // driven from the Branches drill, so focus is elsewhere.
+                    self.files_tab = .files;
+                    self.focus = .files;
+                    try self.setMessage("cherry-pick hit conflicts — resolve them, then c to commit", .{});
+                } else if (stashNoChangesMessage(job, raw)) |msg| {
                     self.select_commit_pending = null;
                     self.dismissOpFrame();
                     try self.setMessage("{s}", .{msg});
@@ -12798,6 +12827,52 @@ test "a failed commit keeps the message; a successful one clears it" {
     const job_b = app.takeMutation().?;
     const okres = git_mod.ExecResult{ .stdout = try page_alloc.dupe(u8, ""), .stderr = try page_alloc.dupe(u8, ""), .term = .{ .exited = 0 } };
     try app.completeMutation(job_b, okres, page_alloc);
+    try std.testing.expectEqual(@as(usize, 0), app.commit_preserved_subject.len);
+    try std.testing.expectEqual(@as(usize, 0), app.commit_preserved_body.len);
+}
+
+test "paste-and-edit keeps its message when the cherry-pick conflicts (issue #35)" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    // A commit copied for cherry-pick, and the edited message typed in the dialog.
+    try app.copied_commits.append(allocator, try allocator.dupe(u8, "aaaaaaa"));
+    app.commit_action = .cherry_pick_commit;
+    try app.commit_buffer.appendSlice(allocator, "reworded pick");
+    try app.commit_body_buffer.appendSlice(allocator, "the body");
+    try commits_mod.submitCommit(&app);
+
+    // Submitting preserves the message (like a create commit) and queues the
+    // cherry_pick_message mutation.
+    try std.testing.expectEqualStrings("reworded pick", app.commit_preserved_subject);
+    try std.testing.expectEqualStrings("the body", app.commit_preserved_body);
+    const job = app.takeMutation().?;
+    try std.testing.expect(std.meta.activeTag(job) == .cherry_pick_message);
+
+    // The --no-commit cherry-pick CONFLICTS, so nothing is committed: the message
+    // must survive so `c` can restore it after the conflicts are resolved.
+    const conflict = git_mod.ExecResult{ .stdout = try page_alloc.dupe(u8, ""), .stderr = try page_alloc.dupe(u8, "CONFLICT (content): Merge conflict in f.txt"), .term = .{ .exited = 1 } };
+    try app.completeMutation(job, conflict, page_alloc);
+    try std.testing.expectEqualStrings("reworded pick", app.commit_preserved_subject);
+    try std.testing.expectEqualStrings("the body", app.commit_preserved_body);
+    // And the status points the user at `c` (not `m`, which has nothing to continue).
+    try std.testing.expect(std.mem.indexOf(u8, app.message, "c to commit") != null);
+    // Focus lands on the Files panel's working-tree list, where conflicts are
+    // resolved and `c` then commits (the paste ran from the Branches drill).
+    try std.testing.expectEqual(model.Focus.files, app.focus);
+    try std.testing.expectEqual(FilesTab.files, app.files_tab);
+
+    // A clean cherry-pick-and-edit, by contrast, lands the commit and clears the draft.
+    app.commit_action = .cherry_pick_commit;
+    try app.commit_buffer.appendSlice(allocator, "reworded pick");
+    try commits_mod.submitCommit(&app);
+    const job2 = app.takeMutation().?;
+    const okres = git_mod.ExecResult{ .stdout = try page_alloc.dupe(u8, ""), .stderr = try page_alloc.dupe(u8, ""), .term = .{ .exited = 0 } };
+    try app.completeMutation(job2, okres, page_alloc);
     try std.testing.expectEqual(@as(usize, 0), app.commit_preserved_subject.len);
     try std.testing.expectEqual(@as(usize, 0), app.commit_preserved_body.len);
 }
