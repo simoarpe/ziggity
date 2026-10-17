@@ -1454,14 +1454,56 @@ fn sidePanelHeights(body_h: u16, focused: model.Focus, accordion: bool, expanded
     const unit = if (total > 0) dynamic / total else 0;
     var rem = if (total > 0) dynamic % total else 0;
 
+    // The panels actually sharing `dynamic` (captured before the remainder loop
+    // below zeroes their weights), and how many — for the minimum-height floor.
+    const active = [4]bool{ weights[0] > 0, weights[1] > 0, weights[2] > 0, weights[3] > 0 };
+    var active_count: u16 = 0;
+    for (active) |a| active_count += @intFromBool(a);
+
     var h = [4]u16{ unit * weights[0], unit * weights[1], unit * weights[2], unit * weights[3] };
-    // Hand out the integer-division remainder one row at a time across the
-    // weighted panels so the column fills `body_h` exactly.
+    // Hand out the integer-division remainder a row at a time, decrementing each
+    // panel's weight as it takes one (mirroring lazygit's boxlayout). Without the
+    // decrement the remainder is split evenly, so a weight-1 panel keeps claiming
+    // rows alongside the focused one — which on short terminals or high weights
+    // dilutes the accordion badly (the unfocused panels stay fat, the focused one
+    // never reaches its weighted share). Decrementing sends the bulk of the
+    // remainder to the heavy (focused) panel, so proportions match the weights.
+    // Safe from an infinite loop: `rem = dynamic % total < total`, i.e. strictly
+    // less than the panels' combined remainder capacity.
     var i: usize = 0;
     while (rem > 0) : (i = (i + 1) % 4) {
         if (weights[i] > 0) {
             h[i] += 1;
+            weights[i] -= 1;
             rem -= 1;
+        }
+    }
+
+    // Minimum framed height (3 rows: the title-bearing top border, one content
+    // row, and the bottom border) for every panel sharing the dynamic space. A
+    // strongly weighted accordion can otherwise squeeze an unfocused panel below
+    // what the renderer can draw — it drops the border and title and spills raw
+    // content with no box. Move rows from the tallest panel (the focused one)
+    // into any that fall short. Skipped when the column is too short to frame
+    // them all (nothing we can do), leaving the proportional split as-is.
+    const min_panel_h: u16 = 3;
+    if (active_count > 0 and dynamic >= active_count * min_panel_h) {
+        while (true) {
+            // The shortest active panel still below the floor, if any.
+            var poorest: ?usize = null;
+            for (0..4) |j| {
+                if (!active[j] or h[j] >= min_panel_h) continue;
+                if (poorest == null or h[j] < h[poorest.?]) poorest = j;
+            }
+            const p = poorest orelse break;
+            // Donate a row from the tallest active panel (kept at/above the floor).
+            var richest: usize = p;
+            for (0..4) |j| {
+                if (active[j] and h[j] > h[richest]) richest = j;
+            }
+            if (richest == p or h[richest] <= min_panel_h) break; // no donor with surplus
+            h[richest] -= 1;
+            h[p] += 1;
         }
     }
 
@@ -5885,6 +5927,26 @@ test "side panel heights match the weighting" {
     // files+branches+commits filter shows all three lines).
     try std.testing.expectEqual(@as(u16, 6), sidePanelHeights(body_h, .files, false, 2, 1).status);
     try std.testing.expectEqual(@as(u16, 7), sidePanelHeights(body_h, .files, false, 2, 2).status);
+}
+
+test "a high accordion weight keeps unfocused panels at the framed minimum" {
+    const body_h: u16 = 30;
+
+    // A heavy weight makes the focused panel dominate, but every unfocused list
+    // panel stays at least 3 rows tall so the renderer always draws its frame
+    // and title (no orphaned, border-less content). The column still fills.
+    const h = sidePanelHeights(body_h, .branches, true, 15, 0);
+    try std.testing.expect(h.files >= 3);
+    try std.testing.expect(h.commits >= 3);
+    try std.testing.expect(h.branches > h.files); // focused still dominates
+    try std.testing.expect(h.branches > h.commits);
+    try std.testing.expectEqual(body_h, h.status + h.files + h.branches + h.commits + h.stash);
+
+    // On a column too short to frame them all, the floor is skipped rather than
+    // forced (there is genuinely no room), and the heights still sum exactly.
+    const tiny: u16 = 16; // status 5 + stash 3 leaves 8 for three list panels
+    const ht = sidePanelHeights(tiny, .branches, true, 15, 0);
+    try std.testing.expectEqual(tiny, ht.status + ht.files + ht.branches + ht.commits + ht.stash);
 }
 
 test "side panel width scales with the terminal, no fixed cap" {
