@@ -122,6 +122,10 @@ expand_focused_side_panel = false  # focused list panel expands, others shrink
 # How much bigger the focused panel gets. It is a weight, so higher values make
 # the focused panel dominate and the others shrink further (they never go below
 # a readable minimum). Try 5 or more for a strong effect; 2 is a gentle nudge.
+# The weight shapes the layout on a tall terminal. On a short one the panels no
+# longer fit stacked at full size, so the focused panel takes the remaining space
+# and the others collapse to a single title bar (regardless of this setting).
+# Make the terminal taller to get the weighted layout back.
 expanded_side_panel_weight = 2
 staging_split = auto               # staging layout: off | on | auto (default)
 

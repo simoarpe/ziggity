@@ -1434,6 +1434,39 @@ fn sidePanelHeights(body_h: u16, focused: model.Focus, accordion: bool, expanded
     const stash_fixed: u16 = @min(body_h -| status_h, 3);
     const stash_focused = focused == .stash;
 
+    // On a short column, the weight only changes the tall layout below
+    // regardless of the accordion setting: the focused list panel takes the
+    // remaining space and the others collapse to a fixed small size — a
+    // framed 3 rows when moderately short, a title-only 1 row when very
+    // short (the renderer draws a 1-2 row panel as a title bar).
+    // This keeps the focused panel usable on a small terminal and lets a high
+    // `expanded_side_panel_weight` actually make it dominate, instead of every
+    // other panel's framed minimum capping it. Status keeps its own
+    // fixed height. (`accordion` only affects the tall layout further down.)
+    if (body_h < 28) {
+        const squashed: u16 = if (body_h >= 21) 3 else 1;
+        var sh = [4]u16{ squashed, squashed, squashed, squashed };
+        const avail = body_h -| status_h;
+        const focus_idx: ?usize = switch (focused) {
+            .files => 0,
+            .branches => 1,
+            .commits => 2,
+            .stash => 3,
+            else => null,
+        };
+        if (focus_idx) |idx| {
+            // The focused list panel gets everything the others don't.
+            const taken = squashed * 3;
+            sh[idx] = if (avail > taken) avail - taken else squashed;
+        } else {
+            // Focus is on Status or the Diff: no list panel expands, so let the
+            // top one absorb the slack and keep the column filled.
+            const taken = squashed * 4;
+            if (avail > taken) sh[0] += avail - taken;
+        }
+        return .{ .status = status_h, .files = sh[0], .branches = sh[1], .commits = sh[2], .stash = sh[3] };
+    }
+
     // Weights for files, branches, commits, stash. Stash stays fixed (weight 0)
     // unless it is the focused panel.
     var weights = [4]u16{ 1, 1, 1, if (stash_focused) @as(u16, 1) else 0 };
@@ -1462,14 +1495,14 @@ fn sidePanelHeights(body_h: u16, focused: model.Focus, accordion: bool, expanded
 
     var h = [4]u16{ unit * weights[0], unit * weights[1], unit * weights[2], unit * weights[3] };
     // Hand out the integer-division remainder a row at a time, decrementing each
-    // panel's weight as it takes one (mirroring lazygit's boxlayout). Without the
-    // decrement the remainder is split evenly, so a weight-1 panel keeps claiming
-    // rows alongside the focused one — which on short terminals or high weights
-    // dilutes the accordion badly (the unfocused panels stay fat, the focused one
-    // never reaches its weighted share). Decrementing sends the bulk of the
-    // remainder to the heavy (focused) panel, so proportions match the weights.
-    // Safe from an infinite loop: `rem = dynamic % total < total`, i.e. strictly
-    // less than the panels' combined remainder capacity.
+    // panel's weight as it takes one. Without the decrement the remainder is split
+    // evenly, so a weight-1 panel keeps claiming rows alongside the focused one —
+    // which on short terminals or high weights dilutes the accordion badly (the
+    // unfocused panels stay fat, the focused one never reaches its weighted
+    // share). Decrementing sends the bulk of the remainder to the heavy (focused)
+    // panel, so proportions match the weights. Safe from an infinite loop:
+    // `rem = dynamic % total < total`, i.e. strictly less than the panels'
+    // combined remainder capacity.
     var i: usize = 0;
     while (rem > 0) : (i = (i + 1) % 4) {
         if (weights[i] > 0) {
@@ -3190,10 +3223,37 @@ fn listScrollInfo(app: *const app_mod.App, focus: model.Focus) ScrollInfo {
 /// Draw a panel's rounded border + scrollbar and return the outer (`raw`, for
 /// the title row) and inner (content) windows. `raw == inner` when too small.
 const PanelFrame = struct { raw: vaxis.Window, inner: vaxis.Window };
+
+/// Draw the border of a squeezed side panel (1-2 rows) as a title-only bar: a
+/// top border line (carrying the caller's title) plus, when there's a second
+/// row, a bottom border — no sides, no content. Keeps an over-shrunk panel
+/// framed and identifiable instead of spilling its list rows border-less.
+fn drawCollapsedBorder(raw: vaxis.Window, w: u16, h: u16, style: vaxis.Style) void {
+    if (w < 2) return;
+    raw.writeCell(0, 0, .{ .char = .{ .grapheme = "╭", .width = 1 }, .style = style });
+    raw.writeCell(w - 1, 0, .{ .char = .{ .grapheme = "╮", .width = 1 }, .style = style });
+    var c: u16 = 1;
+    while (c < w - 1) : (c += 1) raw.writeCell(c, 0, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = style });
+    if (h >= 2) {
+        raw.writeCell(0, 1, .{ .char = .{ .grapheme = "╰", .width = 1 }, .style = style });
+        raw.writeCell(w - 1, 1, .{ .char = .{ .grapheme = "╯", .width = 1 }, .style = style });
+        var c2: u16 = 1;
+        while (c2 < w - 1) : (c2 += 1) raw.writeCell(c2, 1, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = style });
+    }
+}
+
 fn panelBorder(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, focused: bool, scroll: ?ScrollInfo) PanelFrame {
     const raw = root.child(.{ .x_off = @intCast(x), .y_off = @intCast(y), .width = w, .height = h });
-    if (w < 4 or h < 3) return .{ .raw = raw, .inner = raw };
+    if (w < 4 or h == 0) return .{ .raw = raw, .inner = raw };
     const st = styles();
+    if (h < 3) {
+        // Collapsed to a title-only bar: the caller still draws its title onto
+        // row 0 (over this border fill), but the inner window has zero rows so
+        // the list content draws nothing.
+        drawCollapsedBorder(raw, w, h, if (focused) st.active_border else st.inactive_border);
+        const inner = raw.child(.{ .x_off = 0, .y_off = @intCast(h), .width = w, .height = 0 });
+        return .{ .raw = raw, .inner = inner };
+    }
     const border_style = if (focused) st.active_border else st.inactive_border;
     const inner = raw.child(.{
         .border = .{
@@ -3208,7 +3268,9 @@ fn panelBorder(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, focused: bool
 
 fn panel(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, title: []const u8, focused: bool, scroll: ?ScrollInfo) vaxis.Window {
     const frame = panelBorder(root, x, y, w, h, focused, scroll);
-    if (w < 4 or h < 3) return frame.inner;
+    // h in 1..2 is a collapsed title-bar (panelBorder drew its border): still
+    // draw the title onto row 0, just no content (inner is empty).
+    if (w < 4 or h == 0) return frame.inner;
     const st = styles();
     _ = frame.raw.printSegment(.{ .text = title, .style = if (focused) st.active_title else st.title }, .{
         .row_offset = 0,
@@ -3236,7 +3298,9 @@ fn drawTitleSpan(raw: vaxis.Window, w: u16, col: u16, text: []const u8, style: v
 /// optional `[N]` focus-key hint; `suffix` is trailing text (e.g. a filter).
 fn tabbedPanel(root: vaxis.Window, x: u16, y: u16, w: u16, h: u16, number: ?u8, tabs: []const []const u8, active: usize, suffix: []const u8, focused: bool, scroll: ?ScrollInfo) vaxis.Window {
     const frame = panelBorder(root, x, y, w, h, focused, scroll);
-    if (w < 4 or h < 3) return frame.inner;
+    // h in 1..2 is a collapsed title-bar (panelBorder drew its border): still
+    // draw the tab strip onto row 0, just no content (inner is empty).
+    if (w < 4 or h == 0) return frame.inner;
     const st = styles();
     const active_style = if (focused) st.active_title else st.title;
 
@@ -5947,6 +6011,38 @@ test "a high accordion weight keeps unfocused panels at the framed minimum" {
     const tiny: u16 = 16; // status 5 + stash 3 leaves 8 for three list panels
     const ht = sidePanelHeights(tiny, .branches, true, 15, 0);
     try std.testing.expectEqual(tiny, ht.status + ht.files + ht.branches + ht.commits + ht.stash);
+}
+
+test "the accordion squashes unfocused panels on a short column" {
+    // Short column with the accordion: the focused panel dominates and the others
+    // collapse to a clean fixed size, instead of every panel's 3-row minimum
+    // capping the focused one.
+
+    // Very short (< 21): unfocused list panels collapse to a title-only 1 row,
+    // the focused one takes everything else and clearly dominates.
+    const short = sidePanelHeights(20, .branches, true, 10, 0);
+    try std.testing.expectEqual(@as(u16, 1), short.files);
+    try std.testing.expectEqual(@as(u16, 1), short.commits);
+    try std.testing.expectEqual(@as(u16, 1), short.stash);
+    try std.testing.expect(short.branches >= 8); // dominates
+    try std.testing.expectEqual(@as(u16, 20), short.status + short.files + short.branches + short.commits + short.stash);
+
+    // Moderately short (21..27): unfocused list panels keep a framed 3 rows, the
+    // focused one still takes the rest.
+    const med = sidePanelHeights(24, .branches, true, 10, 0);
+    try std.testing.expectEqual(@as(u16, 3), med.files);
+    try std.testing.expectEqual(@as(u16, 3), med.commits);
+    try std.testing.expectEqual(@as(u16, 3), med.stash);
+    try std.testing.expect(med.branches > med.files); // dominates
+    try std.testing.expectEqual(@as(u16, 24), med.status + med.files + med.branches + med.commits + med.stash);
+
+    // The squash applies regardless of the accordion setting, so the focused
+    // panel stays usable on a short terminal even without it.
+    const no_acc = sidePanelHeights(20, .branches, false, 2, 0);
+    try std.testing.expectEqual(@as(u16, 1), no_acc.files);
+    try std.testing.expectEqual(@as(u16, 1), no_acc.commits);
+    try std.testing.expect(no_acc.branches >= 8); // focused still usable
+    try std.testing.expectEqual(@as(u16, 20), no_acc.status + no_acc.files + no_acc.branches + no_acc.commits + no_acc.stash);
 }
 
 test "side panel width scales with the terminal, no fixed cap" {
