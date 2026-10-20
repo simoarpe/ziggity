@@ -3806,7 +3806,10 @@ fn drawWorktrees(win: vaxis.Window, app: *const app_mod.App) void {
         print(win, 0, 0, "No worktrees", styles().muted);
         return;
     }
-    const start = app.listScroll(.branches);
+    // Worktrees are a Files-panel subtab, so follow the Files list's scroll (not
+    // the Branches panel's) — otherwise navigating past the visible rows moves
+    // the selection without scrolling the list into view.
+    const start = app.listScroll(.files);
     var row: u16 = 0;
     var idx = start;
     while (idx < app.data.worktrees.len and row < win.height) : ({
@@ -3827,7 +3830,9 @@ fn drawSubmodules(win: vaxis.Window, app: *const app_mod.App) void {
         print(win, 0, 0, "No submodules", styles().muted);
         return;
     }
-    const start = app.listScroll(.branches);
+    // Submodules are a Files-panel subtab, so follow the Files list's scroll (see
+    // drawWorktrees).
+    const start = app.listScroll(.files);
     var row: u16 = 0;
     var idx = start;
     while (idx < app.data.submodules.len and row < win.height) : ({

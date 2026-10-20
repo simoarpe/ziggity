@@ -14463,6 +14463,29 @@ test "list view scrolls with the wheel but follows the selection on move" {
     try std.testing.expectEqual(@as(usize, 3), app.listScroll(.commits)); // shows 3,4,5
 }
 
+test "the Worktrees subtab follows the Files scroll, not the Branches one" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    var wts: [9]model.Worktree = undefined;
+    for (&wts) |*w| w.* = .{ .path = @constCast("/wt"), .branch = @constCast("b") };
+    app.data.worktrees = &wts;
+    app.focus = .files;
+    app.files_tab = .worktrees;
+    app.worktree_index = 8; // the last one, past a 5-row window
+
+    // The Worktrees list lives in the Files panel, so syncing the Files view must
+    // scroll it to reveal the cursor. drawWorktrees reads listScroll(.files); the
+    // old bug read listScroll(.branches), which never tracked the worktree cursor.
+    app.syncListView(.files, 5);
+    const files_scroll = app.listScroll(.files);
+    try std.testing.expectEqual(@as(usize, 4), files_scroll); // window shows rows 4..8
+    try std.testing.expect(app.worktree_index >= files_scroll and app.worktree_index < files_scroll + 5);
+    try std.testing.expectEqual(@as(usize, 0), app.listScroll(.branches)); // unrelated, untouched
+}
+
 test "shrinking a panel re-anchors so the selected row stays visible" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
