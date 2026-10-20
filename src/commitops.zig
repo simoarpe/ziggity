@@ -48,8 +48,8 @@ pub fn revertSelectedCommit(app: *App) !void {
     return app.requestMutation(.{ .revert = commit.hash }, .{ .gerund = "reverting", .command = "git revert", .refresh = App.Refresh.commit }, "reverted {s}", .{commit.short_hash});
 }
 
-/// Gate a history-rewriting rebase action behind a confirmation, matching
-/// lazygit: `d` (drop) and `s` (squash) prompt before running, unless the
+/// Gate a history-rewriting rebase action behind a confirmation:
+/// `d` (drop) and `s` (squash) prompt before running, unless the
 /// matching `skip_confirm.*` flag is set. Other actions pass straight through.
 /// The same preconditions as the run are checked here so we never prompt for a
 /// no-op. On confirm, `confirmPendingAction` calls `rebaseSelectedCommit`.

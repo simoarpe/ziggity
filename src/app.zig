@@ -279,7 +279,7 @@ pub const Confirmation = enum {
     force_push,
     force_push_plain,
     /// Offered before `d` drops a commit and `s` squashes one into the commit
-    /// below (both rewrite history), matching lazygit. Skipped via
+    /// below (both rewrite history). Skipped via
     /// `skip_confirm.drop_commit` / `skip_confirm.squash_commit`.
     drop_commit,
     squash_commit,
@@ -2422,7 +2422,7 @@ pub const App = struct {
     // fills the terminal. Its own special case, toggled by `z` and exited by `z`
     // or `esc` (the `+`/`_` screen-mode cycle never touches the main panel).
     diff_fullscreen: bool = false,
-    // Screen mode of the focused SIDE panel (lazygit's `+`/`_` cycle): `normal`,
+    // Screen mode of the focused SIDE panel (`+`/`_` cycle): `normal`,
     // `half` (the focused side panel is enlarged), or `full` (it fills the
     // terminal, others hidden). Only meaningful while a side panel is focused;
     // `+`/`_` are no-ops on the main panel, and `esc` never touches it.
@@ -2530,7 +2530,7 @@ pub const App = struct {
     file_display_filter: model.FileDisplayFilter = .all,
     // Paths that had a conflict while the `.conflicted` filter has been active.
     // The filter keeps showing them once resolved (so their diff stays reviewable
-    // until the whole operation is done), mirroring lazygit. Reset whenever the
+    // until the whole operation is done). Reset whenever the
     // display filter changes; accumulated each refresh while `.conflicted`.
     conflict_remembered: std.ArrayList([]u8) = .empty,
     commit_body_buffer: std.ArrayList(u8) = .empty,
@@ -5433,7 +5433,7 @@ pub const App = struct {
         self.conflict_remembered.clearRetainingCapacity();
     }
 
-    /// After a working-tree reload, mirror lazygit's merge behaviour: when
+    /// After a working-tree reload, when
     /// conflicts newly appear, take over the Files panel with the `.conflicted`
     /// filter (only from the default `.all`, never overriding a filter the user
     /// picked). When the last conflict clears, revert to `.all`. While filtered
@@ -6923,7 +6923,7 @@ pub const App = struct {
         }
     }
 
-    /// Cycle the focused SIDE panel's screen mode (lazygit's `+`/`_`): forward
+    /// Cycle the focused SIDE panel's screen mode (`+`/`_`): forward
     /// steps normal -> half -> full, backward steps full -> half -> normal,
     /// clamped at each end. The main panel is a special case (`z`) and is never
     /// affected, so this is a no-op while the main panel is focused.
@@ -12656,7 +12656,7 @@ test "dropping a merge commit warns differently (rebase --onto path)" {
     });
 }
 
-test "f and S open the fixup and autosquash menus (lazygit style)" {
+test "f and S open the fixup and autosquash menus" {
     const allocator = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
     var app = try testApp(allocator, &no_files);
@@ -12883,7 +12883,7 @@ test "amending the last commit asks first, but only with staged changes" {
     var app = try testApp(allocator, &staged);
     defer deinitTestApp(&app);
 
-    // Clean repo + staged changes: amend confirms first (matching lazygit)
+    // Clean repo + staged changes: amend confirms first
     // instead of rewriting HEAD outright.
     try commits_mod.amendLastCommit(&app);
     try std.testing.expect(app.pending_confirmation != null and app.pending_confirmation.? == .amend);

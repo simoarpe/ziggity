@@ -63,7 +63,7 @@ pub const KeyMap = struct {
     toggle_tree: Binding = .{ .codepoint = '`' },
     staging_split: Binding = .{ .codepoint = '\\' },
     toggle_fullscreen: Binding = .{ .codepoint = 'z' },
-    // lazygit-style screen-mode cycle for the focused panel: normal -> half
+    // Screen-mode cycle for the focused panel: normal -> half
     // (enlarged) -> full (fills the terminal), and back.
     screen_mode_next: Binding = .{ .codepoint = '+' },
     screen_mode_prev: Binding = .{ .codepoint = '_' },
@@ -274,7 +274,7 @@ pub const ConfirmSkips = struct {
     force_push: bool = false,
     force_push_plain: bool = false,
     /// Confirm before `d` drops a commit, or `s` squashes one into the commit
-    /// below. Both rewrite history; on by default, matching lazygit.
+    /// below. Both rewrite history; on by default.
     drop_commit: bool = false,
     squash_commit: bool = false,
     /// Field exists so `shouldSkipConfirm`'s comptime lookup covers every
