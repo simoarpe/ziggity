@@ -16,6 +16,8 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+## [0.55.0] - 2026-10-30
+
 ### Added
 - AI commit-message generation (`ctrl+g`) now works when rewording, amending, or
   editing a cherry-picked message, not only for a brand-new commit. It reads the
