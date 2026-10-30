@@ -84,17 +84,41 @@ jobs:
           (cd dist && sha256sum * > checksums.txt)
           ls -la dist
 
-      # 5. Create/update the GitHub Release for this tag and upload everything.
+      # 5. Pull this version's section out of CHANGELOG.md to use as the release
+      #    body. The heading is stamped by release.sh as `## [X.Y.Z] - DATE`, so
+      #    we match the tag with its leading `v` stripped and print the lines up
+      #    to the next `## [`. Missing file or section just yields empty notes.
+      - name: Extract release notes from CHANGELOG
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          if [ -f CHANGELOG.md ]; then
+            awk -v ver="$ver" '
+              $0 ~ "^## \\[" ver "\\]" { grab = 1; next }
+              grab && /^## \[/ { exit }
+              grab { print }
+            ' CHANGELOG.md | sed '/./,$!d' > RELEASE_NOTES.md
+          else
+            : > RELEASE_NOTES.md
+          fi
+          echo "----- release notes -----"
+          cat RELEASE_NOTES.md
+
+      # 6. Create/update the GitHub Release for this tag and upload everything.
       #    Only on a tag push — a manual (workflow_dispatch) run stops after the
       #    build/package steps above, letting you dry-run without a release.
+      #    `body_path` is the curated CHANGELOG section; `generate_release_notes`
+      #    still appends the commit/compare summary after it, so both show up.
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v3
         with:
           files: dist/*
-          generate_release_notes: true   # auto-summarise commits since the last tag
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: true   # appended after the CHANGELOG body
 
-      # 6. Point the Homebrew tap at this release: render Formula/ziggity.rb from
+      # 7. Point the Homebrew tap at this release: render Formula/ziggity.rb from
       #    the template (new version + URLs + sha256s) and push it to
       #    simoarpe/homebrew-ziggity. Needs a token that can write to THAT repo —
       #    the default GITHUB_TOKEN only covers this one. Create a fine-grained
@@ -144,7 +168,7 @@ jobs:
             git push
           fi
 
-      # 7. Point the Scoop bucket at this release: render bucket/ziggity.json from
+      # 8. Point the Scoop bucket at this release: render bucket/ziggity.json from
       #    the template (new version + URL + sha256) and push it to
       #    simoarpe/scoop-ziggity. Like the Homebrew step, needs a token that can
       #    write to THAT repo — create a fine-grained PAT (contents: write on the

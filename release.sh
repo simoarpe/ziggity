@@ -5,7 +5,9 @@
 # What it does (in order):
 #   1. Bump build.zig.zon from  0.x.0-dev  ->  0.x.0,  point the README install
 #      snippets at the new tag (the `VERSION=` line and the Windows zip name),
-#      commit, push.
+#      stamp the CHANGELOG `## [Unreleased]` section with the version and date,
+#      commit, push. The stamped section becomes the GitHub release notes (the
+#      release workflow reads it from the tagged CHANGELOG.md).
 #   2. Tag v0.x.0 (annotated) and push the tag.
 #         -> pushing the tag triggers the `release.yml` GitHub Action, which
 #            cross-compiles every target, publishes the GitHub Release, and
@@ -38,6 +40,7 @@ BREW_FORMULA="simoarpe/ziggity/ziggity"
 MAIN_BRANCH="main"
 ZON="build.zig.zon"
 README="README.md"
+CHANGELOG="CHANGELOG.md"
 
 # ── options ───────────────────────────────────────────────────────────────
 ASSUME_YES=0
@@ -112,7 +115,7 @@ ok "next dev version    : $next_dev"
 
 echo
 step "Plan"
-info "1. $ZON: $current  ->  $release,  README install snippets -> $tag   (commit + push)"
+info "1. $ZON: $current  ->  $release,  README snippets -> $tag,  stamp $CHANGELOG   (commit + push)"
 info "2. tag $tag         (push -> triggers release.yml: build, publish, tap bump)"
 if [ "$DO_BREW" -eq 1 ]; then
   info "3. wait for the release, then verify: brew install $BREW_FORMULA"
@@ -161,6 +164,39 @@ update_readme() {
     || warn "README: Windows zip filename not updated to ${tag} — check the Windows section"
 }
 
+# ── helper: stamp the CHANGELOG's Unreleased section with this version ────
+# Turns the top `## [Unreleased]` into a dated version heading and leaves a fresh
+# empty `## [Unreleased]` above it, so the entries you wrote during the cycle
+# become this release's notes. The release workflow extracts the `## [version]`
+# section from the tagged CHANGELOG.md and uses it as the GitHub release body.
+# Warn (never die) throughout so a changelog slip can't block a ready release.
+stamp_changelog() {
+  local version="$1" date tmp body
+  date=$(date +%F)
+  [ -f "$CHANGELOG" ] || { warn "$CHANGELOG not found — skipping changelog stamp"; return 0; }
+  grep -q '^## \[Unreleased\]' "$CHANGELOG" \
+    || { warn "no '## [Unreleased]' section in $CHANGELOG — skipping stamp"; return 0; }
+
+  # The lines under Unreleased, up to the next section. Empty means this release
+  # would ship with only the workflow's auto-generated compare link.
+  body=$(awk '/^## \[Unreleased\]/{g=1;next} g&&/^## \[/{exit} g{print}' "$CHANGELOG" | sed '/./,$!d')
+  if [ -z "$(printf '%s' "$body" | tr -d '[:space:]')" ]; then
+    warn "the Unreleased section is empty — $tag will have only auto-generated notes"
+  fi
+
+  # Insert `## [version] - date` right after the Unreleased line; the existing
+  # entries fall under it, and Unreleased is left empty for the next cycle.
+  tmp=$(mktemp)
+  awk -v ver="$version" -v d="$date" '
+    { print }
+    /^## \[Unreleased\]/ && !stamped { print ""; print "## [" ver "] - " d; stamped = 1 }
+  ' "$CHANGELOG" >"$tmp"
+  mv "$tmp" "$CHANGELOG"
+  grep -q "^## \[${version}\] - ${date}\$" "$CHANGELOG" \
+    && ok "stamped $CHANGELOG: Unreleased -> $version ($date)" \
+    || warn "could not confirm the $version heading in $CHANGELOG — check it"
+}
+
 # ── test gate ─────────────────────────────────────────────────────────────
 if [ "$DO_TEST" -eq 1 ]; then
   step "Running test suite (gate)"
@@ -176,7 +212,8 @@ set_version "$release"
 ok "set version to $release"
 update_readme "$tag"
 ok "pointed README install snippets at $tag"
-git add "$ZON" "$README"
+stamp_changelog "$release"
+git add "$ZON" "$README" "$CHANGELOG"
 git commit -q -m "Release $tag"
 ok "committed 'Release $tag'"
 git push origin "$MAIN_BRANCH"
