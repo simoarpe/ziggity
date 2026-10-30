@@ -21,3 +21,6 @@ Releases before 0.55.0 are listed on the
   editing a cherry-picked message, not only for a brand-new commit. It reads the
   relevant commit's own diff, so the generated subject and body describe the
   right changes.
+- GitHub releases now carry curated notes from this changelog, so the releases
+  page and the release Atom feed (`/releases.atom`) describe what changed in each
+  version instead of showing only a compare link.
