@@ -527,6 +527,20 @@ The gif tapes under `docs/assets/` regenerate with
 `bash docs/assets/demo-repos.sh` first to set up the scratch repositories
 they record against.
 
+### Releasing
+
+Release notes come from `CHANGELOG.md`. As you land a user-facing change, add a
+short bullet under `## [Unreleased]`, grouped under `Added`, `Changed`, `Fixed`,
+`Removed`, `Deprecated`, or `Security`. Write it for someone using ziggity, not
+reading the diff.
+
+When a release is cut, `release.sh` stamps that section with the version and
+date and leaves a fresh empty `## [Unreleased]` for the next cycle. The release
+workflow then reads the stamped section from the tagged `CHANGELOG.md` and
+publishes it as the GitHub release body, so it appears on the releases page and
+in the release Atom feed at `/releases.atom`. An empty Unreleased section just
+falls back to GitHub's auto-generated compare link.
+
 ### libvaxis Gotcha: Cells Store Graphemes by Reference
 
 libvaxis stores each screen cell's grapheme as a **slice into the source
