@@ -140,6 +140,9 @@ pub const AiRequest = struct {
     limits: aiauthor_mod.Limits,
     /// Owned copy of the current title, for description requests (empty otherwise).
     current_title: []u8,
+    /// Which changes to describe (staged diff, amend diff, or a commit's patch).
+    /// Inline value, so it copies to the worker with no ownership to track.
+    source: aiauthor_mod.DiffSource = .{},
 };
 
 /// A queued PR-description generation. The worker gathers `refLog`/`refDiff` for
@@ -2605,6 +2608,10 @@ pub const App = struct {
     // request carries the revision tokens captured at request time.
     commit_ai_title_req: ?AiRequest = null,
     commit_ai_desc_req: ?AiRequest = null,
+    // Which changes the current commit dialog's AI generation describes: the
+    // staged diff for a new commit, or an existing commit's / amend's own diff
+    // when rewording or editing. Set when each dialog opens.
+    commit_ai_source: aiauthor_mod.DiffSource = .{},
     // ---- AI PR-description generation (ctrl+g -> menu -> PR description) ----
     /// A queued PR-doc generation the TUI loop should start (dupes to a worker).
     pr_gen_requested: ?PrRequest = null,
@@ -11334,6 +11341,9 @@ pub const App = struct {
         self.clearAiRequest(.description);
         if (self.commit_ai_error) |e| self.allocator.free(e);
         self.commit_ai_error = null;
+        // Default to the staged diff; a reword/amend/edit opener overrides this
+        // after the reset so AI generation describes the right change set.
+        self.commit_ai_source = .{};
     }
 
     /// Bump a commit field's revision on a user edit, so an AI result generated
@@ -11385,6 +11395,7 @@ pub const App = struct {
                 .style_defaults = self.config.ai_commit_style_defaults,
             },
             .current_title = title_copy,
+            .source = self.commit_ai_source,
         };
         switch (field) {
             .title => {
@@ -12791,6 +12802,55 @@ test "AI ctrl+g targets the focused commit field" {
     try std.testing.expect(app.commit_ai_title_req != null);
     try std.testing.expect(app.commit_ai_desc_req == null);
     app.resetCommitAiState();
+}
+
+test "AI ctrl+g works when rewording and describes the commit's own diff" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    app.config.ai_command.set("echo hi");
+    app.mode = .commit_prompt;
+    app.commit_action = .reword;
+    app.commit_ai_source = aiauthor_mod.DiffSource.forCommit("abc1234def");
+
+    const ctrl_g = vaxis.Key{ .codepoint = 'g', .mods = .{ .ctrl = true } };
+    app.commit_field = .subject;
+    try commits_mod.handleCommitPromptKey(&app, ctrl_g);
+
+    // The gate used to open only for a new commit; a reword now queues a request,
+    // and it carries the reworded commit's hash so AI reads that commit's patch.
+    const req = app.commit_ai_title_req.?;
+    try std.testing.expectEqual(aiauthor_mod.DiffSource.Kind.commit, req.source.kind);
+    try std.testing.expectEqualStrings("abc1234def", req.source.hash());
+    app.resetCommitAiState();
+}
+
+test "AI ctrl+g on an amend describes the amend diff" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    app.config.ai_command.set("echo hi");
+    app.mode = .commit_prompt;
+    app.commit_action = .amend;
+    app.commit_ai_source = aiauthor_mod.DiffSource.forAmend();
+
+    const ctrl_g = vaxis.Key{ .codepoint = 'g', .mods = .{ .ctrl = true } };
+    app.commit_field = .subject;
+    try commits_mod.handleCommitPromptKey(&app, ctrl_g);
+    try std.testing.expectEqual(aiauthor_mod.DiffSource.Kind.amend, app.commit_ai_title_req.?.source.kind);
+    app.resetCommitAiState();
+}
+
+test "resetCommitAiState returns the AI diff source to the staged default" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    app.commit_ai_source = aiauthor_mod.DiffSource.forCommit("deadbeef");
+    app.resetCommitAiState();
+    try std.testing.expectEqual(aiauthor_mod.DiffSource.Kind.staged, app.commit_ai_source.kind);
 }
 
 test "a failed commit keeps the message; a successful one clears it" {

@@ -142,7 +142,9 @@ the written reference. Every binding is remappable, see
 - `d` / `D`: discard menu for the file / discard all (confirmed)
 - `c` · `w` (Files): commit · commit `--no-verify`
 - `ctrl+g` (commit dialog): generate (or regenerate) the focused field, subject or
-  body, from the staged diff. Only available when `ai_command` is configured (see
+  body. For a new commit it reads the staged diff; when rewording, amending, or
+  editing a cherry-picked message it reads that commit's own diff instead. Only
+  available when `ai_command` is configured (see
   [Configuration](configuration.md))
 - `ctrl+g` (Branches / Commits panels): open the "AI generate" menu to draft a
   pull request description (title + markdown body) from the selected branch

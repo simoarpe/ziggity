@@ -8,6 +8,7 @@ const vaxis = @import("vaxis");
 
 const app_mod = @import("app.zig");
 const commitops_mod = @import("commitops.zig");
+const aiauthor_mod = @import("aiauthor.zig");
 
 const App = app_mod.App;
 
@@ -156,6 +157,7 @@ pub fn startReword(app: *App) !void {
     app.mode = .commit_prompt;
     app.commit_action = .reword;
     app.resetCommitAiState();
+    app.commit_ai_source = aiauthor_mod.DiffSource.forCommit(commit.hash); // AI describes this commit's own diff
     app.commit_reword_index = i;
     app.commit_field = .subject;
     app.commit_buffer.clearRetainingCapacity();
@@ -201,6 +203,7 @@ pub fn startAmendCommit(app: *App) !void {
     app.mode = .commit_prompt;
     app.commit_action = .amend_fixup;
     app.resetCommitAiState();
+    app.commit_ai_source = aiauthor_mod.DiffSource.forCommit(commit.hash); // AI describes the commit being amended
     app.commit_reword_index = i;
     app.commit_field = .subject;
     app.commit_buffer.clearRetainingCapacity();
@@ -254,6 +257,7 @@ fn startAmendReword(app: *App) !void {
     app.mode = .commit_prompt;
     app.commit_action = .amend;
     app.resetCommitAiState();
+    app.commit_ai_source = aiauthor_mod.DiffSource.forAmend(); // AI describes HEAD plus the staged changes
     app.commit_field = .subject;
     app.commit_buffer.clearRetainingCapacity();
     try app.commit_buffer.appendSlice(app.allocator, commit.subject);
@@ -296,6 +300,7 @@ pub fn startCherryPickEdit(app: *App) !void {
     app.mode = .commit_prompt;
     app.commit_action = .cherry_pick_commit;
     app.resetCommitAiState();
+    app.commit_ai_source = aiauthor_mod.DiffSource.forCommit(rep); // AI describes the copied commit's diff
     app.commit_field = .subject;
     app.commit_buffer.clearRetainingCapacity();
     try app.commit_buffer.appendSlice(app.allocator, subject);
@@ -328,10 +333,10 @@ pub fn handleCommitPromptKey(app: *App, key: vaxis.Key) !void {
         return;
     }
     // ctrl+g: generate/regenerate the focused field with AI (when configured).
-    // Only for `create` — AI describes the staged diff, which is meaningless for
-    // a reword of an existing commit.
+    // Describes the staged diff for a new commit, or the edited commit's / amend's
+    // own diff when rewording or editing (see `commit_ai_source`).
     if (key.matches('g', .{ .ctrl = true })) {
-        if (app.commit_action == .create and app.config.aiConfigured()) {
+        if (app.config.aiConfigured()) {
             const field: @import("aiauthor.zig").Field = if (app.commit_field == .subject) .title else .description;
             try app.requestAiGeneration(field);
         }

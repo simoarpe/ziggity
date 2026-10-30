@@ -101,11 +101,13 @@ gains AI generation. ziggity treats
 the command as a black box, so the provider, model, and key or subscription all
 live in that tool; nothing AI-related appears until it is configured. Then:
 
-- `ctrl+g` generates (or regenerates) the focused field from the staged diff:
-  the title when the summary is focused, the body when the description is. The
-  title targets `commit_summary_limit` characters and the body is reflowed to
-  `commit_body_guide` columns (50 and 72 by default), so the AI follows the same
-  length conventions the dialog already nudges you toward.
+- `ctrl+g` generates (or regenerates) the focused field: the title when the
+  summary is focused, the body when the description is. For a new commit it reads
+  the staged diff; when you reword, amend, or edit a cherry-picked message it
+  reads that commit's own diff instead, so the message describes the right
+  changes. The title targets `commit_summary_limit` characters and the body is
+  reflowed to `commit_body_guide` columns (50 and 72 by default), so the AI
+  follows the same length conventions the dialog already nudges you toward.
 - `auto_generate_commit_title` / `auto_generate_commit_description` start
   generation automatically when the dialog opens (concurrently, never blocking
   it). A spinner shows in each field while it works.

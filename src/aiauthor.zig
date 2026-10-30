@@ -65,6 +65,37 @@ fn capFileList(allocator: std.mem.Allocator, list: []const u8) ![]u8 {
 
 pub const GenError = error{ NothingStaged, AiCommandFailed, EmptyResponse };
 
+/// What set of changes a generation describes. `create` reads the staged diff;
+/// `amend` reads the index against HEAD's parent (HEAD's own changes plus what is
+/// staged), so an amend's new message covers the whole resulting commit; `commit`
+/// reads one existing commit's own patch (reword, cherry-pick-edit, amend-marker).
+/// The hash is stored inline so the value copies freely across threads with no
+/// ownership to track.
+pub const DiffSource = struct {
+    kind: Kind = .staged,
+    hash_buf: [64]u8 = undefined,
+    hash_len: usize = 0,
+
+    pub const Kind = enum { staged, amend, commit };
+
+    pub fn forStaged() DiffSource {
+        return .{ .kind = .staged };
+    }
+    pub fn forAmend() DiffSource {
+        return .{ .kind = .amend };
+    }
+    pub fn forCommit(h: []const u8) DiffSource {
+        var s = DiffSource{ .kind = .commit };
+        const n = @min(h.len, s.hash_buf.len);
+        @memcpy(s.hash_buf[0..n], h[0..n]);
+        s.hash_len = n;
+        return s;
+    }
+    pub fn hash(self: *const DiffSource) []const u8 {
+        return self.hash_buf[0..self.hash_len];
+    }
+};
+
 pub const Context = struct {
     staged_diff: []const u8,
     staged_files: []const u8,
@@ -72,28 +103,46 @@ pub const Context = struct {
     /// The current title, passed to description generation so the body can
     /// complement it. Empty when unknown or generating a title.
     current_title: []const u8 = "",
+    /// How the change set is named in the prompt. Defaults to the staged wording;
+    /// a reword/amend generation overrides these so the prompt does not claim the
+    /// changes are staged.
+    change_noun: []const u8 = "staged changes",
+    files_label: []const u8 = "Staged files",
+    diff_label: []const u8 = "Staged diff",
 };
 
 /// Gather the git context, build the field's prompt, run `command`, and return
 /// the normalized result (caller owns it). Runs off the UI thread.
-pub fn generate(allocator: std.mem.Allocator, git: *git_mod.Git, command: []const u8, field: Field, current_title: []const u8, limits: Limits, err_out: *?[]u8) ![]u8 {
+pub fn generate(allocator: std.mem.Allocator, git: *git_mod.Git, command: []const u8, field: Field, current_title: []const u8, limits: Limits, source: DiffSource, err_out: *?[]u8) ![]u8 {
     err_out.* = null;
-    const diff = try git.stagedDiff();
+    const diff = switch (source.kind) {
+        .staged => try git.stagedDiff(),
+        .amend => try git.amendDiff(),
+        .commit => try git.commitDiff(source.hash()),
+    };
     defer allocator.free(diff);
     if (std.mem.trim(u8, diff, " \t\r\n").len == 0) return GenError.NothingStaged;
 
-    const files = try git.stagedFileNames();
+    const files = switch (source.kind) {
+        .staged => try git.stagedFileNames(),
+        .amend => try git.amendFileNames(),
+        .commit => try git.commitFileNames(source.hash()),
+    };
     defer allocator.free(files);
     const files_listed = try capFileList(allocator, files);
     defer allocator.free(files_listed);
     const subjects = try git.recentSubjects(10);
     defer allocator.free(subjects);
 
+    const staged = source.kind == .staged;
     const ctx = Context{
         .staged_diff = diff,
         .staged_files = files_listed,
         .recent_subjects = subjects,
         .current_title = current_title,
+        .change_noun = if (staged) "staged changes" else "changes",
+        .files_label = if (staged) "Staged files" else "Files",
+        .diff_label = if (staged) "Staged diff" else "Diff",
     };
 
     // Optional per-project / global commit-instructions file, scoped to this field.
@@ -259,7 +308,9 @@ pub fn buildTitlePrompt(allocator: std.mem.Allocator, ctx: Context, title_max: u
     const max = if (title_max == 0) 50 else title_max;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "Write a git commit SUBJECT LINE for the staged changes below.\n\nRules:\n");
+    try out.appendSlice(allocator, "Write a git commit SUBJECT LINE for the ");
+    try out.appendSlice(allocator, ctx.change_noun);
+    try out.appendSlice(allocator, " below.\n\nRules:\n");
     // Hard output contract + length: always ours (the parser keeps the first line
     // only, so a preamble would corrupt the title).
     try out.appendSlice(allocator, "- Output ONLY the subject line. No quotes, no markdown, no code fences, no preamble or explanation.\n");
@@ -281,9 +332,13 @@ pub fn buildTitlePrompt(allocator: std.mem.Allocator, ctx: Context, title_max: u
     try appendInstructions(&out, allocator, instructions);
     try out.appendSlice(allocator, "\nRecent commit subjects (for style):\n");
     try out.appendSlice(allocator, ctx.recent_subjects);
-    try out.appendSlice(allocator, "\nStaged files:\n");
+    try out.append(allocator, '\n');
+    try out.appendSlice(allocator, ctx.files_label);
+    try out.appendSlice(allocator, ":\n");
     try out.appendSlice(allocator, ctx.staged_files);
-    try out.appendSlice(allocator, "\nStaged diff:\n");
+    try out.append(allocator, '\n');
+    try out.appendSlice(allocator, ctx.diff_label);
+    try out.appendSlice(allocator, ":\n");
     try appendDiff(&out, allocator, ctx.staged_diff);
     try out.appendSlice(allocator, "\n\nOutput only the single subject line, nothing else.\nSubject line:");
     return out.toOwnedSlice(allocator);
@@ -302,7 +357,9 @@ pub fn buildDescPrompt(allocator: std.mem.Allocator, ctx: Context, body_wrap: us
     const wrap = if (body_wrap == 0) 72 else body_wrap;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "Write a git commit MESSAGE BODY (description) for the staged changes below.\n\nRules:\n");
+    try out.appendSlice(allocator, "Write a git commit MESSAGE BODY (description) for the ");
+    try out.appendSlice(allocator, ctx.change_noun);
+    try out.appendSlice(allocator, " below.\n\nRules:\n");
     // Hard output contract: always ours.
     try out.appendSlice(allocator, "- Output ONLY the body. No subject line, no quotes, no markdown headings, no code fences, no preamble.\n");
     // Soft style defaults: gated by `ai_commit_style_defaults`.
@@ -322,9 +379,13 @@ pub fn buildDescPrompt(allocator: std.mem.Allocator, ctx: Context, body_wrap: us
     }
     try out.appendSlice(allocator, "\nRecent commit subjects (for style):\n");
     try out.appendSlice(allocator, ctx.recent_subjects);
-    try out.appendSlice(allocator, "\nStaged files:\n");
+    try out.append(allocator, '\n');
+    try out.appendSlice(allocator, ctx.files_label);
+    try out.appendSlice(allocator, ":\n");
     try out.appendSlice(allocator, ctx.staged_files);
-    try out.appendSlice(allocator, "\nStaged diff:\n");
+    try out.append(allocator, '\n');
+    try out.appendSlice(allocator, ctx.diff_label);
+    try out.appendSlice(allocator, ":\n");
     try appendDiff(&out, allocator, ctx.staged_diff);
     try out.appendSlice(allocator, "\n\nOutput only the body, nothing else.\nBody:");
     return out.toOwnedSlice(allocator);

@@ -1033,6 +1033,63 @@ pub const Git = struct {
         }
     }
 
+    /// A single commit's own patch (`<hash>^..<hash>`, via `show` so a root commit
+    /// still works), bounded like `stagedDiff`. For AI message generation when
+    /// rewording or editing an existing commit. Owned; empty on failure.
+    pub fn commitDiff(self: *Git, hash: []const u8) ![]u8 {
+        return self.diffWithFallback(
+            &.{ "show", "--no-color", "--no-ext-diff", "--format=", hash },
+            &.{ "show", "--no-color", "--stat", "--stat-count=1024", "--format=", hash },
+        );
+    }
+
+    /// The file names a single commit touches (newline-separated). Owned; empty on
+    /// failure.
+    pub fn commitFileNames(self: *Git, hash: []const u8) ![]u8 {
+        return self.nameOnly(&.{ "diff-tree", "--no-commit-id", "--name-only", "-r", hash });
+    }
+
+    /// The patch an amend of HEAD would produce: the index diffed against HEAD's
+    /// parent, so it covers HEAD's own changes plus whatever is currently staged.
+    /// Bounded like `stagedDiff`. Owned; empty on failure.
+    pub fn amendDiff(self: *Git) ![]u8 {
+        const base = self.amendBaseRef();
+        return self.diffWithFallback(
+            &.{ "diff", "--cached", "--no-color", "--no-ext-diff", base },
+            &.{ "diff", "--cached", "--no-color", "--stat", "--stat-count=1024", base },
+        );
+    }
+
+    /// The file names an amend of HEAD would touch (newline-separated). Owned;
+    /// empty on failure.
+    pub fn amendFileNames(self: *Git) ![]u8 {
+        return self.nameOnly(&.{ "diff", "--cached", "--name-only", self.amendBaseRef() });
+    }
+
+    /// Run a `--name-only` command and return its stdout. Owned; empty on failure.
+    fn nameOnly(self: *Git, args: []const []const u8) ![]u8 {
+        var res = self.exec(args) catch return self.allocator.dupe(u8, "");
+        defer res.deinit(self.allocator);
+        if (!res.ok()) return self.allocator.dupe(u8, "");
+        return self.allocator.dupe(u8, res.stdout);
+    }
+
+    /// The git empty-tree object (sha1). Used as the amend base when HEAD is the
+    /// root commit and has no parent to diff against.
+    const empty_tree_sha1 = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+    /// What the index is diffed against for an amend: HEAD's parent normally, or
+    /// the empty tree when HEAD is the root commit (so a root-commit amend still
+    /// yields its full patch instead of nothing).
+    fn amendBaseRef(self: *Git) []const u8 {
+        if (self.exec(&.{ "rev-parse", "--verify", "--quiet", "HEAD^" })) |ok_res| {
+            var res = ok_res;
+            defer res.deinit(self.allocator);
+            if (res.ok()) return "HEAD^";
+        } else |_| {}
+        return empty_tree_sha1;
+    }
+
     /// Diff between two refs, bounded like `stagedDiff`. `three_dot` uses
     /// `base...target` (the merge-base diff: what `target` added), else a two-dot
     /// `base target`. For PR/commit document generation. Owned.
@@ -2977,6 +3034,83 @@ test "parse commit files handles modifications and renames" {
     try std.testing.expectEqualSlices(u8, "renamed.zig", files[2].path);
     try std.testing.expectEqual(@as(u8, 'D'), files[3].status);
     try std.testing.expectEqualSlices(u8, "gone.zig", files[3].path);
+}
+
+test "commitDiff / amendDiff feed AI the right change set" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    try env.put("HOME", dir_path);
+    try env.put("GIT_CONFIG_GLOBAL", "/dev/null");
+    try env.put("GIT_CONFIG_SYSTEM", "/dev/null");
+
+    // Two commits: the second adds b.txt and a line to a.txt. Then stage a third
+    // line in a.txt (uncommitted) so the amend diff must combine HEAD + staged.
+    const setup =
+        \\set -e
+        \\git init -q -b main
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf 'line1\n' > a.txt
+        \\git add a.txt
+        \\git commit -qm first
+        \\printf 'line1\nline2\n' > a.txt
+        \\printf 'hello\n' > b.txt
+        \\git add a.txt b.txt
+        \\git commit -qm second
+        \\printf 'line1\nline2\nline3\n' > a.txt
+        \\git add a.txt
+    ;
+    var sh = [_][]const u8{ "sh", "-c", setup };
+    const setup_result = try std.process.run(a, tio, .{
+        .argv = &sh,
+        .cwd = .{ .path = dir_path },
+        .environ_map = &env,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+    defer a.free(setup_result.stdout);
+    defer a.free(setup_result.stderr);
+    switch (setup_result.term) {
+        .exited => |code| if (code != 0) return error.SetupFailed,
+        else => return error.SetupFailed,
+    }
+
+    var git = try Git.initAt(a, tio, &env, dir_path);
+    defer git.deinit();
+
+    var rp = try git.exec(&.{ "rev-parse", "HEAD" });
+    defer rp.deinit(a);
+    const head = std.mem.trim(u8, rp.stdout, " \t\r\n");
+
+    // A reword reads the commit's own patch: HEAD added b.txt and line2, and it
+    // must NOT include the still-uncommitted line3.
+    const cdiff = try git.commitDiff(head);
+    defer a.free(cdiff);
+    try std.testing.expect(std.mem.indexOf(u8, cdiff, "b.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cdiff, "+line2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cdiff, "+line3") == null);
+
+    const cfiles = try git.commitFileNames(head);
+    defer a.free(cfiles);
+    try std.testing.expect(std.mem.indexOf(u8, cfiles, "a.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cfiles, "b.txt") != null);
+
+    // An amend reads the index against HEAD^, so it covers HEAD's own change
+    // (line2) plus the staged line3 that will fold in.
+    const adiff = try git.amendDiff();
+    defer a.free(adiff);
+    try std.testing.expect(std.mem.indexOf(u8, adiff, "+line2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, adiff, "+line3") != null);
 }
 
 test "loadCommitFiles and diffForCommitFile show a merge's first-parent files" {

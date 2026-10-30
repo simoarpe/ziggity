@@ -449,6 +449,8 @@ const AiGenRun = struct {
     current_title: []u8,
     field: aiauthor_mod.Field,
     limits: aiauthor_mod.Limits = .{},
+    /// Which changes to describe (inline value, copied from the request).
+    source: aiauthor_mod.DiffSource = .{},
     dialog_generation: u64 = 0,
     revision: u64 = 0,
     staged_signature: u64 = 0,
@@ -480,7 +482,7 @@ fn runAiGen(ag: *AiGenRun) void {
         for (wgit.command_log.items) |e| async_allocator.free(e);
         wgit.command_log.deinit(async_allocator);
     }
-    if (aiauthor_mod.generate(async_allocator, &wgit, ag.command, ag.field, ag.current_title, ag.limits, &ag.error_detail)) |text| {
+    if (aiauthor_mod.generate(async_allocator, &wgit, ag.command, ag.field, ag.current_title, ag.limits, ag.source, &ag.error_detail)) |text| {
         ag.result = text;
         ag.failed = false;
     } else |_| {
@@ -1164,6 +1166,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     .current_title = async_allocator.dupe(u8, req.current_title) catch "",
                     .field = .title,
                     .limits = req.limits,
+                    .source = req.source,
                     .dialog_generation = req.dialog_generation,
                     .revision = req.revision,
                     .staged_signature = req.staged_signature,
@@ -1191,6 +1194,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     .current_title = async_allocator.dupe(u8, req.current_title) catch "",
                     .field = .description,
                     .limits = req.limits,
+                    .source = req.source,
                     .dialog_generation = req.dialog_generation,
                     .revision = req.revision,
                     .staged_signature = req.staged_signature,
@@ -2946,7 +2950,7 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     const py: u16 = (root.height - 12) / 2;
     drawScrollbarRange(root, px + w - 1, py + 1 + body_top, body_h, body_lines, y_origin, !subject_focused);
 
-    const footer_text = if (app.config.aiConfigured() and app.commit_action == .create)
+    const footer_text = if (app.config.aiConfigured())
         "tab: field   enter: commit/newline   ctrl+g: AI   esc: cancel"
     else
         "tab: switch field   enter: commit / newline   esc: cancel";
