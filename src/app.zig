@@ -3576,6 +3576,11 @@ pub const App = struct {
         self.applyConflictAutoFilter(prev_conflicts);
         if (self.tree_view) try self.rebuildTree(tree_path);
 
+        // The staging view overlays the file list this refresh just reloaded. If
+        // its file changed on disk (an editor save, a script), reload the open
+        // diff so the external edit shows up there too, not only in the list.
+        if (self.staging_active) staging_mod.refreshStagingIfChanged(self) catch {};
+
         // History can move without any Ziggity action — an external commit,
         // rebase, or `git pull` in another terminal. This refresh only reloads
         // the working tree, so the Commits panel and the (cached) branch "Log"
@@ -5151,9 +5156,10 @@ pub const App = struct {
             return;
         }
         if (self.mode != .normal) return;
-        if (self.staging_active) return;
         if (!self.terminal_focused) return;
-        // The actual git work runs off the loop; this only queues it.
+        // The actual git work runs off the loop; this only queues it. The staging
+        // view is refreshed too (the snapshot reloads its diff when the file
+        // changed on disk) instead of being skipped, so an external edit shows up.
         self.requestWorktreeRefresh();
     }
 
@@ -5163,6 +5169,9 @@ pub const App = struct {
         // Don't queue a heavy reload alongside an in-flight op; it refreshes on
         // completion anyway.
         if (self.foregroundBusy()) return;
+        // A full refresh here also reloads an open staging view's diff, via the
+        // worktree snapshot (see applyWorktreeSnapshot), so returning to the
+        // terminal after editing the file elsewhere picks the change up.
         self.refreshViews(Refresh.all);
         // Regaining focus is a good moment to check the remote: kick an immediate
         // background fetch (if enabled) and restart the periodic countdown so the
@@ -16825,6 +16834,57 @@ test "staging the last change falls back to the change above (e2e)" {
     try std.testing.expect(app.staging_cursor < last_change);
     try std.testing.expect(std.mem.indexOf(u8, app.staging_diff, "+BOT") == null);
     try std.testing.expect(std.mem.indexOf(u8, app.staging_diff, "+TOP") != null);
+}
+
+test "the staging view picks up an external edit on the next refresh (e2e)" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q
+        \\git config user.email t@t
+        \\git config user.name t
+        \\git config commit.gpgsign false
+        \\printf 'alpha\n' > f.txt
+        \\git add f.txt
+        \\git commit -qm init
+        \\printf 'alpha\nfirst change\n' > f.txt
+    );
+
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    app.git = try git_mod.Git.initAt(a, tio, &env, dir_path);
+    defer app.git.deinit();
+    defer app.data.deinit(a);
+
+    try app.refreshFiles();
+    app.file_index = 0;
+    try staging_mod.openStaging(&app);
+    try std.testing.expect(std.mem.indexOf(u8, app.staging_diff, "+first change") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app.staging_diff, "+second change") == null);
+
+    // Nothing changed on disk: the refresh is a no-op, so the cursor is kept.
+    app.staging_cursor = staging_mod.stagingFirstLine(&app) + 1;
+    const cursor_before = app.staging_cursor;
+    try staging_mod.refreshStagingIfChanged(&app);
+    try std.testing.expectEqual(cursor_before, app.staging_cursor);
+    try std.testing.expect(std.mem.indexOf(u8, app.staging_diff, "+second change") == null);
+
+    // An external edit appends a line; the next refresh reloads the diff so the
+    // open staging view reflects it instead of staying frozen.
+    try testRunSetup(a, tio, &env, dir_path, "printf 'alpha\\nfirst change\\nsecond change\\n' > f.txt");
+    try staging_mod.refreshStagingIfChanged(&app);
+    try std.testing.expect(std.mem.indexOf(u8, app.staging_diff, "+second change") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app.staging_diff, "+first change") != null);
 }
 
 test "staging a whole hunk moves the cursor to the next hunk header (e2e)" {

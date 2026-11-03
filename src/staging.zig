@@ -61,6 +61,25 @@ pub fn reloadStagingAfterEdit(app: *App) !void {
     }
 }
 
+/// Idle-tick refresh for the open staging view: pick up external edits to the
+/// file (an editor save, a script) by reloading the diff, but only when it has
+/// actually changed, so the hunk cursor does not jump when nothing happened.
+/// Skipped mid patch-edit or during an in-progress range selection, where a
+/// reload would pull the ground out from under the user.
+pub fn refreshStagingIfChanged(app: *App) !void {
+    if (!app.staging_active or app.staging_patch_mode or app.staging_anchor != null) return;
+    const fresh = app.git.rawFileDiff(app.staging_path, app.staging_staged_view, app.config.diff_context) catch return;
+    defer app.allocator.free(fresh);
+    var changed = !std.mem.eql(u8, fresh, app.staging_diff);
+    if (!changed and app.staging_split) {
+        // In split view the read-only pane can change on its own, so check it too.
+        const other = app.git.rawFileDiff(app.staging_path, !app.staging_staged_view, app.config.diff_context) catch return;
+        defer app.allocator.free(other);
+        changed = !std.mem.eql(u8, other, app.staging_other_diff);
+    }
+    if (changed) try reloadStagingAfterEdit(app);
+}
+
 /// Reload the staging diff. `allow_flip` auto-switches to the other side when
 /// the active one is empty — wanted on open / after staging (so a fully-staged
 /// file shows the staged side rather than a blank pane), but NOT when the user
