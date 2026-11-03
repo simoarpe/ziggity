@@ -16,6 +16,12 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+### Fixed
+- The staging view now picks up edits made to the open file from outside
+  ziggity. The diff used to stay frozen until you left and reopened the view;
+  it now refreshes on the next background update and when the terminal regains
+  focus, without moving your hunk cursor on a quiet refresh.
+
 ## [0.55.0] - 2026-10-30
 
 ### Added
