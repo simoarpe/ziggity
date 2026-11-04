@@ -16,6 +16,8 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+## [0.57.0] - 2026-11-04
+
 ### Fixed
 - Scrolling a long diff (for example a single generated file with tens of
   thousands of lines) stays smooth instead of becoming clunky. The Diff panel
