@@ -15,24 +15,24 @@ tiny native binary. Here is the honest case, point by point.
 
 Ziggity compiles to a single static binary with no runtime, no garbage
 collector, and no library dependencies beyond the `git` you already have.
-Measured on an Apple M1 Max running macOS 26.5.1, against lazygit 0.62.2 from
-Homebrew, both opening the same repository (ziggity's own: 469 commits, 165
-tracked files, 44 refs, a working checkout with build output on disk) at the
+Measured on an Apple M1 Max running macOS 27.0, against lazygit 0.62.2 from
+Homebrew, both opening the same repository (ziggity's own: 564 commits, 174
+tracked files, 69 refs, a working checkout with build output on disk) at the
 same terminal size:
 
-| | ziggity 0.36.0 | lazygit 0.62.2 |
+| | ziggity 0.57.0 | lazygit 0.62.2 |
 |---|---|---|
-| Binary size | **1.8 MB** | 17.6 MB |
+| Binary size | **1.9 MB** | 17.6 MB |
 | Dynamic libraries linked | **1** | 4 |
-| Process startup, median of 30 runs | **3.7 ms** | 19.9 ms |
-| Git subprocesses to load the repo | **21** | 24 |
-| Peak git processes running in parallel | **11** | 9 |
+| Process startup, median of 30 runs | **3.2 ms** | 14.1 ms |
+| Git subprocesses to load the repo | **23** | 25 |
+| Peak git processes running in parallel | **10** | 9 |
 | Network during load | **none** | `git fetch --all` |
-| Resident memory once settled | **10 MB** | 37 MB |
-| Peak resident memory while loading | **10 MB** | 37 MB |
-| Git subprocesses over 10 s idle | **32** | 38 |
-| Own CPU time over 10 s | **40 ms** | 230 ms |
-| Total CPU including git children | **581 ms** | 709 ms |
+| Resident memory once settled | **10 MB** | 38 MB |
+| Peak resident memory while loading | **10 MB** | 38 MB |
+| Git subprocesses over 10 s idle | **40** | 39 |
+| Own CPU time over 10 s | **70 ms** | 250 ms |
+| Total CPU including git children | **552 ms** | 597 ms |
 
 Startup is the time from spawn to exit for `--version`, the floor any launch
 pays before real work begins. The git subprocess rows come from a shim on
@@ -48,8 +48,8 @@ same checks yourself rather than take these on trust. Numbers vary by machine
 and by repository size; the shape does not.
 
 Treat the CPU rows as approximate. They are the noisiest thing here: across
-those seven runs lazygit's own CPU ranged from 240 ms to 280 ms and ziggity's
-from 30 ms to 40 ms, and on a machine doing anything else both spread much
+those seven runs lazygit's own CPU ranged from 230 ms to 270 ms and ziggity's
+from 60 ms to 80 ms, and on a machine doing anything else both spread much
 wider than that. The medians are steady and the gap is consistent, but a
 single figure carries more precision than the measurement does. Resident
 memory wanders by a megabyte or two between runs as well. Binary size, library
@@ -68,15 +68,17 @@ The subprocess log also shows where the efficiency comes from. When Ziggity
 opens a repository it fans out eleven loaders at once, one per concern:
 status, working tree files, local branches, remote branches, remotes, tags,
 worktrees, submodules, the commit log, the reflog, and the stash list. The
-shim caught all eleven launched within seven milliseconds of each other, and
-every panel had its data about a hundred milliseconds later. Each loader asks
+shim caught them all launched within about ten milliseconds of each other, and
+every panel had its data within a couple hundred milliseconds. Each loader asks
 git for machine readable output (`--porcelain -z`, `--format` with null
 separators) and parses it in a single pass, no shell in between, no libgit2
-state to synchronize. To be fair, lazygit parallelizes its refresh too; it
-just takes about half again as many subprocesses to load the same repository,
-keeps going at a higher rate once idle (40 git processes in ten seconds
-against 22), and burns roughly six times the CPU in its own process over the
-same window.
+state to synchronize. lazygit parallelizes its refresh too, and the two load
+the repository with a similar number of subprocesses (25 against 23) and idle
+at a similar rate (lazygit's 39 git processes in ten seconds against ziggity's
+40, which now include a cheap two second refs poll that catches history changed
+in another terminal). Where they diverge is the tool's own process: over the
+same ten second window lazygit spends roughly three and a half times the CPU
+ziggity does, 250 ms against 70 ms.
 
 The network row is a scheduling difference, not an absolute one. lazygit runs
 `git fetch --all` as part of loading the repository, in the same burst as

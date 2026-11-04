@@ -26,7 +26,7 @@
 </p>
 
 <p align="center">
-  <b>1.8 MB</b> binary · <b>3.7 ms</b> startup · <b>10 MB</b> memory when idle · no runtime, no toolchain, just <code>git</code>
+  <b>1.9 MB</b> binary · <b>3.2 ms</b> startup · <b>10 MB</b> memory when idle · no runtime, no toolchain, just <code>git</code>
 </p>
 
 <p align="center">
@@ -61,8 +61,8 @@ they improve the user experience. See
 
 ## Why Ziggity?
 
-- ⚡ 1.8 MB standalone binary
-- 🚀 Starts in ~3.7 ms
+- ⚡ 1.9 MB standalone binary
+- 🚀 Starts in ~3.2 ms
 - 🔄 Non-blocking Git operations
 - 🖱️ First-class keyboard and mouse interaction
 - 🤖 Optional AI commit messages and pull request descriptions, using the model or subscription you already have
@@ -241,24 +241,24 @@ tiny native binary.
 
 Ziggity compiles to a single static binary with no runtime, no garbage
 collector, and no library dependencies beyond the `git` you already have.
-Measured on an Apple M1 Max running macOS 26.5.1, against lazygit 0.62.2 from
-Homebrew, both opening the same repository (ziggity's own: 469 commits, 165
-tracked files, 44 refs, a working checkout with build output on disk) at the
+Measured on an Apple M1 Max running macOS 27.0, against lazygit 0.62.2 from
+Homebrew, both opening the same repository (ziggity's own: 564 commits, 174
+tracked files, 69 refs, a working checkout with build output on disk) at the
 same terminal size, median of seven runs:
 
-| | ziggity 0.36.0 | lazygit 0.62.2 |
+| | ziggity 0.57.0 | lazygit 0.62.2 |
 |---|---|---|
-| Binary size | **1.8 MB** | 17.6 MB |
+| Binary size | **1.9 MB** | 17.6 MB |
 | Dynamic libraries linked | **1** | 4 |
-| Process startup, median of 30 runs | **3.7 ms** | 19.9 ms |
-| Git subprocesses to load the repo | **21** | 24 |
-| Peak git processes running in parallel | **11** | 9 |
+| Process startup, median of 30 runs | **3.2 ms** | 14.1 ms |
+| Git subprocesses to load the repo | **23** | 25 |
+| Peak git processes running in parallel | **10** | 9 |
 | Network during load | **none** | `git fetch --all` |
-| Resident memory once settled | **10 MB** | 37 MB |
-| Peak resident memory while loading | **10 MB** | 37 MB |
-| Git subprocesses over 10 s idle | **32** | 38 |
-| Own CPU time over 10 s | **40 ms** | 230 ms |
-| Total CPU including git children | **581 ms** | 709 ms |
+| Resident memory once settled | **10 MB** | 38 MB |
+| Peak resident memory while loading | **10 MB** | 38 MB |
+| Git subprocesses over 10 s idle | **40** | 39 |
+| Own CPU time over 10 s | **70 ms** | 250 ms |
+| Total CPU including git children | **552 ms** | 597 ms |
 
 Ziggity holds about a quarter of lazygit's memory and stays flat there from the
 first paint, and both tools fetch: lazygit during load, ziggity about three and

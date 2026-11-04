@@ -157,13 +157,53 @@ def run_tui(binary, repo, seconds, shimbin, real_git, workdir, label):
     stop = threading.Event()
 
     def drain():
-        # the pty buffer must keep moving or the tool blocks on write
+        # The pty buffer must keep moving or the tool blocks on write. We also
+        # answer the terminal-capability queries a TUI emits at startup, because
+        # a tool that waits for the reply (vaxis does: it blocks on the Primary
+        # Device Attributes response with a ~1s timeout) would otherwise stall
+        # that whole second against a drain that never answers, pushing its real
+        # work past the load-phase window and corrupting the subprocess counts.
+        # A real terminal replies in microseconds, so this makes the harness
+        # behave like one rather than inventing a delay no user ever sees.
+        # Matched query bytes are consumed so a reply is never sent twice, and
+        # the buffer is trimmed to the last ESC so a query split across reads
+        # still matches while memory stays bounded.
+        decrqm = re.compile(rb"\x1b\[\?(\d+)\$p")  # DECRQM mode query
+        simple = (
+            (b"\x1b[6n", b"\x1b[1;1R"),            # cursor position report
+            (b"\x1b[?u", b"\x1b[?0u"),             # kitty keyboard flags
+            (b"\x1b[c", b"\x1b[?62;c"),            # Primary Device Attributes
+        )
+        acc = bytearray()
         while not stop.is_set():
             try:
-                if not os.read(master, 65536):
-                    break
+                data = os.read(master, 65536)
             except OSError:
                 break
+            if not data:
+                break
+            acc += data
+            reply = bytearray()
+            for pat, resp in simple:
+                while pat in acc:
+                    i = acc.index(pat)
+                    del acc[i:i + len(pat)]
+                    reply += resp
+
+            def answer(m):
+                reply.extend(b"\x1b[?" + m.group(1) + b";0$y")  # 0 = unsupported
+                return b""
+            acc[:] = decrqm.sub(answer, bytes(acc))
+            if reply:
+                try:
+                    os.write(master, bytes(reply))
+                except OSError:
+                    pass
+            j = acc.rfind(b"\x1b")
+            if j > 0:
+                del acc[:j]
+            elif j < 0:
+                acc.clear()
     threading.Thread(target=drain, daemon=True).start()
 
     # RSS is sampled finely while the repository loads and coarsely afterwards.
