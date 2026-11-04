@@ -16,6 +16,13 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+### Added
+- The Branches and Commits panels now pick up history that moved outside
+  ziggity (a commit, checkout, branch update, or fetch in another terminal)
+  within a couple of seconds, instead of waiting for the slower working tree
+  refresh. A new `external_change_interval_secs` setting tunes the cadence
+  (default 2 seconds; set it to 0 to disable the check).
+
 ### Fixed
 - The staging view now picks up edits made to the open file from outside
   ziggity. The diff used to stay frozen until you left and reopened the view;

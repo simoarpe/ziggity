@@ -681,6 +681,22 @@ pub const Git = struct {
         return self.allocator.dupe(u8, std.mem.trim(u8, result.stdout, " \t\r\n"));
     }
 
+    /// A cheap fingerprint of HEAD plus every ref, for the background
+    /// external-change poll. `git show-ref --head` lists `<sha> <ref>` for HEAD
+    /// and all refs without touching the working tree, so it is far cheaper than
+    /// `git status`; hashing it to a u64 turns any ref movement (an external
+    /// commit, checkout, branch update, or fetch result) into a different value.
+    /// Returns null when the command cannot even run (a transient spawn failure),
+    /// which the caller treats as "unchanged". A repo with no refs yet (unborn
+    /// branch) makes `show-ref` exit non-zero with empty output; that is a real,
+    /// stable state, so it folds into the hash of an empty string rather than a
+    /// null, letting the baseline settle instead of retrying forever.
+    pub fn refsFingerprint(self: *Git) ?u64 {
+        var result = self.exec(&.{ "show-ref", "--head" }) catch return null;
+        defer result.deinit(self.allocator);
+        return std.hash.Wyhash.hash(0, result.stdout);
+    }
+
     const AheadBehind = struct {
         ahead: usize,
         behind: usize,

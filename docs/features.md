@@ -205,8 +205,11 @@ The animation itself is in the [README](../README.md).
   menu (all, or unstaged only), or discard everything (`D`, confirmed). Ignore
   or exclude a file (`i`): a menu adds it to the shared, committed `.gitignore`
   or the local, uncommitted `.git/info/exclude`. Copy a path (`y`).
-- Scoped periodic refresh for external changes, plus a full refresh when the
-  terminal regains focus.
+- Picks up history that moved outside ziggity (a commit, checkout, branch
+  update, or fetch in another terminal) within a couple of seconds, via a cheap
+  refs poll you can tune with `external_change_interval_secs`. A scoped periodic
+  refresh and a full refresh when the terminal regains focus keep the working
+  tree current too.
 
 ### Branches, tags & remotes
 

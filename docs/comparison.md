@@ -91,8 +91,11 @@ you scroll, so history is never capped and never loaded whole. Rendered
 previews are cached, so reselecting a commit is instant instead of a fresh
 `git show`. Background refreshes are scoped to what an operation could have
 changed, so a big repository does not get a full `git status` storm every few
-seconds. And everything slow runs off the interface thread, which is the next
-section.
+seconds. History that moves outside ziggity is still noticed quickly, by a
+separate cheap poll that only hashes the refs (`git show-ref`) and never scans
+the working tree, so reacting to a commit in another terminal costs nothing
+near a status scan. And everything slow runs off the interface thread, which is
+the next section.
 
 ## Nothing Blocks, Ever
 

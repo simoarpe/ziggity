@@ -48,6 +48,8 @@ const Event = union(enum) {
     refresh_tick,
     anim_tick,
     fetch_tick,
+    external_check_tick,
+    external_check_done,
     bg_fetch_done,
     commit_graph_done,
     command_done,
@@ -200,6 +202,32 @@ const WorktreeRun = struct {
 fn worktreeWorker(wr: *WorktreeRun) void {
     wr.result = app_mod.WorktreeSnapshot.load(async_allocator, wr.io, wr.environ, wr.root, wr.git_dir, wr.untracked) catch null;
     _ = wr.loop.tryPostEvent(.worktree_done) catch false;
+}
+
+/// The cheap external-change poll (config `external_change_interval_secs`).
+/// Hashes all refs off the UI loop with a throwaway Git bound to the page
+/// allocator — a read-only `git show-ref`, so no command log and nothing to
+/// deinit — and posts `.external_check_done`. `result` is null when the git call
+/// could not run (treated as "unchanged" by the apply step).
+const ExternalCheckRun = struct {
+    io: std.Io,
+    loop: *vaxis.Loop(Event),
+    root: []u8,
+    git_dir: []const u8,
+    environ: *std.process.Environ.Map,
+    result: ?u64 = null,
+};
+
+fn externalCheckWorker(er: *ExternalCheckRun) void {
+    var wgit = git_mod.Git{
+        .allocator = async_allocator,
+        .io = er.io,
+        .environ = er.environ,
+        .root = er.root,
+        .git_dir = @constCast(er.git_dir),
+    };
+    er.result = wgit.refsFingerprint();
+    _ = er.loop.tryPostEvent(.external_check_done) catch false;
 }
 
 /// The commit-graph viewer's `git log --graph` load, run off the UI loop so a
@@ -666,6 +694,10 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
         if (worktree_run.result) |*r| r.deinit(async_allocator);
     };
 
+    var ext_check_run: ExternalCheckRun = undefined;
+    var ext_check_future: ?std.Io.Future(void) = null;
+    defer if (ext_check_future) |*f| f.cancel(io); // just a u64, nothing to free
+
     var graph_run: GraphRun = undefined;
     var graph_future: ?std.Io.Future(void) = null;
     defer if (graph_future) |*f| {
@@ -768,6 +800,14 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                 app.bg_fetch_requested = true;
                 // Refresh PR status on the same cadence as the background fetch.
                 app.requestPrStatus();
+            },
+            .external_check_tick => app.requestExternalChangeCheck(),
+            .external_check_done => {
+                if (ext_check_future) |*f| {
+                    f.await(io);
+                    ext_check_future = null;
+                    app.applyRefsFingerprint(ext_check_run.result);
+                }
             },
             .bg_fetch_done => {
                 if (bg_fetch_future) |*f| {
@@ -1060,6 +1100,22 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             }
         }
 
+        // Start a queued external-change check (the cheap refs poll) off the loop.
+        if (ext_check_future == null and app.takeExternalChangeCheck()) {
+            ext_check_run = .{
+                .io = io,
+                .loop = &loop,
+                .root = app.git.root,
+                .git_dir = app.git.git_dir,
+                .environ = app.git.environ,
+                .result = null,
+            };
+            ext_check_future = io.concurrent(externalCheckWorker, .{&ext_check_run}) catch blk: {
+                app.applyRefsFingerprint(null); // clears the in-flight guard
+                break :blk null;
+            };
+        }
+
         // Start a queued commit-graph load (ctrl+l) off the loop.
         if (graph_future == null) {
             if (commitgraph_mod.takeLoad(app)) |req| {
@@ -1345,6 +1401,10 @@ fn refreshTickerRun(state: *RefreshTicker) void {
     // than a full interval later.
     const fetch_interval_ms: u64 = @as(u64, state.app.config.fetch_interval_secs) * 1000;
     var fetch_ms: u64 = if (fetch_interval_ms > 3000) fetch_interval_ms - 3000 else 0;
+    // Cheap external-change poll cadence (config `external_change_interval_secs`,
+    // 0 = off). Much tighter than the working-tree refresh, but only hashes refs.
+    const ext_interval_ms: u64 = @as(u64, state.app.config.external_change_interval_secs) * 1000;
+    var ext_ms: u64 = 0;
     var idle_ms: u64 = 0;
     while (!state.stop.load(.acquire)) {
         // Always sleep the short spinner tick so the ticker re-checks the
@@ -1386,6 +1446,14 @@ fn refreshTickerRun(state: *RefreshTicker) void {
                 if (fetch_ms >= fetch_interval_ms) {
                     fetch_ms = 0;
                     _ = state.loop.tryPostEvent(.fetch_tick) catch false;
+                }
+            }
+            // The cheap external-change poll runs on its own tighter cadence.
+            if (ext_interval_ms > 0) {
+                ext_ms += spinner_tick_ms;
+                if (ext_ms >= ext_interval_ms) {
+                    ext_ms = 0;
+                    _ = state.loop.tryPostEvent(.external_check_tick) catch false;
                 }
             }
         }

@@ -382,6 +382,14 @@ pub const Config = struct {
     /// silently if the remote needs credentials (it never prompts). `0` disables
     /// the background fetch entirely.
     fetch_interval_secs: u16 = 60,
+    /// Seconds between cheap external-change checks. A fingerprint of all refs
+    /// (via `git show-ref`, which does not scan the working tree) is polled on
+    /// this tighter cadence, and a full refresh fires only when it changes, so an
+    /// external commit, checkout, branch update, or fetch result shows up in the
+    /// Branches and Commits panels within a couple of seconds instead of waiting
+    /// out `refresh_interval_secs`. `0` disables the poll (history still refreshes
+    /// on the slower working-tree cadence, after operations, and on focus).
+    external_change_interval_secs: u16 = 2,
     /// Local Branches panel ordering: `date` (default), `recency`, or `alphabetical`.
     branch_sort_order: model.BranchSortOrder = .date,
     /// Files panel ordering: `name` (default, by path — a file keeps its place as
@@ -491,6 +499,10 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "fetch_interval_secs")) {
             self.fetch_interval_secs = std.fmt.parseInt(u16, value, 10) catch self.fetch_interval_secs;
+            return;
+        }
+        if (std.mem.eql(u8, key, "external_change_interval_secs")) {
+            self.external_change_interval_secs = std.fmt.parseInt(u16, value, 10) catch self.external_change_interval_secs;
             return;
         }
         if (std.mem.eql(u8, key, "highlight_conventional_commits")) {

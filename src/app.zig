@@ -2934,6 +2934,20 @@ pub const App = struct {
     worktree_refresh_requested: bool = false,
     worktree_refresh_active: bool = false,
     refresh_generation: u64 = 0,
+    // Cheap external-change detection poll (config `external_change_interval_secs`,
+    // default 2s, 0 = off). The working-tree refresh above only reloads the
+    // worktree, and at a relaxed cadence, so an external commit / checkout /
+    // branch update / fetch result in another terminal can take a full
+    // `refresh_interval_secs` to show in the Branches and Commits panels. This
+    // poll hashes all refs (via `git show-ref`, which does not scan the working
+    // tree, so it is far cheaper than `git status`) on a tighter cadence and
+    // fires a full refresh only when the hash changes. `..._requested`/`..._active`
+    // mirror the worktree worker's queue/in-flight guards. `last_refs_fingerprint`
+    // is the baseline; null means "no baseline yet" (established silently by the
+    // next poll, so the first poll and any re-baseline never trigger a refresh).
+    external_check_requested: bool = false,
+    external_check_active: bool = false,
+    last_refs_fingerprint: ?u64 = null,
     /// True from startup until the first (async) repo load lands; panels show a
     /// "Loading…" state and mutating input is gated meanwhile.
     initial_load_pending: bool = false,
@@ -3335,6 +3349,11 @@ pub const App = struct {
             async_scopes.remove(.status);
         }
         if (async_scopes.count() > 0) self.pending_scopes.setUnion(async_scopes);
+        // When this refresh reloads history (branches/commits), the refs state
+        // is about to be current, so drop the external-change baseline: the next
+        // poll re-establishes it silently instead of seeing this refresh's own
+        // ref movement as an external change and firing again.
+        if (scopes.contains(.branches) or scopes.contains(.commits)) self.last_refs_fingerprint = null;
     }
 
     /// TUI loop hook: claim the queued scoped-load views (if any) to run on a
@@ -3529,6 +3548,45 @@ pub const App = struct {
         self.worktree_refresh_requested = false;
         self.worktree_refresh_active = true;
         return self.refresh_generation;
+    }
+
+    /// Queue a cheap external-change check (the refs-fingerprint poll) for the
+    /// TUI loop to run off-thread. Single in-flight, like the worktree refresh.
+    pub fn requestExternalChangeCheck(self: *App) void {
+        self.external_check_requested = true;
+    }
+
+    /// TUI loop hook: claim a queued external-change check. Null (nothing to do)
+    /// when none is queued, one is already running, or a foreground op is in
+    /// flight (the same pause that gates the worktree refresh — an op changes
+    /// refs itself and finishes with its own refresh, so polling during it would
+    /// only detect the op's own work).
+    pub fn takeExternalChangeCheck(self: *App) bool {
+        if (!self.external_check_requested) return false;
+        if (self.external_check_active) return false;
+        if (self.backgroundRefreshPaused()) return false;
+        self.external_check_requested = false;
+        self.external_check_active = true;
+        return true;
+    }
+
+    /// TUI loop hook: apply a finished refs-fingerprint poll on the UI thread.
+    /// `fp` is null when the cheap git call could not run (transient — skip,
+    /// keeping the baseline so the next tick retries). The first successful poll
+    /// (and any poll after `refreshViews` cleared the baseline) only records the
+    /// baseline. A later poll whose fingerprint differs means refs moved outside
+    /// Ziggity, so do a full refresh; that refresh clears the baseline again (see
+    /// `refreshViews`), so this never fires repeatedly while the refresh is in
+    /// flight, nor redundantly right after Ziggity's own history-changing op.
+    pub fn applyRefsFingerprint(self: *App, fp: ?u64) void {
+        self.external_check_active = false;
+        const current = fp orelse return;
+        const baseline = self.last_refs_fingerprint orelse {
+            self.last_refs_fingerprint = current;
+            return;
+        };
+        self.last_refs_fingerprint = current;
+        if (current != baseline) self.refreshViews(Refresh.all);
     }
 
     /// TUI loop hook: apply a finished background worktree snapshot on the UI
@@ -13806,6 +13864,55 @@ test "background worktree refresh is paused while an operation runs" {
     app.async_active = false;
     try std.testing.expect(app.takeWorktreeRefresh() != null);
     try std.testing.expect(app.worktree_refresh_active);
+}
+
+test "external-change poll baselines first, then a changed fingerprint refreshes" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    // Paused while an operation is in flight — same gate as the worktree refresh
+    // (an op changes refs itself and finishes with its own refresh).
+    app.async_active = true;
+    app.requestExternalChangeCheck();
+    try std.testing.expect(!app.takeExternalChangeCheck());
+    app.async_active = false;
+
+    // Claimed once the op clears; single in-flight.
+    try std.testing.expect(app.takeExternalChangeCheck());
+    try std.testing.expect(app.external_check_active);
+    try std.testing.expect(!app.takeExternalChangeCheck()); // already running
+
+    // The first successful poll only records the baseline — no refresh.
+    app.applyRefsFingerprint(123);
+    try std.testing.expect(!app.external_check_active);
+    try std.testing.expectEqual(@as(?u64, 123), app.last_refs_fingerprint);
+    try std.testing.expect(!app.worktree_refresh_requested);
+
+    // An unchanged fingerprint is a no-op.
+    app.requestExternalChangeCheck();
+    _ = app.takeExternalChangeCheck();
+    app.applyRefsFingerprint(123);
+    try std.testing.expect(!app.worktree_refresh_requested);
+    try std.testing.expectEqual(@as(?u64, 123), app.last_refs_fingerprint);
+
+    // A changed fingerprint fires a full refresh, which reloads history and so
+    // clears the baseline — the next poll re-establishes it silently rather than
+    // firing again.
+    app.requestExternalChangeCheck();
+    _ = app.takeExternalChangeCheck();
+    app.applyRefsFingerprint(456);
+    try std.testing.expect(app.worktree_refresh_requested);
+    try std.testing.expect(app.last_refs_fingerprint == null);
+
+    // A transient failure (null) keeps the baseline untouched and clears the guard.
+    app.requestExternalChangeCheck();
+    _ = app.takeExternalChangeCheck();
+    app.last_refs_fingerprint = 789;
+    app.applyRefsFingerprint(null);
+    try std.testing.expect(!app.external_check_active);
+    try std.testing.expectEqual(@as(?u64, 789), app.last_refs_fingerprint);
 }
 
 test "optimistic staging flips file state in the model immediately" {

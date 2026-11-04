@@ -115,6 +115,16 @@ refresh_interval_secs = 10
 # cached) it fails silently. Set to 0 to disable. Default 60.
 fetch_interval_secs = 60
 
+# Seconds between cheap external change checks. A fingerprint of every ref is
+# polled on this tighter cadence (via `git show-ref`, which does not scan the
+# working tree, so it is far lighter than git status), and a full refresh runs
+# only when it changes. This is what makes an external commit, checkout, branch
+# update, or fetch result in another terminal show up in the Branches and
+# Commits panels within a couple of seconds instead of waiting out
+# refresh_interval_secs. Set to 0 to disable the poll (history still refreshes
+# on the slower working tree cadence, after operations, and on focus). Default 2.
+external_change_interval_secs = 2
+
 # Side panel layout: the Status panel is a fixed height, the Files, Branches
 # and Commits lists share the rest equally, and Stash stays small unless it
 # is focused. Enable the accordion to grow the focused list panel.
