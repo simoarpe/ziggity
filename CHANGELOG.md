@@ -17,6 +17,11 @@ Releases before 0.55.0 are listed on the
 ## [Unreleased]
 
 ### Added
+- A `collapse_status` setting shrinks the Status panel to a single title bar,
+  like the other side panels, giving its rows to the Files, Branches, and
+  Commits lists. The collapsed bar still shows repo, branch, and ahead/behind,
+  and the panel expands back on its own during an operation, a merge, rebase, or
+  bisect, an active diffing base, or while it is focused. Default off.
 - The Branches and Commits panels now pick up history that moved outside
   ziggity (a commit, checkout, branch update, or fetch in another terminal)
   within a couple of seconds, instead of waiting for the slower working tree

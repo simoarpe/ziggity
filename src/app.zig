@@ -6978,6 +6978,20 @@ pub const App = struct {
         return self.config.expand_focused_side_panel or (self.screen_mode == .half and self.focus != .main);
     }
 
+    /// Whether the Status panel should render as a single title bar instead of
+    /// the full panel (config `collapse_status`). It is forced back to full size
+    /// whenever it carries something you should not miss: a running operation's
+    /// spinner, a merge/rebase/bisect state, an active diffing base, or when the
+    /// panel is focused (so pressing `1` always reveals it).
+    pub fn statusCollapsed(self: *const App) bool {
+        if (!self.config.collapse_status) return false;
+        if (self.focus == .status) return false;
+        if (self.foregroundBusy()) return false;
+        if (self.data.state != .clean or self.data.bisecting) return false;
+        if (self.diff_base != null) return false;
+        return true;
+    }
+
     /// Whether the `+`/`_` screen mode is actively shaping the layout (a side
     /// panel is focused and enlarged) — drives the footer badge.
     pub fn screenModeActive(self: *const App) bool {

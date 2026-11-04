@@ -421,6 +421,9 @@ The animation itself is in the [README](../README.md).
 - Panel sizing: `z` maximizes the Diff panel to full screen (`z` or `esc` to
   exit); `+` and `_` cycle the focused side panel through normal, half and full,
   with a `[half]`/`[full]` badge in the footer while it is enlarged. The
-  `expand_focused_side_panel` option grows the focused list panel by default.
+  `expand_focused_side_panel` option grows the focused list panel by default,
+  and `collapse_status` shrinks the Status panel to a single title bar (it
+  expands back on its own during an operation, a merge, rebase, or bisect, a
+  diffing base, or while focused).
 - Command log overlay (`@`), themeable colors, fully remappable keys, and
   user defined custom commands.

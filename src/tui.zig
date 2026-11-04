@@ -1497,12 +1497,16 @@ const SidePanelHeights = struct { status: u16, files: u16, branches: u16, commit
 /// stash panel is a small fixed height *unless it is focused*, in which case it
 /// joins the weighted group. With the accordion (`expand_focused_side_panel`),
 /// the focused list panel gets `expanded_weight` instead of 1, growing at the
-/// others' expense. The returned heights always sum to `body_h`.
-fn sidePanelHeights(body_h: u16, focused: model.Focus, accordion: bool, expanded_weight: u16, extra_status_rows: u16) SidePanelHeights {
+/// others' expense. With `collapse_status`, the status panel shrinks to a single
+/// title-bar row and its space flows to the lists. The returned heights always
+/// sum to `body_h`.
+fn sidePanelHeights(body_h: u16, focused: model.Focus, accordion: bool, expanded_weight: u16, extra_status_rows: u16, collapse_status: bool) SidePanelHeights {
     // The Status panel is normally up to 5 tall (3 content rows: repo, summary,
     // and one filter line). The Files, Branches and Commits panels can all be
     // filtered at once, so each active filter beyond the first gets its own row.
-    const status_h: u16 = @min(body_h, 5 + extra_status_rows);
+    // Collapsed (config `collapse_status`), it is a single title-bar row and its
+    // filter rows are dropped, so the space flows to the list panels below.
+    const status_h: u16 = if (collapse_status) 1 else @min(body_h, 5 + extra_status_rows);
     const stash_fixed: u16 = @min(body_h -| status_h, 3);
     const stash_focused = focused == .stash;
 
@@ -1675,6 +1679,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         app.accordionActive(),
         app.config.expanded_side_panel_weight,
         app.statusIndicatorRows() -| 1, // one indicator line fits the base height; the rest add a row each
+        app.statusCollapsed(),
     );
     // Full mode on a side panel gives that one panel the whole body; the others
     // collapse to nothing (their draw calls are height-guarded below).
@@ -1705,7 +1710,14 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     app.panel_rect_count = 6;
 
     if (!app.mainFullscreen()) {
-        if (status_h > 0) drawStatus(panel(root, 0, y, side_w, status_h, "[1] Status", app.focus == .status, null), app);
+        if (status_h > 0) {
+            // `fs` (side-panel fullscreen on Status) always wants the full panel,
+            // so the collapsed title bar only applies in the normal layout.
+            if (fs == null and app.statusCollapsed())
+                drawStatusTitleBar(root, 0, y, side_w, app.focus == .status, app)
+            else
+                drawStatus(panel(root, 0, y, side_w, status_h, "[1] Status", app.focus == .status, null), app);
+        }
         y += status_h;
         if (files_h > 0) {
             const files_tabs = [_][]const u8{ "Files", "Worktrees", "Submodules" };
@@ -3428,6 +3440,41 @@ fn drawScrollbarRange(win: vaxis.Window, col: u16, top: u16, track: usize, len: 
 /// Scrollbar on a bordered window's right edge, spanning its inner height.
 fn drawScrollbar(raw: vaxis.Window, len: usize, pos: usize, focused: bool) void {
     drawScrollbarRange(raw, raw.width - 1, 1, raw.height -| 2, len, pos, focused);
+}
+
+/// The collapsed Status panel (config `collapse_status`): a single title-bar row
+/// that keeps the identity line, `[1] Status  <repo> → <branch> <ahead/behind>`,
+/// drawn onto the border row like `tabbedPanel` does its tab strip. `App.
+/// statusCollapsed` only returns true when the repo is quiet, so the richer
+/// line-1/line-2 content (op spinner, state, diffing, filters) is never what we
+/// drop here.
+fn drawStatusTitleBar(root: vaxis.Window, x: u16, y: u16, w: u16, focused: bool, app: *const app_mod.App) void {
+    const frame = panelBorder(root, x, y, w, 1, focused, null);
+    if (w < 4) return;
+    const st = styles();
+    var col: u16 = 2;
+    col = drawTitleSpan(frame.raw, w, col, "[1] Status", if (focused) st.active_title else st.title);
+    col = drawTitleSpan(frame.raw, w, col, "  ", st.muted);
+    // Breadcrumb of parent repos when drilled into a worktree/submodule.
+    for (app.repo_stack.items) |parent| {
+        col = drawTitleSpan(frame.raw, w, col, std.fs.path.basename(parent), st.muted);
+        col = drawTitleSpan(frame.raw, w, col, " / ", st.muted);
+    }
+    col = drawTitleSpan(frame.raw, w, col, std.fs.path.basename(app.git.root), st.normal);
+    col = drawTitleSpan(frame.raw, w, col, " ", st.muted);
+    col = drawTitleSpan(frame.raw, w, col, glyph_to_branch, st.muted);
+    col = drawTitleSpan(frame.raw, w, col, " ", st.muted);
+    col = drawTitleSpan(frame.raw, w, col, app.data.current_branch, if (focused) st.active_title else st.title);
+    // Ahead/behind (or "(upstream gone)"), only if a few columns remain so the
+    // glyphs never collide with the border corner.
+    if (col + 12 < w) {
+        col = drawTitleSpan(frame.raw, w, col, " ", st.muted);
+        if (app.data.upstream_gone) {
+            _ = drawTitleSpan(frame.raw, w, col, "(upstream gone)", withFg(st.muted, ui_theme.unstaged));
+        } else {
+            _ = drawBranchStatus(frame.raw, 0, col, st.muted, app.data.upstream != null, app.data.ahead orelse 0, app.data.behind orelse 0);
+        }
+    }
 }
 
 fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
@@ -6047,7 +6094,7 @@ test "side panel heights match the weighting" {
 
     // Default (no accordion): status fixed, stash a small fixed size when not
     // focused, files/branches/commits share the rest equally. Fills body_h.
-    const h = sidePanelHeights(body_h, .files, false, 2, 0);
+    const h = sidePanelHeights(body_h, .files, false, 2, 0, false);
     try std.testing.expectEqual(@as(u16, 5), h.status);
     try std.testing.expectEqual(@as(u16, 3), h.stash);
     try std.testing.expectEqual(body_h, h.status + h.files + h.branches + h.commits + h.stash);
@@ -6055,19 +6102,26 @@ test "side panel heights match the weighting" {
     try std.testing.expect(lists_spread <= 1);
 
     // Stash focused: it joins the weighted group and grows past the fixed 3.
-    const hs = sidePanelHeights(body_h, .stash, false, 2, 0);
+    const hs = sidePanelHeights(body_h, .stash, false, 2, 0, false);
     try std.testing.expect(hs.stash > 3);
     try std.testing.expectEqual(body_h, hs.status + hs.files + hs.branches + hs.commits + hs.stash);
 
     // Accordion: the focused list panel is larger than the others.
-    const ha = sidePanelHeights(body_h, .commits, true, 2, 0);
+    const ha = sidePanelHeights(body_h, .commits, true, 2, 0, false);
     try std.testing.expect(ha.commits > ha.files);
     try std.testing.expectEqual(body_h, ha.status + ha.files + ha.branches + ha.commits + ha.stash);
 
     // Each stacked filter beyond the first grows the Status panel by a row (so a
     // files+branches+commits filter shows all three lines).
-    try std.testing.expectEqual(@as(u16, 6), sidePanelHeights(body_h, .files, false, 2, 1).status);
-    try std.testing.expectEqual(@as(u16, 7), sidePanelHeights(body_h, .files, false, 2, 2).status);
+    try std.testing.expectEqual(@as(u16, 6), sidePanelHeights(body_h, .files, false, 2, 1, false).status);
+    try std.testing.expectEqual(@as(u16, 7), sidePanelHeights(body_h, .files, false, 2, 2, false).status);
+
+    // Collapsed: the Status panel is a single title-bar row whatever the filter
+    // count, and the reclaimed rows go to the list panels. Still fills body_h.
+    const hc = sidePanelHeights(body_h, .files, false, 2, 2, true);
+    try std.testing.expectEqual(@as(u16, 1), hc.status);
+    try std.testing.expectEqual(body_h, hc.status + hc.files + hc.branches + hc.commits + hc.stash);
+    try std.testing.expect(hc.files > h.files); // more room than the uncollapsed layout
 }
 
 test "a high accordion weight keeps unfocused panels at the framed minimum" {
@@ -6076,7 +6130,7 @@ test "a high accordion weight keeps unfocused panels at the framed minimum" {
     // A heavy weight makes the focused panel dominate, but every unfocused list
     // panel stays at least 3 rows tall so the renderer always draws its frame
     // and title (no orphaned, border-less content). The column still fills.
-    const h = sidePanelHeights(body_h, .branches, true, 15, 0);
+    const h = sidePanelHeights(body_h, .branches, true, 15, 0, false);
     try std.testing.expect(h.files >= 3);
     try std.testing.expect(h.commits >= 3);
     try std.testing.expect(h.branches > h.files); // focused still dominates
@@ -6086,7 +6140,7 @@ test "a high accordion weight keeps unfocused panels at the framed minimum" {
     // On a column too short to frame them all, the floor is skipped rather than
     // forced (there is genuinely no room), and the heights still sum exactly.
     const tiny: u16 = 16; // status 5 + stash 3 leaves 8 for three list panels
-    const ht = sidePanelHeights(tiny, .branches, true, 15, 0);
+    const ht = sidePanelHeights(tiny, .branches, true, 15, 0, false);
     try std.testing.expectEqual(tiny, ht.status + ht.files + ht.branches + ht.commits + ht.stash);
 }
 
@@ -6097,7 +6151,7 @@ test "the accordion squashes unfocused panels on a short column" {
 
     // Very short (< 21): unfocused list panels collapse to a title-only 1 row,
     // the focused one takes everything else and clearly dominates.
-    const short = sidePanelHeights(20, .branches, true, 10, 0);
+    const short = sidePanelHeights(20, .branches, true, 10, 0, false);
     try std.testing.expectEqual(@as(u16, 1), short.files);
     try std.testing.expectEqual(@as(u16, 1), short.commits);
     try std.testing.expectEqual(@as(u16, 1), short.stash);
@@ -6106,7 +6160,7 @@ test "the accordion squashes unfocused panels on a short column" {
 
     // Moderately short (21..27): unfocused list panels keep a framed 3 rows, the
     // focused one still takes the rest.
-    const med = sidePanelHeights(24, .branches, true, 10, 0);
+    const med = sidePanelHeights(24, .branches, true, 10, 0, false);
     try std.testing.expectEqual(@as(u16, 3), med.files);
     try std.testing.expectEqual(@as(u16, 3), med.commits);
     try std.testing.expectEqual(@as(u16, 3), med.stash);
@@ -6115,7 +6169,7 @@ test "the accordion squashes unfocused panels on a short column" {
 
     // The squash applies regardless of the accordion setting, so the focused
     // panel stays usable on a short terminal even without it.
-    const no_acc = sidePanelHeights(20, .branches, false, 2, 0);
+    const no_acc = sidePanelHeights(20, .branches, false, 2, 0, false);
     try std.testing.expectEqual(@as(u16, 1), no_acc.files);
     try std.testing.expectEqual(@as(u16, 1), no_acc.commits);
     try std.testing.expect(no_acc.branches >= 8); // focused still usable

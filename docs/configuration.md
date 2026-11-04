@@ -137,6 +137,13 @@ expand_focused_side_panel = false  # focused list panel expands, others shrink
 # and the others collapse to a single title bar (regardless of this setting).
 # Make the terminal taller to get the weighted layout back.
 expanded_side_panel_weight = 2
+# Collapse the Status panel to a single title bar, like the other side panels,
+# so its rows go to the Files, Branches, and Commits lists. The collapsed bar
+# still shows repo, branch, and ahead/behind. The panel springs back to full
+# size on its own whenever it has something you should not miss: a running
+# operation, a merge, rebase, or bisect in progress, an active diffing base, or
+# while you have it focused. Default off.
+collapse_status = false
 staging_split = auto               # staging layout: off | on | auto (default)
 
 # Open the file lists (the Files panel and a commit's or branch's changed

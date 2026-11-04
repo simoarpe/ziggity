@@ -365,6 +365,13 @@ pub const Config = struct {
     /// `expanded_side_panel_weight` while the others shrink. Default off.
     expand_focused_side_panel: bool = false,
     expanded_side_panel_weight: u8 = 2,
+    /// Collapse the Status panel to a single title bar, like the other side
+    /// panels, so its rows go to the Files/Branches/Commits lists. The collapsed
+    /// bar still shows repo, branch, and ahead/behind, and the panel springs back
+    /// to full size on its own whenever it carries something you should not miss:
+    /// a running operation, a merge/rebase/bisect state, an active diffing base,
+    /// or when you focus it. Default off.
+    collapse_status: bool = false,
     /// Default staging-view layout: `off`, `on`, or `auto` (the default — split
     /// only when a file has both staged and unstaged changes). `\` toggles the
     /// view at runtime; see README for the full remember-vs-reset behavior.
@@ -535,6 +542,10 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "expand_focused_side_panel")) {
             if (parseBool(value)) |on| self.expand_focused_side_panel = on;
+            return;
+        }
+        if (std.mem.eql(u8, key, "collapse_status")) {
+            if (parseBool(value)) |on| self.collapse_status = on;
             return;
         }
         if (std.mem.eql(u8, key, "show_file_tree")) {
