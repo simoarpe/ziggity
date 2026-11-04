@@ -16,6 +16,8 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+## [0.56.0] - 2026-11-04
+
 ### Added
 - A `collapse_status` setting shrinks the Status panel to a single title bar,
   like the other side panels, giving its rows to the Files, Branches, and
