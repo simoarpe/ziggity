@@ -1981,15 +1981,22 @@ fn drawCommitGraphPopup(root: vaxis.Window, app: *app_mod.App) void {
     const py0: u16 = (root.height - h) / 2;
     app.beginDialogGrid(px0 + 1, py0 + 1, footer_row);
 
-    var it = std.mem.splitScalar(u8, graph, '\n');
-    var pit = std.mem.splitScalar(u8, plain, '\n');
-    var idx: usize = 0;
+    // Jump to the first visible row via the cached line index for both the
+    // colored graph and the plain text, instead of re-splitting from the top and
+    // skipping `commit_graph_scroll` rows every frame (O(scroll)).
+    const goffs = app_mod.lineOffsets(app.allocator, graph);
+    const poffs = app_mod.lineOffsets(app.allocator, plain);
     var row: u16 = 0;
     var head_buf: [1024]u8 = undefined;
-    while (it.next()) |line| : (idx += 1) {
-        const pline = pit.next() orelse "";
-        if (idx < app.commit_graph_scroll) continue;
+    var idx: usize = app.commit_graph_scroll;
+    while (idx < goffs.len) : (idx += 1) {
         if (row >= footer_row) break;
+        const gstart = goffs[idx];
+        const line = graph[gstart .. std.mem.indexOfScalarPos(u8, graph, gstart, '\n') orelse graph.len];
+        const pline = if (idx < poffs.len)
+            plain[poffs[idx] .. std.mem.indexOfScalarPos(u8, plain, poffs[idx], '\n') orelse plain.len]
+        else
+            "";
         const selected = idx == app.commit_graph_sel;
         var base = st.normal;
         if (selected) {
@@ -4828,6 +4835,25 @@ fn drawStagingPane(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
         return;
     }
 
+    // Jump to the first visible line via the cached line index (O(height))
+    // rather than re-splitting the whole diff from the top every frame.
+    const offs = app_mod.lineOffsets(app.allocator, text);
+    if (offs.len > 0) {
+        var row: u16 = 0;
+        while (row < win.height) : (row += 1) {
+            const abs_line = scroll + row;
+            if (abs_line >= offs.len) break;
+            const start = offs[abs_line];
+            const end = std.mem.indexOfScalarPos(u8, text, start, '\n') orelse text.len;
+            const line = text[start..end];
+            const base = baseOf(app, line, abs_line, active, hl_start, hl_end);
+            if (std.meta.activeTag(base.bg) != .default) fillRow(win, row, base);
+            const em = emphFor(emph_lines, abs_line);
+            const sg = segSel(selColsFor(sel, abs_line), h_off, h_off +| win.width);
+            printAnsiEmph(win, row, line, base, sg.lo, sg.hi, h_off, em.spans, wordBg(em), std.math.maxInt(u16), false);
+        }
+        return;
+    }
     var lines = std.mem.splitScalar(u8, text, '\n');
     var skipped: usize = 0;
     while (skipped < scroll) : (skipped += 1) {

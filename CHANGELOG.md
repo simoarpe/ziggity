@@ -24,7 +24,13 @@ Releases before 0.55.0 are listed on the
   cached by content, so a frame costs the same at the bottom of a huge diff as at
   the top, and a flood of scroll events no longer saturates the event loop (which
   was also stalling the file-list refresh). Measured on a 1.7 MB diff, draining a
-  burst of scroll events dropped from about 1.6 s to about 0.5 s.
+  burst of scroll events dropped from about 1.6 s to about 0.5 s. The same cached
+  index speeds up scrolling in the staging view and the commit-graph viewer.
+- The Diff panel keeps its scroll position when you focus it to read and then
+  move back to the list. It used to snap to the top every time focus crossed in
+  or out of the panel, even though the same diff was still shown; it now resets
+  only when the shown content actually changes (a different file, commit, or
+  branch).
 - Leaving the `W` diffing view no longer drops the Diff panel at a stale scroll
   position. After scrolling a long ref diff, exiting (or entering) diffing now
   resets the panel to the top, instead of opening the next preview clamped to a

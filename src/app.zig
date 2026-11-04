@@ -7055,23 +7055,29 @@ pub const App = struct {
         // panel keeps its own context); only <esc> backs out of them. Staging
         // is modal, so it is closed.
         if (self.staging_active) staging_mod.clearStaging(self);
+        const old_content = self.contentFocus();
         self.focus = focus;
-        self.resetMainView();
+        // Reset the diff scroll only when the shown content actually changes.
+        // Jumping to a panel that already drives the main view (so the same diff
+        // stays on screen) keeps your scroll position instead of snapping to top.
+        if (self.contentFocus() != old_content) self.resetMainView();
         try self.updatePreview();
     }
 
     /// Descend into the main panel to inspect the selected item, remembering
     /// the side panel we came from so <esc>/<h> can return there.
     pub fn enterMain(self: *App) !void {
+        // Focusing the diff panel shows the same item (`contentFocus` maps
+        // `.main` back to `main_origin`), so the scroll is kept: you can tab in
+        // to read on from where a wheel/PageDown scroll left off, not the top.
         if (self.focus.isSidePanel()) self.main_origin = self.focus;
         self.focus = .main;
-        self.resetMainView();
         try self.updatePreview();
     }
 
     fn leaveMain(self: *App) !void {
+        // Same content on the way back out, so keep the scroll position too.
         self.focus = self.main_origin;
-        self.resetMainView();
         try self.updatePreview();
     }
 
@@ -14764,6 +14770,32 @@ test "entering and exiting diffing resets the main-panel scroll to the top" {
     app.main_scroll = 120;
     try app.handleKey(esc); // nothing to back out of, so this exits diffing
     try std.testing.expect(app.diff_base == null);
+    try std.testing.expectEqual(@as(usize, 0), app.main_scroll);
+}
+
+test "focusing and leaving the diff panel keeps the scroll; a panel switch resets it" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.focus = .commits;
+    app.main_origin = .commits;
+    app.main_scroll = 40;
+
+    // Tab into the diff panel: the same item is shown, so the scroll is kept.
+    try app.enterMain();
+    try std.testing.expectEqual(model.Focus.main, app.focus);
+    try std.testing.expectEqual(@as(usize, 40), app.main_scroll);
+
+    // Tab back out: still the same content, scroll still kept.
+    try app.leaveMain();
+    try std.testing.expectEqual(model.Focus.commits, app.focus);
+    try std.testing.expectEqual(@as(usize, 40), app.main_scroll);
+
+    // Jumping to a different panel changes what the main view shows, so it resets.
+    try app.setFocus(.files);
+    try std.testing.expectEqual(model.Focus.files, app.focus);
     try std.testing.expectEqual(@as(usize, 0), app.main_scroll);
 }
 
