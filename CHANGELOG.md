@@ -16,6 +16,27 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+### Fixed
+- Scrolling a long diff (for example a single generated file with tens of
+  thousands of lines) stays smooth instead of becoming clunky. The Diff panel
+  used to rescan the whole diff every frame, both to find the first visible line
+  and to measure the widest line for the horizontal-scroll clamp. Both are now
+  cached by content, so a frame costs the same at the bottom of a huge diff as at
+  the top, and a flood of scroll events no longer saturates the event loop (which
+  was also stalling the file-list refresh). Measured on a 1.7 MB diff, draining a
+  burst of scroll events dropped from about 1.6 s to about 0.5 s.
+- Leaving the `W` diffing view no longer drops the Diff panel at a stale scroll
+  position. After scrolling a long ref diff, exiting (or entering) diffing now
+  resets the panel to the top, instead of opening the next preview clamped to a
+  seemingly random offset.
+- A slow or very large diff preview no longer freezes the file list. The
+  background working-tree refresh used to pause while any preview was loading, so
+  a heavy preview (for example diffing a branch against another ref in a large
+  repository) could stall it and stop the Files panel from picking up changes.
+  The refresh now runs independently of previews. The branch, commit-range, and
+  directory diffs also load a bounded summary first and skip the full patch when
+  it is enormous, the guard the single-commit preview already used.
+
 ## [0.56.0] - 2026-11-04
 
 ### Added

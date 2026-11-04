@@ -2111,6 +2111,113 @@ pub fn deinitWrapCache() void {
     }
 }
 
+// ---- Line-offset index cache (unwrapped diff panels) ---------------------
+//
+// The byte offset where each source line starts, computed once per diff text and
+// reused across frames. Without it the unwrapped renderer re-split the whole diff
+// from the top every frame and skipped `main_scroll` lines, which is O(scroll)
+// per frame — scrolling to the bottom of a large diff then cost a full scan each
+// frame and made the panel clunky (and backed up the event loop). With the index
+// the render jumps straight to the visible window in O(height), and the line
+// count is a cached `offs.len` instead of a fresh scan. Freed at shutdown.
+
+const LineIndexEntry = struct {
+    addr: usize = 0,
+    len: usize = 0,
+    used: u64 = 0,
+    gpa: ?std.mem.Allocator = null,
+    offs: []usize = &.{},
+};
+var line_index_cache: [3]LineIndexEntry = .{ .{}, .{}, .{} };
+var line_index_clock: u64 = 0;
+var line_index_empty: [0]usize = .{};
+
+/// Byte offsets of each source line's start in `text`, so `offs[i]` begins line
+/// `i` and `offs.len` is the line count (matching `diffLineCount`: a trailing
+/// newline does not add an empty final line). Computed once and cached by text
+/// identity. Best-effort: an allocation failure yields an empty slice, and the
+/// caller falls back to a from-the-top scan.
+pub fn lineOffsets(gpa: std.mem.Allocator, text: []const u8) []const usize {
+    if (text.len == 0) return line_index_empty[0..];
+    const addr = @intFromPtr(text.ptr);
+    line_index_clock +%= 1;
+    for (&line_index_cache) |*e| {
+        if (e.gpa != null and e.addr == addr and e.len == text.len) {
+            e.used = line_index_clock;
+            return e.offs;
+        }
+    }
+    var victim: *LineIndexEntry = &line_index_cache[0];
+    for (&line_index_cache) |*e| {
+        if (e.gpa == null) {
+            victim = e;
+            break;
+        }
+        if (e.used < victim.used) victim = e;
+    }
+    const offs = buildLineOffsets(gpa, text) catch line_index_empty[0..];
+    if (offs.len == 0) return line_index_empty[0..]; // don't cache a failed build
+    if (victim.gpa) |g| g.free(victim.offs);
+    victim.* = .{ .addr = addr, .len = text.len, .used = line_index_clock, .gpa = gpa, .offs = offs };
+    return offs;
+}
+
+fn buildLineOffsets(gpa: std.mem.Allocator, text: []const u8) ![]usize {
+    var list: std.ArrayList(usize) = .empty;
+    errdefer list.deinit(gpa);
+    try list.append(gpa, 0); // line 0 starts at byte 0
+    var i: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, text, i, '\n')) |nl| {
+        if (nl + 1 >= text.len) break; // a trailing newline adds no further line
+        try list.append(gpa, nl + 1);
+        i = nl + 1;
+    }
+    return list.toOwnedSlice(gpa);
+}
+
+/// Release the line-offset cache (module-level). Called from `tui.run` teardown.
+pub fn deinitLineIndexCache() void {
+    for (&line_index_cache) |*e| {
+        if (e.gpa) |g| g.free(e.offs);
+        e.* = .{};
+    }
+}
+
+// ---- Max-visible-width cache (diff panels) -------------------------------
+//
+// `diffMaxVisibleWidth` scans the whole diff to find its widest line, and the
+// render clamps the horizontal scroll against it every frame. Scanning 1-2 MB
+// per frame made scrolling a large diff clunky, so the result is cached by text
+// identity (no allocation, just a u16 per entry — no teardown needed).
+
+const WidthCacheEntry = struct { addr: usize = 0, len: usize = 0, used: u64 = 0, width: u16 = 0, valid: bool = false };
+var width_cache: [4]WidthCacheEntry = .{ .{}, .{}, .{}, .{} };
+var width_clock: u64 = 0;
+
+/// `diffMaxVisibleWidth(text)`, computed once per text and cached by identity.
+pub fn cachedMaxVisibleWidth(text: []const u8) u16 {
+    if (text.len == 0) return 0;
+    const addr = @intFromPtr(text.ptr);
+    width_clock +%= 1;
+    for (&width_cache) |*e| {
+        if (e.valid and e.addr == addr and e.len == text.len) {
+            e.used = width_clock;
+            return e.width;
+        }
+    }
+    var victim: *WidthCacheEntry = &width_cache[0];
+    for (&width_cache) |*e| {
+        if (!e.valid) {
+            victim = e;
+            break;
+        }
+        if (e.used < victim.used) victim = e;
+    }
+    const w = diffMaxVisibleWidth(text);
+    victim.* = .{ .addr = addr, .len = text.len, .used = width_clock, .width = w, .valid = true };
+    return w;
+}
+
 /// Remove `len` bytes at `pos` from `buf`, shifting the tail down. Never grows,
 /// so no allocation is needed.
 fn deleteRange(buf: *std.ArrayList(u8), pos: usize, len: usize) void {
@@ -4049,6 +4156,10 @@ pub const App = struct {
                     // the whole mode on the first press.
                     diffmode_mod.clearDiffBase(self);
                     try self.setMessage("exited diffing mode", .{});
+                    // The main panel now shows the selection's own preview, not
+                    // the ref diff you were scrolling; reset it to the top-left so
+                    // it does not open at a stale, clamped scroll offset.
+                    self.resetMainView();
                     try self.updatePreview();
                 } else {
                     // Top level: nothing to back out of. Esc does not quit.
@@ -5206,13 +5317,18 @@ pub const App = struct {
     }
 
     pub fn handleRefreshTick(self: *App) !void {
-        // While a foreground op runs — or a preview is still loading off-thread
-        // — the ticker fires fast to animate the spinner; advance it and skip the
-        // (paused) background refresh.
+        // Advance the spinner whenever something is working off-thread (the ticker
+        // fires fast then so the spinner animates smoothly).
         if (self.foregroundBusy() or self.preview_loading or self.commitAiGenerating() or self.pr_gen_active) {
             self.spinner_frame +%= 1;
-            return;
         }
+        // Pause the background working-tree refresh only for work that must not
+        // overlap a `git status` read: a foreground git op (it finishes with its
+        // own refresh) and the AI generators. A loading preview must NOT pause it:
+        // the preview runs on its own worker, and a slow or stuck one (a huge ref
+        // diff, say) would otherwise freeze the file list behind it. The worktree
+        // snapshot is a separate worker, so it stays current regardless.
+        if (self.foregroundBusy() or self.commitAiGenerating() or self.pr_gen_active) return;
         if (self.mode != .normal) return;
         if (!self.terminal_focused) return;
         // The actual git work runs off the loop; this only queues it. The staging
@@ -7179,7 +7295,13 @@ pub const App = struct {
     /// the scroll clamp.
     pub fn mainVisualRows(self: *const App) usize {
         const text = self.activeMainText();
-        if (!self.wrap_diff) return diffLineCount(text);
+        if (!self.wrap_diff) {
+            // Cached line count (O(1) after the first build) instead of a fresh
+            // O(n) scan every frame; falls back to the scan if the index could
+            // not be built.
+            const offs = lineOffsets(self.allocator, text);
+            return if (offs.len > 0 or text.len == 0) offs.len else diffLineCount(text);
+        }
         const width: u16 = if (self.main_view_width == 0) 80 else self.main_view_width;
         return wrapRowsFor(self.allocator, text, width).len;
     }
@@ -7242,7 +7364,9 @@ pub const App = struct {
 
     /// The widest line of the main panel's current content, in visible cells.
     fn mainContentWidth(self: *const App) u16 {
-        return diffMaxVisibleWidth(if (self.staging_active) self.staging_diff else self.diff);
+        // Cached: the clamp in the render loop calls this every frame, and a fresh
+        // full-text scan there made scrolling a large diff clunky.
+        return cachedMaxVisibleWidth(if (self.staging_active) self.staging_diff else self.diff);
     }
 
     /// Largest horizontal offset that still keeps the widest line's end at (or
@@ -10486,8 +10610,16 @@ pub const App = struct {
                 empty_msg = "No changes across the selected commits.\n";
                 const from_parent = try std.fmt.allocPrint(page_alloc, "{s}^", .{r.from});
                 defer page_alloc.free(from_parent);
+                // Bounded stat + skip-if-huge patch, like `.commit` and
+                // `.diff_refs`: a range spanning many commits can be enormous, and
+                // a single unbounded section would stall the preview worker.
                 try sections.append(page_alloc, .{
-                    .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--color=always", "--stat", "--patch", ctx_arg, from_parent, r.to }),
+                    .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--color=always", "--stat", from_parent, r.to }),
+                    .marks_huge_at = 256 * 1024,
+                });
+                try sections.append(page_alloc, .{
+                    .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--color=always", "--patch", ctx_arg, from_parent, r.to }),
+                    .skip_if_huge = true,
                 });
             },
             .commit_file => |cf| {
@@ -10504,9 +10636,17 @@ pub const App = struct {
             .commit_dir => |cd| {
                 empty_msg = "No changes under this directory.\n";
                 // See `.commit_file`: `-m --first-parent` keeps a merge commit's
-                // per-directory preview consistent with its file list.
+                // per-directory preview consistent with its file list. Bounded
+                // stat + skip-if-huge patch like the other diff previews: a
+                // directory can hold a large generated/vendored subtree whose
+                // patch would stall the worker and freeze the refresh behind it.
                 try sections.append(page_alloc, .{
-                    .argv = try dupArgv(&.{ "show", "-m", "--first-parent", cd.hash, "--no-ext-diff", "--color=always", "--stat", "--patch", ctx_arg, "--format=", "--", cd.path }),
+                    .argv = try dupArgv(&.{ "show", "-m", "--first-parent", cd.hash, "--no-ext-diff", "--color=always", "--stat", "--format=", "--", cd.path }),
+                    .marks_huge_at = 256 * 1024,
+                });
+                try sections.append(page_alloc, .{
+                    .argv = try dupArgv(&.{ "show", "-m", "--first-parent", cd.hash, "--no-ext-diff", "--color=always", "--patch", ctx_arg, "--format=", "--", cd.path }),
+                    .skip_if_huge = true,
                 });
             },
             .stash => |s| {
@@ -10519,18 +10659,35 @@ pub const App = struct {
             },
             .diff_refs => |dr| {
                 empty_msg = "No differences.\n";
+                // Two sections, like `.commit` above: a bounded `--stat` that
+                // always loads, then the patch, skipped when the stat shows the
+                // diff is enormous. A whole-branch diff in a large repo (a feature
+                // branch against master in a big monorepo) can be hundreds of MB;
+                // a single `--stat --patch` section would blow past the preview
+                // byte cap and STALL the worker, which leaves `preview_loading`
+                // stuck and freezes the background working-tree refresh behind it.
+                // Three-dot `base...target` diffs from the merge-base (only the
+                // target's own changes since it diverged, the GitHub-PR view) and
+                // is passed as one ref-spec arg; two-dot takes the refs positionally.
                 if (dr.three_dot) {
-                    // Three-dot `base...target` diffs from the merge-base of the
-                    // two refs — only the target's own changes since it diverged
-                    // (the GitHub-PR view). Passed as one ref-spec arg.
                     const spec = try std.fmt.allocPrint(page_alloc, "{s}...{s}", .{ dr.base, dr.target });
                     defer page_alloc.free(spec);
                     try sections.append(page_alloc, .{
-                        .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--color=always", "--stat", "--patch", ctx_arg, spec }),
+                        .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--color=always", "--stat", spec }),
+                        .marks_huge_at = 256 * 1024,
+                    });
+                    try sections.append(page_alloc, .{
+                        .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--color=always", "--patch", ctx_arg, spec }),
+                        .skip_if_huge = true,
                     });
                 } else {
                     try sections.append(page_alloc, .{
-                        .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--color=always", "--stat", "--patch", ctx_arg, dr.base, dr.target }),
+                        .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--color=always", "--stat", dr.base, dr.target }),
+                        .marks_huge_at = 256 * 1024,
+                    });
+                    try sections.append(page_alloc, .{
+                        .argv = try dupArgv(&.{ "diff", "--no-ext-diff", "--color=always", "--patch", ctx_arg, dr.base, dr.target }),
+                        .skip_if_huge = true,
                     });
                 }
             },
@@ -13929,6 +14086,68 @@ test "external-change poll baselines first, then a changed fingerprint refreshes
     try std.testing.expectEqual(@as(?u64, 789), app.last_refs_fingerprint);
 }
 
+test "ref-diff preview is bounded: stat section plus a skip-if-huge patch section" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    const hasArg = struct {
+        fn f(argv: []const []const u8, needle: []const u8) bool {
+            for (argv) |a| if (std.mem.eql(u8, a, needle)) return true;
+            return false;
+        }
+    }.f;
+
+    // A whole-branch ref diff must not be a single unbounded `--stat --patch`
+    // section: that can produce hundreds of MB, stall the preview worker, and
+    // freeze the working-tree refresh gated behind `preview_loading`. It is
+    // instead a bounded stat section plus a patch section dropped when huge.
+    for ([_]bool{ true, false }) |three_dot| {
+        const key = try app.allocator.dupe(u8, "dr:test");
+        defer app.allocator.free(key);
+        const job = try app.buildPreviewJob(.{ .diff_refs = .{ .base = "master", .target = "feature", .three_dot = three_dot } }, key);
+        defer job.deinit(page_alloc);
+
+        try std.testing.expectEqual(@as(usize, 2), job.sections.len);
+        // Section 0: the always-loaded stat, which flags the job huge past the cap.
+        try std.testing.expectEqual(@as(usize, 256 * 1024), job.sections[0].marks_huge_at);
+        try std.testing.expect(!job.sections[0].skip_if_huge);
+        try std.testing.expect(hasArg(job.sections[0].argv, "--stat"));
+        try std.testing.expect(!hasArg(job.sections[0].argv, "--patch"));
+        // Section 1: the patch, skipped when the stat marked the job huge.
+        try std.testing.expect(job.sections[1].skip_if_huge);
+        try std.testing.expect(hasArg(job.sections[1].argv, "--patch"));
+    }
+}
+
+test "a loading preview does not pause the working-tree refresh" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.mode = .normal;
+    app.terminal_focused = true;
+
+    // A preview loading off-thread runs on its own worker; it must not pause the
+    // file-list refresh, or a slow/stuck preview (a huge ref diff) freezes the
+    // Files panel behind it.
+    app.preview_loading = true;
+    app.worktree_refresh_requested = false;
+    try app.handleRefreshTick();
+    try std.testing.expect(app.worktree_refresh_requested);
+
+    // A foreground git op still pauses it: a status read must not overlap a
+    // mutation, and the op finishes with its own refresh anyway.
+    app.preview_loading = false;
+    app.async_active = true; // foregroundBusy() == true
+    app.worktree_refresh_requested = false;
+    try app.handleRefreshTick();
+    try std.testing.expect(!app.worktree_refresh_requested);
+    app.async_active = false;
+}
+
 test "optimistic staging flips file state in the model immediately" {
     const allocator = std.testing.allocator;
     var files = [_]model.FileStatus{
@@ -14491,6 +14710,61 @@ test "esc steps out of a drill before exiting diffing mode" {
     // Second esc, with nothing left to back out of, exits diffing.
     try app.handleKey(esc);
     try std.testing.expect(app.diff_base == null);
+}
+
+test "lineOffsets indexes line starts and matches diffLineCount" {
+    const a = std.testing.allocator;
+    defer deinitLineIndexCache();
+
+    const cases = [_][]const u8{
+        "a\nb\nc", // no trailing newline
+        "a\nb\n", // trailing newline (no empty final line)
+        "only one line",
+        "\n\n\n", // blank lines
+        "",
+    };
+    for (cases) |text| {
+        const offs = lineOffsets(a, text);
+        // Line count agrees with the scalar counter the scroll clamp uses.
+        try std.testing.expectEqual(diffLineCount(text), offs.len);
+        // Each offset starts a line, and the text from it up to the next newline
+        // equals the corresponding `splitScalar` line (what the old renderer drew).
+        var it = std.mem.splitScalar(u8, text, '\n');
+        for (offs) |start| {
+            const end = std.mem.indexOfScalarPos(u8, text, start, '\n') orelse text.len;
+            try std.testing.expectEqualStrings(it.next().?, text[start..end]);
+        }
+    }
+
+    // A second call returns the cached slice (same pointer) for the same text.
+    const t = "x\ny\nz";
+    const first = lineOffsets(a, t);
+    const second = lineOffsets(a, t);
+    try std.testing.expectEqual(first.ptr, second.ptr);
+}
+
+test "entering and exiting diffing resets the main-panel scroll to the top" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    const esc = vaxis.Key{ .codepoint = vaxis.Key.escape };
+
+    // A preview scrolled down, then diffing is entered: the ref diff must start
+    // at the top, not inherit the previous scroll offset.
+    app.main_scroll = 50;
+    try diffmode_mod.diffAgainstRef(&app, "main");
+    try std.testing.expect(app.diff_base != null);
+    try std.testing.expectEqual(@as(usize, 0), app.main_scroll);
+    try app.handleKey(esc); // dismiss the diffing-mode note
+    try std.testing.expectEqual(Mode.normal, app.mode);
+
+    // Scroll the ref diff, then exit diffing: the selection's own preview must
+    // open at the top rather than at the stale, clamped offset.
+    app.main_scroll = 120;
+    try app.handleKey(esc); // nothing to back out of, so this exits diffing
+    try std.testing.expect(app.diff_base == null);
+    try std.testing.expectEqual(@as(usize, 0), app.main_scroll);
 }
 
 test "commit works from the staging view but not the generic diff view" {
@@ -17155,6 +17429,9 @@ fn deinitTestApp(app: *App) void {
     page_alloc.free(app.mutation_msg);
     staging_mod.clearStagePending(app);
     app.stage_pending.deinit(app.allocator);
+    // Release the module-level render caches this test may have populated with
+    // the test allocator (production frees them in `tui.run`'s teardown).
+    deinitLineIndexCache();
 }
 
 test "discard menu offers the unstaged option only when a file has both" {

@@ -59,6 +59,9 @@ pub fn diffAgainstSelected(app: *App) !void {
     app.diff_three_dot = is_branch;
     try app.setMessage("comparing using {s} as base - select another ref (W options, esc exits)", .{ref});
     try openDiffingDialog(app);
+    // The main panel switches to the ref diff; start it at the top-left rather
+    // than inheriting the previous preview's scroll offset.
+    app.resetMainView();
     try app.updatePreview();
 }
 
@@ -79,6 +82,8 @@ pub fn diffAgainstRef(app: *App, ref: []const u8) !void {
     app.diff_three_dot = app.localBranchExists(owned) or app.isRemoteBranchName(owned);
     try app.setMessage("comparing using {s} as base - select another ref (W options, esc exits)", .{owned});
     try openDiffingDialog(app);
+    // Start the ref diff at the top-left, not the previous preview's offset.
+    app.resetMainView();
     try app.updatePreview();
 }
 

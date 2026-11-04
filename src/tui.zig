@@ -610,6 +610,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     word_diff_enabled = app.config.highlight_word_diff;
     defer deinitWordCache();
     defer app_mod.deinitWrapCache();
+    defer app_mod.deinitLineIndexCache();
 
     var tty_buffer: [1024]u8 = undefined;
     // Opening /dev/tty (+ switching it to raw mode) fails when there's no
@@ -4738,6 +4739,25 @@ fn drawDiffContent(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
     }
 
     const h_off = app.main_hscroll;
+    // Jump straight to the first visible line via the cached line-offset index
+    // (O(height)); only fall back to a from-the-top split when the index could
+    // not be built. The old unconditional split skipped `main_scroll` lines each
+    // frame, which is O(scroll) and made scrolling a long diff clunky.
+    const offs = app_mod.lineOffsets(app.allocator, text);
+    if (offs.len > 0) {
+        var row: u16 = 0;
+        while (row < win.height) : (row += 1) {
+            const abs_line = app.main_scroll + row;
+            if (abs_line >= offs.len) break;
+            const start = offs[abs_line];
+            const end = std.mem.indexOfScalarPos(u8, text, start, '\n') orelse text.len;
+            const line = text[start..end];
+            const em = emphFor(emph_lines, abs_line);
+            const sg = segSel(selColsFor(sel, abs_line), h_off, h_off +| win.width);
+            printAnsiEmph(win, row, line, base, sg.lo, sg.hi, h_off, em.spans, wordBg(em), std.math.maxInt(u16), false);
+        }
+        return;
+    }
     var lines = std.mem.splitScalar(u8, text, '\n');
     var skipped: usize = 0;
     while (skipped < app.main_scroll) : (skipped += 1) {
@@ -4840,7 +4860,8 @@ fn drawStagingSplit(root: vaxis.Window, app: *app_mod.App, x: u16, y: u16, w: u1
     // Scrollbar length is visual rows when wrapping, source lines otherwise.
     const rowsOf = struct {
         fn f(a: *app_mod.App, text: []const u8, panel_w: u16) usize {
-            if (!a.wrap_diff) return app_mod.diffLineCount(text);
+            // Cached line index / wrap rows, not a fresh per-frame scan.
+            if (!a.wrap_diff) return app_mod.lineOffsets(a.allocator, text).len;
             return app_mod.wrapRowsFor(a.allocator, text, panel_w -| 2).len;
         }
     }.f;
