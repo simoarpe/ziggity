@@ -105,18 +105,58 @@ jobs:
           echo "----- release notes -----"
           cat RELEASE_NOTES.md
 
-      # 6. Create/update the GitHub Release for this tag and upload everything.
+      # 6. Create the GitHub Release for this tag and upload every asset, with a
+      #    retry loop so a transient GitHub 5xx (one struck a past release mid-
+      #    upload and left a half-finished draft) does not abort the release.
       #    Only on a tag push — a manual (workflow_dispatch) run stops after the
       #    build/package steps above, letting you dry-run without a release.
-      #    `body_path` is the curated CHANGELOG section; `generate_release_notes`
-      #    still appends the commit/compare summary after it, so both show up.
+      #
+      #    Body = the curated CHANGELOG section (step 5) followed by GitHub's
+      #    auto-generated commit/compare summary, matching the old
+      #    body_path + generate_release_notes behaviour.
+      #
+      #    Each attempt first deletes any release a failed earlier attempt left
+      #    behind (the tag is kept), then creates the release as a draft and
+      #    uploads all assets, and only flips it to published once that succeeds.
+      #    So a failure partway never leaves a half-uploaded PUBLIC release, and a
+      #    retry always starts from a clean slate. We drive this with `gh` rather
+      #    than a release action because it gives us that cleanup-and-retry control.
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v3
-        with:
-          files: dist/*
-          body_path: RELEASE_NOTES.md
-          generate_release_notes: true   # appended after the CHANGELOG body
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # Release body: curated CHANGELOG section, then GitHub's generated notes
+          # appended. A generate-notes hiccup just omits that second half.
+          gen="$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+                   -f tag_name="$TAG" --jq '.body' 2>/dev/null || true)"
+          { cat RELEASE_NOTES.md; printf '\n\n'; printf '%s\n' "$gen"; } > FULL_NOTES.md
+
+          publish() {
+            # Clear anything a previous failed attempt left behind (keep the tag),
+            # so each attempt starts clean rather than colliding with a partial.
+            gh release delete "$TAG" --yes 2>/dev/null || true
+            # Draft + all assets first; publish only once the upload fully succeeds
+            # (|| return so a failure stops this attempt instead of falling through,
+            # since `set -e` is suspended for a function called in an `until`).
+            gh release create "$TAG" dist/* \
+              --title "$TAG" --notes-file FULL_NOTES.md --verify-tag --draft || return 1
+            gh release edit "$TAG" --draft=false --latest || return 1
+          }
+
+          n=1; max=5; delay=10
+          until publish; do
+            if [ "$n" -ge "$max" ]; then
+              echo "::error::release publish failed after ${max} attempts"
+              exit 1
+            fi
+            echo "::warning::publish attempt ${n} failed (likely a transient GitHub error); retrying in ${delay}s"
+            sleep "$delay"; n=$((n + 1)); delay=$((delay * 2))
+          done
+          echo "published ${TAG}"
 
       # 7. Point the Homebrew tap at this release: render Formula/ziggity.rb from
       #    the template (new version + URLs + sha256s) and push it to
