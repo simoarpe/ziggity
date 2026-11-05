@@ -16,6 +16,21 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+### Fixed
+- The Files panel no longer snaps the selection off a file you picked when the
+  same path is listed twice. After `git rm`-ing a tracked file and recreating it,
+  `git status` reports both a staged deletion and an untracked file at that path;
+  selecting the untracked one and waiting for a background refresh used to jump
+  the cursor onto the staged-deletion row, because the selection was restored by
+  path alone. It now also matches the file's status, so it stays put.
+- Selecting a very large file no longer makes the interface churn. While its
+  (large) diff preview was loading, the background working-tree refresh fired on
+  every fast spinner tick instead of the normal interval, so `git status` ran
+  back to back and the file list was re-read and re-sorted constantly, which
+  could make the selection feel jumpy and navigation laggy. The refresh now runs
+  at its configured cadence whether or not a preview is loading, while the
+  spinner still animates smoothly.
+
 ## [0.57.0] - 2026-11-04
 
 ### Fixed

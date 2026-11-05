@@ -46,6 +46,7 @@ const Event = union(enum) {
     paste_start,
     paste_end,
     refresh_tick,
+    spinner_tick,
     anim_tick,
     fetch_tick,
     external_check_tick,
@@ -796,6 +797,9 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             .mouse => |m| render_needed = try app.handleMouse(m),
             .winsize => |ws| try vx.resize(allocator, tty.writer(), ws),
             .refresh_tick => try app.handleRefreshTick(),
+            // Fast tick while something works off-thread: advance the loading
+            // spinner only. The worktree refresh rides the slower `.refresh_tick`.
+            .spinner_tick => app.spinner_frame +%= 1,
             .anim_tick => app.advanceDonut(io),
             .fetch_tick => {
                 app.bg_fetch_requested = true;
@@ -1413,34 +1417,31 @@ fn refreshTickerRun(state: *RefreshTicker) void {
         // tick instead of waiting out a long idle sleep.
         std.Io.sleep(state.io, spinner_tick, .awake) catch return;
         if (state.stop.load(.acquire)) return;
-        if (state.app.busy_flag.load(.acquire)) {
-            // Busy: animate the loading spinner on every fast tick — and keep the
-            // about-splash donut spinning too, so a pull/push/etc. doesn't freeze
-            // it. `animate_flag` still stops it when the splash is hidden or the
-            // terminal is unfocused.
-            idle_ms = 0;
-            _ = state.loop.tryPostEvent(.refresh_tick) catch false;
-            if (state.app.animate_flag.load(.acquire)) {
-                _ = state.loop.tryPostEvent(.anim_tick) catch false;
+        const busy = state.app.busy_flag.load(.acquire);
+        // Busy: animate the loading spinner on every fast tick (spinner only — the
+        // worktree refresh rides the slower cadence below, so a long preview load
+        // can't turn every tick into a `git status` + file-list re-sort).
+        if (busy) _ = state.loop.tryPostEvent(.spinner_tick) catch false;
+        // The about-splash donut animates on every fast tick while shown.
+        if (state.app.animate_flag.load(.acquire)) {
+            _ = state.loop.tryPostEvent(.anim_tick) catch false;
+        }
+        // The periodic working-tree refresh fires at the configured cadence
+        // whether busy or idle: a long preview load neither starves it (it still
+        // fires each interval) nor spams it (never per fast tick). A timed tick
+        // during a foreground op is a no-op — `handleRefreshTick` skips it.
+        if (interval_ms > 0) {
+            idle_ms += spinner_tick_ms;
+            if (idle_ms >= interval_ms) {
+                idle_ms = 0;
+                _ = state.loop.tryPostEvent(.refresh_tick) catch false;
             }
-        } else {
-            // The about-splash animation runs on every fast tick (independent of
-            // the background refresh, and without triggering a git status).
-            if (state.app.animate_flag.load(.acquire)) {
-                _ = state.loop.tryPostEvent(.anim_tick) catch false;
-            }
-            // Idle: fire the periodic working-tree refresh only at the slower
-            // cadence (built up from the fast ticks), not every tick.
-            if (interval_ms > 0) {
-                idle_ms += spinner_tick_ms;
-                if (idle_ms >= interval_ms) {
-                    idle_ms = 0;
-                    _ = state.loop.tryPostEvent(.refresh_tick) catch false;
-                }
-            }
-            // The background auto-fetch runs on its own (slower) cadence. A
-            // focus-triggered fetch restarts the countdown so the next timed one
-            // is a full interval away.
+        }
+        // The background fetch and the cheap external-change poll stay paused
+        // while busy (no network/git contention during an op or a preview load).
+        if (!busy) {
+            // Auto-fetch on its own (slower) cadence; a focus-triggered fetch
+            // restarts the countdown so the next timed one is a full interval away.
             if (fetch_interval_ms > 0) {
                 if (state.app.fetch_timer_reset.swap(false, .acquire)) fetch_ms = 0;
                 fetch_ms += spinner_tick_ms;
@@ -1449,7 +1450,6 @@ fn refreshTickerRun(state: *RefreshTicker) void {
                     _ = state.loop.tryPostEvent(.fetch_tick) catch false;
                 }
             }
-            // The cheap external-change poll runs on its own tighter cadence.
             if (ext_interval_ms > 0) {
                 ext_ms += spinner_tick_ms;
                 if (ext_ms >= ext_interval_ms) {

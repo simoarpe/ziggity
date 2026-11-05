@@ -3409,6 +3409,7 @@ pub const App = struct {
         else
             null;
         defer if (selected_prev) |p| self.allocator.free(p);
+        const selected_status: ?[2]u8 = if (self.selectedFile()) |file| file.short_status else null;
         const tree_path = try self.captureTreePath();
         defer if (tree_path) |p| self.allocator.free(p);
 
@@ -3424,7 +3425,7 @@ pub const App = struct {
         // Only working-tree file diffs can have changed.
         self.preview_cache.invalidatePrefix(self.allocator, "f:");
 
-        self.restoreFileSelection(selected_path, selected_prev);
+        self.restoreFileSelection(selected_path, selected_prev, selected_status);
         self.clampSelections();
         self.applyConflictAutoFilter(prev_conflicts);
         if (self.tree_view) try self.rebuildTree(tree_path);
@@ -3721,6 +3722,7 @@ pub const App = struct {
         else
             null;
         defer if (selected_prev) |p| self.allocator.free(p);
+        const sel_status: ?[2]u8 = if (self.selectedFile()) |file| file.short_status else null;
         const tree_path = try self.captureTreePath();
         defer if (tree_path) |p| self.allocator.free(p);
 
@@ -3736,7 +3738,7 @@ pub const App = struct {
         // previews stay valid, so drop just the "f:" entries.
         self.preview_cache.invalidatePrefix(self.allocator, "f:");
 
-        self.restoreFileSelection(selected_path, selected_prev);
+        self.restoreFileSelection(selected_path, selected_prev, sel_status);
         self.clampSelections();
         self.applyConflictAutoFilter(prev_conflicts);
         if (self.tree_view) try self.rebuildTree(tree_path);
@@ -5317,17 +5319,12 @@ pub const App = struct {
     }
 
     pub fn handleRefreshTick(self: *App) !void {
-        // Advance the spinner whenever something is working off-thread (the ticker
-        // fires fast then so the spinner animates smoothly).
-        if (self.foregroundBusy() or self.preview_loading or self.commitAiGenerating() or self.pr_gen_active) {
-            self.spinner_frame +%= 1;
-        }
-        // Pause the background working-tree refresh only for work that must not
-        // overlap a `git status` read: a foreground git op (it finishes with its
-        // own refresh) and the AI generators. A loading preview must NOT pause it:
-        // the preview runs on its own worker, and a slow or stuck one (a huge ref
-        // diff, say) would otherwise freeze the file list behind it. The worktree
-        // snapshot is a separate worker, so it stays current regardless.
+        // Fires on the configured refresh cadence (not the fast spinner tick — the
+        // spinner is advanced separately), so a slow preview never turns this into
+        // a refresh storm. Pause only for work that must not overlap a `git status`
+        // read: a foreground git op (it finishes with its own refresh) and the AI
+        // generators. A loading preview does NOT pause it: the snapshot runs on its
+        // own worker, so the file list stays current even while a big diff loads.
         if (self.foregroundBusy() or self.commitAiGenerating() or self.pr_gen_active) return;
         if (self.mode != .normal) return;
         if (!self.terminal_focused) return;
@@ -11735,9 +11732,24 @@ pub const App = struct {
     /// the primary path flips between `old` and `new`. Without this the cursor
     /// jumps whenever the row it sat on was absorbed into (or emitted from) a
     /// rename. See the rename-detection transitions in `parseStatus`.
-    fn restoreFileSelection(self: *App, path: ?[]const u8, prev: ?[]const u8) void {
+    fn restoreFileSelection(self: *App, path: ?[]const u8, prev: ?[]const u8, status: ?[2]u8) void {
         const sel = path orelse return;
-        // Exact match first: the common case, and unambiguous.
+        // Path + status match first. The same path can appear twice in one status
+        // listing — a staged deletion (`D `) plus an untracked file recreated at
+        // that path (`??`) — so matching on path alone would snap the cursor onto
+        // the wrong half of the pair (e.g. jumping off the `??` row you picked
+        // onto the `D ` row) on the next background refresh.
+        if (status) |st| {
+            for (self.data.files, 0..) |file, idx| {
+                if (std.mem.eql(u8, file.path, sel) and
+                    file.short_status[0] == st[0] and file.short_status[1] == st[1])
+                {
+                    self.file_index = idx;
+                    return;
+                }
+            }
+        }
+        // Exact path match: the common case, and unambiguous when the path is unique.
         for (self.data.files, 0..) |file, idx| {
             if (std.mem.eql(u8, file.path, sel)) {
                 self.file_index = idx;
@@ -15664,16 +15676,47 @@ test "Files cursor does not jump across rename stage/unstage transitions" {
         defer allocator.free(sel);
         const prev = if (app.selectedFile().?.previous_path) |p| try allocator.dupe(u8, p) else null;
         defer if (prev) |p| allocator.free(p);
+        const sel_status = app.selectedFile().?.short_status;
 
         app.data.replaceFiles(allocator, try git_mod.parseStatus(allocator, c.after));
         app.applyFileSort();
-        app.restoreFileSelection(sel, prev);
+        app.restoreFileSelection(sel, prev, sel_status);
 
         try std.testing.expectEqualStrings(c.expect, app.selectedFile().?.path);
 
         model.deinitFileStatuses(allocator, app.data.files);
         app.data.files = &.{};
     }
+}
+
+test "restoreFileSelection disambiguates a path that appears twice by status" {
+    const allocator = std.testing.allocator;
+    // A staged deletion and the untracked file recreated at the same path — the
+    // exact shape `git status` reports after `git rm` then re-creating the file.
+    const dup = "res/drawable/big.xml";
+    var files = [_]model.FileStatus{
+        .{ .path = @constCast(dup), .short_status = .{ 'D', ' ' }, .has_staged = true, .has_unstaged = false, .tracked = true, .added = false, .deleted = true, .conflict = false },
+        .{ .path = @constCast(dup), .short_status = .{ '?', '?' }, .has_staged = false, .has_unstaged = false, .tracked = false, .added = true, .deleted = false, .conflict = false },
+    };
+    var app = try testApp(allocator, &files);
+    defer deinitTestApp(&app);
+
+    // Restoring the untracked (`??`) entry must land on index 1, not snap to the
+    // staged-deletion row at index 0 (the bug: matching on path alone).
+    app.file_index = 0;
+    app.restoreFileSelection(dup, null, .{ '?', '?' });
+    try std.testing.expectEqual(@as(usize, 1), app.file_index);
+
+    // And restoring the staged-deletion entry lands on index 0.
+    app.file_index = 1;
+    app.restoreFileSelection(dup, null, .{ 'D', ' ' });
+    try std.testing.expectEqual(@as(usize, 0), app.file_index);
+
+    // Without a captured status it falls back to the first path match (index 0),
+    // the pre-existing behavior for the unique-path case.
+    app.file_index = 1;
+    app.restoreFileSelection(dup, null, null);
+    try std.testing.expectEqual(@as(usize, 0), app.file_index);
 }
 
 test "tree view cursor follows a file merged into a rename (no jump to root)" {
