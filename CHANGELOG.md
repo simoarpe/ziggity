@@ -16,6 +16,8 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+## [0.58.0] - 2026-11-05
+
 ### Fixed
 - The Files panel no longer snaps the selection off a file you picked when the
   same path is listed twice. After `git rm`-ing a tracked file and recreating it,
