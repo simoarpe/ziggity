@@ -16,6 +16,8 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+## [0.59.0] - 2026-11-06
+
 ### Fixed
 - A fetch or pull that fails because the remote replaced a branch with one
   nested under its old name (for example `topic` became `topic/part-1`, so git
