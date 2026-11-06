@@ -1045,8 +1045,9 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     if (app.push_upstream_remote) |r| async_job.upstream_remote = async_allocator.dupe(u8, r) catch null;
                     if (app.push_upstream_branch) |b| async_job.upstream_branch = async_allocator.dupe(u8, b) catch null;
                 }
-                // A per-remote fetch carries the remote name (appended after "fetch").
-                if (op == .fetch_remote) {
+                // A per-remote fetch or prune carries the remote name (appended
+                // after "fetch" / "remote prune").
+                if (op == .fetch_remote or op == .prune_remote) {
                     if (app.fetch_remote_name) |r| async_job.upstream_remote = async_allocator.dupe(u8, r) catch null;
                 }
                 // Fetch ops carry the prune flag forced by `fetch_prune_mode`, if any.
@@ -3187,6 +3188,7 @@ fn drawConfirmPopup(root: vaxis.Window, app: *app_mod.App) void {
         .drop_commit => "Drop commit",
         .squash_commit => "Squash commit",
         .delete_index_lock => "Git locked",
+        .prune_remote_refs => "Stale remote ref",
         .reset_patch => "Discard patch",
         .remove_recent_repo => "Remove from recent list",
         .pull_reset_upstream => "Reset to remote",

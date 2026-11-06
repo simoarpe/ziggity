@@ -16,6 +16,16 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+### Fixed
+- A fetch or pull that fails because the remote replaced a branch with one
+  nested under its old name (for example `topic` became `topic/part-1`, so git
+  reports `cannot lock ref ... exists; cannot create ...`) no longer offers to
+  delete a lock file that does not exist. Nothing is locked in that case: a
+  stale remote-tracking ref is in the way. Ziggity now explains that and offers
+  to run `git remote prune <remote>`, then re-runs the fetch or pull. It also
+  skips the automatic lock retries for this error, since they could never
+  succeed.
+
 ## [0.58.0] - 2026-11-05
 
 ### Fixed

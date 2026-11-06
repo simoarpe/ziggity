@@ -41,10 +41,57 @@ const lock_retry_cap_ms: i64 = 250;
 /// another git process (a background refresh, or one the user ran elsewhere)
 /// briefly held `.git/index.lock` or a ref lock.
 pub fn isRetryableLockError(text: []const u8) bool {
+    // A ref-name collision is also reported as "cannot lock ref", but no lock
+    // is held and no retry can succeed (see `staleRemoteRefConflict`).
+    if (staleRemoteRefConflict(text) != null) return false;
     // `index.lock` (rather than `.git/index.lock`) so linked-worktree paths
     // (`.git/worktrees/<name>/index.lock`) and the bare message both match.
     return std.mem.indexOf(u8, text, "index.lock") != null or
         std.mem.indexOf(u8, text, "cannot lock ref") != null;
+}
+
+/// A fetch/pull refused because a remote-tracking ref collides with one the
+/// remote now has: the remote deleted branch `a/b` and created `a` (or the
+/// reverse), and refs are files, so the stale local `refs/remotes/<remote>/a/b`
+/// blocks creating `refs/remotes/<remote>/a`. Nothing is locked; the fix is
+/// `git remote prune <remote>`, which drops the stale ref.
+pub const StaleRemoteRefConflict = struct {
+    /// The remote whose stale tracking ref is in the way (e.g. "origin").
+    remote: []const u8,
+    /// The stale local ref that exists (e.g. "refs/remotes/origin/a").
+    stale_ref: []const u8,
+    /// The ref git could not create (e.g. "refs/remotes/origin/a/b").
+    wanted_ref: []const u8,
+};
+
+/// Parse git's ref-name collision out of its output, or null when the output
+/// is something else. The message has the shape
+/// `cannot lock ref '<wanted>': '<stale>' exists; cannot create '<wanted>'`.
+/// Only a collision under `refs/remotes/<remote>/` qualifies: a local-branch
+/// collision (`refs/heads/...`) is the user's own naming conflict and pruning
+/// would not help.
+pub fn staleRemoteRefConflict(text: []const u8) ?StaleRemoteRefConflict {
+    const lock_marker = "cannot lock ref '";
+    const lock_at = std.mem.indexOf(u8, text, lock_marker) orelse return null;
+    const wanted_start = lock_at + lock_marker.len;
+    const wanted_end = std.mem.indexOfScalarPos(u8, text, wanted_start, '\'') orelse return null;
+    const wanted_ref = text[wanted_start..wanted_end];
+
+    // `wanted_end` is the closing quote of the wanted ref.
+    const stale_marker = "': '";
+    if (!std.mem.startsWith(u8, text[wanted_end..], stale_marker)) return null;
+    const stale_start = wanted_end + stale_marker.len;
+    const exists_marker = "' exists; cannot create '";
+    const stale_end = std.mem.indexOfPos(u8, text, stale_start, exists_marker) orelse return null;
+    const stale_ref = text[stale_start..stale_end];
+
+    const remotes_prefix = "refs/remotes/";
+    if (!std.mem.startsWith(u8, stale_ref, remotes_prefix)) return null;
+    const after_prefix = stale_ref[remotes_prefix.len..];
+    const remote_end = std.mem.indexOfScalar(u8, after_prefix, '/') orelse return null;
+    const remote = after_prefix[0..remote_end];
+    if (remote.len == 0 or wanted_ref.len == 0) return null;
+    return .{ .remote = remote, .stale_ref = stale_ref, .wanted_ref = wanted_ref };
 }
 
 /// Drop git comment lines (those whose first character is `#`) from `raw` and
@@ -3219,6 +3266,37 @@ test "retryable lock errors are detected, other errors are not" {
     try std.testing.expect(!isRetryableLockError("error: pathspec 'x' did not match any file(s)"));
     try std.testing.expect(!isRetryableLockError("Everything up-to-date"));
     try std.testing.expect(!isRetryableLockError(""));
+    // A ref-name collision reads as "cannot lock ref" but holds no lock, so
+    // retrying it is pointless.
+    try std.testing.expect(!isRetryableLockError("error: cannot lock ref 'refs/remotes/origin/a/b': 'refs/remotes/origin/a' exists; cannot create 'refs/remotes/origin/a/b'"));
+}
+
+test "staleRemoteRefConflict parses a remote-tracking ref collision" {
+    // The remote deleted `a` and created `a/b`: the stale `a` file blocks the
+    // `a/` directory. Git's message, as printed by fetch/pull.
+    const nested = "error: cannot lock ref 'refs/remotes/origin/a/b': 'refs/remotes/origin/a' exists; cannot create 'refs/remotes/origin/a/b'\n" ++
+        "From https://example.com/repo\n" ++
+        " ! [new branch]      a/b        -> origin/a/b  (unable to update local ref)";
+    const c = staleRemoteRefConflict(nested).?;
+    try std.testing.expectEqualStrings("origin", c.remote);
+    try std.testing.expectEqualStrings("refs/remotes/origin/a", c.stale_ref);
+    try std.testing.expectEqualStrings("refs/remotes/origin/a/b", c.wanted_ref);
+
+    // The reverse: `a/b` was deleted and `a` created; the stale `a/` directory
+    // blocks the `a` file. Also a non-origin remote.
+    const flattened = "error: cannot lock ref 'refs/remotes/upstream/a': 'refs/remotes/upstream/a/b' exists; cannot create 'refs/remotes/upstream/a'";
+    const c2 = staleRemoteRefConflict(flattened).?;
+    try std.testing.expectEqualStrings("upstream", c2.remote);
+    try std.testing.expectEqualStrings("refs/remotes/upstream/a/b", c2.stale_ref);
+    try std.testing.expectEqualStrings("refs/remotes/upstream/a", c2.wanted_ref);
+
+    // A local branch collision is the user's own naming conflict; pruning a
+    // remote would not help, so it is not reported as one.
+    try std.testing.expect(staleRemoteRefConflict("error: cannot lock ref 'refs/heads/a/b': 'refs/heads/a' exists; cannot create 'refs/heads/a/b'") == null);
+    // Real lock errors and unrelated output are not collisions.
+    try std.testing.expect(staleRemoteRefConflict("error: cannot lock ref 'refs/heads/main': is at 1234 but expected 5678") == null);
+    try std.testing.expect(staleRemoteRefConflict("fatal: Unable to create '/repo/.git/index.lock': File exists.") == null);
+    try std.testing.expect(staleRemoteRefConflict("") == null);
 }
 
 test "stripCommentLines drops comments and trims surrounding blanks" {

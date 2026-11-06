@@ -280,6 +280,9 @@ pub const ConfirmSkips = struct {
     /// Field exists so `shouldSkipConfirm`'s comptime lookup covers every
     /// Confirmation tag; the lock-recovery prompt is never auto-skipped.
     delete_index_lock: bool = false,
+    /// As above: the stale remote-tracking ref prompt (offering `git remote
+    /// prune`) is never auto-skipped.
+    prune_remote_refs: bool = false,
     /// When set, switching the custom patch to another commit discards the old
     /// patch without asking.
     reset_patch: bool = false,

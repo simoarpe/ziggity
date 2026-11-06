@@ -290,6 +290,12 @@ pub const Confirmation = enum {
     /// even after the automatic retries — almost always a stale lock left by a
     /// crashed git. Confirming deletes the lock file and (for async ops) retries.
     delete_index_lock,
+    /// Offered when a fetch/pull fails because a stale remote-tracking ref
+    /// collides with a branch the remote renamed under it (e.g. `a/b` replaced
+    /// by `a`). Git reports it as "cannot lock ref", but no lock is held, so
+    /// deleting a lock file would be wrong. Confirming runs `git remote prune
+    /// <remote>` and then retries the failed op.
+    prune_remote_refs,
     /// Offered when adding a file to the custom patch from a different commit
     /// than the one the patch is already building from (a patch is tied to a
     /// single commit). Confirming discards the current patch and starts a new
@@ -352,6 +358,11 @@ pub const AsyncOp = enum {
     /// appended by the worker from `push_upstream_remote`/`push_upstream_branch`
     /// (see `pushSelectedTag`).
     push_tag,
+    /// Drop stale remote-tracking refs: `remote prune <remote>`. The remote
+    /// name is appended by the worker from `fetch_remote_name`. Offered via
+    /// `prune_remote_refs` when a stale ref blocks a fetch; on success the op
+    /// that failed is re-run (see `confirmPruneRemoteRefs`).
+    prune_remote,
 
     /// Whether this op is one of the pull variants (`git pull ...`).
     pub fn isPull(self: AsyncOp) bool {
@@ -375,6 +386,7 @@ pub const AsyncOp = enum {
             .fetch, .fetch_remote => "fetch",
             .pull, .pull_merge, .pull_rebase, .pull_ff_only => "pull",
             .push, .push_force, .push_force_plain, .push_set_upstream, .push_tag => "push",
+            .prune_remote => "prune",
         };
     }
 
@@ -385,6 +397,7 @@ pub const AsyncOp = enum {
             .push, .push_set_upstream, .push_tag => "pushing",
             .push_force => "force push with lease",
             .push_force_plain => "force push",
+            .prune_remote => "pruning",
         };
     }
 
@@ -413,6 +426,8 @@ pub const AsyncOp = enum {
             // The remote and tag are appended by the worker (from
             // `push_upstream_remote`/`push_upstream_branch`).
             .push_tag => &.{"push"},
+            // The remote name is appended by the worker (from `fetch_remote_name`).
+            .prune_remote => &.{ "remote", "prune" },
         };
     }
 };
@@ -3017,6 +3032,10 @@ pub const App = struct {
     /// that survived the automatic retries (see `offerLockRecovery`).
     lock_path: ?[]u8 = null,
     retry_action: RetryAction = .none,
+    /// The stale remote-tracking ref behind a pending `prune_remote_refs`
+    /// prompt (owned), shown in the prompt. The remote to prune is in
+    /// `fetch_remote_name`.
+    stale_ref: ?[]u8 = null,
 
     // Async preview pipeline. Switching panels / moving the selection only
     // computes a cache key and renders cached text (instant); the matching git
@@ -7031,6 +7050,13 @@ pub const App = struct {
             },
             .force_push => "Push rejected: the remote has commits you don't have. It will be force pushed WITH LEASE (--force-with-lease). Continue?",
             .force_push_plain => "Force push with lease (--force-with-lease) was rejected. It will be force pushed (--force). Continue?",
+            .prune_remote_refs => blk: {
+                const remote = self.fetch_remote_name orelse "the remote";
+                if (self.stale_ref) |r| {
+                    break :blk std.fmt.bufPrint(buf, "{s} replaced a branch, and the stale remote-tracking ref {s} is in the way. No lock is held. Run git remote prune {s} to drop stale refs and retry?", .{ remote, r, remote }) catch "A stale remote-tracking ref blocks the fetch. Run git remote prune and retry?";
+                }
+                break :blk std.fmt.bufPrint(buf, "A stale remote-tracking ref blocks the fetch. Run git remote prune {s} and retry?", .{remote}) catch "A stale remote-tracking ref blocks the fetch. Run git remote prune and retry?";
+            },
             .delete_index_lock => blk: {
                 if (self.lock_path) |p| {
                     break :blk std.fmt.bufPrint(buf, "git is locked ({s}). Another git process may be running. Delete this lock file and retry?", .{p}) catch "git is locked. Delete the lock file and retry?";
@@ -10231,6 +10257,7 @@ pub const App = struct {
             .force_push => return self.requestAsync(.push_force),
             .force_push_plain => return self.requestAsync(.push_force_plain),
             .delete_index_lock => return self.confirmDeleteIndexLock(),
+            .prune_remote_refs => return self.confirmPruneRemoteRefs(),
             // Discard the old patch, then resume the action that triggered the
             // switch on the new commit (toggle the file, or re-open the line view).
             .reset_patch => {
@@ -10864,9 +10891,15 @@ pub const App = struct {
                 try self.setMessage("{s} complete", .{op.label()});
                 // A pull advances HEAD; land the Commits cursor on the new top.
                 if (op.isPull()) self.select_top_commit_pending = true;
+                // A prune confirmed from `prune_remote_refs` re-runs the fetch or
+                // pull that the stale ref blocked.
+                if (op == .prune_remote) try self.runRetryAction("pruned stale remote-tracking refs");
             } else {
                 const stderr = std.mem.trim(u8, mutable.stderr, " \t\r\n");
                 const raw = if (stderr.len > 0) mutable.stderr else mutable.stdout;
+                // A failed prune drops the op queued behind it, unless a
+                // credential prompt is about to retry the prune (keeping the chain).
+                if (op == .prune_remote and !credentials_mod.isAuthFailure(raw)) self.clearLockRecovery();
                 // Escalating push chain: a rejected step offers the next, stronger
                 // option (confirmed first): push → --force-with-lease → --force.
                 // A rejected plain --force just reports the error (end of chain).
@@ -11031,7 +11064,22 @@ pub const App = struct {
     /// survived the automatic retries), instead offer to delete the lock file
     /// and retry. `action` is what to re-run on confirm (`.none` = delete only,
     /// the user re-triggers). Returns true when it handled the lock case.
+    ///
+    /// A ref-name collision with a stale remote-tracking ref also reads as a
+    /// lock error, but nothing is locked: it offers `git remote prune` instead.
     fn reportFailureOrLock(self: *App, summary: []const u8, raw: []const u8, action: RetryAction) !bool {
+        if (git_mod.staleRemoteRefConflict(raw)) |conflict| {
+            self.clearLockRecovery();
+            self.retry_action = action;
+            if (self.fetch_remote_name) |old| self.allocator.free(old);
+            self.fetch_remote_name = try self.allocator.dupe(u8, conflict.remote);
+            self.stale_ref = try self.allocator.dupe(u8, conflict.stale_ref);
+            self.dismissOpFrame();
+            self.pending_confirmation = .prune_remote_refs;
+            self.mode = .confirmation;
+            try self.setMessage("stale remote-tracking ref — press y to run git remote prune {s} and retry", .{conflict.remote});
+            return true;
+        }
         if (!git_mod.isRetryableLockError(raw)) {
             freeRetryAction(action); // free an unused owned action, if any
             try self.reportFailure(summary, raw);
@@ -11076,6 +11124,10 @@ pub const App = struct {
             self.allocator.free(p);
             self.lock_path = null;
         }
+        if (self.stale_ref) |r| {
+            self.allocator.free(r);
+            self.stale_ref = null;
+        }
     }
 
     /// Delete the stale lock file the user confirmed removing, then re-run the
@@ -11085,14 +11137,37 @@ pub const App = struct {
         if (self.lock_path) |path| {
             std.Io.Dir.deleteFile(.cwd(), self.git.io, path) catch {};
         }
-        const action = self.retry_action;
-        self.retry_action = .none; // ownership moves to `action`
         if (self.lock_path) |p| {
             self.allocator.free(p);
             self.lock_path = null;
         }
+        try self.runRetryAction("removed git lock");
+    }
+
+    /// Prune the remote whose stale tracking ref blocked the op. The captured
+    /// retry action stays queued and runs once the prune succeeds (see
+    /// `completeAsync`); a failed prune reports normally and drops it.
+    fn confirmPruneRemoteRefs(self: *App) !void {
+        if (self.fetch_remote_name == null) {
+            self.clearLockRecovery();
+            try self.setMessage("no remote to prune", .{});
+            return;
+        }
+        if (self.stale_ref) |r| {
+            self.allocator.free(r);
+            self.stale_ref = null;
+        }
+        return self.requestAsync(.prune_remote);
+    }
+
+    /// Re-run the captured retry action (async only; a sync mutation is left for
+    /// the user to re-trigger, so `.none` just shows `done_msg`). Takes
+    /// ownership of `retry_action`.
+    fn runRetryAction(self: *App, done_msg: []const u8) !void {
+        const action = self.retry_action;
+        self.retry_action = .none; // ownership moves to `action`
         switch (action) {
-            .none => try self.setMessage("removed git lock", .{}),
+            .none => try self.setMessage("{s}", .{done_msg}),
             .async_op => |op| return self.requestAsync(op),
             .mutation => |m| {
                 if (self.mutation_requested) |old| old.deinit(page_alloc);
@@ -15267,6 +15342,81 @@ test "lock errors offer delete-and-retry; other failures report normally" {
     try std.testing.expect(!handled2);
     try std.testing.expect(std.meta.activeTag(app.retry_action) == .none);
     try std.testing.expect(app.lock_path == null);
+}
+
+test "a stale remote-tracking ref collision offers git remote prune, then re-runs the op" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = @constCast("/repo") };
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    // Git reports the collision as "cannot lock ref", but no lock file exists.
+    // It must not be mistaken for a stale lock (whose prompt would offer to
+    // delete a nonexistent index.lock), but offer a prune of that remote.
+    const raw = "error: cannot lock ref 'refs/remotes/origin/sko/plaster/extensions': 'refs/remotes/origin/sko/plaster' exists; cannot create 'refs/remotes/origin/sko/plaster/extensions'";
+    const handled = try app.reportFailureOrLock("pull failed", raw, .{ .async_op = .pull });
+    try std.testing.expect(handled);
+    try std.testing.expectEqual(Mode.confirmation, app.mode);
+    try std.testing.expectEqual(Confirmation.prune_remote_refs, app.pending_confirmation.?);
+    try std.testing.expectEqual(AsyncOp.pull, app.retry_action.async_op);
+    try std.testing.expect(app.lock_path == null);
+    try std.testing.expectEqualStrings("origin", app.fetch_remote_name.?);
+    try std.testing.expectEqualStrings("refs/remotes/origin/sko/plaster", app.stale_ref.?);
+    // The prompt names the remote and the stale ref, and says no lock is held.
+    var prompt_buf: [1024]u8 = undefined;
+    const prompt = app.confirmationText(&prompt_buf);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "git remote prune origin") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "refs/remotes/origin/sko/plaster") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "lock file") == null);
+
+    // Confirming queues `git remote prune origin` (the worker appends the
+    // remote from `fetch_remote_name`) and keeps the pull queued behind it.
+    try app.confirmPruneRemoteRefs();
+    try std.testing.expectEqual(AsyncOp.prune_remote, app.async_requested.?);
+    try std.testing.expectEqualStrings("remote", AsyncOp.prune_remote.argv()[0]);
+    try std.testing.expectEqualStrings("prune", AsyncOp.prune_remote.argv()[1]);
+    try std.testing.expect(!AsyncOp.prune_remote.isFetch()); // no --prune/--no-prune flag
+    try std.testing.expectEqual(AsyncOp.pull, app.retry_action.async_op);
+    try std.testing.expect(app.stale_ref == null);
+    app.async_requested = null;
+
+    // A successful prune re-runs the pull.
+    const ok = git_mod.ExecResult{
+        .stdout = try allocator.dupe(u8, "Pruning origin\n * [pruned] origin/sko/plaster\n"),
+        .stderr = try allocator.dupe(u8, ""),
+        .term = .{ .exited = 0 },
+    };
+    try app.completeAsync(.prune_remote, ok, allocator);
+    try std.testing.expectEqual(AsyncOp.pull, app.async_requested.?);
+    try std.testing.expect(std.meta.activeTag(app.retry_action) == .none);
+    app.async_requested = null;
+}
+
+test "a failed prune drops the op queued behind it" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = @constCast("/repo") };
+    defer app.git.command_log.deinit(allocator);
+    defer for (app.git.command_log.items) |e| allocator.free(e);
+
+    const raw = "error: cannot lock ref 'refs/remotes/origin/a/b': 'refs/remotes/origin/a' exists; cannot create 'refs/remotes/origin/a/b'";
+    _ = try app.reportFailureOrLock("fetch failed", raw, .{ .async_op = .fetch });
+    try app.confirmPruneRemoteRefs();
+    app.async_requested = null;
+
+    const failed = git_mod.ExecResult{
+        .stdout = try allocator.dupe(u8, ""),
+        .stderr = try allocator.dupe(u8, "fatal: unable to access 'https://example.com/repo/': Could not resolve host"),
+        .term = .{ .exited = 128 },
+    };
+    try app.completeAsync(.prune_remote, failed, allocator);
+    try std.testing.expect(app.async_requested == null);
+    try std.testing.expect(std.meta.activeTag(app.retry_action) == .none);
 }
 
 test "selectCurrentBranch highlights the current branch in the local tab" {
