@@ -17,6 +17,7 @@ const commitgraph_mod = @import("commitgraph.zig");
 const graphlanes_mod = @import("graphlanes.zig");
 const aiauthor_mod = @import("aiauthor.zig");
 const worddiff = @import("worddiff.zig");
+const sidebyside = @import("sidebyside.zig");
 
 /// Active theme, set from config at startup and read by `styles()`.
 var ui_theme: config_mod.Theme = .{};
@@ -612,6 +613,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     defer deinitWordCache();
     defer app_mod.deinitWrapCache();
     defer app_mod.deinitLineIndexCache();
+    defer app_mod.deinitSplitRowsCache();
 
     var tty_buffer: [1024]u8 = undefined;
     // Opening /dev/tty (+ switching it to raw mode) fails when there's no
@@ -2207,6 +2209,7 @@ const help_lines = [_][]const u8{
     "  H, shift+left    scroll the focused panel left (long rows)",
     "  L, shift+right   scroll the focused panel right (long rows)",
     "  ctrl+w         wrap long lines in the diff panels instead of scrolling",
+    "  |              toggle the Diff panel between unified and side-by-side",
     "  [              previous tab (or staging side)",
     "  ]              next tab (or staging side)",
     "  enter          inspect the selection in the main panel",
@@ -4689,9 +4692,66 @@ fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
         return;
     }
 
+    // Side-by-side layout, when the toggle is on and the preview is a diff wide
+    // enough for two columns; otherwise the usual unified renderer below.
+    if (app.splitActive()) {
+        drawSideBySide(win, app);
+        return;
+    }
+
     // Preview text carries git's own ANSI colors (--color=always); `styles().normal`
     // is just the reset/base printAnsi falls back to.
     drawDiffContent(win, app, app.diff, .main);
+}
+
+/// Side-by-side Diff panel: the old file (left) and new file (right), aligned by
+/// `app_mod.sideBySideRows`. Context lines appear on both sides, a change shows
+/// its removed line left and added line right, and a `@@` header spans the full
+/// width. Both columns pan together with `main_hscroll`.
+fn drawSideBySide(win: vaxis.Window, app: *const app_mod.App) void {
+    const st = styles();
+    const sr = app.splitRows();
+    const rows = sr.rows;
+    const plain = sr.plain;
+
+    const col_w = app_mod.App.splitColWidth(win.width);
+    if (col_w == 0) return;
+    const gutter: u16 = 3;
+    const right_x = col_w + gutter;
+    const sep_col = col_w + 1; // the middle cell of the three-cell gutter
+    const h_off = app.main_hscroll;
+
+    const left = win.child(.{ .x_off = 0, .y_off = 0, .width = col_w, .height = win.height });
+    const right = win.child(.{ .x_off = right_x, .y_off = 0, .width = col_w, .height = win.height });
+
+    var screen_row: u16 = 0;
+    while (screen_row < win.height) : (screen_row += 1) {
+        const idx = app.main_scroll + screen_row;
+        if (idx >= rows.len) break;
+        const r = rows[idx];
+        if (r.kind == .header) {
+            // The @@ hunk header, drawn across the whole width in the hunk colour.
+            print(win, screen_row, 0, r.left.text(plain), st.hunk);
+            continue;
+        }
+        print(win, screen_row, sep_col, "\u{2502}", st.muted); // │ column divider
+        drawSplitCell(left, screen_row, r.left, plain, h_off, col_w);
+        drawSplitCell(right, screen_row, r.right, plain, h_off, col_w);
+    }
+}
+
+/// Draw one side-by-side cell into its column window: the line's text clipped to
+/// `[h_off, h_off+width)` and coloured by kind. A blank (padding) cell draws
+/// nothing, leaving the column empty where the other side has a line.
+fn drawSplitCell(col: vaxis.Window, row: u16, cell: sidebyside.Cell, plain: []const u8, h_off: u16, width: u16) void {
+    if (cell.kind == .blank) return;
+    const st = styles();
+    const style: vaxis.Style = switch (cell.kind) {
+        .add => st.added,
+        .del => st.removed,
+        else => st.normal,
+    };
+    printAnsiEmph(col, row, cell.text(plain), style, 0, 0, h_off, &[_]worddiff.Span{}, 0, width, false);
 }
 
 /// The mouse text-selection's visual-column range on source `line`, or null when
@@ -5268,13 +5328,13 @@ fn footerHints(c: FooterCtx) []const u8 {
         .stash => "space apply  g pop  d drop  r rename  w patch  y copy  enter view" ++ global,
         .main => if (c.fullscreen)
             (if (c.main_file)
-                "enter stage  j/k scroll  H/L pan  ^w wrap  e edit  PgUp/PgDn page  drag select  y copy all  z exit full  esc back" ++ global_main
+                "enter stage  j/k scroll  H/L pan  ^w wrap  | split  e edit  PgUp/PgDn page  drag select  y copy all  z exit full  esc back" ++ global_main
             else
-                "j/k scroll  H/L pan  ^w wrap  PgUp/PgDn page  drag select  y copy all  z exit full  esc back" ++ global_main)
+                "j/k scroll  H/L pan  ^w wrap  | split  PgUp/PgDn page  drag select  y copy all  z exit full  esc back" ++ global_main)
         else if (c.main_file)
-            "enter stage  j/k scroll  H/L pan  ^w wrap  e edit  PgUp/PgDn page  drag select  y copy all  z full  esc back" ++ global_main
+            "enter stage  j/k scroll  H/L pan  ^w wrap  | split  e edit  PgUp/PgDn page  drag select  y copy all  z full  esc back" ++ global_main
         else
-            "j/k scroll  H/L pan  ^w wrap  PgUp/PgDn page  drag select  y copy all  z full  esc back" ++ global_main,
+            "j/k scroll  H/L pan  ^w wrap  | split  PgUp/PgDn page  drag select  y copy all  z full  esc back" ++ global_main,
     };
 }
 

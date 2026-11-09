@@ -13,6 +13,7 @@ the written reference. Every binding is remappable, see
 | `j` `k` / arrows | Move selection |
 | `tab` | Focus the Diff panel (and back) |
 | `z` | Maximize the Diff panel to full screen (`z` or `esc` to exit) |
+| `\|` | Toggle the Diff panel between unified and side-by-side |
 | `+` `_` | Cycle the focused side panel's size: normal, half, full |
 | `[` `]` | Switch the focused panel's tabs (or staging side) |
 | `enter` / `esc` | Inspect in the main panel / step back |
@@ -65,6 +66,10 @@ the written reference. Every binding is remappable, see
 - `z`: maximize the Diff panel to full screen; the side panels hide and the
   diff fills the terminal; press `z` again or `esc` to restore the layout. The
   main panel is a special case handled only by `z`, never by `+`/`_`
+- `|`: toggle the Diff panel between unified (one column) and side-by-side (old
+  file left, new file right) for the session. Set `diff_layout = split` to start
+  in it. A terminal too narrow for two columns stays unified (see
+  [configuration.md](configuration.md#diff-layout-diff_layout))
 - `+` / `_`: cycle the focused **side** panel's screen mode. `+` grows it
   (normal to half to full), `_` shrinks it back. In half the focused side panel
   takes about half the column with the rest still visible; in full it fills the

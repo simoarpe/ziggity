@@ -20,6 +20,12 @@ to per repo auto detection (notably the editor).
 side_panel_width_percent = 34
 diff_context = 3
 
+# Diff panel layout: `unified` (default) shows one column with - and + lines;
+# `split` shows the old file on the left and the new file on the right with
+# lines aligned. `|` toggles it at runtime for the session. A terminal too
+# narrow for two columns falls back to unified automatically.
+diff_layout = unified
+
 # The commit summary character count (shown in the commit and reword dialog)
 # turns red once it goes over this many characters; below it, it stays
 # yellow. Default 50 (the git subject length convention). Set to 0 to disable
@@ -324,6 +330,24 @@ each file opens:
 `\` toggles split or single for the **current file only**. It is not
 remembered, so the next file always opens with the layout above. The layout
 is chosen when a file opens and not redecided mid edit.
+
+## Diff Layout (`diff_layout`)
+
+The Diff panel (the main preview, and a commit's diff) renders a change either
+as a unified diff, one column with `-` and `+` lines, or side by side, the old
+file on the left and the new file on the right with lines aligned. `diff_layout`
+sets which one it opens with:
+
+| `diff_layout` | Diff panel shows |
+|---|---|
+| **`unified`** *(default)* | one column, `-` / `+` lines |
+| `split` | two columns, old left and new right |
+
+`|` toggles between them for the whole session (not per file, unlike the staging
+`\` split). A context line appears on both sides; a change shows its old line on
+the left and its new line on the right, and an added or removed line leaves the
+opposite side blank. A terminal too narrow for two readable columns falls back
+to unified until there is room, so the toggle is safe to leave on.
 
 ## Editor (`e`)
 

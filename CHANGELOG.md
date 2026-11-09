@@ -16,6 +16,14 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+### Added
+- The Diff panel can show changes side by side, the old file on the left and the
+  new file on the right with lines aligned, instead of the usual single column.
+  Press `|` to switch layouts for the session, or set `diff_layout = split` to
+  start in it. A context line shows on both sides, a change shows its old line
+  left and new line right, and a terminal too narrow for two columns stays
+  unified until there is room.
+
 ## [0.59.0] - 2026-11-06
 
 ### Fixed

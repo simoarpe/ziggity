@@ -16,6 +16,7 @@ const config_mod = @import("config.zig");
 const diffmode_mod = @import("diffmode.zig");
 const credentials_mod = @import("credentials.zig");
 const diff_mod = @import("diff.zig");
+const sidebyside = @import("sidebyside.zig");
 const drills_mod = @import("drills.zig");
 const editor_mod = @import("editor.zig");
 const filetree = @import("filetree.zig");
@@ -2233,6 +2234,165 @@ pub fn cachedMaxVisibleWidth(text: []const u8) u16 {
     return w;
 }
 
+// ---- Side-by-side rows cache (split Diff panel) --------------------------
+//
+// The split layout needs the diff as plain text (markers intact, no ANSI) and
+// aligned into left/right rows. Both are derived from the coloured preview
+// (`self.diff`) and cached together by text identity, so toggling the layout or
+// scrolling costs nothing after the first build. The rows reference the plain
+// buffer, so the two are stored and freed as a unit. Freed at shutdown.
+
+/// The smallest Diff-panel width that still fits two readable columns; below it
+/// the split renderer falls back to unified.
+pub const min_split_width: u16 = 72;
+
+/// A plain (ANSI-stripped) diff and the side-by-side rows built from it. The
+/// rows borrow `plain`, so they are returned and cached together.
+pub const SplitRows = struct {
+    plain: []const u8,
+    rows: []const sidebyside.Row,
+};
+
+const SplitRowsEntry = struct {
+    addr: usize = 0,
+    len: usize = 0,
+    used: u64 = 0,
+    gpa: ?std.mem.Allocator = null,
+    plain: []u8 = &.{},
+    rows: []sidebyside.Row = &.{},
+};
+var split_rows_cache: [2]SplitRowsEntry = .{ .{}, .{} };
+var split_rows_clock: u64 = 0;
+var split_rows_empty: [0]sidebyside.Row = .{};
+
+/// The plain text and aligned rows for `colored` (a `git diff --color` preview),
+/// built once and cached by text identity. An empty `rows` means the text is not
+/// a diff (no hunks) or a build failed, and the caller should render unified.
+pub fn sideBySideRows(gpa: std.mem.Allocator, colored: []const u8) SplitRows {
+    if (colored.len == 0) return .{ .plain = "", .rows = split_rows_empty[0..] };
+    const addr = @intFromPtr(colored.ptr);
+    split_rows_clock +%= 1;
+    for (&split_rows_cache) |*e| {
+        if (e.gpa != null and e.addr == addr and e.len == colored.len) {
+            e.used = split_rows_clock;
+            return .{ .plain = e.plain, .rows = e.rows };
+        }
+    }
+    const built = buildSplitRows(gpa, colored) catch return .{ .plain = "", .rows = split_rows_empty[0..] };
+    var victim: *SplitRowsEntry = &split_rows_cache[0];
+    for (&split_rows_cache) |*e| {
+        if (e.gpa == null) {
+            victim = e;
+            break;
+        }
+        if (e.used < victim.used) victim = e;
+    }
+    if (victim.gpa) |g| {
+        g.free(victim.plain);
+        sidebyside.free(g, victim.rows);
+    }
+    victim.* = .{ .addr = addr, .len = colored.len, .used = split_rows_clock, .gpa = gpa, .plain = built.plain, .rows = built.rows };
+    return .{ .plain = built.plain, .rows = built.rows };
+}
+
+const BuiltSplit = struct { plain: []u8, rows: []sidebyside.Row };
+
+fn buildSplitRows(gpa: std.mem.Allocator, colored: []const u8) !BuiltSplit {
+    const plain = try stripAnsiAll(gpa, colored);
+    errdefer gpa.free(plain);
+    var parsed = try diff_mod.parse(gpa, plain);
+    defer parsed.deinit(gpa);
+    const rows = try sidebyside.build(gpa, plain, parsed);
+    return .{ .plain = plain, .rows = rows };
+}
+
+/// Copy `text` with every ANSI escape sequence removed. Git colours its preview
+/// with CSI (`ESC [ ... final`) sequences; the split renderer colours by line
+/// kind itself, so it works from the stripped text.
+fn stripAnsiAll(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == 0x1b and i + 1 < text.len and text[i + 1] == '[') {
+            i += 2;
+            while (i < text.len and !(text[i] >= 0x40 and text[i] <= 0x7e)) i += 1;
+            if (i < text.len) i += 1; // consume the final byte of the sequence
+            continue;
+        }
+        try out.append(gpa, text[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+/// Release the side-by-side rows cache (module-level). Called from tui teardown.
+pub fn deinitSplitRowsCache() void {
+    for (&split_rows_cache) |*e| {
+        if (e.gpa) |g| {
+            g.free(e.plain);
+            sidebyside.free(g, e.rows);
+        }
+        e.* = .{};
+    }
+}
+
+test "sideBySideRows strips ANSI colour and aligns a coloured preview" {
+    const gpa = std.testing.allocator;
+    defer deinitSplitRowsCache();
+    // A git-style coloured diff: bold file header, a hunk, a red del and green add.
+    const colored =
+        "\x1b[1mdiff --git a/x b/x\x1b[m\n" ++
+        "@@ -1,1 +1,1 @@\n" ++
+        "\x1b[31m-old line\x1b[m\n" ++
+        "\x1b[32m+new line\x1b[m\n";
+    const sr = sideBySideRows(gpa, colored);
+    // header row + one paired old|new row (the file header is dropped by parse).
+    try std.testing.expectEqual(@as(usize, 2), sr.rows.len);
+    try std.testing.expectEqual(sidebyside.RowKind.header, sr.rows[0].kind);
+    try std.testing.expectEqualStrings("old line", sr.rows[1].left.text(sr.plain));
+    try std.testing.expectEqualStrings("new line", sr.rows[1].right.text(sr.plain));
+    // A second call for the same text hits the cache and returns the same buffers.
+    const again = sideBySideRows(gpa, colored);
+    try std.testing.expectEqual(sr.plain.ptr, again.plain.ptr);
+}
+
+test "sideBySideRows returns no rows for a non-diff preview" {
+    const gpa = std.testing.allocator;
+    defer deinitSplitRowsCache();
+    const sr = sideBySideRows(gpa, "just some text\nwith no hunks\n");
+    try std.testing.expectEqual(@as(usize, 0), sr.rows.len);
+}
+
+test "split layout gates on the toggle, a parseable diff, and the panel width" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+
+    a.free(app.diff);
+    app.diff = try a.dupe(u8, "diff --git a/x b/x\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n");
+    app.main_view_width = 120;
+
+    // Off by default: the unified path is used, so it is not active.
+    try std.testing.expect(!app.splitActive());
+
+    app.diff_split = true;
+    try std.testing.expect(app.splitActive());
+    // header + context + old|new = 3 aligned rows drive the scroll math.
+    try std.testing.expectEqual(@as(usize, 3), app.mainVisualRows());
+
+    // Too narrow for two columns: falls back to unified even with the toggle on.
+    app.main_view_width = 40;
+    try std.testing.expect(!app.splitActive());
+
+    // A non-diff preview is never split, however wide the panel.
+    app.main_view_width = 120;
+    a.free(app.diff);
+    app.diff = try a.dupe(u8, "Binary files differ\n");
+    try std.testing.expect(!app.splitActive());
+}
+
 /// Remove `len` bytes at `pos` from `buf`, shifting the tail down. Never grows,
 /// so no allocation is needed.
 fn deleteRange(buf: *std.ArrayList(u8), pos: usize, len: usize) void {
@@ -2547,6 +2707,11 @@ pub const App = struct {
     // fills the terminal. Its own special case, toggled by `z` and exited by `z`
     // or `esc` (the `+`/`_` screen-mode cycle never touches the main panel).
     diff_fullscreen: bool = false,
+    // Side-by-side Diff panel: the old file on the left, the new on the right,
+    // lines aligned. Initialized from `config.diff_layout`; `|` toggles it for
+    // the session. The renderer falls back to unified when the preview is not a
+    // diff or the panel is too narrow for two columns.
+    diff_split: bool = false,
     // Screen mode of the focused SIDE panel (`+`/`_` cycle): `normal`,
     // `half` (the focused side panel is enlarged), or `full` (it fills the
     // terminal, others hidden). Only meaningful while a side panel is focused;
@@ -3213,6 +3378,7 @@ pub const App = struct {
             .git = git,
             .config = cfg,
             .wrap_diff = cfg.wrap_diff,
+            .diff_split = cfg.diff_layout == .split,
             .tree_view = cfg.show_file_tree,
             // The commit-graph viewer opens in the configured scope; `a` then
             // toggles it and the choice is remembered for the rest of the session.
@@ -4295,6 +4461,7 @@ pub const App = struct {
             .undo => try self.startUndoConfirm(),
             .recent_repos => try self.openRecentRepos(),
             .toggle_wrap => try self.toggleWrapDiff(),
+            .toggle_diff_layout => try self.toggleDiffLayout(),
             .copy_to_clipboard => try self.requestClipboardCopy(),
             .open_browser => try diffmode_mod.openSelectionInBrowser(self),
             // W: with no base yet and a ref under the cursor, mark it right away
@@ -7318,11 +7485,37 @@ pub const App = struct {
         return if (self.staging_active) self.staging_diff else self.diff;
     }
 
+    /// The plain diff and aligned rows for the current preview, for the split
+    /// layout. Empty rows mean the preview is not a diff (render unified).
+    pub fn splitRows(self: *const App) SplitRows {
+        return sideBySideRows(self.allocator, self.diff);
+    }
+
+    /// Whether the Diff panel should render side-by-side right now: the toggle is
+    /// on, the main panel shows a parseable diff (not the staging view), and the
+    /// panel is wide enough for two columns. When false the renderer and the
+    /// scroll math both use the unified path, so they stay in step.
+    pub fn splitActive(self: *const App) bool {
+        if (!self.diff_split or self.staging_active) return false;
+        const w: u16 = if (self.main_view_width == 0) 80 else self.main_view_width;
+        if (w < min_split_width) return false;
+        return self.splitRows().rows.len > 0;
+    }
+
+    /// Width of one column in the split Diff panel, given the panel's inner width.
+    pub fn splitColWidth(w: u16) u16 {
+        const gutter: u16 = 3; // " | " between the two columns
+        return (w -| gutter) / 2;
+    }
+
     /// Total displayed rows of the main panel: source lines when truncating, or
     /// wrapped visual rows when `wrap_diff` is on. `main_scroll` is an index into
     /// these, so the two models share one scroll field. Drives the scrollbar and
     /// the scroll clamp.
     pub fn mainVisualRows(self: *const App) usize {
+        // In the split layout the scrollable unit is the aligned row, and wrap is
+        // not applied, so the row count is the number of side-by-side rows.
+        if (self.splitActive()) return self.splitRows().rows.len;
         const text = self.activeMainText();
         if (!self.wrap_diff) {
             // Cached line count (O(1) after the first build) instead of a fresh
@@ -7375,6 +7568,16 @@ pub const App = struct {
         if (self.wrap_diff) try self.setMessage("line wrap: on", .{}) else try self.setMessage("line wrap: off", .{});
     }
 
+    /// `|`: flip the Diff panel between unified and side-by-side, session-wide.
+    /// The two layouts count rows differently (pairing removes some), so reset
+    /// the horizontal pan and re-clamp the scroll to the new content height.
+    fn toggleDiffLayout(self: *App) !void {
+        self.diff_split = !self.diff_split;
+        self.main_hscroll = 0;
+        self.main_scroll = @min(self.main_scroll, self.maxMainScroll());
+        if (self.diff_split) try self.setMessage("diff layout: side-by-side", .{}) else try self.setMessage("diff layout: unified", .{});
+    }
+
     fn scrollMain(self: *App, amount: isize) !void {
         if (amount < 0) {
             self.main_scroll -|= @intCast(-amount);
@@ -7401,6 +7604,12 @@ pub const App = struct {
     /// Largest horizontal offset that still keeps the widest line's end at (or
     /// before) the panel's right edge. Zero when the content already fits.
     pub fn maxMainHScroll(self: *const App) u16 {
+        if (self.splitActive()) {
+            // Both columns pan together by `main_hscroll`; clamp to the widest
+            // line so a column never scrolls past its content.
+            const w: u16 = if (self.main_view_width == 0) 80 else self.main_view_width;
+            return cachedMaxVisibleWidth(self.splitRows().plain) -| splitColWidth(w);
+        }
         if (self.wrap_diff) return 0; // nothing overflows horizontally while wrapping
         const view: u16 = if (self.main_view_width == 0) 80 else self.main_view_width;
         return self.mainContentWidth() -| view;
@@ -17657,6 +17866,7 @@ fn deinitTestApp(app: *App) void {
     // Release the module-level render caches this test may have populated with
     // the test allocator (production frees them in `tui.run`'s teardown).
     deinitLineIndexCache();
+    deinitSplitRowsCache();
 }
 
 test "discard menu offers the unstaged option only when a file has both" {
