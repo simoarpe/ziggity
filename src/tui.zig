@@ -4818,24 +4818,35 @@ fn drawLineNo(win: vaxis.Window, row: u16, x: u16, digits: u16, num: usize) void
     print(win, row, x + pad, s, styles().muted);
 }
 
+// Rounded box glyphs, matching the `single_rounded` border every panel uses, so
+// the selected hunk reads as a nested panel rather than a foreign rectangle.
 const box_vert = "\u{2502}"; // │
 const box_horz = "\u{2500}"; // ─
-const box_tl = "\u{250C}"; // ┌
-const box_tr = "\u{2510}"; // ┐
-const box_bl = "\u{2514}"; // └
-const box_br = "\u{2518}"; // ┘
+const box_tl = "\u{256D}"; // ╭
+const box_tr = "\u{256E}"; // ╮
+const box_bl = "\u{2570}"; // ╰
+const box_br = "\u{256F}"; // ╯
 
-/// The top edge of the selection box: the cursor hunk's `@@` header as a full-width
-/// band in reverse video (always legible, whatever the theme), capped with the box's
-/// top corners. The band gives the title weight; the corners start the rectangle.
+/// The top edge of the selection box: a rounded accent rule with the hunk's `@@`
+/// header set into it as a title (`╭─ @@ ... ─────╮`), exactly the way the app
+/// frames a focused panel. The whole frame uses the active-accent colour, so the
+/// cursor hunk reads as a nested panel: clearly selected, and native to the UI.
 fn drawHunkBoxTop(win: vaxis.Window, row: u16, title: []const u8, right_edge_x: u16) void {
-    const st = styles();
-    var band = st.hunk;
-    band.reverse = true;
-    fillRow(win, row, band);
-    print(win, row, 1, title, band);
-    print(win, row, 0, box_tl, st.active_border);
-    print(win, row, right_edge_x, box_tr, st.active_border);
+    const accent = styles().active_border;
+    print(win, row, 0, box_tl, accent);
+    var x: u16 = 1;
+    while (x < right_edge_x) : (x += 1) print(win, row, x, box_horz, accent);
+    print(win, row, right_edge_x, box_tr, accent);
+    // Set the header into the rule, a space on each side so the line does not run
+    // into the text. Clipped to leave a `─` and the corner on the right.
+    const start: u16 = 2;
+    const limit = right_edge_x -| 1;
+    if (start + 2 >= limit) return; // too narrow for " x "
+    const after_lead = printSpan(win, row, start, " ", accent);
+    const avail = (limit -| after_lead) -| 1; // keep a column for the trailing space
+    const shown = if (title.len > avail) title[0..avail] else title;
+    const after_title = printSpan(win, row, after_lead, shown, styles().active_title);
+    _ = printSpan(win, row, after_title, " ", accent);
 }
 
 /// The left and right edges of the selection box on one of the hunk's body rows.
@@ -4845,7 +4856,8 @@ fn drawHunkBoxSides(win: vaxis.Window, row: u16, right_edge_x: u16) void {
     print(win, row, right_edge_x, box_vert, accent);
 }
 
-/// The bottom edge of the selection box, a full-width rule under the hunk's last row.
+/// The bottom edge of the selection box: a rounded accent rule closing the frame
+/// under the hunk's last row.
 fn drawHunkBoxBottom(win: vaxis.Window, row: u16, right_edge_x: u16) void {
     const accent = styles().active_border;
     print(win, row, 0, box_bl, accent);

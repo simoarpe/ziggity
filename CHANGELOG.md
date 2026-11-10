@@ -20,11 +20,12 @@ Releases before 0.55.0 are listed on the
 - A side-by-side review of the current diff: press `|` to open it full screen,
   the old file on the left and the new on the right with lines aligned, file line
   numbers down each side, and the changed words emphasized. `j`/`k` or the wheel
-  scroll, `J`/`K` (or `shift+↑`/`shift+↓`) jump to the next and previous change;
-  the current change is framed in a box with its header drawn as a full-width
-  band. Clicking a line selects its hunk, `d` discards the whole current hunk,
-  `^w` soft-wraps both columns kept line for line, `H`/`L` pan, and `esc`
-  returns. A terminal too narrow for two columns falls back to the unified view.
+  scroll, `J`/`K` (or `shift+↑`/`shift+↓`) jump to the next and previous change,
+  landing its header at the top; the current change is framed in a rounded panel
+  titled with its hunk header. Clicking a line (or the frame) selects its hunk,
+  `d` discards the whole current hunk, `^w` soft-wraps both columns kept line for
+  line, `H`/`L` pan, and `esc` returns. A terminal too narrow for two columns
+  falls back to the unified view.
   From the staging view, `|` reviews the active side and opens on the hunk the
   staging cursor is on, and `d` discards from that side.
 

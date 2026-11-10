@@ -331,11 +331,12 @@ The Diff panel is unified (one column with `-` and `+` lines). To read a change
 side by side, press `|` to open a full-screen review: the old file on the left
 and the new on the right, lines aligned, file line numbers down each side, and
 the changed words emphasized. Inside it, `j`/`k` scroll, `J`/`K` jump to the next
-and previous change. The current change is framed in a box, with its header drawn
-as a full-width band, so you can see at a glance which hunk `d` acts on. Clicking
-a line selects its hunk, `d` discards the whole current hunk, `^w` soft-wraps
-both columns kept line for line, `H`/`L` pan, and `esc` returns. A terminal too
-narrow for two columns falls back to the unified view. From the staging view, `|`
+and previous change, bringing its header to the top. The current change is framed
+in a rounded panel titled with its hunk header, so you can see at a glance which
+hunk `d` acts on. Clicking a line or the frame selects its hunk, `d` discards the
+whole current hunk, `^w` soft-wraps both columns kept line for line, `H`/`L` pan,
+and `esc` returns. A terminal too narrow for two columns falls back to the
+unified view. From the staging view, `|`
 reviews the active side and opens on the hunk the staging cursor is on, and `d`
 discards from that side.
 

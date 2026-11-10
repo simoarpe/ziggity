@@ -408,10 +408,10 @@ The animation itself is in the [README](../README.md).
 - Side-by-side review: `|` opens a full-screen view of the current diff with the
   old file on the left and the new on the right, lines aligned, file line numbers
   down each side, and the changed words emphasized. `j`/`k` scroll, `J`/`K` jump
-  between changes (the current change is framed in a box with its header as a
-  full-width band), `d` discards the whole current hunk, `^w` soft-wraps both
-  columns kept line for line, and `esc` returns. A terminal too narrow for two
-  columns falls back to unified.
+  between changes, bringing each one's header to the top (the current change is
+  framed in a rounded panel titled with its hunk header), `d` discards the whole
+  current hunk, `^w` soft-wraps both columns kept line for line, and `esc`
+  returns. A terminal too narrow for two columns falls back to unified.
 - Mouse text selection with automatic copy in the diff panel, the read only
   dialogs, and the footer message line (drag the lower left log to copy it)
   (OSC 52); copy the selected item (`y`: a file path, commit, branch, tag,

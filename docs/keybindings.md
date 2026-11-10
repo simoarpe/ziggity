@@ -69,11 +69,11 @@ the written reference. Every binding is remappable, see
 - `|`: open the full-screen side-by-side review of the current diff (old file
   left, new file right, lines aligned, file line numbers down each side, changed
   words emphasized). Inside it `j`/`k` scroll, `J`/`K` jump to the next/previous
-  change (the current change is framed in a box with its header as a full-width
-  band), `d` discards the whole current hunk, `^w` soft-wraps both columns kept
-  line for line, `H`/`L` pan, and `esc` returns. A terminal too narrow for two
-  columns falls back to the unified view (see
-  [configuration.md](configuration.md#side-by-side-review-))
+  change, bringing its header to the top (the current change is framed in a
+  rounded panel titled with its hunk header), `d` discards the whole current
+  hunk, `^w` soft-wraps both columns kept line for line, `H`/`L` pan, and `esc`
+  returns. A terminal too narrow for two columns falls back to the unified view
+  (see [configuration.md](configuration.md#side-by-side-review-))
 - `+` / `_`: cycle the focused **side** panel's screen mode. `+` grows it
   (normal to half to full), `_` shrinks it back. In half the focused side panel
   takes about half the column with the rest still visible; in full it fills the
