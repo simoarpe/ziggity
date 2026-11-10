@@ -16,6 +16,8 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+## [0.60.0] - 2026-11-10
+
 ### Added
 - A side-by-side review of the current diff: press `|` to open it full screen,
   the old file on the left and the new on the right with lines aligned, file line
