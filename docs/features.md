@@ -414,6 +414,11 @@ The animation itself is in the [README](../README.md).
   change stays its own boxed hunk), `^w` soft-wraps both columns kept line for
   line, and `esc` returns. A terminal too narrow for two columns falls back to
   unified.
+
+  ![Side-by-side review, the selected change boxed with its header pinned](screenshots/27-side-by-side-review.png)
+
+  ![The same review with `=`, the whole file filled in around the boxed hunks](screenshots/28-side-by-side-whole.png)
+
 - Mouse text selection with automatic copy in the diff panel, one column of the
   side-by-side review (drag over the old or new file, line numbers and hunk
   headers left out), the read only dialogs, and the footer message line (drag the

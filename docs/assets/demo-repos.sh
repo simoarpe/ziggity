@@ -288,6 +288,70 @@ pub fn shutdown() void {
 }
 ZEOF
 
+# --- /tmp/zreview: the side-by-side review demo (review.tape) ---------------
+# A short Zig file with two separated edits, each a line replacement with a few
+# intra-line word changes, so the side-by-side review shows aligned old/new
+# columns, the changed words picked out, line numbers down both sides, and a
+# second hunk below the boxed, selected one.
+rm -rf /tmp/zreview
+mkdir /tmp/zreview
+cd /tmp/zreview
+git init -q -b main
+git config user.email demo@ziggity.dev
+git config user.name "Demo"
+cat > net.zig <<'ZEOF'
+const std = @import("std");
+const log = std.log;
+
+pub const Config = struct {
+    host: []const u8 = "localhost",
+    port: u16 = 8080,
+    max_retries: u32 = 3,
+    timeout_ms: u32 = 5000,
+};
+
+pub const Server = struct {
+    config: Config,
+
+    pub fn start(self: *Server) !void {
+        log.info("listening on {s}:{d}", .{ self.config.host, self.config.port });
+        try self.bind();
+    }
+
+    pub fn stop(self: *Server) void {
+        log.info("closing all connections", .{});
+        self.drain();
+    }
+};
+ZEOF
+git add .
+git commit -q -m "Add network server config"
+cat > net.zig <<'ZEOF'
+const std = @import("std");
+const log = std.log;
+
+pub const Config = struct {
+    host: []const u8 = "localhost",
+    port: u16 = 9090,
+    max_retries: u32 = 5,
+    timeout_ms: u32 = 3000,
+};
+
+pub const Server = struct {
+    config: Config,
+
+    pub fn start(self: *Server) !void {
+        log.info("listening on {s}:{d}", .{ self.config.host, self.config.port });
+        try self.bind();
+    }
+
+    pub fn stop(self: *Server) void {
+        log.info("draining open sockets", .{});
+        self.drain();
+    }
+};
+ZEOF
+
 # --- /tmp/zwrap: the line-wrapping demo (wrap.tape) -------------------------
 # A markdown file with long prose paragraphs and a one-word edit deep inside
 # one of them, so the diff has long -/+ lines that run off the right edge when

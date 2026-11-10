@@ -292,6 +292,13 @@ point, with demos:
   hunks. `d` discards at the same granularity, so one bad line goes away
   without touching the rest of the file, and a split view can show unstaged
   and staged side by side.
+- **Review a diff side by side**: press `|` for a full-screen view with the old
+  file on the left and the new on the right, lines aligned, numbered down each
+  side, and the changed words picked out. `J`/`K` step between the changes, each
+  framed in its own rounded panel whose header stays pinned as you scroll through
+  it; `=` fills the rest of the file in around the changes, `d` discards a hunk,
+  and dragging over either column copies just that side. It works on a working
+  tree file, the staging view, or a single file from any commit.
 - **Interactive rebase you compose first**: mark drop, squash, fixup, edit
   and reword across a range of commits in a plan editor, then run the lot as
   one rebase. Cherry picking, autosquash, custom patch building and
@@ -338,6 +345,12 @@ point, with demos:
 </p>
 
 <p align="center"><i>Stage or unstage single lines or whole hunks with <code>space</code>; <code>d</code> discards them instead.</i></p>
+
+<p align="center">
+  <img src="docs/screenshots/27-side-by-side-review.png" alt="Side-by-side diff review" width="900">
+</p>
+
+<p align="center"><i><code>|</code> opens the full-screen side-by-side review: the old file on the left, the new on the right, changed words picked out, and each change in its own box you step through with <code>J</code>/<code>K</code>.</i></p>
 
 <p align="center">
   <img src="docs/screenshots/08-commit-dialog.png" alt="Commit message dialog" width="900">
