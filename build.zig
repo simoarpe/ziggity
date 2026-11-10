@@ -33,7 +33,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         // Strip debug info from release builds so the shipped binaries stay
         // small (a few MB, not ~10). Debug builds keep it for backtraces.
-        .strip = optimize != .Debug,
+        .strip = optimize != .debug,
         .imports = &.{
             .{ .name = "ziggity", .module = lib_mod },
             .{ .name = "vaxis", .module = vaxis_mod },
@@ -50,7 +50,7 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run ziggity");
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
     run_step.dependOn(&run_cmd.step);
 
     const lib_tests = b.addTest(.{ .root_module = lib_mod });

@@ -634,9 +634,9 @@ pub const Config = struct {
         if (std.mem.startsWith(u8, key, "skip_confirm.")) {
             const name = key["skip_confirm.".len..];
             const on = parseBool(value) orelse return;
-            inline for (std.meta.fields(ConfirmSkips)) |field| {
-                if (std.mem.eql(u8, name, field.name)) {
-                    @field(self.skip_confirm, field.name) = on;
+            inline for (@typeInfo(ConfirmSkips).@"struct".field_names) |fname| {
+                if (std.mem.eql(u8, name, fname)) {
+                    @field(self.skip_confirm, fname) = on;
                     return;
                 }
             }
@@ -657,9 +657,9 @@ pub const Config = struct {
         if (std.mem.startsWith(u8, key, "color.")) {
             const color_name = key["color.".len..];
             const parsed = std.fmt.parseInt(u8, value, 10) catch return;
-            inline for (std.meta.fields(Theme)) |field| {
-                if (std.mem.eql(u8, color_name, field.name)) {
-                    @field(self.theme, field.name) = parsed;
+            inline for (@typeInfo(Theme).@"struct".field_names) |fname| {
+                if (std.mem.eql(u8, color_name, fname)) {
+                    @field(self.theme, fname) = parsed;
                     return;
                 }
             }
@@ -668,9 +668,9 @@ pub const Config = struct {
 
         const key_name = if (std.mem.startsWith(u8, key, "key.")) key["key.".len..] else return;
         const binding = parseBinding(value) orelse return;
-        inline for (std.meta.fields(KeyMap)) |field| {
-            if (std.mem.eql(u8, key_name, field.name)) {
-                @field(self.keymap, field.name) = binding;
+        inline for (@typeInfo(KeyMap).@"struct".field_names) |fname| {
+            if (std.mem.eql(u8, key_name, fname)) {
+                @field(self.keymap, fname) = binding;
                 return;
             }
         }

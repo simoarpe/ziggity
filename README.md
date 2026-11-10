@@ -16,7 +16,7 @@
 
 <p align="center">
   <a href="https://ziggity.dev"><img alt="Website" src="https://img.shields.io/badge/website-ziggity.dev-f7a41d"></a>
-  <img alt="Zig 0.16" src="https://img.shields.io/badge/Zig-0.16.0-f7a41d">
+  <img alt="Zig 0.17" src="https://img.shields.io/badge/Zig-0.17.1-f7a41d">
   <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue">
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20Android-lightgrey">
 </p>
@@ -189,7 +189,7 @@ sha256sum --ignore-missing -c checksums.txt   # macOS: shasum -a 256 --ignore-mi
 
 ### Compile from Source
 
-**Requirements:** [Zig `0.16.0`](https://ziglang.org/download/) and `git` on your `PATH`.
+**Requirements:** [Zig `0.17.1`](https://ziglang.org/download/) and `git` on your `PATH`.
 
 ```sh
 git clone https://github.com/simoarpe/ziggity

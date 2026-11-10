@@ -44,7 +44,7 @@ pub fn isAuthFailure(output: []const u8) bool {
         "fatal: Authentication",
     };
     for (needles) |n| {
-        if (std.ascii.indexOfIgnoreCase(output, n) != null) return true;
+        if (std.ascii.findIgnoreCase(output, n) != null) return true;
     }
     return false;
 }
@@ -61,7 +61,7 @@ pub fn isSshKeyFailure(output: []const u8) bool {
         "Enter passphrase for key",
     };
     for (needles) |n| {
-        if (std.ascii.indexOfIgnoreCase(output, n) != null) return true;
+        if (std.ascii.findIgnoreCase(output, n) != null) return true;
     }
     return false;
 }
@@ -70,9 +70,9 @@ pub fn isSshKeyFailure(output: []const u8) bool {
 /// failure summary. No username/password prompt can help here, so the message
 /// points at the actual fix (an agent, or trusting the host).
 pub fn sshFailureReason(output: []const u8) []const u8 {
-    if (std.ascii.indexOfIgnoreCase(output, "Host key verification failed") != null)
+    if (std.ascii.findIgnoreCase(output, "Host key verification failed") != null)
         return "host key not trusted (connect once outside ziggity to add it)";
-    if (std.ascii.indexOfIgnoreCase(output, "authentication agent") != null)
+    if (std.ascii.findIgnoreCase(output, "authentication agent") != null)
         return "no SSH agent running (start one and run ssh-add)";
     return "SSH key rejected (load it with ssh-add, or check it is authorized on the remote)";
 }
@@ -88,7 +88,7 @@ pub fn tokenHintSuffix(output: []const u8) []const u8 {
         "token", // e.g. "you must use a personal access token"
     };
     for (token_needles) |n| {
-        if (std.ascii.indexOfIgnoreCase(output, n) != null)
+        if (std.ascii.findIgnoreCase(output, n) != null)
             return " — use a personal access token, not a password";
     }
     return "";

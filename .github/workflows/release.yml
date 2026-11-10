@@ -34,7 +34,7 @@ jobs:
       #    bump the major once mlugg/setup-zig ships a Node 24 release.)
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.1
 
       # 3. Gate the release on the test suite — never ship a broken build.
       - name: Test

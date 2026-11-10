@@ -405,7 +405,7 @@ test "buildPartialFilePatch keeps only included lines across hunks" {
 
     // Include only the "+b" addition (line 6); the "+y" in hunk 1 is excluded,
     // so hunk 1 drops out entirely.
-    var included = [_]bool{false} ** 13;
+    var included: [13]bool = @splat(false);
     included[6] = true;
     const patch = try buildPartialFilePatch(std.testing.allocator, diff, parsed, &included);
     defer std.testing.allocator.free(patch);
@@ -415,7 +415,7 @@ test "buildPartialFilePatch keeps only included lines across hunks" {
     );
 
     // Including nothing yields EmptySelection.
-    var none = [_]bool{false} ** 13;
+    var none: [13]bool = @splat(false);
     try std.testing.expectError(error.EmptySelection, buildPartialFilePatch(std.testing.allocator, diff, parsed, &none));
 }
 
@@ -433,7 +433,7 @@ test "buildPartialFilePatch turns an unselected deletion into context" {
     defer parsed.deinit(std.testing.allocator);
 
     // Include only the "-b" deletion; "-c" stays as context.
-    var included = [_]bool{false} ** 8;
+    var included: [8]bool = @splat(false);
     included[6] = true;
     const patch = try buildPartialFilePatch(std.testing.allocator, diff, parsed, &included);
     defer std.testing.allocator.free(patch);

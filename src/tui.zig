@@ -6153,7 +6153,7 @@ const glyph_collapsed = "▸"; // U+25B8
 const glyph_focus_pointer = "◀"; // U+25C0 (marks the help section for the current context)
 const glyph_expanded = "▾"; // U+25BE
 const glyph_diff_base = "◆"; // U+25C6 (the diffing-mode base marker)
-const indent_spaces = " " ** 32;
+const indent_spaces: [32]u8 = @splat(' ');
 
 /// Render ahead/behind status: `↓2↑3`, `✓` when in sync, or `(unpushed)`
 /// when the branch has no upstream (never pushed). Returns the next column.

@@ -39,6 +39,10 @@ Releases before 0.55.0 are listed on the
   back to the unified view. From the staging view, `|` reviews the active side
   and opens on the hunk the staging cursor is on, and `d` discards from that side.
 
+### Changed
+- Build against Zig 0.17.1, up from 0.16.0. Building from source now needs Zig
+  0.17.1 on your `PATH`.
+
 ### Fixed
 - Emoji and other characters made of several code points (a base plus a
   variation selector, a zero-width-joiner sequence, a skin-tone modifier, or a

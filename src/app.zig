@@ -82,7 +82,7 @@ pub fn runAskpassHelper(init: std.process.Init) !void {
     defer it.deinit();
     _ = it.next(); // argv[0]: our own path
     const prompt = it.next() orelse "";
-    const wants_user = std.ascii.indexOfIgnoreCase(prompt, "username") != null;
+    const wants_user = std.ascii.findIgnoreCase(prompt, "username") != null;
     const value = (if (wants_user)
         init.environ_map.get(askpass_env_user)
     else
@@ -1456,7 +1456,7 @@ pub fn loadRepoDataAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.proce
     // a big repo) so that when the concurrency limit is reached, it's the cheap
     // commands that fall back to running inline.
     const workers = .{ loadStatusW, loadFilesW, loadCommitsW, loadBranchesW, loadReflogW, loadRemoteBranchesW, loadRemotesW, loadWorktreesW, loadSubmodulesW, loadStashW };
-    var futures: [workers.len]?std.Io.Future(void) = .{null} ** workers.len;
+    var futures: [workers.len]?std.Io.Future(void) = @splat(null);
     // Spawn concurrently; `concurrent` never blocks — it only fails when the
     // runtime can't take another task (with `std.Io.Threaded`'s default
     // unlimited `concurrent_limit`, that means thread spawn or allocation
@@ -1539,7 +1539,7 @@ pub fn loadScopesAsync(gpa: std.mem.Allocator, io: std.Io, environ: *std.process
     // a view leaves it out, so applyScopedLoad keeps the stale data for it
     // rather than wiping the panel.
     var d = model.RepoData{};
-    var loaded = ScopeSet.initEmpty();
+    var loaded = ScopeSet.empty;
     if (scopes.contains(.files)) {
         if (wgit.loadFiles()) |f| {
             d.files = f;
@@ -3593,7 +3593,7 @@ pub const App = struct {
     // selection only when the *selection* changes (keyboard/click/refresh), not
     // when the wheel scrolls. Indexed via `listViewIndex` (files/branches/
     // commits/stash); status and main have no entry.
-    list_views: [4]ListView = [_]ListView{.{}} ** 4,
+    list_views: [4]ListView = @splat(.{}),
     // Character-precise mouse text selection in the Diff panel. Coordinates are
     // into the rendered diff (`self.diff`): `line` is an absolute line index,
     // `col` a visible column. `anchor` is where the drag began, `head` the
@@ -3675,7 +3675,7 @@ pub const App = struct {
     dialog_sel_head_col: usize = 0,
     dialog_origin_x: u16 = 0,
     dialog_origin_y: u16 = 0,
-    dialog_rows: [256][]const u8 = [_][]const u8{""} ** 256,
+    dialog_rows: [256][]const u8 = @splat(""),
     dialog_row_count: usize = 0,
     /// App-owned backing for the confirmation prompt text, so the rendered rows
     /// recorded for mouse selection stay valid after the draw call returns
@@ -3786,7 +3786,7 @@ pub const App = struct {
     commit_content_x: u16 = 0,
     commit_content_y: u16 = 0,
     commit_row_count: usize = 0,
-    commit_rows: [16]CommitRowMap = [_]CommitRowMap{.{}} ** 16,
+    commit_rows: [16]CommitRowMap = @splat(.{}),
     file_filter_scroll: usize = 0,
     commit_action: CommitAction = .create,
     // ---- AI-assisted commit authoring (see aiauthor.zig) --------------------
@@ -3999,8 +3999,7 @@ pub const App = struct {
     // cancelled, restored on reopen, and cleared once the thing is created.
     // Indexed by TextPromptKind; only "draftable" creation kinds are populated.
     // Each entry is owned.
-    prompt_drafts: [@typeInfo(TextPromptKind).@"enum".fields.len][]u8 =
-        [_][]u8{&.{}} ** @typeInfo(TextPromptKind).@"enum".fields.len,
+    prompt_drafts: [@typeInfo(TextPromptKind).@"enum".field_names.len][]u8 = @splat(&.{}),
     // Holds the remote name between the two-step add-remote prompt (name → URL)
     // and the remote acted on by edit/remove. No allocation needed.
     // 256 > git's 255-byte ref-name limit, so a remote/branch/tag name never
@@ -4166,7 +4165,7 @@ pub const App = struct {
     /// Slow views (branches/commits/tags/…) queued for an off-thread scoped
     /// reload (per-view refresh). The fast Files/Status views are
     /// refreshed synchronously, so they never appear here and never race.
-    pending_scopes: ScopeSet = ScopeSet.initEmpty(),
+    pending_scopes: ScopeSet = ScopeSet.empty,
     scoped_load_active: bool = false,
     /// True from startup until the tags, which load after the rest of the repo
     /// (see `loadRepoDataAsync`), land; the Tags panel shows "Loading…" meanwhile.
@@ -4192,7 +4191,7 @@ pub const App = struct {
     mutation_msg: []u8 = &.{},
     mutation_echo: bool = false,
     mutation_post: PostMutation = .none,
-    mutation_refresh: ScopeSet = ScopeSet.initFull(),
+    mutation_refresh: ScopeSet = ScopeSet.full,
     mutation_gerund: []const u8 = "working",
     busy_flag: std.atomic.Value(bool) = .init(false),
     spinner_frame: usize = 0,
@@ -4577,7 +4576,7 @@ pub const App = struct {
         if (self.scoped_load_active) return null;
         if (self.pending_scopes.count() == 0) return null;
         const scopes = self.pending_scopes;
-        self.pending_scopes = ScopeSet.initEmpty();
+        self.pending_scopes = ScopeSet.empty;
         self.scoped_load_active = true;
         return scopes;
     }
@@ -13012,7 +13011,7 @@ pub const App = struct {
         pub const worktree_add = ScopeSet.init(.{ .worktrees = true, .branches = true });
         pub const submodules = ScopeSet.init(.{ .files = true, .submodules = true });
         pub const upstream = ScopeSet.init(.{ .branches = true, .status = true });
-        pub const all = ScopeSet.initFull();
+        pub const all = ScopeSet.full;
     };
 
     /// Run a mutation that touched only the working tree (stage/unstage/discard/
@@ -13064,7 +13063,7 @@ pub const App = struct {
         post: PostMutation = .none,
         /// Views to refresh when the mutation finishes. Defaults to everything
         /// (rebase/merge/etc. touch a lot); precise ops can narrow it.
-        refresh: ScopeSet = ScopeSet.initFull(),
+        refresh: ScopeSet = ScopeSet.full,
     };
 
     /// Queue a slow mutation for the TUI loop to run off-thread. Refused if a
@@ -14108,7 +14107,7 @@ test "horizontal scroll steps uniformly and stays bounded by the content" {
     // moves a uniform `horizontal_scroll_step` (no giant first jump), and the
     // only short move is the final clamp to the bound.
     allocator.free(app.diff);
-    app.diff = try allocator.dupe(u8, "short\n" ++ ("x" ** 90) ++ "\n");
+    app.diff = try allocator.dupe(u8, "short\n" ++ @as([90]u8, @splat('x')) ++ "\n");
     app.main_view_width = 64;
     app.focus = .main;
 
@@ -14202,7 +14201,7 @@ test "credential prompt collects username then password and queues a retry" {
     defer deinitTestApp(&app);
     // An askpass path must exist for credential entry to be offered/used; the
     // path itself is not exercised by this flow.
-    app.exe_path = try allocator.dupeZ(u8, "/path/to/ziggity");
+    app.exe_path = try allocator.dupeSentinel(u8, "/path/to/ziggity", 0);
     // The retry records the command in the git log; a minimal Git suffices.
     app.git = .{ .allocator = allocator, .io = undefined, .environ = undefined, .root = undefined };
     defer app.git.command_log.deinit(allocator);
@@ -14234,7 +14233,7 @@ test "cancelling the credential prompt stores nothing and queues nothing" {
     var no_files = [_]model.FileStatus{};
     var app = try testApp(allocator, &no_files);
     defer deinitTestApp(&app);
-    app.exe_path = try allocator.dupeZ(u8, "/path/to/ziggity");
+    app.exe_path = try allocator.dupeSentinel(u8, "/path/to/ziggity", 0);
 
     try credentials_mod.startCredentialPrompt(&app, .pull);
     try app.input_buffer.appendSlice(allocator, "octocat");
@@ -19139,7 +19138,7 @@ test "exe_path keeps the executablePathAlloc sentinel so deinit frees the full a
     // exactly 16 bytes, which is why the crash reproduced for packaged builds
     // but not from a `zig-out/bin` checkout. The checking allocator here
     // trips on the same mismatch, so this fails (panics) without the fix.
-    app.exe_path = try a.dupeZ(u8, "/usr/bin/ziggity");
+    app.exe_path = try a.dupeSentinel(u8, "/usr/bin/ziggity", 0);
     try std.testing.expectEqual(@as(usize, 16), app.exe_path.?.len);
 }
 
