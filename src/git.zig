@@ -1452,7 +1452,7 @@ pub const Git = struct {
     /// The diff a single commit introduced for one path. `-m --first-parent` gives
     /// a merge's first-parent diff (what it brought into the mainline) instead of
     /// the empty combined diff; a no-op for regular and root commits.
-    pub fn diffForCommitFile(self: *Git, hash: []const u8, path: []const u8, diff_context: u8) ![]u8 {
+    pub fn diffForCommitFile(self: *Git, hash: []const u8, path: []const u8, diff_context: u32) ![]u8 {
         const context_arg = try std.fmt.allocPrint(self.allocator, "--unified={d}", .{diff_context});
         defer self.allocator.free(context_arg);
         var result = try self.exec(&.{ "show", "-m", "--first-parent", hash, "--no-ext-diff", "--no-color", context_arg, "--format=", "--", path });

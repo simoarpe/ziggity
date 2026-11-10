@@ -340,9 +340,10 @@ hunk (a common line between hunks selects nothing), `d` discards the
 whole current hunk, `=` fills in the rest of a single file around its changes
 (every unchanged line is shown, and each change stays its own boxed hunk that
 `J`/`K` steps between), `^w` soft-wraps both columns kept line for line, `H`/`L`
-pan, and `esc` returns. `d`
-and `=` are offered only when the review shows a single not-yet-committed file (a
-working-tree file, or the staging view); reviewing a commit or a `W` comparison is
+pan, and `esc` returns. Both act on a single file, so `=` is offered for a
+working-tree file, the staging view, or one file drilled into a commit, while `d`
+(which changes the working tree) is offered only for the not-yet-committed cases;
+a whole multi-file commit or a `W` comparison has no single "whole file" and is
 read-only. A terminal too narrow for two columns falls back to the unified view.
 From the staging view, `|` reviews the active side and opens on the hunk the
 staging cursor is on, and `d` discards from that side.

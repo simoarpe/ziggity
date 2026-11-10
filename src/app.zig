@@ -3156,6 +3156,43 @@ test "review whole-file view is available only for a single tracked file" {
     try std.testing.expect(!app.reviewWholeFileAvailable());
 }
 
+test "review whole-file view is available for a single file drilled into a commit" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+
+    var empty: [0]u8 = .{};
+    var commits = [_]model.Commit{.{
+        .hash = try a.dupe(u8, "abc123"),
+        .short_hash = &empty,
+        .author = &empty,
+        .time = &empty,
+        .refs = &empty,
+        .subject = &empty,
+    }};
+    defer a.free(commits[0].hash);
+    var cfiles = [_]model.CommitFile{.{ .status = 'M', .path = try a.dupe(u8, "f.txt") }};
+    defer a.free(cfiles[0].path);
+
+    app.data.commits = &commits;
+    app.commit_files = &cfiles;
+
+    // Just a commit selected (no file drilled): its diff is multi-file, so no.
+    app.focus = .commits;
+    try std.testing.expect(!app.reviewWholeFileAvailable());
+
+    // Drilled into one of the commit's files: available.
+    app.commit_files_active = true;
+    try std.testing.expect(app.reviewWholeFileAvailable());
+    try std.testing.expect(app.reviewCommitFile() != null);
+
+    // Leaving the file drill drops availability again.
+    app.commit_files_active = false;
+    app.focus = .files;
+    try std.testing.expect(!app.reviewWholeFileAvailable());
+}
+
 test "wrapped side-by-side expands a pair to its taller side and pads the shorter" {
     const a = std.testing.allocator;
     defer deinitSplitRowsCache();
@@ -8422,13 +8459,23 @@ pub const App = struct {
         }
     }
 
+    /// The commit and file when the review is showing a single file drilled into a
+    /// commit (in the Commits panel or a branch's commits), or null. That file's
+    /// diff can be re-run with full context, so `=` works there too.
+    fn reviewCommitFile(self: *const App) ?struct { hash: []const u8, path: []const u8 } {
+        const file = self.selectedCommitFile() orelse return null; // null unless a file is drilled
+        const commit = self.selectedCommit() orelse return null;
+        return .{ .hash = commit.hash, .path = file.path };
+    }
+
     /// Whether the review can offer `=` (show the entire file): only for a single
-    /// tracked file whose diff we can re-run with full context, which is the
-    /// staging view's file or a working-tree file selected in the Files panel. A
+    /// file whose diff we can re-run with full context — the staging view's file, a
+    /// working-tree file in the Files panel, or one file drilled into a commit. A
     /// multi-file diff (a whole commit, a directory, a `W` comparison) has no one
     /// "entire file", so it is not offered there.
     pub fn reviewWholeFileAvailable(self: *const App) bool {
         if (self.staging_active) return self.staging_path.len > 0;
+        if (self.reviewCommitFile() != null) return true;
         if (self.diff_base != null) return false;
         if (self.contentFocus() != .files) return false;
         const file = self.selectedFile() orelse return false;
@@ -8487,6 +8534,9 @@ pub const App = struct {
         if (self.staging_active) {
             if (self.staging_path.len == 0) return null;
             return self.git.rawFileDiff(self.staging_path, self.staging_staged_view, whole_context) catch null;
+        }
+        if (self.reviewCommitFile()) |cf| {
+            return self.git.diffForCommitFile(cf.hash, cf.path, whole_context) catch null;
         }
         if (self.diff_base != null) return null;
         if (self.contentFocus() != .files) return null;
