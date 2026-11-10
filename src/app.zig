@@ -2670,12 +2670,16 @@ fn buildChangeHunkLines(gpa: std.mem.Allocator, diff: []const u8) ![]usize {
             has_change = false;
         } else if (cur_header != null) {
             // A diff body line leads with a space, `+`, `-`, or `\`. Anything else
-            // (the next file's `diff --git`/`index` header, or a section label)
-            // ends this hunk's body, so the following `---`/`+++` file headers are
-            // not counted as changes — which would mark a change-free gap hunk as a
-            // real one and desync the count from the compact view.
+            // (the next file's `diff --git`/`index` header, a section label, or the
+            // synthetic empty line past the final `\n`) ends this hunk's body, so the
+            // following `---`/`+++` file headers are not counted as changes — which
+            // would mark a change-free gap hunk as a real one and desync the count
+            // from the compact view. Flush the hunk first if it had a change, or a
+            // real change hunk that runs to the end of the diff would be dropped.
             if (line.len == 0 or (line[0] != ' ' and line[0] != '+' and line[0] != '-' and line[0] != '\\')) {
+                if (cur_header) |h| if (has_change) try list.append(gpa, h);
                 cur_header = null;
+                has_change = false;
             } else {
                 const k = bodyKind(line);
                 if (k == .del or k == .add) has_change = true;
@@ -2944,6 +2948,38 @@ test "splitDiffAtChanges keeps small hunks and carves gaps between changes" {
     try std.testing.expect(std.mem.indexOf(u8, split, "@@ -4,1 +4,1 @@") != null); // gap (l4)
     try std.testing.expect(std.mem.indexOf(u8, split, "@@ -8,1 +8,1 @@") != null); // gap (l8)
     // Navigation skips the gap hunks: only the two real changes are reachable.
+    const changes = changeHunkLines(a, split);
+    try std.testing.expectEqual(@as(usize, 2), changes.len);
+}
+
+test "the final change hunk is counted when the diff ends on it" {
+    const a = std.testing.allocator;
+    defer deinitChangeHunksCache();
+    // Two changes, the second on the last line, so after the split the last hunk
+    // is a real change that runs to the end of the diff (no trailing gap hunk).
+    // This is the common case of editing the end of a file.
+    const diff =
+        "diff --git a/f b/f\n" ++
+        "--- a/f\n" ++
+        "+++ b/f\n" ++
+        "@@ -1,8 +1,8 @@\n" ++
+        "-l1\n" ++ // change A (line 1)
+        "+L1\n" ++
+        " l2\n" ++
+        " l3\n" ++
+        " l4\n" ++
+        " l5\n" ++
+        " l6\n" ++
+        " l7\n" ++
+        "-l8\n" ++ // change B (line 8, the last line)
+        "+L8\n";
+    const split = try splitDiffAtChanges(a, diff, 1);
+    defer a.free(split);
+    // The last change hunk (`@@ -7,2 +7,2 @@`, l7 context + l8 change) reaches the
+    // end of the split with no gap hunk after it.
+    try std.testing.expect(std.mem.indexOf(u8, split, "@@ -7,2 +7,2 @@") != null);
+    // Both changes are counted; before the fix the final one was dropped (the view
+    // showed one fewer change than the compact view and `J`/`K` could not reach it).
     const changes = changeHunkLines(a, split);
     try std.testing.expectEqual(@as(usize, 2), changes.len);
 }

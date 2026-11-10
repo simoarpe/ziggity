@@ -248,7 +248,6 @@ pub const ResultDialog = enum { on_error, always, never };
 /// with both staged and unstaged changes.
 pub const StagingSplitMode = enum { off, on, auto };
 
-
 /// Whether a custom shell command's output pops a dialog (`show`, the default,
 /// since custom commands are usually run to read output) or follows
 /// `result_dialog` like any other action (`silent`).
