@@ -31,6 +31,7 @@ var word_diff_enabled: bool = true;
 /// message). Module-level so the title outlives the frame flush.
 var main_title_wrap_buf: [128]u8 = undefined;
 var split_title_buf: [64]u8 = undefined;
+var review_footer_buf: [256]u8 = undefined;
 
 /// Append the wrap indicator to a Diff-panel title when wrapping is on, so the
 /// current wrap state is visible in the header rather than only in a message.
@@ -617,6 +618,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     defer app_mod.deinitSplitRowsCache();
     defer app_mod.deinitSplitWrapCache();
     defer app_mod.deinitHunkLinesCache();
+    defer app_mod.deinitChangeHunksCache();
 
     var tty_buffer: [1024]u8 = undefined;
     // Opening /dev/tty (+ switching it to raw mode) fails when there's no
@@ -1920,10 +1922,14 @@ fn drawDiffReview(root: vaxis.Window, app: *app_mod.App) void {
     // the review has no message bar to report it. It must live in a module buffer
     // (not the stack): `panel` stores the title by reference until the frame flush.
     const base_title: []const u8 = if (app.currentDiffHunk()) |h|
-        (std.fmt.bufPrint(&split_title_buf, "Side-by-side review (change {d}/{d})", .{ h + 1, app_mod.diffHunkLines(app.allocator, app.activeMainText()).len }) catch "Side-by-side review")
+        (std.fmt.bufPrint(&split_title_buf, "Side-by-side review (change {d}/{d})", .{ h + 1, app.reviewHunkLines().len }) catch "Side-by-side review")
     else
         "Side-by-side review";
-    const title = titleWithWrap(app, base_title, &main_title_wrap_buf);
+    // Show the layout state in the header, like the wrap indicator: whole file
+    // (`=` on) vs the default hunks-only, and soft-wrap (`^w`) when on.
+    const full_tag: []const u8 = if (app.review_whole_file) "  \u{2261} full file" else "";
+    const wrap_tag: []const u8 = if (app.wrap_diff) "  \u{21A9} wrap" else "";
+    const title = std.fmt.bufPrint(&main_title_wrap_buf, "{s}{s}{s}", .{ base_title, full_tag, wrap_tag }) catch base_title;
     const main = panel(root, 0, 0, root.width, body_h, title, true, scroll);
     app.main_view_width = main.width;
     app.main_view_height = main.height;
@@ -1931,11 +1937,14 @@ fn drawDiffReview(root: vaxis.Window, app: *app_mod.App) void {
     app.main_scroll = @min(app.main_scroll, app.maxMainScroll());
     app.main_hscroll = @min(app.main_hscroll, app.maxMainHScroll());
     if (app.splitActive()) drawSideBySide(main, app) else drawDiffContent(main, app, app.activeMainText(), .main);
-    // Offer "d discard hunk" only when the review shows uncommitted changes.
-    const footer = if (app.reviewDiscardOffered())
-        "  j/k scroll  J/K change  d discard hunk  ^w wrap  H/L pan  esc back  q quit"
+    // The hints after "J/K change" are conditional: "= whole file" when a single
+    // file can be expanded, and "d discard hunk" only for uncommitted changes.
+    const whole = if (app.reviewWholeFileAvailable())
+        (if (app.review_whole_file) "  = hunks only" else "  = whole file")
     else
-        "  j/k scroll  J/K change  ^w wrap  H/L pan  esc back  q quit";
+        "";
+    const discard = if (app.reviewDiscardOffered()) "  d discard hunk" else "";
+    const footer = std.fmt.bufPrint(&review_footer_buf, "  j/k scroll  J/K change{s}{s}  ^w wrap  H/L pan  esc back  q quit", .{ whole, discard }) catch "  j/k scroll  J/K change  ^w wrap  H/L pan  esc back  q quit";
     print(root, footer_row, 0, footer, st.bottom_accent);
 }
 
@@ -4810,6 +4819,9 @@ fn drawSideBySide(win: vaxis.Window, app: *const app_mod.App) void {
         drawSplitCell(right, screen_row, r.right, plain, offs, emph_lines, h_off, col_w);
         screen_row += 1;
     }
+    // Keep the selection box's top edge in view: pin its header to the top row
+    // while scrolling through the hunk, drawn exactly like the box top.
+    if (app.stickyHeaderRow()) |hrow| drawHunkBoxTop(win, 0, rows[hrow].left.text(plain), right_edge_x);
 }
 
 /// Draw a file line number right-aligned in the `digits`-wide gutter at column `x`,
@@ -4956,6 +4968,10 @@ fn drawSideBySideWrapped(win: vaxis.Window, app: *const app_mod.App) void {
         drawSplitSeg(left, screen_row, v.left, plain, emph_lines);
         drawSplitSeg(right, screen_row, v.right, plain, emph_lines);
         screen_row += 1;
+    }
+    if (app.stickyHeaderRow()) |hrow| {
+        const vh = vrows[hrow];
+        drawHunkBoxTop(win, 0, plain[vh.hoff .. vh.hoff + vh.hlen], right_edge_x);
     }
 }
 

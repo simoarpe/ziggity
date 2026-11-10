@@ -410,8 +410,10 @@ The animation itself is in the [README](../README.md).
   down each side, and the changed words emphasized. `j`/`k` scroll, `J`/`K` jump
   between changes, bringing each one's header to the top (the current change is
   framed in a rounded panel titled with its hunk header), `d` discards the whole
-  current hunk, `^w` soft-wraps both columns kept line for line, and `esc`
-  returns. A terminal too narrow for two columns falls back to unified.
+  current hunk, `=` fills in the rest of a single file around its changes (each
+  change stays its own boxed hunk), `^w` soft-wraps both columns kept line for
+  line, and `esc` returns. A terminal too narrow for two columns falls back to
+  unified.
 - Mouse text selection with automatic copy in the diff panel, the read only
   dialogs, and the footer message line (drag the lower left log to copy it)
   (OSC 52); copy the selected item (`y`: a file path, commit, branch, tag,

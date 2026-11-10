@@ -333,13 +333,17 @@ and the new on the right, lines aligned, file line numbers down each side, and
 the changed words emphasized. Inside it, `j`/`k` scroll, `J`/`K` jump to the next
 and previous change, bringing its header to the top. The current change is framed
 in a rounded panel titled with its hunk header, so you can see at a glance which
-hunk `d` acts on. Clicking a line or the frame selects its hunk, `d` discards the
-whole current hunk, `^w` soft-wraps both columns kept line for line, `H`/`L` pan,
-and `esc` returns. `d` is offered only when the review shows changes that are not
-yet committed (a working-tree file, or the staging view); reviewing a commit or a
-`W` comparison is read-only. A terminal too narrow for two columns falls back to
-the unified view. From the staging view, `|` reviews the active side and opens on
-the hunk the staging cursor is on, and `d` discards from that side.
+hunk `d` acts on; that header stays pinned to the top while you scroll through the
+hunk. Clicking a line or the frame selects its hunk, `d` discards the
+whole current hunk, `=` fills in the rest of a single file around its changes
+(every unchanged line is shown, and each change stays its own boxed hunk that
+`J`/`K` steps between), `^w` soft-wraps both columns kept line for line, `H`/`L`
+pan, and `esc` returns. `d`
+and `=` are offered only when the review shows a single not-yet-committed file (a
+working-tree file, or the staging view); reviewing a commit or a `W` comparison is
+read-only. A terminal too narrow for two columns falls back to the unified view.
+From the staging view, `|` reviews the active side and opens on the hunk the
+staging cursor is on, and `d` discards from that side.
 
 ## Editor (`e`)
 

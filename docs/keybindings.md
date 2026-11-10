@@ -71,9 +71,11 @@ the written reference. Every binding is remappable, see
   words emphasized). Inside it `j`/`k` scroll, `J`/`K` jump to the next/previous
   change, bringing its header to the top (the current change is framed in a
   rounded panel titled with its hunk header), `d` discards the whole current
-  hunk, `^w` soft-wraps both columns kept line for line, `H`/`L` pan, and `esc`
-  returns. A terminal too narrow for two columns falls back to the unified view
-  (see [configuration.md](configuration.md#side-by-side-review-))
+  hunk, `=` fills in the rest of a single file around its changes (each change
+  stays its own boxed hunk), `^w`
+  soft-wraps both columns kept line for line, `H`/`L` pan, and `esc` returns. A
+  terminal too narrow for two columns falls back to the unified view (see
+  [configuration.md](configuration.md#side-by-side-review-))
 - `+` / `_`: cycle the focused **side** panel's screen mode. `+` grows it
   (normal to half to full), `_` shrinks it back. In half the focused side panel
   takes about half the column with the rest still visible; in full it fills the

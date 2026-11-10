@@ -386,7 +386,7 @@ pub const Git = struct {
     /// The plain unified diff for one file's unstaged (working tree vs index)
     /// or staged (index vs HEAD) changes, with no decoration — suitable for
     /// hunk parsing and re-application.
-    pub fn rawFileDiff(self: *Git, path: []const u8, staged: bool, diff_context: u8) ![]u8 {
+    pub fn rawFileDiff(self: *Git, path: []const u8, staged: bool, diff_context: u32) ![]u8 {
         const context_arg = try std.fmt.allocPrint(self.allocator, "--unified={d}", .{diff_context});
         defer self.allocator.free(context_arg);
         if (staged) {
