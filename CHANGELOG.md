@@ -18,6 +18,10 @@ Releases before 0.55.0 are listed on the
 
 ## [0.61.0] - 2026-11-10
 
+### Changed
+- Build against Zig 0.17.1, up from 0.16.0. Building from source now needs Zig
+  0.17.1 on your `PATH`.
+
 ## [0.60.0] - 2026-11-10
 
 ### Added
@@ -40,10 +44,6 @@ Releases before 0.55.0 are listed on the
   `H`/`L` pan, and `esc` returns. A terminal too narrow for two columns falls
   back to the unified view. From the staging view, `|` reviews the active side
   and opens on the hunk the staging cursor is on, and `d` discards from that side.
-
-### Changed
-- Build against Zig 0.17.1, up from 0.16.0. Building from source now needs Zig
-  0.17.1 on your `PATH`.
 
 ### Fixed
 - Emoji and other characters made of several code points (a base plus a
