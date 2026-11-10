@@ -20,12 +20,6 @@ to per repo auto detection (notably the editor).
 side_panel_width_percent = 34
 diff_context = 3
 
-# Diff panel layout: `unified` (default) shows one column with - and + lines;
-# `split` shows the old file on the left and the new file on the right with
-# lines aligned. `|` toggles it at runtime for the session. A terminal too
-# narrow for two columns falls back to unified automatically.
-diff_layout = unified
-
 # The commit summary character count (shown in the commit and reword dialog)
 # turns red once it goes over this many characters; below it, it stays
 # yellow. Default 50 (the git subject length convention). Set to 0 to disable
@@ -331,23 +325,19 @@ each file opens:
 remembered, so the next file always opens with the layout above. The layout
 is chosen when a file opens and not redecided mid edit.
 
-## Diff Layout (`diff_layout`)
+## Side-by-side review (`|`)
 
-The Diff panel (the main preview, and a commit's diff) renders a change either
-as a unified diff, one column with `-` and `+` lines, or side by side, the old
-file on the left and the new file on the right with lines aligned. `diff_layout`
-sets which one it opens with:
-
-| `diff_layout` | Diff panel shows |
-|---|---|
-| **`unified`** *(default)* | one column, `-` / `+` lines |
-| `split` | two columns, old left and new right |
-
-`|` toggles between them for the whole session (not per file, unlike the staging
-`\` split). A context line appears on both sides; a change shows its old line on
-the left and its new line on the right, and an added or removed line leaves the
-opposite side blank. A terminal too narrow for two readable columns falls back
-to unified until there is room, so the toggle is safe to leave on.
+The Diff panel is unified (one column with `-` and `+` lines). To read a change
+side by side, press `|` to open a full-screen review: the old file on the left
+and the new on the right, lines aligned, file line numbers down each side, and
+the changed words emphasized. Inside it, `j`/`k` scroll, `J`/`K` jump to the next
+and previous change. The current change is framed in a box, with its header drawn
+as a full-width band, so you can see at a glance which hunk `d` acts on. Clicking
+a line selects its hunk, `d` discards the whole current hunk, `^w` soft-wraps
+both columns kept line for line, `H`/`L` pan, and `esc` returns. A terminal too
+narrow for two columns falls back to the unified view. From the staging view, `|`
+reviews the active side and opens on the hunk the staging cursor is on, and `d`
+discards from that side.
 
 ## Editor (`e`)
 

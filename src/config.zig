@@ -62,7 +62,7 @@ pub const KeyMap = struct {
     file_filter: Binding = .{ .codepoint = '/' },
     toggle_tree: Binding = .{ .codepoint = '`' },
     staging_split: Binding = .{ .codepoint = '\\' },
-    // Toggle the Diff panel between unified and side-by-side layouts, session-wide.
+    // Open the full-screen side-by-side review of the current diff.
     diff_layout_toggle: Binding = .{ .codepoint = '|' },
     toggle_fullscreen: Binding = .{ .codepoint = 'z' },
     // Screen-mode cycle for the focused panel: normal -> half
@@ -248,11 +248,6 @@ pub const ResultDialog = enum { on_error, always, never };
 /// with both staged and unstaged changes.
 pub const StagingSplitMode = enum { off, on, auto };
 
-/// How the Diff panel renders a file or commit diff. `unified` is the usual
-/// single column with `-`/`+` lines; `split` shows the old file on the left and
-/// the new file on the right, lines aligned. This is the initial state; `|`
-/// toggles it at runtime for the session.
-pub const DiffLayout = enum { unified, split };
 
 /// Whether a custom shell command's output pops a dialog (`show`, the default,
 /// since custom commands are usually run to read output) or follows
@@ -326,10 +321,6 @@ pub const Config = struct {
     /// toggles it at runtime for the session. When off, long lines truncate and
     /// `H`/`L` pan horizontally.
     wrap_diff: bool = false,
-    /// Initial Diff-panel layout: `unified` (default) or `split` (side-by-side,
-    /// old left / new right). `|` toggles it at runtime for the session. A
-    /// terminal too narrow for two columns falls back to unified automatically.
-    diff_layout: DiffLayout = .unified,
     /// Pressing a panel's number key (1-5) while that panel is already focused
     /// cycles to its next tab, so `3` walks Local -> Remotes -> Tags, `4` walks
     /// Commits -> Reflog -> Divergence, and `2` walks Files -> Worktrees ->
@@ -579,10 +570,6 @@ pub const Config = struct {
             } else if (std.ascii.eqlIgnoreCase(value, "off")) {
                 self.staging_split = .off;
             }
-            return;
-        }
-        if (std.mem.eql(u8, key, "diff_layout")) {
-            if (std.meta.stringToEnum(DiffLayout, value)) |v| self.diff_layout = v;
             return;
         }
         if (std.mem.eql(u8, key, "expanded_side_panel_weight")) {

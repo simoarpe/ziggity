@@ -32,7 +32,8 @@ var word_diff_enabled: bool = true;
 var main_title_wrap_buf: [128]u8 = undefined;
 var split_title_buf: [64]u8 = undefined;
 
-/// Append the wrap indicator to a Diff-panel title when wrapping is on.
+/// Append the wrap indicator to a Diff-panel title when wrapping is on, so the
+/// current wrap state is visible in the header rather than only in a message.
 fn titleWithWrap(app: *const app_mod.App, title: []const u8, buf: []u8) []const u8 {
     if (!app.wrap_diff) return title;
     return std.fmt.bufPrint(buf, "{s}  \u{21A9} wrap", .{title}) catch title;
@@ -614,6 +615,8 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
     defer app_mod.deinitWrapCache();
     defer app_mod.deinitLineIndexCache();
     defer app_mod.deinitSplitRowsCache();
+    defer app_mod.deinitSplitWrapCache();
+    defer app_mod.deinitHunkLinesCache();
 
     var tty_buffer: [1024]u8 = undefined;
     // Opening /dev/tty (+ switching it to raw mode) fails when there's no
@@ -1894,8 +1897,41 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         .recent_repos => drawRecentReposPopup(root, app),
         .conflict_resolve => drawConflicts(root, app),
         .pr_preview => drawPrPreviewPopup(root, app),
+        .diff_review => drawDiffReview(root, app),
         else => {},
     }
+}
+
+/// Full-screen side-by-side review of the current diff (`|`), for reading and
+/// for discarding a hunk (`d`). Fills the terminal so it reads as its own mode,
+/// not a layout of the Diff panel.
+/// Reuses the side-by-side renderer; too narrow to split, it falls back to the
+/// unified view so the content is never lost.
+fn drawDiffReview(root: vaxis.Window, app: *app_mod.App) void {
+    const st = styles();
+    const footer_row: u16 = root.height -| 1;
+    const body_h: u16 = footer_row;
+    // Paint over everything the normal layout drew (side panels, footer) so the
+    // review reads as its own full-screen view rather than a panel on top.
+    var clear_row: u16 = 0;
+    while (clear_row < root.height) : (clear_row += 1) fillRow(root, clear_row, st.normal);
+    const scroll: ScrollInfo = .{ .len = app.mainContentLines(), .pos = app.main_scroll };
+    // Title carries the change count and which one the `J`/`K` cursor is on, since
+    // the review has no message bar to report it. It must live in a module buffer
+    // (not the stack): `panel` stores the title by reference until the frame flush.
+    const base_title: []const u8 = if (app.currentDiffHunk()) |h|
+        (std.fmt.bufPrint(&split_title_buf, "Side-by-side review (change {d}/{d})", .{ h + 1, app_mod.diffHunkLines(app.allocator, app.activeMainText()).len }) catch "Side-by-side review")
+    else
+        "Side-by-side review";
+    const title = titleWithWrap(app, base_title, &main_title_wrap_buf);
+    const main = panel(root, 0, 0, root.width, body_h, title, true, scroll);
+    app.main_view_width = main.width;
+    app.main_view_height = main.height;
+    app.applyReviewPendingScroll(); // now that the view size is known
+    app.main_scroll = @min(app.main_scroll, app.maxMainScroll());
+    app.main_hscroll = @min(app.main_hscroll, app.maxMainHScroll());
+    if (app.splitActive()) drawSideBySide(main, app) else drawDiffContent(main, app, app.activeMainText(), .main);
+    print(root, footer_row, 0, "  j/k scroll  J/K change  d discard hunk  ^w wrap  H/L pan  esc back  q quit", st.bottom_accent);
 }
 
 /// Copy `line` into `buf`, replacing the first commit-node `*` (the one git draws
@@ -2209,7 +2245,9 @@ const help_lines = [_][]const u8{
     "  H, shift+left    scroll the focused panel left (long rows)",
     "  L, shift+right   scroll the focused panel right (long rows)",
     "  ctrl+w         wrap long lines in the diff panels instead of scrolling",
-    "  |              toggle the Diff panel between unified and side-by-side",
+    "  |              open the full-screen side-by-side review of the diff",
+    "                 (read-only: j/k scroll, J/K next/prev change, ^w wrap,",
+    "                 H/L pan, esc back)",
     "  [              previous tab (or staging side)",
     "  ]              next tab (or staging side)",
     "  enter          inspect the selection in the main panel",
@@ -4709,49 +4747,217 @@ fn drawDiff(win: vaxis.Window, app: *const app_mod.App) void {
 /// its removed line left and added line right, and a `@@` header spans the full
 /// width. Both columns pan together with `main_hscroll`.
 fn drawSideBySide(win: vaxis.Window, app: *const app_mod.App) void {
+    if (app.wrap_diff) return drawSideBySideWrapped(win, app);
+
     const st = styles();
     const sr = app.splitRows();
     const rows = sr.rows;
     const plain = sr.plain;
+    // Word-level emphasis and the per-line index, both over the plain diff, so a
+    // changed word gets the same highlight it does in the unified view.
+    const emph_lines = wordEmphasis(app.allocator, plain);
+    const offs = app_mod.lineOffsets(app.allocator, plain);
 
-    const col_w = app_mod.App.splitColWidth(win.width);
+    const col_w = app.splitColWidth(win.width);
     if (col_w == 0) return;
-    const gutter: u16 = 3;
-    const right_x = col_w + gutter;
-    const sep_col = col_w + 1; // the middle cell of the three-cell gutter
+    const digits = app.lineNoDigits();
+    const g = app.splitGutter(); // number gutter width (digits + a space)
+    const left_no_x: u16 = 1; // column 0 is the selection box's left edge
+    const content_left_x: u16 = 1 + g;
+    const sep_col = content_left_x + col_w + 1; // the middle of the three-cell gutter
+    const right_no_x = content_left_x + col_w + 3;
+    const right_x = right_no_x + g;
+    const right_edge_x = win.width -| 1; // the selection box's right edge
     const h_off = app.main_hscroll;
 
-    const left = win.child(.{ .x_off = 0, .y_off = 0, .width = col_w, .height = win.height });
+    const left = win.child(.{ .x_off = content_left_x, .y_off = 0, .width = col_w, .height = win.height });
     const right = win.child(.{ .x_off = right_x, .y_off = 0, .width = col_w, .height = win.height });
+    const box = app.selectedHunkRowBox();
 
     var screen_row: u16 = 0;
-    while (screen_row < win.height) : (screen_row += 1) {
-        const idx = app.main_scroll + screen_row;
-        if (idx >= rows.len) break;
+    var idx: usize = app.main_scroll;
+    while (screen_row < win.height and idx < rows.len) : (idx += 1) {
         const r = rows[idx];
-        if (r.kind == .header) {
-            // The @@ hunk header, drawn across the whole width in the hunk colour.
-            print(win, screen_row, 0, r.left.text(plain), st.hunk);
+        const in_box = if (box) |b| (idx >= b.top and idx <= b.bottom) else false;
+        if (r.kind == .spacer) {
+            // The cursor hunk's spacer carries the box's bottom edge; the rest stay blank.
+            if (box) |b| {
+                if (idx == b.bottom + 1) drawHunkBoxBottom(win, screen_row, right_edge_x);
+            }
+            screen_row += 1;
             continue;
         }
-        print(win, screen_row, sep_col, "\u{2502}", st.muted); // │ column divider
-        drawSplitCell(left, screen_row, r.left, plain, h_off, col_w);
-        drawSplitCell(right, screen_row, r.right, plain, h_off, col_w);
+        if (r.kind == .header) {
+            if (in_box and idx == box.?.top) {
+                drawHunkBoxTop(win, screen_row, r.left.text(plain), right_edge_x);
+            } else {
+                // A non-selected hunk header, inset past the box's margin column.
+                print(win, screen_row, left_no_x, r.left.text(plain), st.hunk);
+            }
+            screen_row += 1;
+            continue;
+        }
+        if (in_box) drawHunkBoxSides(win, screen_row, right_edge_x);
+        drawLineNo(win, screen_row, left_no_x, digits, r.left.old_no);
+        drawLineNo(win, screen_row, right_no_x, digits, r.right.new_no);
+        print(win, screen_row, sep_col, box_vert, st.muted); // │ divider
+        drawSplitCell(left, screen_row, r.left, plain, offs, emph_lines, h_off, col_w);
+        drawSplitCell(right, screen_row, r.right, plain, offs, emph_lines, h_off, col_w);
+        screen_row += 1;
     }
 }
 
-/// Draw one side-by-side cell into its column window: the line's text clipped to
-/// `[h_off, h_off+width)` and coloured by kind. A blank (padding) cell draws
-/// nothing, leaving the column empty where the other side has a line.
-fn drawSplitCell(col: vaxis.Window, row: u16, cell: sidebyside.Cell, plain: []const u8, h_off: u16, width: u16) void {
-    if (cell.kind == .blank) return;
+/// Draw a file line number right-aligned in the `digits`-wide gutter at column `x`,
+/// in the muted style so it stays out of the way. Nothing is drawn for `0` (a cell
+/// that has no number on this side, such as an added line in the old-file gutter).
+fn drawLineNo(win: vaxis.Window, row: u16, x: u16, digits: u16, num: usize) void {
+    if (num == 0) return;
+    var buf: [16]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{d}", .{num}) catch return;
+    const pad: u16 = if (s.len < digits) digits - @as(u16, @intCast(s.len)) else 0;
+    print(win, row, x + pad, s, styles().muted);
+}
+
+const box_vert = "\u{2502}"; // │
+const box_horz = "\u{2500}"; // ─
+const box_tl = "\u{250C}"; // ┌
+const box_tr = "\u{2510}"; // ┐
+const box_bl = "\u{2514}"; // └
+const box_br = "\u{2518}"; // ┘
+
+/// The top edge of the selection box: the cursor hunk's `@@` header as a full-width
+/// band in reverse video (always legible, whatever the theme), capped with the box's
+/// top corners. The band gives the title weight; the corners start the rectangle.
+fn drawHunkBoxTop(win: vaxis.Window, row: u16, title: []const u8, right_edge_x: u16) void {
     const st = styles();
-    const style: vaxis.Style = switch (cell.kind) {
+    var band = st.hunk;
+    band.reverse = true;
+    fillRow(win, row, band);
+    print(win, row, 1, title, band);
+    print(win, row, 0, box_tl, st.active_border);
+    print(win, row, right_edge_x, box_tr, st.active_border);
+}
+
+/// The left and right edges of the selection box on one of the hunk's body rows.
+fn drawHunkBoxSides(win: vaxis.Window, row: u16, right_edge_x: u16) void {
+    const accent = styles().active_border;
+    print(win, row, 0, box_vert, accent);
+    print(win, row, right_edge_x, box_vert, accent);
+}
+
+/// The bottom edge of the selection box, a full-width rule under the hunk's last row.
+fn drawHunkBoxBottom(win: vaxis.Window, row: u16, right_edge_x: u16) void {
+    const accent = styles().active_border;
+    print(win, row, 0, box_bl, accent);
+    var x: u16 = 1;
+    while (x < right_edge_x) : (x += 1) print(win, row, x, box_horz, accent);
+    print(win, row, right_edge_x, box_br, accent);
+}
+
+/// The diff line of the cursor hunk's `@@` header while the review is open, else
+/// null. Used by the narrow-terminal unified fallback, which has no room for the
+/// box and marks the selection by showing that header row in reverse video.
+fn selectedHunkHeaderLine(app: *const app_mod.App) ?usize {
+    if (app.mode != .diff_review) return null;
+    const r = app.currentDiffHunkRange() orelse return null;
+    return r.start;
+}
+
+/// `style` with reverse video turned on when `on`: the terminal swaps its own
+/// fg/bg, so the result is always readable whatever the theme or terminal.
+fn reverseIf(style: vaxis.Style, on: bool) vaxis.Style {
+    if (!on) return style;
+    var s = style;
+    s.reverse = true;
+    return s;
+}
+
+/// Draw one side-by-side cell (unwrapped) into its column window: the full diff
+/// line (leading `+`/`-`/space marker included), clipped to `[h_off, h_off+width)`
+/// and coloured by kind, with the changed words emphasized. A blank (padding)
+/// cell draws nothing.
+fn drawSplitCell(col: vaxis.Window, row: u16, cell: sidebyside.Cell, plain: []const u8, offs: []const usize, emph_lines: []worddiff.Emph, h_off: u16, width: u16) void {
+    if (cell.kind == .blank) return;
+    const line = if (cell.line < offs.len) blk: {
+        const start = offs[cell.line];
+        const end = std.mem.indexOfScalarPos(u8, plain, start, '\n') orelse plain.len;
+        break :blk plain[start..end];
+    } else cell.text(plain);
+    const em = emphFor(emph_lines, cell.line);
+    printAnsiEmph(col, row, line, splitStyle(cell.kind), 0, 0, h_off, em.spans, wordBg(em), width, false);
+}
+
+/// Soft-wrapped side-by-side: each column wraps to its width and a pair occupies
+/// as many screen rows as its taller side (`app_mod.sideBySideWrapRows`).
+fn drawSideBySideWrapped(win: vaxis.Window, app: *const app_mod.App) void {
+    const st = styles();
+    const sr = app.splitRows();
+    const plain = sr.plain;
+    const emph_lines = wordEmphasis(app.allocator, plain);
+    const vrows = app.splitWrapRows();
+
+    const col_w = app.splitColWidth(win.width);
+    if (col_w == 0) return;
+    const digits = app.lineNoDigits();
+    const g = app.splitGutter();
+    const left_no_x: u16 = 1;
+    const content_left_x: u16 = 1 + g;
+    const sep_col = content_left_x + col_w + 1;
+    const right_no_x = content_left_x + col_w + 3;
+    const right_x = right_no_x + g;
+    const right_edge_x = win.width -| 1;
+
+    const left = win.child(.{ .x_off = content_left_x, .y_off = 0, .width = col_w, .height = win.height });
+    const right = win.child(.{ .x_off = right_x, .y_off = 0, .width = col_w, .height = win.height });
+    const box = app.selectedHunkRowBox();
+
+    var screen_row: u16 = 0;
+    var idx: usize = app.main_scroll;
+    while (screen_row < win.height and idx < vrows.len) : (idx += 1) {
+        const v = vrows[idx];
+        const in_box = if (box) |b| (idx >= b.top and idx <= b.bottom) else false;
+        if (v.spacer) {
+            if (box) |b| {
+                if (idx == b.bottom + 1) drawHunkBoxBottom(win, screen_row, right_edge_x);
+            }
+            screen_row += 1;
+            continue;
+        }
+        if (v.header) {
+            if (in_box and idx == box.?.top) {
+                drawHunkBoxTop(win, screen_row, plain[v.hoff .. v.hoff + v.hlen], right_edge_x);
+            } else {
+                print(win, screen_row, left_no_x, plain[v.hoff .. v.hoff + v.hlen], st.hunk);
+            }
+            screen_row += 1;
+            continue;
+        }
+        if (in_box) drawHunkBoxSides(win, screen_row, right_edge_x);
+        drawLineNo(win, screen_row, left_no_x, digits, v.left.old_no);
+        drawLineNo(win, screen_row, right_no_x, digits, v.right.new_no);
+        print(win, screen_row, sep_col, box_vert, st.muted);
+        drawSplitSeg(left, screen_row, v.left, plain, emph_lines);
+        drawSplitSeg(right, screen_row, v.right, plain, emph_lines);
+        screen_row += 1;
+    }
+}
+
+/// Draw one wrapped segment into its column: the segment's visual window of its
+/// full diff line, coloured by kind with word emphasis carried across the wrap.
+fn drawSplitSeg(col: vaxis.Window, row: u16, seg: app_mod.SplitSeg, plain: []const u8, emph_lines: []worddiff.Emph) void {
+    if (!seg.present) return;
+    const line = plain[seg.off .. seg.off + seg.len];
+    const em = emphFor(emph_lines, seg.line);
+    printAnsiEmph(col, row, line, splitStyle(seg.kind), 0, 0, seg.vis_start, em.spans, wordBg(em), seg.vis_end - seg.vis_start, false);
+}
+
+fn splitStyle(kind: sidebyside.CellKind) vaxis.Style {
+    const st = styles();
+    return switch (kind) {
         .add => st.added,
         .del => st.removed,
         else => st.normal,
     };
-    printAnsiEmph(col, row, cell.text(plain), style, 0, 0, h_off, &[_]worddiff.Span{}, 0, width, false);
 }
 
 /// The mouse text-selection's visual-column range on source `line`, or null when
@@ -4792,6 +4998,15 @@ fn drawDiffContent(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
     const emph_lines = wordEmphasis(app.allocator, text);
     const sel = app.diffSelectionRangeFor(pane);
 
+    // Hunk cursor (the narrow-terminal fallback for the review): show the selected
+    // hunk's `@@` header line in reverse video, matching the side-by-side view.
+    const sel_header = if (pane == .main) selectedHunkHeaderLine(app) else null;
+    const baseFor = struct {
+        fn f(b: vaxis.Style, header: ?usize, line: usize) vaxis.Style {
+            return reverseIf(b, header != null and line == header.?);
+        }
+    }.f;
+
     if (app.wrap_diff) {
         const rows = app_mod.wrapRowsFor(app.allocator, text, win.width);
         var screen_row: u16 = 0;
@@ -4800,9 +5015,10 @@ fn drawDiffContent(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
             if (vidx >= rows.len) break;
             const wr = rows[vidx];
             const line = text[wr.start..wr.end];
+            const lb = baseFor(base, sel_header, wr.line);
             const em = emphFor(emph_lines, wr.line);
             const sg = segSel(selColsFor(sel, wr.line), wr.vis_start, wr.vis_end);
-            printAnsiEmph(win, screen_row, line, base, sg.lo, sg.hi, wr.vis_start, em.spans, wordBg(em), wr.vis_end - wr.vis_start, false);
+            printAnsiEmph(win, screen_row, line, lb, sg.lo, sg.hi, wr.vis_start, em.spans, wordBg(em), wr.vis_end - wr.vis_start, false);
         }
         return;
     }
@@ -4821,9 +5037,10 @@ fn drawDiffContent(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
             const start = offs[abs_line];
             const end = std.mem.indexOfScalarPos(u8, text, start, '\n') orelse text.len;
             const line = text[start..end];
+            const lb = baseFor(base, sel_header, abs_line);
             const em = emphFor(emph_lines, abs_line);
             const sg = segSel(selColsFor(sel, abs_line), h_off, h_off +| win.width);
-            printAnsiEmph(win, row, line, base, sg.lo, sg.hi, h_off, em.spans, wordBg(em), std.math.maxInt(u16), false);
+            printAnsiEmph(win, row, line, lb, sg.lo, sg.hi, h_off, em.spans, wordBg(em), std.math.maxInt(u16), false);
         }
         return;
     }
@@ -4836,9 +5053,10 @@ fn drawDiffContent(win: vaxis.Window, app: *const app_mod.App, text: []const u8,
     while (row < win.height) : (row += 1) {
         const line = lines.next() orelse break;
         const abs_line = app.main_scroll + row;
+        const lb = baseFor(base, sel_header, abs_line);
         const em = emphFor(emph_lines, abs_line);
         const sg = segSel(selColsFor(sel, abs_line), h_off, h_off +| win.width);
-        printAnsiEmph(win, row, line, base, sg.lo, sg.hi, h_off, em.spans, wordBg(em), std.math.maxInt(u16), false);
+        printAnsiEmph(win, row, line, lb, sg.lo, sg.hi, h_off, em.spans, wordBg(em), std.math.maxInt(u16), false);
     }
 }
 
@@ -5053,6 +5271,8 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
     // Screen-mode badge, right-aligned so the current mode is visible even in
     // full mode, where only the focused panel and this bar remain on screen. The
     // hints draw into a window narrowed to leave room, so they never collide.
+    // (The diff-context state is shown in the Diff panel title instead, next to
+    // the wrap indicator.)
     const mode_label: []const u8 = if (!app.screenModeActive()) "" else switch (app.screen_mode) {
         .normal => "",
         .half => "[half]",
@@ -5328,13 +5548,13 @@ fn footerHints(c: FooterCtx) []const u8 {
         .stash => "space apply  g pop  d drop  r rename  w patch  y copy  enter view" ++ global,
         .main => if (c.fullscreen)
             (if (c.main_file)
-                "enter stage  j/k scroll  H/L pan  ^w wrap  | split  e edit  PgUp/PgDn page  drag select  y copy all  z exit full  esc back" ++ global_main
+                "enter stage  j/k scroll  H/L pan  ^w wrap  | side-by-side  e edit  PgUp/PgDn page  drag select  y copy all  z exit full  esc back" ++ global_main
             else
-                "j/k scroll  H/L pan  ^w wrap  | split  PgUp/PgDn page  drag select  y copy all  z exit full  esc back" ++ global_main)
+                "j/k scroll  H/L pan  ^w wrap  | side-by-side  PgUp/PgDn page  drag select  y copy all  z exit full  esc back" ++ global_main)
         else if (c.main_file)
-            "enter stage  j/k scroll  H/L pan  ^w wrap  | split  e edit  PgUp/PgDn page  drag select  y copy all  z full  esc back" ++ global_main
+            "enter stage  j/k scroll  H/L pan  ^w wrap  | side-by-side  e edit  PgUp/PgDn page  drag select  y copy all  z full  esc back" ++ global_main
         else
-            "j/k scroll  H/L pan  ^w wrap  | split  PgUp/PgDn page  drag select  y copy all  z full  esc back" ++ global_main,
+            "j/k scroll  H/L pan  ^w wrap  | side-by-side  PgUp/PgDn page  drag select  y copy all  z full  esc back" ++ global_main,
     };
 }
 
@@ -5861,7 +6081,15 @@ fn decodeCell(win: vaxis.Window, text: []const u8, i: usize) DecodedCell {
         if (b >= 32 and b < 127) return .{ .grapheme = ascii_table[b][0..1], .len = 1, .width = 1 };
         return .{ .grapheme = "?", .len = 1, .width = 1 };
     }
-    const seq_len = utf8CellLen(text, i) orelse return .{ .grapheme = "?", .len = 1, .width = 1 };
+    // Reject an ill-formed lead byte before touching the grapheme segmenter.
+    const first_len = utf8CellLen(text, i) orelse return .{ .grapheme = "?", .len = 1, .width = 1 };
+    // Consume a whole grapheme cluster, so a base character plus a variation
+    // selector, ZWJ sequence or combining mark stays one cell measured once,
+    // instead of splitting into pieces (which desynced the width from the wrap
+    // pass and mangled, e.g., an emoji followed by U+FE0F).
+    var it = vaxis.unicode.graphemeIterator(text[i..]);
+    const g = it.next() orelse return .{ .grapheme = text[i .. i + first_len], .len = first_len, .width = 1 };
+    const seq_len = if (g.len >= first_len) g.len else first_len;
     const stored = stashGrapheme(text[i .. i + seq_len]) orelse return .{ .grapheme = "?", .len = seq_len, .width = 1 };
     const w = win.gwidth(stored);
     return .{ .grapheme = stored, .len = seq_len, .width = if (w == 0) 1 else w };

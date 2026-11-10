@@ -13,7 +13,7 @@ the written reference. Every binding is remappable, see
 | `j` `k` / arrows | Move selection |
 | `tab` | Focus the Diff panel (and back) |
 | `z` | Maximize the Diff panel to full screen (`z` or `esc` to exit) |
-| `\|` | Toggle the Diff panel between unified and side-by-side |
+| `\|` | Open the full-screen side-by-side review of the diff |
 | `+` `_` | Cycle the focused side panel's size: normal, half, full |
 | `[` `]` | Switch the focused panel's tabs (or staging side) |
 | `enter` / `esc` | Inspect in the main panel / step back |
@@ -66,10 +66,14 @@ the written reference. Every binding is remappable, see
 - `z`: maximize the Diff panel to full screen; the side panels hide and the
   diff fills the terminal; press `z` again or `esc` to restore the layout. The
   main panel is a special case handled only by `z`, never by `+`/`_`
-- `|`: toggle the Diff panel between unified (one column) and side-by-side (old
-  file left, new file right) for the session. Set `diff_layout = split` to start
-  in it. A terminal too narrow for two columns stays unified (see
-  [configuration.md](configuration.md#diff-layout-diff_layout))
+- `|`: open the full-screen side-by-side review of the current diff (old file
+  left, new file right, lines aligned, file line numbers down each side, changed
+  words emphasized). Inside it `j`/`k` scroll, `J`/`K` jump to the next/previous
+  change (the current change is framed in a box with its header as a full-width
+  band), `d` discards the whole current hunk, `^w` soft-wraps both columns kept
+  line for line, `H`/`L` pan, and `esc` returns. A terminal too narrow for two
+  columns falls back to the unified view (see
+  [configuration.md](configuration.md#side-by-side-review-))
 - `+` / `_`: cycle the focused **side** panel's screen mode. `+` grows it
   (normal to half to full), `_` shrinks it back. In half the focused side panel
   takes about half the column with the rest still visible; in full it fills the

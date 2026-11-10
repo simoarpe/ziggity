@@ -445,7 +445,7 @@ essentials:
 | `j` `k` / arrows | Move selection |
 | `tab` | Focus the Diff panel (and back) |
 | `z` | Maximize the Diff panel to full screen (`z` or `esc` to exit) |
-| `\|` | Toggle the Diff panel between unified and side-by-side |
+| `\|` | Open the full-screen side-by-side review of the diff |
 | `+` `_` | Cycle the focused side panel's size: normal, half, full |
 | `[` `]` | Switch the focused panel's tabs (or staging side) |
 | `enter` / `esc` | Inspect in the main panel / step back |

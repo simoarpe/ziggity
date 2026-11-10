@@ -405,10 +405,13 @@ The animation itself is in the [README](../README.md).
   [comparison.md](comparison.md#jump-between-repositories)).
 - Find the fixup base for a staged change and make a `fixup!` (`ctrl+f`, via
   blame).
-- Diff panel layout: read a change in unified form (one column) or side by side
-  (old file on the left, new file on the right, lines aligned); `|` toggles it
-  for the session and `diff_layout = split` starts in it, falling back to unified
-  when the terminal is too narrow for two columns.
+- Side-by-side review: `|` opens a full-screen view of the current diff with the
+  old file on the left and the new on the right, lines aligned, file line numbers
+  down each side, and the changed words emphasized. `j`/`k` scroll, `J`/`K` jump
+  between changes (the current change is framed in a box with its header as a
+  full-width band), `d` discards the whole current hunk, `^w` soft-wraps both
+  columns kept line for line, and `esc` returns. A terminal too narrow for two
+  columns falls back to unified.
 - Mouse text selection with automatic copy in the diff panel, the read only
   dialogs, and the footer message line (drag the lower left log to copy it)
   (OSC 52); copy the selected item (`y`: a file path, commit, branch, tag,

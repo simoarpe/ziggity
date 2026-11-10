@@ -17,12 +17,22 @@ Releases before 0.55.0 are listed on the
 ## [Unreleased]
 
 ### Added
-- The Diff panel can show changes side by side, the old file on the left and the
-  new file on the right with lines aligned, instead of the usual single column.
-  Press `|` to switch layouts for the session, or set `diff_layout = split` to
-  start in it. A context line shows on both sides, a change shows its old line
-  left and new line right, and a terminal too narrow for two columns stays
-  unified until there is room.
+- A side-by-side review of the current diff: press `|` to open it full screen,
+  the old file on the left and the new on the right with lines aligned, file line
+  numbers down each side, and the changed words emphasized. `j`/`k` or the wheel
+  scroll, `J`/`K` (or `shift+↑`/`shift+↓`) jump to the next and previous change;
+  the current change is framed in a box with its header drawn as a full-width
+  band. Clicking a line selects its hunk, `d` discards the whole current hunk,
+  `^w` soft-wraps both columns kept line for line, `H`/`L` pan, and `esc`
+  returns. A terminal too narrow for two columns falls back to the unified view.
+  From the staging view, `|` reviews the active side and opens on the hunk the
+  staging cursor is on, and `d` discards from that side.
+
+### Fixed
+- Emoji and other characters made of several code points (a base plus a
+  variation selector, a zero-width-joiner sequence, a skin-tone modifier, or a
+  flag) now render as one glyph in the diff panels and lists, instead of
+  splitting apart and shifting the rest of the line.
 
 ## [0.59.0] - 2026-11-06
 
