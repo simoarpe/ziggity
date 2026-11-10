@@ -2767,6 +2767,54 @@ test "review mouse click selects the hunk, including its bottom separator row" {
     deinitHunkLinesCache();
 }
 
+test "review offers discard only for not-yet-committed changes" {
+    const a = std.testing.allocator;
+    var files = [_]model.FileStatus{.{
+        .path = try a.dupe(u8, "f.txt"),
+        .short_status = .{ ' ', 'M' },
+        .has_staged = false,
+        .has_unstaged = true,
+        .tracked = true,
+        .added = false,
+        .deleted = false,
+        .conflict = false,
+    }};
+    defer a.free(files[0].path);
+    var app = try testApp(a, &files);
+    defer deinitTestApp(&app);
+
+    // A tracked working-tree file with unstaged changes: discard is offered.
+    app.focus = .files;
+    try std.testing.expect(app.reviewDiscardOffered());
+
+    // Focused on a committed view (a commit's diff): not offered.
+    app.focus = .commits;
+    try std.testing.expect(!app.reviewDiscardOffered());
+
+    // Back on the file, but inside a `W` ref-to-ref comparison (committed): no.
+    app.focus = .files;
+    var base_buf = [_]u8{ 'm', 'a', 'i', 'n' };
+    app.diff_base = base_buf[0..];
+    try std.testing.expect(!app.reviewDiscardOffered());
+    app.diff_base = null;
+
+    // The staging view (index or working-tree side) is always uncommitted: yes.
+    app.staging_active = true;
+    try std.testing.expect(app.reviewDiscardOffered());
+    app.staging_active = false;
+
+    // A file with nothing unstaged (staged only): not offered from a plain review.
+    files[0].has_unstaged = false;
+    files[0].has_staged = true;
+    try std.testing.expect(!app.reviewDiscardOffered());
+
+    // An untracked file: not offered (discard targets tracked changes).
+    files[0].has_unstaged = true;
+    files[0].has_staged = false;
+    files[0].tracked = false;
+    try std.testing.expect(!app.reviewDiscardOffered());
+}
+
 test "wrapped side-by-side expands a pair to its taller side and pads the shorter" {
     const a = std.testing.allocator;
     defer deinitSplitRowsCache();
@@ -7994,7 +8042,22 @@ pub const App = struct {
         if (km.toggle_wrap.matches(key)) return self.toggleWrapDiff();
         if (km.scroll_left.matches(key) or key.matches(vaxis.Key.left, .{ .shift = true })) return self.scrollMainHorizontal(-@as(i32, horizontal_scroll_step));
         if (km.scroll_right.matches(key) or key.matches(vaxis.Key.right, .{ .shift = true })) return self.scrollMainHorizontal(@as(i32, horizontal_scroll_step));
-        if (km.discard.matches(key)) return self.discardReviewHunk();
+        if (self.reviewDiscardOffered() and km.discard.matches(key)) return self.discardReviewHunk();
+    }
+
+    /// Whether the review should offer `d` (discard): only when it is showing
+    /// not-yet-committed changes. The staging view (index or working-tree side)
+    /// always qualifies; a plain preview qualifies only when it is a tracked
+    /// working-tree file's own unstaged changes. A commit, a stash, or a `W`
+    /// ref-to-ref comparison is already committed, so discard is never offered.
+    /// Gates both the footer hint and the key, so the option appears only where
+    /// it applies.
+    pub fn reviewDiscardOffered(self: *const App) bool {
+        if (self.staging_active) return true;
+        if (self.diff_base != null) return false; // diffing mode: a committed ref diff
+        if (self.contentFocus() != .files) return false;
+        const file = self.selectedFile() orelse return false;
+        return file.tracked and file.has_unstaged;
     }
 
     /// `d` in the review: discard the whole hunk the cursor is on. From staging it

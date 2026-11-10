@@ -1931,7 +1931,12 @@ fn drawDiffReview(root: vaxis.Window, app: *app_mod.App) void {
     app.main_scroll = @min(app.main_scroll, app.maxMainScroll());
     app.main_hscroll = @min(app.main_hscroll, app.maxMainHScroll());
     if (app.splitActive()) drawSideBySide(main, app) else drawDiffContent(main, app, app.activeMainText(), .main);
-    print(root, footer_row, 0, "  j/k scroll  J/K change  d discard hunk  ^w wrap  H/L pan  esc back  q quit", st.bottom_accent);
+    // Offer "d discard hunk" only when the review shows uncommitted changes.
+    const footer = if (app.reviewDiscardOffered())
+        "  j/k scroll  J/K change  d discard hunk  ^w wrap  H/L pan  esc back  q quit"
+    else
+        "  j/k scroll  J/K change  ^w wrap  H/L pan  esc back  q quit";
+    print(root, footer_row, 0, footer, st.bottom_accent);
 }
 
 /// Copy `line` into `buf`, replacing the first commit-node `*` (the one git draws
