@@ -3059,6 +3059,44 @@ test "review mouse click selects the hunk, including its bottom separator row" {
     deinitHunkLinesCache();
 }
 
+test "review text selection copies one column, skipping gutters and headers" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    defer deinitSplitRowsCache();
+    defer deinitLineIndexCache();
+
+    a.free(app.diff);
+    // Rows: header(0), pair " a"(1), pair "-b"/"+B"(2), pair " c"(3), spacer(4).
+    app.diff = try a.dupe(u8, "diff --git a/x b/x\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n");
+    app.main_view_width = 120;
+    app.main_view_height = 20;
+    app.focus = .main;
+    app.mode = .diff_review;
+    try std.testing.expect(app.splitActive());
+
+    // Select the whole content of the left (old) column, rows 1..3. Columns run
+    // from 0 (the `+`/`-`/space marker) to the end.
+    app.review_sel_active = true;
+    app.review_sel_right = false;
+    app.review_sel_anchor_row = 1;
+    app.review_sel_anchor_col = 0;
+    app.review_sel_head_row = 3;
+    app.review_sel_head_col = std.math.maxInt(usize);
+    try app.copyReviewSelection();
+    // Left column = the old file: context " a", deletion "-b", context " c". The
+    // "+B" addition is on the right (a blank left cell), so it is skipped.
+    try std.testing.expectEqualStrings(" a\n-b\n c", app.clipboard_request.?);
+
+    // The right (new) column gives the addition instead of the deletion.
+    app.review_sel_right = true;
+    try app.copyReviewSelection();
+    try std.testing.expectEqualStrings(" a\n+B\n c", app.clipboard_request.?);
+
+    app.mode = .normal;
+}
+
 test "review offers discard only for not-yet-committed changes" {
     const a = std.testing.allocator;
     var files = [_]model.FileStatus{.{
@@ -3547,6 +3585,18 @@ pub const App = struct {
     // the staging/preview buffers underneath are left untouched.
     review_whole_file: bool = false,
     review_whole_diff: []u8 = &.{},
+    // Character-precise mouse text selection in the side-by-side review. It covers
+    // one column (old file on the left, new on the right — `right` picks which),
+    // never both, and the line-number gutters and hunk headers are not selectable.
+    // `row` is a view-row index (into the split rows); `col` a character column in
+    // that side's line. A drag selects; releasing copies to the clipboard.
+    review_sel_active: bool = false,
+    review_sel_dragged: bool = false,
+    review_sel_right: bool = false,
+    review_sel_anchor_row: usize = 0,
+    review_sel_anchor_col: usize = 0,
+    review_sel_head_row: usize = 0,
+    review_sel_head_col: usize = 0,
     // Screen mode of the focused SIDE panel (`+`/`_` cycle): `normal`,
     // `half` (the focused side panel is enlarged), or `full` (it fills the
     // terminal, others hidden). Only meaningful while a side panel is focused;
@@ -5442,23 +5492,54 @@ pub const App = struct {
         // The side-by-side review scrolls the diff with the wheel, like the Diff
         // panel does in normal mode.
         if (self.mode == .diff_review) {
-            if (mouse.type == .press) switch (mouse.button) {
-                .wheel_up => {
-                    try self.scrollMain(-1);
-                    return true;
+            const c: u16 = if (mouse.col < 0) 0 else @intCast(mouse.col);
+            const rw: u16 = if (mouse.row < 0) 0 else @intCast(mouse.row);
+            switch (mouse.type) {
+                .press => switch (mouse.button) {
+                    .wheel_up => {
+                        try self.scrollMain(-1);
+                        return true;
+                    },
+                    .wheel_down => {
+                        try self.scrollMain(1);
+                        return true;
+                    },
+                    // A left press may begin a text selection (when it lands in one
+                    // of the two content columns) and always moves the hunk cursor,
+                    // so a plain click still selects the hunk.
+                    .left => {
+                        self.review_sel_dragged = false;
+                        if (self.reviewSelSideAt(c)) |right| {
+                            self.review_sel_active = true;
+                            self.review_sel_right = right;
+                            self.review_sel_anchor_row = self.reviewRowClamped(rw);
+                            self.review_sel_anchor_col = self.reviewColInSide(c, right);
+                            self.review_sel_head_row = self.review_sel_anchor_row;
+                            self.review_sel_head_col = self.review_sel_anchor_col;
+                        } else self.review_sel_active = false;
+                        _ = self.selectDiffHunkAtRow(rw);
+                        return true;
+                    },
+                    else => return false,
                 },
-                .wheel_down => {
-                    try self.scrollMain(1);
-                    return true;
+                .drag => {
+                    if (self.review_sel_active) {
+                        self.review_sel_head_row = self.reviewRowClamped(rw);
+                        self.review_sel_head_col = self.reviewColInSide(c, self.review_sel_right);
+                        self.review_sel_dragged = true;
+                        return true;
+                    }
+                    return false;
                 },
-                // Clicking a line selects its hunk (moves the `J`/`K` cursor).
-                .left => {
-                    const rw: u16 = if (mouse.row < 0) 0 else @intCast(mouse.row);
-                    return self.selectDiffHunkAtRow(rw);
+                .release => {
+                    if (self.review_sel_active and self.review_sel_dragged) {
+                        try self.copyReviewSelection();
+                        return true;
+                    }
+                    return false;
                 },
-                else => {},
-            };
-            return false;
+                else => return false,
+            }
         }
 
         if (self.mode != .normal) {
@@ -8437,6 +8518,7 @@ pub const App = struct {
         // From staging, open on the hunk under the staging cursor; otherwise the first.
         self.diff_hunk = if (self.staging_active) staging_mod.stagingHunkAt(self, self.staging_cursor) orelse 0 else 0;
         self.clearReviewWholeFile();
+        self.clearReviewSelection();
         self.review_pending_scroll = true;
         self.mode = .diff_review;
     }
@@ -8444,6 +8526,7 @@ pub const App = struct {
     /// Leave the side-by-side review, restoring the Diff panel's scroll.
     fn closeDiffReview(self: *App) void {
         self.clearReviewWholeFile();
+        self.clearReviewSelection();
         self.mode = .normal;
         self.main_scroll = self.review_saved_scroll;
         self.main_hscroll = self.review_saved_hscroll;
@@ -8487,6 +8570,7 @@ pub const App = struct {
     /// hunks) into `review_whole_diff`; off frees it. The selected hunk is kept at
     /// the same place on screen so toggling layouts does not move it.
     fn toggleReviewWholeFile(self: *App) !void {
+        self.clearReviewSelection(); // the row set changes, so a selection would be stale
         // Capture how far down the view the selected hunk currently sits. The same
         // change is a hunk in both layouts (same count and order), so re-placing it
         // at this offset afterwards keeps it visually still.
@@ -8564,6 +8648,8 @@ pub const App = struct {
     /// between changes, wrap, pan, and leave. Nothing here writes.
     fn handleDiffReviewKey(self: *App, key: vaxis.Key) !void {
         const km = self.config.keymap;
+        // Esc first drops a text selection, then (next press) leaves the review.
+        if (self.isDialogCloseKey(key) and self.review_sel_active) return self.clearReviewSelection();
         if (self.isDialogCloseKey(key) or km.diff_layout_toggle.matches(key)) return self.closeDiffReview();
         if (km.quit.matches(key)) {
             self.running = false;
@@ -8615,6 +8701,7 @@ pub const App = struct {
     /// hunk is the deliberate target.
     fn discardReviewHunk(self: *App) !void {
         if (self.foregroundBusy()) return self.setMessage("operation in progress...", .{});
+        self.clearReviewSelection(); // the diff reloads, so a selection would be stale
         if (!self.staging_active) {
             // A worktree file only (not a commit/ref diff), unstaged, not partial.
             if (self.contentFocus() != .files) return self.setMessage("discarding works on a working-tree file", .{});
@@ -8798,6 +8885,7 @@ pub const App = struct {
     /// `ctrl+w`: flip soft-wrap for every diff panel, session-wide, keeping the
     /// same source line pinned to the top so the view does not jump.
     fn toggleWrapDiff(self: *App) !void {
+        self.clearReviewSelection(); // row indices change between wrapped and not
         // The split layout indexes its own rows (aligned, or wrapped), which count
         // differently, so re-anchor the top diff line after the flip, the same way
         // the unified path does, instead of keeping a now-stale row index.
@@ -8886,6 +8974,100 @@ pub const App = struct {
         if (hi == self.diff_hunk) return false;
         self.diff_hunk = hi;
         return true;
+    }
+
+    /// Drop any text selection in the review (on close, reload, or a layout change).
+    pub fn clearReviewSelection(self: *App) void {
+        self.review_sel_active = false;
+        self.review_sel_dragged = false;
+    }
+
+    /// Which content column screen column `c` is in: `false` (left/old file),
+    /// `true` (right/new file), or null for the line-number gutters, the middle
+    /// divider, the box edges, or outside. Text selection is only offered in the
+    /// unwrapped layout for now, so wrapping returns null.
+    fn reviewSelSideAt(self: *const App, c: u16) ?bool {
+        if (!self.splitActive() or self.wrap_diff) return null;
+        const col_w: usize = self.splitColWidth(self.main_view_width);
+        if (col_w == 0) return null;
+        const g: usize = self.splitGutter();
+        const content_left_x: usize = 1 + g; // the box edge sits at column 0
+        const right_x: usize = content_left_x + col_w + 3 + g;
+        const win_col: usize = if (c < 1) 0 else @as(usize, c) - 1; // the panel border is column 0
+        if (win_col >= content_left_x and win_col < content_left_x + col_w) return false;
+        if (win_col >= right_x and win_col < right_x + col_w) return true;
+        return null;
+    }
+
+    /// The character column (in a side's line) for screen column `c`, clamped to
+    /// the start/end of that side's content window so a drag past either edge
+    /// extends to the line start or end.
+    fn reviewColInSide(self: *const App, c: u16, right: bool) usize {
+        const col_w: usize = self.splitColWidth(self.main_view_width);
+        const g: usize = self.splitGutter();
+        const content_left_x: usize = 1 + g;
+        const cx: usize = if (right) content_left_x + col_w + 3 + g else content_left_x;
+        const win_col: usize = if (c < 1) 0 else @as(usize, c) - 1;
+        if (win_col < cx) return 0;
+        if (win_col >= cx + col_w) return std.math.maxInt(usize);
+        return (win_col - cx) + self.main_hscroll;
+    }
+
+    /// The view row under screen row `rw`, clamped into the visible content and the
+    /// row count (so a drag below the view extends to the last row).
+    fn reviewRowClamped(self: *const App, rw: u16) usize {
+        const inner: usize = if (rw < 1) 0 else @min(@as(usize, rw) - 1, self.main_view_height -| 1);
+        const total = self.splitRows().rows.len;
+        return @min(self.main_scroll + inner, total -| 1);
+    }
+
+    /// The normalized review text selection (`start <= end`), or null when none is
+    /// active. `right` names the selected column; the rest mirror a diff selection.
+    pub fn reviewSelRange(self: *const App) ?struct { right: bool, sl: usize, sc: usize, el: usize, ec: usize } {
+        if (!self.review_sel_active) return null;
+        var sl = self.review_sel_anchor_row;
+        var sc = self.review_sel_anchor_col;
+        var el = self.review_sel_head_row;
+        var ec = self.review_sel_head_col;
+        if (el < sl or (el == sl and ec < sc)) {
+            std.mem.swap(usize, &sl, &el);
+            std.mem.swap(usize, &sc, &ec);
+        }
+        return .{ .right = self.review_sel_right, .sl = sl, .sc = sc, .el = el, .ec = ec };
+    }
+
+    /// Copy the review text selection to the clipboard: the selected side's lines
+    /// over the selected rows, columns clipped per row. Header and spacer rows, and
+    /// a blank cell (the side has no line there), contribute nothing.
+    fn copyReviewSelection(self: *App) !void {
+        const sel = self.reviewSelRange() orelse return;
+        const data = self.splitRows();
+        const rows = data.rows;
+        const plain = data.plain;
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(self.allocator);
+        var first = true;
+        var row = sel.sl;
+        while (row <= sel.el and row < rows.len) : (row += 1) {
+            const r = rows[row];
+            if (r.kind != .pair) continue;
+            const cell = if (sel.right) r.right else r.left;
+            if (cell.kind == .blank) continue;
+            const line = blk: {
+                const start = cell.off -| @as(usize, if (cell.off > 0) 1 else 0); // include the +/-/space marker
+                const end = std.mem.indexOfScalarPos(u8, plain, cell.off, '\n') orelse plain.len;
+                break :blk plain[start..end];
+            };
+            const lo = if (row == sel.sl) sel.sc else 0;
+            const hi = if (row == sel.el) sel.ec else std.math.maxInt(usize);
+            if (!first) try out.append(self.allocator, '\n');
+            first = false;
+            try appendDiffColumns(&out, self.allocator, line, lo, hi);
+        }
+        if (out.items.len == 0) return self.setMessage("nothing selected to copy", .{});
+        if (self.clipboard_request) |old| self.allocator.free(old);
+        self.clipboard_request = try self.allocator.dupe(u8, out.items);
+        try self.setMessage("copied to clipboard", .{});
     }
 
     /// The change-hunk index whose frame (its header through its spacer) contains

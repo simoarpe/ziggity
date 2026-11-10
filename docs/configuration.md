@@ -344,9 +344,12 @@ pan, and `esc` returns. Both act on a single file, so `=` is offered for a
 working-tree file, the staging view, or one file drilled into a commit, while `d`
 (which changes the working tree) is offered only for the not-yet-committed cases;
 a whole multi-file commit or a `W` comparison has no single "whole file" and is
-read-only. A terminal too narrow for two columns falls back to the unified view.
-From the staging view, `|` reviews the active side and opens on the hunk the
-staging cursor is on, and `d` discards from that side.
+read-only. Dragging the mouse over one column selects its text (the old file on
+the left, the new on the right, never both) and copies it to the clipboard when
+you release, leaving out the line-number gutters and hunk headers; `esc` clears
+the selection before it leaves the review. A terminal too narrow for two columns
+falls back to the unified view. From the staging view, `|` reviews the active
+side and opens on the hunk the staging cursor is on, and `d` discards from that side.
 
 ## Editor (`e`)
 

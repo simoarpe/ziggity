@@ -4787,6 +4787,7 @@ fn drawSideBySide(win: vaxis.Window, app: *const app_mod.App) void {
     const left = win.child(.{ .x_off = content_left_x, .y_off = 0, .width = col_w, .height = win.height });
     const right = win.child(.{ .x_off = right_x, .y_off = 0, .width = col_w, .height = win.height });
     const box = app.selectedHunkRowBox();
+    const text_sel = app.reviewSelRange();
 
     var screen_row: u16 = 0;
     var idx: usize = app.main_scroll;
@@ -4815,8 +4816,12 @@ fn drawSideBySide(win: vaxis.Window, app: *const app_mod.App) void {
         drawLineNo(win, screen_row, left_no_x, digits, r.left.old_no);
         drawLineNo(win, screen_row, right_no_x, digits, r.right.new_no);
         print(win, screen_row, sep_col, box_vert, st.muted); // │ divider
-        drawSplitCell(left, screen_row, r.left, plain, offs, emph_lines, h_off, col_w);
-        drawSplitCell(right, screen_row, r.right, plain, offs, emph_lines, h_off, col_w);
+        // The text selection highlights one column only; the other gets nothing.
+        const row_cols = selColsFor(text_sel, idx);
+        const sel_left: ?SelCols = if (text_sel) |s| (if (!s.right) row_cols else null) else null;
+        const sel_right: ?SelCols = if (text_sel) |s| (if (s.right) row_cols else null) else null;
+        drawSplitCell(left, screen_row, r.left, plain, offs, emph_lines, h_off, col_w, sel_left);
+        drawSplitCell(right, screen_row, r.right, plain, offs, emph_lines, h_off, col_w, sel_right);
         screen_row += 1;
     }
     // Keep the selection box's top edge in view: pin its header to the top row
@@ -4905,7 +4910,7 @@ fn reverseIf(style: vaxis.Style, on: bool) vaxis.Style {
 /// line (leading `+`/`-`/space marker included), clipped to `[h_off, h_off+width)`
 /// and coloured by kind, with the changed words emphasized. A blank (padding)
 /// cell draws nothing.
-fn drawSplitCell(col: vaxis.Window, row: u16, cell: sidebyside.Cell, plain: []const u8, offs: []const usize, emph_lines: []worddiff.Emph, h_off: u16, width: u16) void {
+fn drawSplitCell(col: vaxis.Window, row: u16, cell: sidebyside.Cell, plain: []const u8, offs: []const usize, emph_lines: []worddiff.Emph, h_off: u16, width: u16, sel: ?SelCols) void {
     if (cell.kind == .blank) return;
     const line = if (cell.line < offs.len) blk: {
         const start = offs[cell.line];
@@ -4913,7 +4918,8 @@ fn drawSplitCell(col: vaxis.Window, row: u16, cell: sidebyside.Cell, plain: []co
         break :blk plain[start..end];
     } else cell.text(plain);
     const em = emphFor(emph_lines, cell.line);
-    printAnsiEmph(col, row, line, splitStyle(cell.kind), 0, 0, h_off, em.spans, wordBg(em), width, false);
+    const sg = segSel(sel, h_off, h_off +| width);
+    printAnsiEmph(col, row, line, splitStyle(cell.kind), sg.lo, sg.hi, h_off, em.spans, wordBg(em), width, false);
 }
 
 /// Soft-wrapped side-by-side: each column wraps to its width and a pair occupies

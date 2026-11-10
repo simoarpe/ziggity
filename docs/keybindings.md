@@ -48,7 +48,7 @@ the written reference. Every binding is remappable, see
   esc also exits). While it is on, the Status panel shows a diamond-marked
   banner naming the base, with the `esc` exit reminder
 - mouse: click a panel to focus; wheel to navigate and scroll; drag over the
-  diff or a dialog to select and copy text
+  diff, one column of the side-by-side review, or a dialog to select and copy text
 - `/`: filter files by path live; enter accepts; esc clears
 - `` ` ``: toggle the directory tree view, in the Files panel **and** in a
   commit's or branch's file list. `enter` collapses or expands the folder
