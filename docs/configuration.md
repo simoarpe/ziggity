@@ -335,10 +335,11 @@ and previous change, bringing its header to the top. The current change is frame
 in a rounded panel titled with its hunk header, so you can see at a glance which
 hunk `d` acts on. Clicking a line or the frame selects its hunk, `d` discards the
 whole current hunk, `^w` soft-wraps both columns kept line for line, `H`/`L` pan,
-and `esc` returns. A terminal too narrow for two columns falls back to the
-unified view. From the staging view, `|`
-reviews the active side and opens on the hunk the staging cursor is on, and `d`
-discards from that side.
+and `esc` returns. `d` is offered only when the review shows changes that are not
+yet committed (a working-tree file, or the staging view); reviewing a commit or a
+`W` comparison is read-only. A terminal too narrow for two columns falls back to
+the unified view. From the staging view, `|` reviews the active side and opens on
+the hunk the staging cursor is on, and `d` discards from that side.
 
 ## Editor (`e`)
 

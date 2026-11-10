@@ -23,11 +23,12 @@ Releases before 0.55.0 are listed on the
   scroll, `J`/`K` (or `shift+↑`/`shift+↓`) jump to the next and previous change,
   landing its header at the top; the current change is framed in a rounded panel
   titled with its hunk header. Clicking a line (or the frame) selects its hunk,
-  `d` discards the whole current hunk, `^w` soft-wraps both columns kept line for
-  line, `H`/`L` pan, and `esc` returns. A terminal too narrow for two columns
-  falls back to the unified view.
-  From the staging view, `|` reviews the active side and opens on the hunk the
-  staging cursor is on, and `d` discards from that side.
+  `d` discards the whole current hunk (offered only for changes that are not yet
+  committed, so a working-tree file or the staging view, never a commit or a `W`
+  comparison), `^w` soft-wraps both columns kept line for line, `H`/`L` pan, and
+  `esc` returns. A terminal too narrow for two columns falls back to the unified
+  view. From the staging view, `|` reviews the active side and opens on the hunk
+  the staging cursor is on, and `d` discards from that side.
 
 ### Fixed
 - Emoji and other characters made of several code points (a base plus a
