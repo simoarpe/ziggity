@@ -18,6 +18,7 @@ pub const Action = enum {
     screen_mode_next,
     screen_mode_prev,
     toggle_staging_split,
+    toggle_diff_layout,
     select,
     stage_all,
     edit_file,
@@ -297,6 +298,7 @@ pub fn fromNormalKey(key: vaxis.Key, keymap: config_mod.KeyMap, focus: model.Foc
     if (keymap.undo.matches(key)) return .undo;
     if (keymap.recent_repos.matches(key)) return .recent_repos;
     if (keymap.toggle_wrap.matches(key)) return .toggle_wrap;
+    if (keymap.diff_layout_toggle.matches(key)) return .toggle_diff_layout;
     if (keymap.open_browser.matches(key)) return .open_browser;
     if (keymap.diff_mark.matches(key)) return .diff_mark;
     if (keymap.patch_menu.matches(key)) return .patch_menu;

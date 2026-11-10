@@ -62,6 +62,8 @@ pub const KeyMap = struct {
     file_filter: Binding = .{ .codepoint = '/' },
     toggle_tree: Binding = .{ .codepoint = '`' },
     staging_split: Binding = .{ .codepoint = '\\' },
+    // Open the full-screen side-by-side review of the current diff.
+    diff_layout_toggle: Binding = .{ .codepoint = '|' },
     toggle_fullscreen: Binding = .{ .codepoint = 'z' },
     // Screen-mode cycle for the focused panel: normal -> half
     // (enlarged) -> full (fills the terminal), and back.

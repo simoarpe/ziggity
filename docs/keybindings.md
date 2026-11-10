@@ -13,6 +13,7 @@ the written reference. Every binding is remappable, see
 | `j` `k` / arrows | Move selection |
 | `tab` | Focus the Diff panel (and back) |
 | `z` | Maximize the Diff panel to full screen (`z` or `esc` to exit) |
+| `\|` | Open the full-screen side-by-side review of the diff |
 | `+` `_` | Cycle the focused side panel's size: normal, half, full |
 | `[` `]` | Switch the focused panel's tabs (or staging side) |
 | `enter` / `esc` | Inspect in the main panel / step back |
@@ -47,7 +48,7 @@ the written reference. Every binding is remappable, see
   esc also exits). While it is on, the Status panel shows a diamond-marked
   banner naming the base, with the `esc` exit reminder
 - mouse: click a panel to focus; wheel to navigate and scroll; drag over the
-  diff or a dialog to select and copy text
+  diff, one column of the side-by-side review, or a dialog to select and copy text
 - `/`: filter files by path live; enter accepts; esc clears
 - `` ` ``: toggle the directory tree view, in the Files panel **and** in a
   commit's or branch's file list. `enter` collapses or expands the folder
@@ -65,6 +66,17 @@ the written reference. Every binding is remappable, see
 - `z`: maximize the Diff panel to full screen; the side panels hide and the
   diff fills the terminal; press `z` again or `esc` to restore the layout. The
   main panel is a special case handled only by `z`, never by `+`/`_`
+- `|`: open the full-screen side-by-side review of the current diff (old file
+  left, new file right, lines aligned, file line numbers down each side, changed
+  words emphasized). Inside it `j`/`k` (or `PageUp`/`PageDown`, `Home`/`End`)
+  scroll, `J`/`K` jump to the next/previous change, bringing its header to the top
+  (the current change is framed in a rounded panel titled with its hunk header,
+  and that header stays pinned while you scroll the hunk), `space` recentres on
+  the selected hunk after you scroll away, `d` discards the whole current hunk, `=`
+  fills in the rest of a single file around its changes (each change stays its own
+  boxed hunk), `^w` soft-wraps both columns kept line for line, `H`/`L` pan, and
+  `esc` returns. A terminal too narrow for two columns falls back to the unified view (see
+  [configuration.md](configuration.md#side-by-side-review-))
 - `+` / `_`: cycle the focused **side** panel's screen mode. `+` grows it
   (normal to half to full), `_` shrinks it back. In half the focused side panel
   takes about half the column with the rest still visible; in full it fills the
@@ -82,7 +94,8 @@ the written reference. Every binding is remappable, see
 - `enter` on a file opens the staging view: `j` and `k` by line, `J` and `K`
   (or shift+arrows) jump to the next/previous hunk, `v` range, `space` stage
   the line(s) or hunk, `d` discard the line(s) or hunk instead, `[` and `]`
-  switch side, `\` split view, `c` and `A` commit or amend, `esc` back
+  switch side, `\` split view, `|` side-by-side review of the active side, `c`
+  and `A` commit or amend, `esc` back
 - `space`: stage or unstage a file · checkout a branch · apply a stash (by
   focus)
 - `e`: open the file under view in your editor (Files, a commit's files, the
