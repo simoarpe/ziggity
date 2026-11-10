@@ -91,7 +91,8 @@ the written reference. Every binding is remappable, see
 - `enter` on a file opens the staging view: `j` and `k` by line, `J` and `K`
   (or shift+arrows) jump to the next/previous hunk, `v` range, `space` stage
   the line(s) or hunk, `d` discard the line(s) or hunk instead, `[` and `]`
-  switch side, `\` split view, `c` and `A` commit or amend, `esc` back
+  switch side, `\` split view, `|` side-by-side review of the active side, `c`
+  and `A` commit or amend, `esc` back
 - `space`: stage or unstage a file · checkout a branch · apply a stash (by
   focus)
 - `e`: open the file under view in your editor (Files, a commit's files, the

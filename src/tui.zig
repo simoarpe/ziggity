@@ -5506,7 +5506,7 @@ fn footerHints(c: FooterCtx) []const u8 {
         return "j/k line  v range  space add/remove line (@@=hunk)  ^p patch  e edit  esc back" ++ global;
     }
     if (c.staging) {
-        return "j/k line  J/K hunk  v range  space stage/unstage  d discard (@@=hunk)  [/] staged/unstaged  \\ split  c/A commit/amend  e edit  esc back" ++ global;
+        return "j/k line  J/K hunk  v range  space stage/unstage  d discard (@@=hunk)  [/] staged/unstaged  \\ split  | side-by-side  c/A commit/amend  e edit  esc back" ++ global;
     }
     // A commit's file list, building a custom patch: `space` toggles the whole
     // file, `enter` opens per-line selection, `^p` opens the patch menu, `e`
