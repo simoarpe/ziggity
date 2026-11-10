@@ -2669,8 +2669,17 @@ fn buildChangeHunkLines(gpa: std.mem.Allocator, diff: []const u8) ![]usize {
             cur_header = line_no;
             has_change = false;
         } else if (cur_header != null) {
-            const k = bodyKind(line);
-            if (k == .del or k == .add) has_change = true;
+            // A diff body line leads with a space, `+`, `-`, or `\`. Anything else
+            // (the next file's `diff --git`/`index` header, or a section label)
+            // ends this hunk's body, so the following `---`/`+++` file headers are
+            // not counted as changes — which would mark a change-free gap hunk as a
+            // real one and desync the count from the compact view.
+            if (line.len == 0 or (line[0] != ' ' and line[0] != '+' and line[0] != '-' and line[0] != '\\')) {
+                cur_header = null;
+            } else {
+                const k = bodyKind(line);
+                if (k == .del or k == .add) has_change = true;
+            }
         }
         line_no += 1;
         if (le == diff.len) break;
@@ -8515,6 +8524,16 @@ pub const App = struct {
         if (km.up.matches(key) or key.matches(vaxis.Key.up, .{})) return self.scrollMain(-1);
         if (key.matches(vaxis.Key.page_down, .{})) return self.scrollMain(page);
         if (key.matches(vaxis.Key.page_up, .{})) return self.scrollMain(-page);
+        if (key.matches(vaxis.Key.home, .{})) {
+            self.main_scroll = 0;
+            return;
+        }
+        if (key.matches(vaxis.Key.end, .{})) {
+            self.main_scroll = self.maxMainScroll();
+            return;
+        }
+        // `space` recentres the view on the selected hunk after scrolling away.
+        if (key.matches(' ', .{})) return self.refocusDiffHunk();
         if (km.staging_next_hunk.matches(key) or key.matches(vaxis.Key.down, .{ .shift = true })) return self.moveDiffHunk(true);
         if (km.staging_prev_hunk.matches(key) or key.matches(vaxis.Key.up, .{ .shift = true })) return self.moveDiffHunk(false);
         if (km.toggle_wrap.matches(key)) return self.toggleWrapDiff();
@@ -8870,6 +8889,12 @@ pub const App = struct {
         self.diff_hunk = next;
         self.scrollDiffHunkToTop(self.diffHunkRow(next));
         try self.setMessage("hunk {d}/{d}", .{ next + 1, hunks.len });
+    }
+
+    /// `space` in the review: bring the selected hunk back into view (its header
+    /// to the top) without changing which hunk is selected, after scrolling away.
+    fn refocusDiffHunk(self: *App) void {
+        if (self.currentDiffHunk()) |h| self.scrollDiffHunkToTop(self.diffHunkRow(h));
     }
 
     /// The row index (in the current view's units: side-by-side rows, or diff

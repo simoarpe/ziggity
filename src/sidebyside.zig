@@ -103,6 +103,15 @@ fn appendHunk(gpa: std.mem.Allocator, rows: *std.ArrayList(Row), diff: []const u
             continue;
         }
 
+        // Stop at a file boundary: a diff body line always leads with a space,
+        // `+`, `-`, or `\`. Anything else (the next file's `diff --git`/`index`
+        // header, or an "Unstaged"/"Staged" section label the preview inserts
+        // between two file blocks) means this hunk's content has ended, so the
+        // following file's header lines are not mistaken for its own rows. The
+        // `---`/`+++` file headers lead with `-`/`+` but always sit after such a
+        // line, so they never slip through.
+        if (line.len == 0 or (line[0] != ' ' and line[0] != '+' and line[0] != '-' and line[0] != '\\')) break;
+
         const c: u8 = if (line.len > 0) line[0] else ' ';
         switch (c) {
             '-' => {
@@ -203,6 +212,38 @@ fn rowsOf(gpa: std.mem.Allocator, diff: []const u8) ![]Row {
     var parsed = try diff_mod.parse(gpa, diff);
     defer parsed.deinit(gpa);
     return build(gpa, diff, parsed);
+}
+
+test "a hunk stops at a file boundary (two concatenated diff blocks)" {
+    const gpa = testing.allocator;
+    // The review concatenates the unstaged and staged diffs of one file (a `MM`
+    // file), so a second `diff --git` block follows the first hunk. The first
+    // hunk must not render the second block's header lines as its own content.
+    const diff =
+        "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n" ++
+        "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n x\n-y\n+Y\n z\n";
+    const rows = try rowsOf(gpa, diff);
+    defer free(gpa, rows);
+
+    // Two headers, and no row renders a file-header line as content.
+    var headers: usize = 0;
+    for (rows) |r| {
+        if (r.kind == .header) headers += 1;
+        for ([_]Cell{ r.left, r.right }) |cell| {
+            if (cell.kind == .blank) continue;
+            const t = cell.text(diff);
+            try testing.expect(!std.mem.startsWith(u8, t, "diff --git"));
+            try testing.expect(!std.mem.eql(u8, t, "-- a/f")); // `---` minus its marker
+            try testing.expect(!std.mem.eql(u8, t, "++ b/f")); // `+++` minus its marker
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), headers);
+    // First hunk: header + ctx(a) + b|B + ctx(c) = 4 rows, then the second hunk.
+    try testing.expectEqual(RowKind.header, rows[0].kind);
+    try testing.expectEqualStrings("a", rows[1].left.text(diff));
+    try testing.expectEqualStrings("c", rows[3].left.text(diff));
+    try testing.expectEqual(RowKind.header, rows[4].kind);
+    try testing.expectEqualStrings("@@ -1,3 +1,3 @@", rows[4].left.text(diff));
 }
 
 test "pure addition: every row has a blank left and the added text on the right" {

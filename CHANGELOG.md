@@ -19,9 +19,10 @@ Releases before 0.55.0 are listed on the
 ### Added
 - A side-by-side review of the current diff: press `|` to open it full screen,
   the old file on the left and the new on the right with lines aligned, file line
-  numbers down each side, and the changed words emphasized. `j`/`k` or the wheel
-  scroll, `J`/`K` (or `shift+↑`/`shift+↓`) jump to the next and previous change,
-  landing its header at the top; the current change is framed in a rounded panel
+  numbers down each side, and the changed words emphasized. `j`/`k`, the wheel,
+  `PageUp`/`PageDown` and `Home`/`End` scroll, `J`/`K` (or `shift+↑`/`shift+↓`)
+  jump to the next and previous change, landing its header at the top, and
+  `space` recentres on the selected hunk; the current change is framed in a rounded panel
   titled with its hunk header, and that header stays pinned to the top while you
   scroll through the hunk. Clicking a line (or the frame) selects its hunk,
   `d` discards the whole current hunk (offered only for changes that are not yet

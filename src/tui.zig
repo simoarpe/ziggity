@@ -1944,7 +1944,7 @@ fn drawDiffReview(root: vaxis.Window, app: *app_mod.App) void {
     else
         "";
     const discard = if (app.reviewDiscardOffered()) "  d discard hunk" else "";
-    const footer = std.fmt.bufPrint(&review_footer_buf, "  j/k scroll  J/K change{s}{s}  ^w wrap  H/L pan  esc back  q quit", .{ whole, discard }) catch "  j/k scroll  J/K change  ^w wrap  H/L pan  esc back  q quit";
+    const footer = std.fmt.bufPrint(&review_footer_buf, "  j/k scroll  J/K change  space refocus{s}{s}  ^w wrap  H/L pan  esc back  q quit", .{ whole, discard }) catch "  j/k scroll  J/K change  space refocus  ^w wrap  H/L pan  esc back  q quit";
     print(root, footer_row, 0, footer, st.bottom_accent);
 }
 

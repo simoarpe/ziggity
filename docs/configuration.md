@@ -330,11 +330,13 @@ is chosen when a file opens and not redecided mid edit.
 The Diff panel is unified (one column with `-` and `+` lines). To read a change
 side by side, press `|` to open a full-screen review: the old file on the left
 and the new on the right, lines aligned, file line numbers down each side, and
-the changed words emphasized. Inside it, `j`/`k` scroll, `J`/`K` jump to the next
-and previous change, bringing its header to the top. The current change is framed
-in a rounded panel titled with its hunk header, so you can see at a glance which
-hunk `d` acts on; that header stays pinned to the top while you scroll through the
-hunk. Clicking a line or the frame selects its hunk, `d` discards the
+the changed words emphasized. Inside it, `j`/`k` (or `PageUp`/`PageDown`,
+`Home`/`End`) scroll, `J`/`K` jump to the next and previous change, bringing its
+header to the top, and `space` recentres on the selected hunk after you scroll away.
+The current change is framed in a rounded panel titled with its hunk header, so
+you can see at a glance which hunk `d` acts on; that header stays pinned to the
+top while you scroll through the hunk. Clicking a line or the frame selects its
+hunk (a common line between hunks selects nothing), `d` discards the
 whole current hunk, `=` fills in the rest of a single file around its changes
 (every unchanged line is shown, and each change stays its own boxed hunk that
 `J`/`K` steps between), `^w` soft-wraps both columns kept line for line, `H`/`L`
