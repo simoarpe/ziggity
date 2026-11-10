@@ -16,6 +16,8 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+## [0.61.0] - 2026-11-10
+
 ## [0.60.0] - 2026-11-10
 
 ### Added
