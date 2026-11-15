@@ -3366,6 +3366,55 @@ pub fn viewScroll(prev_origin: usize, size: usize, cursor: usize) ViewScroll {
     return .{ .view = cursor - prev_origin, .origin = prev_origin };
 }
 
+/// One display cell starting at `line[i]`: the bytes it spans and the terminal
+/// columns it occupies, measured exactly as the renderer draws it (`decodeCell`):
+/// a whole grapheme cluster via `gwidth`, zero-width forced to one, and any
+/// invalid UTF-8 counted as a single one-column cell.
+const CellStep = struct { len: usize, width: usize };
+fn cellStep(line: []const u8, i: usize) CellStep {
+    const b = line[i];
+    if (b < 0x80) return .{ .len = 1, .width = 1 };
+    const seq = std.unicode.utf8ByteSequenceLength(b) catch return .{ .len = 1, .width = 1 };
+    if (i + seq > line.len) return .{ .len = 1, .width = 1 };
+    _ = std.unicode.utf8Decode(line[i .. i + seq]) catch return .{ .len = 1, .width = 1 };
+    var it = vaxis.unicode.graphemeIterator(line[i..]);
+    const g = it.next() orelse return .{ .len = seq, .width = 1 };
+    const glen = if (g.len >= seq) g.len else seq;
+    const w = wrapCellWidth(line[i .. i + glen]);
+    return .{ .len = glen, .width = if (w == 0) 1 else w };
+}
+
+/// Display column (terminal cells) of the caret at byte offset `byte` within a
+/// single `line`, measured in grapheme clusters the way the renderer draws them.
+/// For pure ASCII this equals `byte`, so the text fields behave exactly as before
+/// on Latin text and only wide (CJK), combining, or emoji runs shift the caret.
+pub fn displayColumn(line: []const u8, byte: usize) usize {
+    const end = @min(byte, line.len);
+    var col: usize = 0;
+    var i: usize = 0;
+    while (i < end) {
+        const step = cellStep(line, i);
+        if (i + step.len > end) break; // a byte offset inside a cell: stop at its start
+        col += step.width;
+        i += step.len;
+    }
+    return col;
+}
+
+/// Byte offset of the first grapheme boundary at or past display column `col`
+/// within `line` (the inverse of `displayColumn`, snapping forward off the middle
+/// of a wide cell). For pure ASCII this is `col` clamped to the line length.
+pub fn byteAtColumn(line: []const u8, col: usize) usize {
+    var c: usize = 0;
+    var i: usize = 0;
+    while (i < line.len and c < col) {
+        const step = cellStep(line, i);
+        c += step.width;
+        i += step.len;
+    }
+    return i;
+}
+
 /// A directory-tree view over a flat file list: the visible rows, the cursor,
 /// and which directories are collapsed. Shared by the working-tree Files panel
 /// and the commit/branch file drills. The diff for a selected directory covers
@@ -8793,14 +8842,38 @@ pub const App = struct {
             const left = self.reviewHunkLines().len;
             if (left == 0) {
                 self.closeDiffReview();
-            } else if (self.diff_hunk >= left) {
-                self.diff_hunk = left - 1;
+            } else {
+                if (self.diff_hunk >= left) self.diff_hunk = left - 1;
+                self.refocusDiffHunk(); // bring the now-current hunk into view
             }
         } else {
-            // The preview reloads asynchronously, so return to the Diff panel.
+            // Working-tree file: refresh its diff in place and stay in the review,
+            // the way the staging path does, instead of dropping back to the Diff
+            // panel. The file preview cache is keyed by path and status, which a
+            // hunk discard need not change, so drop it to avoid re-showing the
+            // stale pre-discard diff before the async refresh lands.
+            self.preview_cache.invalidatePrefix(self.allocator, "f:");
+            if (self.selectedFile()) |file| {
+                if (self.git.rawFileDiff(file.path, false, self.config.diff_context)) |fresh| {
+                    self.allocator.free(self.diff);
+                    self.diff = fresh;
+                } else |_| {}
+            }
+            if (self.review_whole_file) {
+                if (self.buildWholeFileDiff()) |whole| {
+                    if (self.review_whole_diff.len > 0) self.allocator.free(self.review_whole_diff);
+                    self.review_whole_diff = whole;
+                } else self.clearReviewWholeFile();
+            }
             self.refreshViews(Refresh.all);
             try self.updatePreview();
-            self.closeDiffReview();
+            const left = self.reviewHunkLines().len;
+            if (left == 0) {
+                self.closeDiffReview();
+            } else {
+                if (self.diff_hunk >= left) self.diff_hunk = left - 1;
+                self.refocusDiffHunk(); // bring the now-current hunk into view
+            }
         }
         try self.setMessage("hunk discarded", .{});
     }
@@ -10203,7 +10276,12 @@ pub const App = struct {
         const wc: usize = col - self.commit_content_x;
         const is_body = m.kind == .body;
         const buf = if (is_body) self.commit_body_buffer.items else self.commit_buffer.items;
-        var off = @min(m.base + @min(wc, m.vis_len), buf.len);
+        // `wc` is a display column, so map it through the visible slice's cell
+        // widths to a byte offset (wide CJK characters are two columns each),
+        // rather than treating the column as a byte count.
+        const vis_start = @min(m.base, buf.len);
+        const visible = buf[vis_start..@min(vis_start + m.vis_len, buf.len)];
+        var off = vis_start + byteAtColumn(visible, wc);
         // Don't land in the middle of a multi-byte character.
         while (off > 0 and off < buf.len and (buf[off] & 0xC0) == 0x80) off -= 1;
         return .{ .is_body = is_body, .offset = off };
@@ -13903,6 +13981,39 @@ test "viewScroll keeps the caret inside the field" {
     try std.testing.expectEqual(ViewScroll{ .view = 2, .origin = 6 }, viewScroll(6, 10, 8));
     // Zero width is a no-op.
     try std.testing.expectEqual(ViewScroll{ .view = 0, .origin = 0 }, viewScroll(3, 0, 5));
+}
+
+test "displayColumn and byteAtColumn measure wide characters in cells" {
+    // ASCII: a column equals its byte offset, so the text fields are unchanged
+    // on Latin text and only wide runs shift the caret.
+    try std.testing.expectEqual(@as(usize, 0), displayColumn("hello", 0));
+    try std.testing.expectEqual(@as(usize, 3), displayColumn("hello", 3));
+    try std.testing.expectEqual(@as(usize, 5), displayColumn("hello", 5));
+    try std.testing.expectEqual(@as(usize, 3), byteAtColumn("hello", 3));
+    try std.testing.expectEqual(@as(usize, 5), byteAtColumn("hello", 99)); // clamp to len
+
+    // CJK: each character is three bytes but two columns wide. A caret after the
+    // first character sits at column 2, not 3 (the byte count) - the reported bug.
+    const cjk = "你好"; // U+4F60 U+597D, three bytes each
+    try std.testing.expectEqual(@as(usize, 0), displayColumn(cjk, 0));
+    try std.testing.expectEqual(@as(usize, 2), displayColumn(cjk, 3));
+    try std.testing.expectEqual(@as(usize, 4), displayColumn(cjk, 6));
+    // Inverse: column 2 is the byte after the first character, and a column that
+    // lands inside a wide cell snaps forward to the next grapheme boundary.
+    try std.testing.expectEqual(@as(usize, 3), byteAtColumn(cjk, 2));
+    try std.testing.expectEqual(@as(usize, 6), byteAtColumn(cjk, 4));
+    try std.testing.expectEqual(@as(usize, 3), byteAtColumn(cjk, 1));
+
+    // Mixed Latin and CJK: the column is the running cell width, not the byte count.
+    const mixed = "a你b"; // 1 + 3 + 1 bytes
+    try std.testing.expectEqual(@as(usize, 1), displayColumn(mixed, 1)); // after 'a'
+    try std.testing.expectEqual(@as(usize, 3), displayColumn(mixed, 4)); // after 'a你'
+    try std.testing.expectEqual(@as(usize, 4), displayColumn(mixed, 5)); // after 'a你b'
+    try std.testing.expectEqual(@as(usize, 4), byteAtColumn(mixed, 3)); // start of 'b'
+
+    // displayColumn and byteAtColumn round-trip on grapheme boundaries (byte 4
+    // is the start of 'b'; byte 3 would be inside the wide character).
+    try std.testing.expectEqual(@as(usize, 4), byteAtColumn(mixed, displayColumn(mixed, 4)));
 }
 
 test "word and line motion helpers" {

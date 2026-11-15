@@ -2825,8 +2825,8 @@ fn drawTextPromptPopup(root: vaxis.Window, app: *app_mod.App) void {
     // Horizontally scroll so the caret stays inside the box:
     // render the buffer starting at the scroll origin instead of clipping it.
     const caret = @min(app.prompt_cursor, app.input_buffer.items.len);
-    const sc = app_mod.viewScroll(app.prompt_scroll, win.width, caret);
-    app.prompt_scroll = sc.origin;
+    const sc = fieldScroll(app.input_buffer.items, caret, win.width, app.prompt_scroll);
+    app.prompt_scroll = sc.col_origin;
     print(win, 0, 0, app.input_buffer.items[sc.origin..], st.normal);
 
     if (total > 0) {
@@ -2863,7 +2863,7 @@ fn drawTextPromptPopup(root: vaxis.Window, app: *app_mod.App) void {
         print(win, 2, 0, "enter confirm   esc cancel", st.bottom_accent);
         app.prompt_list_rows = 0;
     }
-    win.showCursor(@intCast(sc.view), 0);
+    win.showCursor(sc.view, 0);
 }
 
 fn drawCredentialPopup(root: vaxis.Window, app: *app_mod.App) void {
@@ -2872,8 +2872,8 @@ fn drawCredentialPopup(root: vaxis.Window, app: *app_mod.App) void {
     const win = popup(root, w, 5, credentials_mod.credentialTitle(app), null);
     // Scroll horizontally so the caret stays inside the box.
     const caret = @min(app.prompt_cursor, app.input_buffer.items.len);
-    const sc = app_mod.viewScroll(app.prompt_scroll, win.width, caret);
-    app.prompt_scroll = sc.origin;
+    const sc = fieldScroll(app.input_buffer.items, caret, win.width, app.prompt_scroll);
+    app.prompt_scroll = sc.col_origin;
     const visible = app.input_buffer.items[sc.origin..];
     if (credentials_mod.credentialMask(app)) {
         // Mask the secret with bullets, one per byte (credentials are ASCII, so
@@ -2890,7 +2890,7 @@ fn drawCredentialPopup(root: vaxis.Window, app: *app_mod.App) void {
         print(win, 0, 0, visible, st.normal);
     }
     print(win, 2, 0, "enter confirm   esc cancel", st.bottom_accent);
-    win.showCursor(@intCast(sc.view), 0);
+    win.showCursor(sc.view, 0);
 }
 
 /// The selected column span `[lo, hi)` within a rendered commit row, given the
@@ -2985,8 +2985,14 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     // on failure a small non-modal status. Any typed text takes over immediately.
     const subj = app.commit_buffer.items;
     const subj_caret = @min(app.commit_cursor, subj.len);
-    const subj_sc = app_mod.viewScroll(app.commit_scroll, win.width, subj_caret);
+    // Scroll by display columns, not bytes, so the caret and the field's own
+    // horizontal scroll land on the right cell after wide (CJK) characters.
+    // `commit_scroll` holds a display-column origin; `subj_origin` is its byte.
+    const subj_caret_col = app_mod.displayColumn(subj, subj_caret);
+    const subj_sc = app_mod.viewScroll(app.commit_scroll, win.width, subj_caret_col);
     app.commit_scroll = subj_sc.origin;
+    const subj_origin = app_mod.byteAtColumn(subj, subj_sc.origin);
+    const subj_view: u16 = @intCast(subj_caret_col - app_mod.displayColumn(subj, subj_origin));
     // The placeholder replaces the field while generating (including a regenerate
     // over existing text), but only until the user types: an edit advances the
     // revision past the one captured when generation began, and their text takes
@@ -3000,10 +3006,10 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     } else if (app.commit_ai_title_state == .failed and subj.len == 0) {
         drawAiFailure(win, 1, 0, app.commit_ai_error, st.warning);
     } else {
-        const vis = subj[subj_sc.origin..];
-        const sel = selCols(app, subject_focused, subj_sc.origin, vis.len);
+        const vis = subj[subj_origin..];
+        const sel = selCols(app, subject_focused, subj_origin, vis.len);
         printAnsi(win, 1, vis, st.normal, sel.lo, sel.hi, 0);
-        app.commit_rows[1] = .{ .kind = .summary, .base = subj_sc.origin, .vis_len = vis.len };
+        app.commit_rows[1] = .{ .kind = .summary, .base = subj_origin, .vis_len = vis.len };
     }
 
     // Body: multi-line area from row 4 down to the footer, scrolled in both axes.
@@ -3013,13 +3019,19 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     const body = app.commit_body_buffer.items;
     const b_caret = @min(app.commit_body_cursor, body.len);
     var caret_line: usize = 0;
-    var caret_col: usize = 0;
-    for (body[0..b_caret]) |b| {
+    var caret_line_start: usize = 0;
+    for (body[0..b_caret], 0..) |b, bi| {
         if (b == '\n') {
             caret_line += 1;
-            caret_col = 0;
-        } else caret_col += 1;
+            caret_line_start = bi + 1;
+        }
     }
+    var caret_line_end = b_caret;
+    while (caret_line_end < body.len and body[caret_line_end] != '\n') caret_line_end += 1;
+    const caret_line_bytes = body[caret_line_start..caret_line_end];
+    // Caret column in display cells within its line (wide-character aware), so
+    // CJK text places the caret and scrolls the body by columns, not bytes.
+    const caret_col = app_mod.displayColumn(caret_line_bytes, b_caret - caret_line_start);
     // Total body rows (no soft-wrap: one row per newline-separated line), and the
     // furthest the view can scroll while still showing a full page.
     var total_lines: usize = 1;
@@ -3041,7 +3053,10 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     }
     app.commit_body_scroll_y = y_origin;
     const scx = app_mod.viewScroll(app.commit_body_scroll_x, win.width, caret_col);
-    app.commit_body_scroll_x = scx.origin;
+    app.commit_body_scroll_x = scx.origin; // a display-column origin, shared by every line
+    // The caret's column within the field, from the scrolled origin of its line.
+    const cl_origin_byte = app_mod.byteAtColumn(caret_line_bytes, scx.origin);
+    const body_caret_view: u16 = @intCast(caret_col - app_mod.displayColumn(caret_line_bytes, cl_origin_byte));
 
     // A soft vertical guide at the configured body-wrap column, drawn *under*
     // the description text: where a line reaches it the text renders over it,
@@ -3078,8 +3093,11 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
             // Byte offset of this line within the body buffer (for selection and
             // click mapping), plus the horizontal-scroll offset into it.
             const line_start = @intFromPtr(line.ptr) - @intFromPtr(body.ptr);
-            const vis = if (scx.origin < line.len) line[scx.origin..] else "";
-            const base = @min(line_start + scx.origin, line_start + line.len);
+            // Slice each line at the shared display-column origin (converted to a
+            // byte offset per line), so wide characters scroll by columns.
+            const line_origin = app_mod.byteAtColumn(line, scx.origin);
+            const vis = line[line_origin..];
+            const base = line_start + line_origin;
             const sel = selCols(app, !subject_focused, base, vis.len);
             printAnsi(win, row, vis, st.normal, sel.lo, sel.hi, 0);
             app.commit_rows[row] = .{ .kind = .body, .base = base, .vis_len = vis.len };
@@ -3103,13 +3121,13 @@ fn drawCommitPopup(root: vaxis.Window, app: *app_mod.App) void {
     // Hide the caret while the focused field shows the generation placeholder,
     // so it doesn't blink in the middle of "Generating...".
     if (subject_focused) {
-        if (!title_generating) win.showCursor(@intCast(subj_sc.view), 1);
+        if (!title_generating) win.showCursor(subj_view, 1);
     } else if (!desc_generating) {
         // Only show the body caret when it is within the scrolled view; a wheel
         // scroll can push it off-screen, and then it should simply not be drawn.
         if (caret_line >= y_origin and caret_line < y_origin + body_h) {
             const cursor_row: u16 = body_top + @as(u16, @intCast(caret_line - y_origin));
-            win.showCursor(@intCast(scx.view), cursor_row);
+            win.showCursor(body_caret_view, cursor_row);
         }
     }
 }
@@ -5242,20 +5260,20 @@ fn drawBottom(win: vaxis.Window, app: *app_mod.App) void {
         // The field starts at column 8; scroll within the remaining width.
         const field_w: usize = if (win.width > 8) win.width - 8 else 0;
         const caret = @min(app.file_filter_cursor, app.file_filter_buffer.items.len);
-        const sc = app_mod.viewScroll(app.file_filter_scroll, field_w, caret);
-        app.file_filter_scroll = sc.origin;
+        const sc = fieldScroll(app.file_filter_buffer.items, caret, field_w, app.file_filter_scroll);
+        app.file_filter_scroll = sc.col_origin;
         print(win, 0, 8, app.file_filter_buffer.items[sc.origin..], st.bottom);
-        win.showCursor(@intCast(8 + sc.view), 0);
+        win.showCursor(8 + sc.view, 0);
         return;
     }
     if (app.mode == .branch_filter_prompt) {
         print(win, 0, 0, "filter: ", st.bottom_accent);
         const field_w: usize = if (win.width > 8) win.width - 8 else 0;
         const caret = @min(app.branch_filter_cursor, app.branch_filter_buffer.items.len);
-        const sc = app_mod.viewScroll(app.branch_filter_scroll, field_w, caret);
-        app.branch_filter_scroll = sc.origin;
+        const sc = fieldScroll(app.branch_filter_buffer.items, caret, field_w, app.branch_filter_scroll);
+        app.branch_filter_scroll = sc.col_origin;
         print(win, 0, 8, app.branch_filter_buffer.items[sc.origin..], st.bottom);
-        win.showCursor(@intCast(8 + sc.view), 0);
+        win.showCursor(8 + sc.view, 0);
         return;
     }
     if (app.mode == .status_filter_menu) {
@@ -5663,6 +5681,22 @@ fn drawSelectable(win: vaxis.Window, row: u16, text: []const u8, style: vaxis.St
 
 fn print(win: vaxis.Window, row: u16, col: u16, text: []const u8, style: vaxis.Style) void {
     _ = printSpan(win, row, col, text, style);
+}
+
+/// Width-aware horizontal scroll for a single-line text field. Measures the caret
+/// in display cells (grapheme clusters via `gwidth`), so the caret and the
+/// field's own scroll land on the right column after wide (CJK) characters.
+/// Returns the byte offset to start drawing `line` from, the caret's column
+/// within the field, and the display-column origin the caller stores for the next
+/// frame. For ASCII every column equals its byte offset, so Latin fields behave
+/// exactly as before.
+const FieldScroll = struct { origin: usize, view: u16, col_origin: usize };
+fn fieldScroll(line: []const u8, caret: usize, width: usize, prev_col_origin: usize) FieldScroll {
+    const col = app_mod.displayColumn(line, @min(caret, line.len));
+    const sc = app_mod.viewScroll(prev_col_origin, width, col);
+    const origin = app_mod.byteAtColumn(line, sc.origin);
+    const view: u16 = @intCast(col - app_mod.displayColumn(line, origin));
+    return .{ .origin = origin, .view = view, .col_origin = sc.origin };
 }
 
 /// Horizontal scroll offset (cells) applied by `printSpan`/`printGlyph` to the

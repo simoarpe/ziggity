@@ -16,6 +16,17 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+### Fixed
+- The text cursor now lands on the right column in the commit message editor (and
+  the other input fields) when the text contains wide characters such as CJK. The
+  caret, the horizontal scroll, and click-to-position are measured in display
+  cells instead of bytes, so composing a message in Chinese, Japanese, or Korean
+  no longer drifts the cursor off the text.
+- Discarding a hunk with `d` in the side-by-side review of a working-tree file no
+  longer closes the review. It stays open on the next change, matching how discard
+  already worked from the staging view, and closes only when the file has no more
+  changes.
+
 ## [0.61.0] - 2026-11-10
 
 ### Changed
