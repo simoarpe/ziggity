@@ -16,6 +16,8 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+## [0.62.0] - 2026-11-15
+
 ### Fixed
 - The text cursor now lands on the right column in the commit message editor (and
   the other input fields) when the text contains wide characters such as CJK. The
