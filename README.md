@@ -82,7 +82,7 @@ they improve the user experience. See
 
 Ziggity needs the `git` command on your `PATH` at runtime, since it drives
 git as a subprocess. Install via Homebrew (macOS / Linux), Scoop (Windows),
-grab a prebuilt binary, or build from source.
+Nix (macOS / Linux), grab a prebuilt binary, or build from source.
 
 ### Homebrew (macOS / Linux)
 
@@ -111,6 +111,28 @@ scoop install ziggity
 Upgrade later with `scoop update ziggity`. Needs
 [Git for Windows](https://git-scm.com/download/win) (or `scoop install git`) on
 your `PATH`.
+
+### Nix (macOS / Linux)
+
+The repository is a [flake](https://nix.dev/concepts/flakes), so with flakes
+enabled you can try Ziggity without installing it:
+
+```sh
+nix run github:simoarpe/ziggity
+```
+
+or install it into your profile:
+
+```sh
+nix profile install github:simoarpe/ziggity
+```
+
+Both build from source with the pinned Zig toolchain and run the test suite.
+The package falls back to its own `git` when none is on your `PATH`.
+
+To use it from another flake, add this repository as an input and either
+reference `inputs.ziggity.packages.${system}.default` directly or apply
+`inputs.ziggity.overlays.default` to get `pkgs.ziggity`.
 
 ### Prebuilt Binaries
 
@@ -197,6 +219,9 @@ cd ziggity
 zig build -Doptimize=ReleaseSafe     # binary at ./zig-out/bin/ziggity
 zig build test                       # (optional) run the test suite
 ```
+
+With Nix, `nix develop` drops you into a shell with the right Zig version, and
+`nix build` produces the binary at `./result/bin/ziggity`.
 
 The build leaves the binary at `./zig-out/bin/ziggity`. **Add it to your
 `PATH`** so you can run `ziggity` from anywhere. Either copy it into a
