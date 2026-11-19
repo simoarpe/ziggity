@@ -16,6 +16,14 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+### Fixed
+- The side-by-side and unified diffing view (`W`) now refreshes when its base
+  branch moves. Comparing against a branch such as `master` and then pulling (or
+  committing, or resetting) so that branch advances used to leave the view
+  showing the diff against the old commit, because the cached diff was keyed by
+  the branch name and the name had not changed. It now recomputes against where
+  the base points now, so the comparison matches the current branches.
+
 ## [0.62.0] - 2026-11-15
 
 ### Fixed

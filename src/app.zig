@@ -4738,6 +4738,15 @@ pub const App = struct {
         // fetch, pull, push, reset, … — so the log regenerates with the current
         // commits and freshly computed relative dates instead of a frozen snapshot.
         if (s.contains(.branches)) self.preview_cache.invalidatePrefix(self.allocator, "b:");
+        // The diffing-mode ref diff (`dr:…`) is keyed by the base and target ref
+        // *names*, not by the commits they resolve to, so a cached copy goes stale
+        // when either ref moves — a pull fast-forward, a new commit, a reset, or a
+        // moved tag — even though the names are unchanged. Without this, the base
+        // ref silently advancing under an open diffing view keeps showing the diff
+        // against the old commit. Drop it whenever branches or tags refresh so it
+        // recomputes against where the refs point now instead of a frozen snapshot.
+        if (s.contains(.branches) or s.contains(.tags))
+            self.preview_cache.invalidatePrefix(self.allocator, "dr:");
         self.updatePreview() catch {};
     }
 
@@ -18001,22 +18010,28 @@ test "a branches refresh drops the cached branch log preview, keeps commit previ
     }
     app.focus = .branches;
 
-    // Warm two previews: the branch "Log" (`b:`), whose git-rendered commit set
+    // Warm three previews: the branch "Log" (`b:`), whose git-rendered commit set
     // and `--date=relative` "N ago" dates go stale as the branch moves or time
-    // passes, and an immutable commit diff (`c:`) that must survive a refresh.
+    // passes; the diffing-mode ref diff (`dr:`), keyed by ref name and so stale
+    // once the base or target ref moves to a new commit; and an immutable commit
+    // diff (`c:`) that must survive a refresh.
     try app.preview_cache.put(allocator, "b:main", "cached branch log");
+    try app.preview_cache.put(allocator, "dr:3:3:main:feature", "cached ref diff");
     try app.preview_cache.put(allocator, "c:3:deadbeef", "cached commit diff");
     try std.testing.expect(app.preview_cache.get("b:main") != null);
+    try std.testing.expect(app.preview_cache.get("dr:3:3:main:feature") != null);
 
     // A branches-scope refresh — what a commit / fetch / pull / push triggers —
-    // must drop the branch preview so it regenerates with the current commits and
-    // freshly computed relative dates, while leaving the immutable commit preview.
+    // must drop both name-keyed previews so they regenerate against where the refs
+    // point now (the branch log with current commits and relative dates, the ref
+    // diff against the moved base), while leaving the immutable commit preview.
     var sd = ScopedData{ .scopes = ScopeSet.init(.{ .branches = true }) };
     sd.data.branches = try page.alloc(model.Branch, 1);
     sd.data.branches[0] = .{ .name = try page.dupe(u8, "main"), .current = true };
     app.applyScopedLoad(sd, page);
 
     try std.testing.expect(app.preview_cache.get("b:main") == null);
+    try std.testing.expect(app.preview_cache.get("dr:3:3:main:feature") == null);
     try std.testing.expect(app.preview_cache.get("c:3:deadbeef") != null);
 }
 
