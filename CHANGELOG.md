@@ -16,6 +16,12 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+### Added
+- Terminals that support the Program Status Protocol (OSC 7501), such as Rex,
+  now show what Ziggity is doing on an unfocused tab: busy during a fetch, pull,
+  push, rebase or AI generation, waiting when it needs credentials or a
+  force-push confirmation, and failed while an error dialog is open.
+
 ## [0.63.0] - 2026-11-19
 
 ### Fixed

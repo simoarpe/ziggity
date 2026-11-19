@@ -673,6 +673,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
         writer.flush() catch {};
     }
     try vx.queryTerminal(writer, .fromSeconds(1));
+    defer status_reporter.clear(&vx, writer);
 
     var async_job: AsyncJob = undefined;
     var async_future: ?std.Io.Future(void) = null;
@@ -1473,6 +1474,65 @@ fn renderAndFlush(vx: *vaxis.Vaxis, writer: anytype, app: *app_mod.App) !void {
     render(vx, app);
     try vx.render(writer);
     try writer.flush();
+    status_reporter.update(vx, writer, app.programStatus());
+}
+
+/// Tells the terminal what ziggity is doing through the Program Status Protocol
+/// (OSC 7501), so it can mark an unfocused tab as busy, waiting on the user, or
+/// failed. Called after every frame, but writes only when the status changed.
+/// Silent on terminals that did not answer the feature query at startup.
+const StatusReporter = struct {
+    sent: bool = false,
+    state: vaxis.Vaxis.ProgramStatus.State = .idle,
+    kind: ?vaxis.Vaxis.ProgramStatus.Kind = null,
+    msg_buf: [256]u8 = undefined,
+    msg_len: usize = 0,
+
+    fn update(self: *StatusReporter, vx: *vaxis.Vaxis, writer: *std.Io.Writer, status: app_mod.ProgramStatus) void {
+        if (!vx.caps.program_status) return;
+        const msg = clipUtf8(status.msg, self.msg_buf.len);
+        if (self.sent and self.state == status.state and self.kind == status.kind and
+            std.mem.eql(u8, self.msg_buf[0..self.msg_len], msg)) return;
+
+        // A report replaces the whole record, so `app` goes out every time.
+        vx.reportProgramStatus(writer, .{
+            .state = status.state,
+            .kind = status.kind,
+            .app = "ziggity",
+            .msg = if (msg.len > 0) msg else null,
+        }) catch return;
+        self.sent = true;
+        self.state = status.state;
+        self.kind = status.kind;
+        @memcpy(self.msg_buf[0..msg.len], msg);
+        self.msg_len = msg.len;
+    }
+
+    /// Remove ziggity's record on exit; the terminal would otherwise keep an
+    /// `idle` or `error` one after the process is gone.
+    fn clear(self: *StatusReporter, vx: *vaxis.Vaxis, writer: *std.Io.Writer) void {
+        if (!self.sent) return;
+        vx.clearProgramStatus(writer, null) catch {};
+        self.sent = false;
+    }
+};
+
+var status_reporter: StatusReporter = .{};
+
+/// `text` cut to at most `max` bytes without splitting a UTF-8 sequence.
+fn clipUtf8(text: []const u8, max: usize) []const u8 {
+    if (text.len <= max) return text;
+    var end = max;
+    while (end > 0 and (text[end] & 0xC0) == 0x80) end -= 1;
+    return text[0..end];
+}
+
+test "clipUtf8 never splits a codepoint" {
+    try std.testing.expectEqualStrings("abc", clipUtf8("abc", 8));
+    try std.testing.expectEqualStrings("ab", clipUtf8("abc", 2));
+    // "é" is two bytes; a cut landing inside it backs up to before it.
+    try std.testing.expectEqualStrings("a", clipUtf8("aé", 2));
+    try std.testing.expectEqualStrings("aé", clipUtf8("aéb", 3));
 }
 
 /// Backing context for `app.render_hook`, letting App repaint mid-handler so a
