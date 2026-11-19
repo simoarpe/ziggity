@@ -16,6 +16,8 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+## [0.63.0] - 2026-11-19
+
 ### Fixed
 - The side-by-side and unified diffing view (`W`) now refreshes when its base
   branch moves. Comparing against a branch such as `master` and then pulling (or
