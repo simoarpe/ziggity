@@ -99,7 +99,8 @@ the written reference. Every binding is remappable, see
 - `space`: stage or unstage a file · checkout a branch · apply a stash (by
   focus)
 - `e`: open the file under view in your editor (Files, a commit's files, the
-  staging or patch view, or a working tree file's diff; see
+  staging or patch view, or a working tree file's diff; from the staging or
+  patch view and a focused Diff panel it opens at the line you are on; see
   [Editor](configuration.md#editor-e))
 - `/` (Branches, Local): filter branches by name live; enter accepts, esc clears
 - `n`: new branch from HEAD (Branches, Local)

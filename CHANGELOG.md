@@ -16,6 +16,12 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+### Added
+- `e` now opens your editor at the line you are looking at, as lazygit does:
+  the cursor line in the staging or patch view, or the top line of a focused
+  Diff panel. All editor presets support it, and a custom `editor_command` can
+  use a new `{{line}}` placeholder.
+
 ## [0.65.0] - 2026-11-20
 
 ### Fixed
