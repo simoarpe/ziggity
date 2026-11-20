@@ -16,6 +16,13 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+### Fixed
+- Clicking the Status panel no longer traps the mouse on it. Focusing the Status
+  panel shows the about splash, and while it was up a click anywhere was
+  swallowed, so you could select panel 1 with the mouse but never click to
+  another panel. Clicks outside the Status panel now focus the panel they land
+  on, as before.
+
 ## [0.64.0] - 2026-11-20
 
 ### Added

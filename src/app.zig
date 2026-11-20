@@ -3072,6 +3072,32 @@ test "review wrap toggle keeps the selected hunk header pinned to the top" {
     deinitHunkLinesCache();
 }
 
+test "clicking another panel while the Status about-splash is up still moves focus" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+
+    // Focusing the Status panel shows the about splash. Its mouse handler used to
+    // return for every event, so no click ever reached the panel dispatch and the
+    // pointer was stuck on panel 1.
+    app.focus = .status;
+    try std.testing.expect(app.showAboutSplash());
+
+    // Status panel on top, Branches below it.
+    app.panel_rects[0] = .{ .focus = .status, .x = 0, .y = 0, .w = 30, .h = 5 };
+    app.panel_rects[1] = .{ .focus = .branches, .x = 0, .y = 6, .w = 30, .h = 5 };
+    app.panel_rect_count = 2;
+
+    // A left click inside the Branches panel must focus it, not stay on Status.
+    _ = try app.handleMouse(.{ .col = 5, .row = 7, .button = .left, .mods = .{}, .type = .press });
+    try std.testing.expectEqual(model.Focus.branches, app.focus);
+
+    // A click back inside the Status panel still focuses it.
+    _ = try app.handleMouse(.{ .col = 5, .row = 2, .button = .left, .mods = .{}, .type = .press });
+    try std.testing.expectEqual(model.Focus.status, app.focus);
+}
+
 test "review mouse click selects the hunk, including its bottom separator row" {
     const a = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -5803,7 +5829,17 @@ pub const App = struct {
                     return true;
                 },
             }
-            return false;
+            // The splash only owns the Status panel. A press (click or wheel)
+            // that landed on another panel wasn't consumed above, so fall through
+            // to the panel dispatch below and let it focus or scroll that panel;
+            // without this the splash swallowed every press and trapped the
+            // pointer on panel 1 (you could select Status with the mouse but never
+            // click or scroll another panel). Anything else the splash did not
+            // handle is ignored.
+            if (!(mouse.type == .press and
+                mouse.col >= 0 and mouse.row >= 0 and
+                (if (self.panelAt(c, rw)) |r| r.focus != .status else false)))
+                return false;
         }
 
         // Character-precise text selection: left-drag selects, release copies to
