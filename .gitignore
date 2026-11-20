@@ -2,3 +2,5 @@
 zig-out/
 zig-pkg/
 *.o
+result
+result-*
