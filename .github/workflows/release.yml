@@ -252,4 +252,38 @@ jobs:
             git add bucket/ziggity.json
             git commit -m "ziggity ${version}"
             git push
+
+  # ── Nix flake health ──────────────────────────────────────────────────────
+  # Build the flake and run its checks. Deliberately a SEPARATE job that the
+  # release job does NOT depend on: a Nix or nixpkgs hiccup must never block the
+  # binary / Homebrew / Scoop publish (Nix is one install path among several).
+  # If this job goes red, the release still ships; you just have a flake to fix.
+  #
+  # What it buys us:
+  #   - Catches a stale `zigDeps` hash in nix/package.nix — the one Nix failure
+  #     nothing else surfaces. It needs regenerating whenever build.zig.zon's
+  #     dependencies change (e.g. every Zig bump repoints libvaxis); see the
+  #     comment in nix/package.nix for how.
+  #   - Builds and tests the flake natively on Linux, the platform flake.nix
+  #     declares but that has only ever been built on macOS.
+  #
+  # Runs on a tag push (alongside a release) and on a manual dispatch, so you
+  # can also check the flake on demand without cutting a release.
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Flake-enabled Nix. CI can't be dry-run locally, so the first run on
+      # GitHub is the real check; bump these action versions if one is stale.
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # Evaluates every flake output and builds this system's `checks` — the
+      # ziggity package, which runs `zig build test` in the sandbox. A stale
+      # zigDeps hash fails here with a hash mismatch. `-L` streams full logs.
+      - name: nix flake check
+        run: nix flake check -L
           fi
