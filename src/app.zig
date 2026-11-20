@@ -122,6 +122,18 @@ pub const CommitAction = enum { create, reword, amend_fixup, amend, cherry_pick_
 /// the field it is just normal editable text.
 pub const GenState = enum { idle, generating, failed };
 
+/// What ziggity is doing right now, as reported to the terminal through the
+/// Program Status Protocol (OSC 7501) so it can show a busy or needs-attention
+/// marker on an unfocused tab. Derived from `App` state by `App.programStatus`.
+pub const ProgramStatus = struct {
+    state: vaxis.Vaxis.ProgramStatus.State,
+    /// What the user must do. Only set with `.blocked`.
+    kind: ?vaxis.Vaxis.ProgramStatus.Kind = null,
+    /// One human-readable line. Static, or borrowed from the `App` (valid until
+    /// its next message or op), so copy it to keep it.
+    msg: []const u8 = "",
+};
+
 /// One rendered row of the commit popup, recorded during draw so a mouse click
 /// can map an absolute cell back to a byte offset in the summary or body buffer.
 /// `base` is the buffer offset of the row's first *visible* character (past any
@@ -13140,6 +13152,46 @@ pub const App = struct {
             self.mutation_active or self.mutation_requested != null;
     }
 
+    /// The status to report to the terminal (see `ProgramStatus`). Only
+    /// foreground work counts: the periodic background fetch and view refreshes
+    /// would otherwise mark the tab busy with nothing the user asked for.
+    pub fn programStatus(self: *const App) ProgramStatus {
+        // Blocked: an operation stopped partway and needs the user to continue.
+        if (self.mode == .credential_prompt) {
+            return .{ .state = .blocked, .kind = .auth, .msg = self.message };
+        }
+        if (self.mode == .confirmation) if (self.pending_confirmation) |kind| switch (kind) {
+            // Only the prompts an operation raises on its own, possibly long
+            // after the keypress that started it. A prompt opened directly by a
+            // key is ordinary UI the user is already looking at.
+            .force_push, .force_push_plain, .prune_remote_refs, .delete_index_lock => {
+                return .{ .state = .blocked, .kind = .permission, .msg = self.message };
+            },
+            else => {},
+        };
+
+        if (self.async_active or self.async_requested != null) {
+            return .{ .state = .working, .msg = self.async_op.gerund() };
+        }
+        if (self.mutation_active or self.mutation_requested != null) {
+            return .{ .state = .working, .msg = self.mutation_gerund };
+        }
+        if (self.op_running) return .{ .state = .working, .msg = self.op_command };
+        if (self.pr_gen_active or self.pr_gen_requested != null) {
+            return .{ .state = .working, .msg = "generating PR description" };
+        }
+        if (self.commit_ai_title_state == .generating or self.commit_ai_desc_state == .generating) {
+            return .{ .state = .working, .msg = "generating commit message" };
+        }
+        if (self.initial_load_pending) return .{ .state = .working, .msg = "loading repository" };
+
+        // The failure dialog is still open, so the user has not dismissed it.
+        if (self.mode == .operation and !self.op_ok) {
+            return .{ .state = .@"error", .msg = self.op_summary };
+        }
+        return .{ .state = .idle };
+    }
+
     /// UI-thread side effect to run when a mutation succeeds.
     const PostMutation = enum { none, clear_patch, clear_copied };
 
@@ -16064,6 +16116,93 @@ test "background worktree refresh is paused while an operation runs" {
     app.async_active = false;
     try std.testing.expect(app.takeWorktreeRefresh() != null);
     try std.testing.expect(app.worktree_refresh_active);
+}
+
+test "program status follows foreground work" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    const State = vaxis.Vaxis.ProgramStatus.State;
+
+    try std.testing.expectEqual(State.idle, app.programStatus().state);
+
+    // A network op is working from the moment it is requested.
+    app.async_requested = .push;
+    app.async_op = .push;
+    try std.testing.expectEqual(State.working, app.programStatus().state);
+    try std.testing.expectEqualStrings("pushing", app.programStatus().msg);
+    app.async_requested = null;
+    app.async_active = true;
+    try std.testing.expectEqual(State.working, app.programStatus().state);
+    app.async_active = false;
+    try std.testing.expectEqual(State.idle, app.programStatus().state);
+
+    // The periodic background fetch is not foreground work.
+    app.bg_fetch_requested = true;
+    try std.testing.expectEqual(State.idle, app.programStatus().state);
+    app.bg_fetch_requested = false;
+
+    app.mutation_active = true;
+    app.mutation_gerund = "rebasing";
+    try std.testing.expectEqualStrings("rebasing", app.programStatus().msg);
+    app.mutation_active = false;
+
+    app.pr_gen_active = true;
+    try std.testing.expectEqual(State.working, app.programStatus().state);
+    app.pr_gen_active = false;
+
+    app.commit_ai_desc_state = .generating;
+    try std.testing.expectEqual(State.working, app.programStatus().state);
+    app.commit_ai_desc_state = .failed;
+    try std.testing.expectEqual(State.idle, app.programStatus().state);
+}
+
+test "program status reports prompts an operation raised as blocked" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    const PS = vaxis.Vaxis.ProgramStatus;
+
+    // A rejected push asks before force pushing.
+    try app.requestConfirmation(.force_push, "push rejected — force push with lease? (y/n)", .{});
+    var status = app.programStatus();
+    try std.testing.expectEqual(PS.State.blocked, status.state);
+    try std.testing.expectEqual(@as(?PS.Kind, .permission), status.kind);
+    try std.testing.expectEqualStrings("push rejected — force push with lease? (y/n)", status.msg);
+
+    // A confirmation the user opened with a key is not a blocked operation.
+    app.pending_confirmation = .discard_all;
+    try std.testing.expectEqual(PS.State.idle, app.programStatus().state);
+
+    app.mode = .credential_prompt;
+    try app.setMessage("authentication required", .{});
+    status = app.programStatus();
+    try std.testing.expectEqual(PS.State.blocked, status.state);
+    try std.testing.expectEqual(@as(?PS.Kind, .auth), status.kind);
+}
+
+test "program status reports an open failure dialog as an error" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+    const State = vaxis.Vaxis.ProgramStatus.State;
+
+    app.op_running = true; // so finishOp does not read the command log
+    try app.finishOp(false, "push failed", "fatal: unable to access remote");
+    try std.testing.expectEqual(State.@"error", app.programStatus().state);
+    try std.testing.expectEqualStrings("push failed", app.programStatus().msg);
+
+    // Dismissing the dialog ends the error.
+    app.mode = .normal;
+    try std.testing.expectEqual(State.idle, app.programStatus().state);
+
+    // A success dialog is not an error.
+    app.op_running = true;
+    try app.finishOp(true, "pushed", "");
+    try std.testing.expectEqual(State.idle, app.programStatus().state);
 }
 
 test "external-change poll baselines first, then a changed fingerprint refreshes" {
