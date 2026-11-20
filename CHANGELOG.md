@@ -19,6 +19,11 @@ Releases before 0.55.0 are listed on the
 ### Added
 - Nix flake: `nix run github:simoarpe/ziggity` runs Ziggity without installing
   it, and `nix develop` gives contributors a shell with the pinned Zig version.
+- Terminals that support the Program Status Protocol (OSC 7501), such as Rex,
+  now show what Ziggity is doing on an unfocused tab: busy during a fetch, pull,
+  push, rebase or AI generation, waiting when it needs credentials or a
+  force-push confirmation, and failed while an error dialog is open.
+
 ## [0.63.0] - 2026-11-19
 
 ### Fixed
