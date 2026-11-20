@@ -252,6 +252,7 @@ jobs:
             git add bucket/ziggity.json
             git commit -m "ziggity ${version}"
             git push
+          fi
 
   # ── Nix flake health ──────────────────────────────────────────────────────
   # Build the flake and run its checks. Deliberately a SEPARATE job that the
@@ -286,4 +287,3 @@ jobs:
       # zigDeps hash fails here with a hash mismatch. `-L` streams full logs.
       - name: nix flake check
         run: nix flake check -L
-          fi
