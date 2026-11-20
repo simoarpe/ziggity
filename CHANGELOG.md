@@ -16,6 +16,8 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+## [0.64.0] - 2026-11-20
+
 ### Added
 - Nix flake: `nix run github:simoarpe/ziggity` runs Ziggity without installing
   it, and `nix develop` gives contributors a shell with the pinned Zig version.
