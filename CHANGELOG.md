@@ -16,6 +16,8 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+## [0.65.0] - 2026-11-20
+
 ### Fixed
 - Clicking the Status panel no longer traps the mouse on it. Focusing the Status
   panel shows the about splash, and while it was up a click anywhere was
