@@ -219,7 +219,7 @@ footer_hint_rows = 1               # 1 (default, single line) | any number | 0 (
 # editor_preset, then git core.editor / $GIT_EDITOR / $VISUAL / $EDITOR, then
 # vim. Full details under "Editor" below.
 editor_preset =                    # vi | vim | nvim | lvim | nano | emacs | micro | helix | kakoune | vscode | sublime | zed | bbedit | xcode
-editor_command =                   # explicit command, e.g. "code --reuse-window -- {{filename}}"; overrides editor_preset. A GUI editor also needs editor_in_terminal = false (a bare command otherwise suspends the TUI)
+editor_command =                   # explicit command, e.g. "code --reuse-window -- {{filename}}"; overrides editor_preset. Add {{line}} to open at the line under the cursor, e.g. "myed +{{line}} {{filename}}". A GUI editor also needs editor_in_terminal = false (a bare command otherwise suspends the TUI)
 editor_in_terminal =               # empty = use the editor's own default | true = force suspend the TUI | false = force just launch
 
 # Action feedback. Default: silent success plus a bottom bar summary, and
@@ -394,3 +394,17 @@ That means `editor_preset = vscode` is simply shorthand for
 `editor_command = code --reuse-window -- {{filename}}` plus
 `editor_in_terminal = false`. The preset just fills in the command and the "do
 not suspend" behavior so you do not have to.
+
+### Opening at a line
+
+When you press `e` while navigating a diff, the editor opens at that line: the
+cursor line in the staging or patch view, or the line at the top of a focused
+Diff panel (the first change, when the panel is scrolled to the top). From a
+file list the file just opens.
+
+Every preset knows its editor's jump syntax (`nvim +42 -- file`,
+`code --goto -- file:42`, and so on). For an `editor_command`, put `{{line}}`
+where the line number should go, e.g. `myeditor +{{line}} {{filename}}`; it is
+filled with `1` when there is no line to jump to, and a command without it
+simply opens the file. An auto-detected editor that is not one of the presets
+also just opens the file.

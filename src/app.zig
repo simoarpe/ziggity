@@ -9459,12 +9459,32 @@ pub const App = struct {
             try self.setMessage("no file selected", .{});
             return;
         };
-        return self.requestEditPath(path);
+        return self.requestEditPathAt(path, self.editorLineForView());
+    }
+
+    /// The file line `e` should open the editor at, when a diff is being
+    /// navigated: the staging/patch view's cursor line, or the line at the top
+    /// of a focused Diff panel. Null from a file list (the file just opens).
+    fn editorLineForView(self: *const App) ?usize {
+        if (self.staging_active) return diff_mod.newFileLineAt(self.staging_diff, self.staging_cursor);
+        if (self.focus == .main and self.mode != .diff_review) {
+            // The Diff panel's text is git's colored output; the line mapping
+            // needs the bare diff (stripping keeps the line count).
+            const plain = stripAnsiAll(self.allocator, self.diff) catch return null;
+            defer self.allocator.free(plain);
+            return diff_mod.newFileLineAt(plain, self.topSourceLine());
+        }
+        return null;
     }
 
     /// Build an editor command for `path` (a file or, for a worktree, a
     /// directory) and hand it to the TUI loop to run.
     fn requestEditPath(self: *App, path: []const u8) !void {
+        return self.requestEditPathAt(path, null);
+    }
+
+    /// `requestEditPath`, opening the file at 1-based `line` when given.
+    fn requestEditPathAt(self: *App, path: []const u8, line: ?usize) !void {
         var det_buf: [128]u8 = undefined;
         const detected = self.detectEditor(&det_buf);
         const r = editor_mod.resolve(
@@ -9474,6 +9494,7 @@ pub const App = struct {
             detected,
             self.config.editor.in_terminal,
             path,
+            line,
         ) catch {
             try self.setMessage("could not build the editor command", .{});
             return;
@@ -9516,6 +9537,7 @@ pub const App = struct {
             detected,
             self.config.editor.in_terminal,
             paths,
+            null,
         ) catch {
             try self.setMessage("could not build the editor command", .{});
             return;
@@ -20610,4 +20632,11 @@ test "issue #4: shift/J-K jump the staging cursor by hunk" {
     staging_mod.moveStagingHunk(&app, true);
     try std.testing.expectEqual(@as(?usize, null), app.staging_anchor);
     try std.testing.expectEqual(@as(usize, 7), app.staging_cursor);
+}
+
+test "editorLineForView maps a colored Diff panel to a file line" {
+    const a = std.testing.allocator;
+    const plain = try stripAnsiAll(a, "\x1b[1mdiff --git a/x b/x\x1b[m\n\x1b[36m@@ -7,2 +7,2 @@\x1b[m\n ctx\n\x1b[31m-old\x1b[m\n\x1b[32m+new\x1b[m\n");
+    defer a.free(plain);
+    try std.testing.expectEqual(@as(?usize, 8), diff_mod.newFileLineAt(plain, 0));
 }

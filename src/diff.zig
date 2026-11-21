@@ -74,6 +74,50 @@ pub fn parse(allocator: std.mem.Allocator, diff: []const u8) !ParsedDiff {
     };
 }
 
+/// The 1-based line of the new (post-image) file that diff line `target` (a
+/// 0-based line index into `diff`) corresponds to, for opening an editor
+/// there. A context or added line maps to itself; a removed line maps to the
+/// line that now sits where it was. A file-header or `@@` line maps to the
+/// first changed line after it. Null when no hunk line is found (e.g. the text
+/// is not a diff). Understands combined (`@@@`) diffs too.
+pub fn newFileLineAt(diff: []const u8, target: usize) ?usize {
+    var in_hunk = false;
+    var cols: usize = 1; // prefix columns: 1, or one per parent in a combined diff
+    var new_no: usize = 0;
+    var idx: usize = 0;
+    var it = std.mem.splitScalar(u8, diff, '\n');
+    while (it.next()) |line| : (idx += 1) {
+        if (std.mem.startsWith(u8, line, "@@")) {
+            var ats: usize = 0;
+            while (ats < line.len and line[ats] == '@') ats += 1;
+            const plus = std.mem.indexOf(u8, line, " +") orelse {
+                in_hunk = false;
+                continue;
+            };
+            var end = plus + 2;
+            while (end < line.len and std.ascii.isDigit(line[end])) end += 1;
+            new_no = std.fmt.parseInt(usize, line[plus + 2 .. end], 10) catch {
+                in_hunk = false;
+                continue;
+            };
+            cols = ats - 1;
+            in_hunk = true;
+            continue;
+        }
+        if (std.mem.startsWith(u8, line, "diff ")) {
+            in_hunk = false;
+            continue;
+        }
+        if (!in_hunk or line.len == 0 or line[0] == '\\') continue;
+        const prefix = line[0..@min(cols, line.len)];
+        const removed = std.mem.indexOfScalar(u8, prefix, '-') != null;
+        const added = std.mem.indexOfScalar(u8, prefix, '+') != null;
+        if (idx == target or (idx > target and (removed or added))) return @max(new_no, 1);
+        if (!removed) new_no += 1;
+    }
+    return null;
+}
+
 /// Build a single-hunk patch (file header + one hunk) suitable for
 /// `git apply --cached`. Caller owns the returned slice.
 pub fn buildHunkPatch(allocator: std.mem.Allocator, diff: []const u8, parsed: ParsedDiff, hunk_index: usize) ![]u8 {
@@ -687,4 +731,35 @@ test "buildLinePatch rejects a selection with no change" {
     defer parsed.deinit(std.testing.allocator);
     // Body index 0 is the context " a"; selecting only it yields no change.
     try std.testing.expectError(error.EmptySelection, buildLinePatch(std.testing.allocator, diff, parsed, 0, 0, 0, false));
+}
+
+test "newFileLineAt maps diff lines to new-file lines" {
+    const d =
+        "diff --git a/f b/f\n" ++ // 0
+        "--- a/f\n" ++ // 1
+        "+++ b/f\n" ++ // 2
+        "@@ -10,4 +10,4 @@ fn x\n" ++ // 3
+        " ctx\n" ++ // 4 -> 10
+        "-old\n" ++ // 5 -> 11
+        "+new\n" ++ // 6 -> 11
+        " ctx\n" ++ // 7 -> 12
+        "@@ -30,2 +30,3 @@\n" ++ // 8
+        " ctx\n" ++ // 9 -> 30
+        "+add\n"; // 10 -> 31
+    try std.testing.expectEqual(@as(?usize, 10), newFileLineAt(d, 4));
+    try std.testing.expectEqual(@as(?usize, 11), newFileLineAt(d, 5));
+    try std.testing.expectEqual(@as(?usize, 11), newFileLineAt(d, 6));
+    try std.testing.expectEqual(@as(?usize, 12), newFileLineAt(d, 7));
+    try std.testing.expectEqual(@as(?usize, 31), newFileLineAt(d, 10));
+    // Header and hunk-header lines land on the next change.
+    try std.testing.expectEqual(@as(?usize, 11), newFileLineAt(d, 0));
+    try std.testing.expectEqual(@as(?usize, 31), newFileLineAt(d, 8));
+    try std.testing.expectEqual(@as(?usize, null), newFileLineAt(d, 99));
+    try std.testing.expectEqual(@as(?usize, null), newFileLineAt("not a diff\n", 0));
+    // A deleted file's only hunk starts at +0: clamp to line 1.
+    try std.testing.expectEqual(@as(?usize, 1), newFileLineAt("@@ -1,1 +0,0 @@\n-gone\n", 1));
+    // Combined diff: two prefix columns.
+    const c = "@@@ -1,2 -1,2 +5,3 @@@\n  ctx\n- gone\n++both\n";
+    try std.testing.expectEqual(@as(?usize, 6), newFileLineAt(c, 2));
+    try std.testing.expectEqual(@as(?usize, 6), newFileLineAt(c, 3));
 }
