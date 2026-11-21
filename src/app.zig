@@ -572,6 +572,11 @@ pub const BranchesTab = enum {
     }
 };
 
+/// Which list the Branches panel's `/` name filter is editing. The Local tab,
+/// a drilled remote's branches, or the Tags tab each keep their own filter
+/// string; this records which one the prompt is bound to.
+pub const BranchFilterTarget = enum { local, remotes, tags };
+
 /// Tabs within the Files panel, switched with [ and ] (Worktrees/Submodules
 /// live here rather than under Branches, matching the upstream grouping).
 pub const FilesTab = enum {
@@ -3955,6 +3960,18 @@ pub const App = struct {
     branch_filter_buffer: std.ArrayList(u8) = .empty,
     branch_filter_cursor: usize = 0,
     branch_filter_scroll: usize = 0,
+    // The Remotes tab's drilled-in name filter (the same `/` prompt), kept
+    // separate from the Local tab's `branch_filter`. Active only while drilled
+    // into a remote, and cleared on drill in and out so each remote starts
+    // unfiltered. `remote_index` stays a raw `remote_branches` index that the
+    // navigation and selection keep on a matching branch.
+    remote_branch_filter: []u8 = &.{},
+    // The Tags tab's name filter (same `/` prompt). Like `branch_filter`,
+    // `tag_index` is a visible ordinal over the matching tags, so an empty
+    // filter behaves exactly like no filter. Persists across tab switches.
+    tag_filter: []u8 = &.{},
+    // Which list the filter prompt is editing. Captured when the prompt opens.
+    branch_filter_target: BranchFilterTarget = .local,
     // Operation dialog: the modal that shows a synchronous git op running and
     // its result. `op_command` is the command line, `op_summary` a one-line
     // outcome, `op_output` the raw stdout/stderr. `op_running` is true only
@@ -4448,6 +4465,8 @@ pub const App = struct {
         self.allocator.free(self.message);
         self.allocator.free(self.file_filter);
         self.allocator.free(self.branch_filter);
+        self.allocator.free(self.remote_branch_filter);
+        self.allocator.free(self.tag_filter);
         self.branch_filter_buffer.deinit(self.allocator);
         self.clearRememberedConflicts();
         self.conflict_remembered.deinit(self.allocator);
@@ -5332,6 +5351,21 @@ pub const App = struct {
                     return;
                 }
                 if (self.focus == .branches and self.branches_tab == .local and self.branch_filter.len > 0 and !self.branch_commits_active) {
+                    self.branch_filter_target = .local;
+                    try self.clearBranchFilter();
+                    return;
+                }
+                if (self.focus == .branches and self.branches_tab == .tags and self.tag_filter.len > 0 and !self.branch_commits_active) {
+                    self.branch_filter_target = .tags;
+                    try self.clearBranchFilter();
+                    return;
+                }
+                // Inside a drilled remote, esc clears an active filter first and
+                // backs out to the remotes list only on the next press (the
+                // filter is a list-level state, like the Local/Tags filters and
+                // the commit-files drill above).
+                if (self.focus == .branches and self.remoteDrillActive() and self.remote_branch_filter.len > 0) {
+                    self.branch_filter_target = .remotes;
                     try self.clearBranchFilter();
                     return;
                 }
@@ -5978,8 +6012,8 @@ pub const App = struct {
                 self.branch_commits.len
             else switch (self.branches_tab) {
                 .local => self.visibleBranchCount(),
-                .remotes => if (self.remotesListActive()) self.data.remotes.len else if (self.drilledRemoteRange()) |r| r.end - r.start else 0,
-                .tags => self.data.tags.len,
+                .remotes => if (self.remotesListActive()) self.data.remotes.len else self.visibleRemoteBranchCount(),
+                .tags => self.visibleTagCount(),
             },
             .commits => if (self.commitsFilesActive())
                 (if (self.tree_view) self.commit_tree.rows.len else self.commit_files.len)
@@ -6009,7 +6043,7 @@ pub const App = struct {
                 self.branch_commit_index
             else switch (self.branches_tab) {
                 .local => self.branch_index,
-                .remotes => if (self.remotesListActive()) self.remotes_index else if (self.drilledRemoteRange()) |r| self.remote_index -| r.start else 0,
+                .remotes => if (self.remotesListActive()) self.remotes_index else self.remoteBranchVisibleOrdinal(),
                 .tags => self.tag_index,
             },
             .commits => if (self.commitsFilesActive())
@@ -6509,13 +6543,18 @@ pub const App = struct {
                     if (self.remotesListActive()) {
                         if (self.data.remotes.len == 0) return;
                         self.remotes_index = @min(clicked, self.data.remotes.len - 1);
-                    } else if (self.drilledRemoteRange()) |r| {
-                        self.remote_index = r.start + @min(clicked, (r.end - r.start) - 1);
+                    } else {
+                        // Map the clicked visible row to the raw index of that
+                        // matching branch (identity when no filter is active).
+                        const n = self.visibleRemoteBranchCount();
+                        if (n == 0) return;
+                        if (self.rawRemoteBranchIndex(@min(clicked, n - 1))) |raw| self.remote_index = raw;
                     }
                 },
                 .tags => {
-                    if (self.data.tags.len == 0) return;
-                    self.tag_index = @min(clicked, self.data.tags.len - 1);
+                    const n = self.visibleTagCount();
+                    if (n == 0) return;
+                    self.tag_index = @min(clicked, n - 1);
                 },
             },
             .commits => {
@@ -6851,6 +6890,8 @@ pub const App = struct {
         var n: u16 = 0;
         if (self.anyFileFilterActive()) n += 1;
         if (self.branchFilterActive()) n += 1;
+        if (self.remoteBranchFilterActive()) n += 1;
+        if (self.tagFilterActive()) n += 1;
         if (self.git.hasLogFilter()) n += 1;
         return n;
     }
@@ -6992,6 +7033,68 @@ pub const App = struct {
         return self.data.branches[raw];
     }
 
+    /// Whether the Remotes drilled-in name filter is active.
+    pub fn remoteBranchFilterActive(self: *const App) bool {
+        return self.remote_branch_filter.len > 0;
+    }
+
+    /// Whether a remote-tracking branch passes the drilled-in filter. An empty
+    /// filter matches everything, so the drilled list behaves as before.
+    pub fn remoteBranchMatchesFilter(self: *const App, branch: model.Branch) bool {
+        if (self.remote_branch_filter.len == 0) return true;
+        return textmatch.pathMatchesFilter(branch.name, self.remote_branch_filter);
+    }
+
+    /// Number of drilled-remote branches matching the active filter.
+    pub fn visibleRemoteBranchCount(self: *const App) usize {
+        const r = self.drilledRemoteRange() orelse return 0;
+        if (self.remote_branch_filter.len == 0) return r.end - r.start;
+        var n: usize = 0;
+        for (self.data.remote_branches[r.start..r.end]) |b| {
+            if (self.remoteBranchMatchesFilter(b)) n += 1;
+        }
+        return n;
+    }
+
+    /// The raw `remote_branches` index of the `ordinal`-th matching branch within
+    /// the drilled remote, or null when out of range.
+    pub fn rawRemoteBranchIndex(self: *const App, ordinal: usize) ?usize {
+        const r = self.drilledRemoteRange() orelse return null;
+        var ord: usize = 0;
+        var i = r.start;
+        while (i < r.end) : (i += 1) {
+            if (!self.remoteBranchMatchesFilter(self.data.remote_branches[i])) continue;
+            if (ord == ordinal) return i;
+            ord += 1;
+        }
+        return null;
+    }
+
+    /// The visible ordinal (over matching branches) of the current `remote_index`.
+    pub fn remoteBranchVisibleOrdinal(self: *const App) usize {
+        const r = self.drilledRemoteRange() orelse return 0;
+        var ord: usize = 0;
+        var i = r.start;
+        while (i < r.end and i < self.remote_index) : (i += 1) {
+            if (self.remoteBranchMatchesFilter(self.data.remote_branches[i])) ord += 1;
+        }
+        return ord;
+    }
+
+    /// Whether `remote_index` points at a branch that is both in the drilled
+    /// range and passing the filter.
+    fn selectedRemoteBranchMatches(self: *const App) bool {
+        const r = self.drilledRemoteRange() orelse return false;
+        if (self.remote_index < r.start or self.remote_index >= r.end) return false;
+        return self.remoteBranchMatchesFilter(self.data.remote_branches[self.remote_index]);
+    }
+
+    /// Reset the drilled-in remote-branch filter (on drill in/out).
+    fn clearRemoteBranchFilter(self: *App) void {
+        self.allocator.free(self.remote_branch_filter);
+        self.remote_branch_filter = &.{};
+    }
+
     /// The Remotes tab is showing the list of remotes (not drilled in).
     pub fn remotesListActive(self: *const App) bool {
         return self.branches_tab == .remotes and self.remote_drill == null;
@@ -7123,6 +7226,13 @@ pub const App = struct {
     /// remotes list itself there is no branch selected).
     pub fn selectedRemoteBranch(self: *const App) ?model.Branch {
         const r = self.drilledRemoteRange() orelse return null;
+        // With a filter, a selection that has drifted off the match set (or a
+        // filter that matches nothing) falls back to the first match, or no
+        // selection at all, so actions never act on a hidden branch.
+        if (self.remote_branch_filter.len > 0 and !self.selectedRemoteBranchMatches()) {
+            const raw = self.rawRemoteBranchIndex(0) orelse return null;
+            return self.data.remote_branches[raw];
+        }
         const i = std.math.clamp(self.remote_index, r.start, r.end - 1);
         return self.data.remote_branches[i];
     }
@@ -7135,6 +7245,7 @@ pub const App = struct {
         };
         if (self.remote_drill) |old| self.allocator.free(old);
         self.remote_drill = try self.allocator.dupe(u8, remote.name);
+        self.clearRemoteBranchFilter(); // each remote opens unfiltered
         if (self.drilledRemoteRange()) |r| self.remote_index = r.start else self.remote_index = 0;
         self.resetMainView();
         self.resetListHScroll(.branches);
@@ -7146,6 +7257,7 @@ pub const App = struct {
     pub fn closeRemoteDrill(self: *App) !void {
         if (self.remote_drill) |old| self.allocator.free(old);
         self.remote_drill = null;
+        self.clearRemoteBranchFilter();
         self.resetMainView();
         self.resetListHScroll(.branches);
         try self.updatePreview();
@@ -7316,9 +7428,44 @@ pub const App = struct {
         return false;
     }
 
+    /// Whether the Tags tab's `/` name filter is active.
+    pub fn tagFilterActive(self: *const App) bool {
+        return self.tag_filter.len > 0;
+    }
+
+    /// Whether a tag passes the active name filter (empty matches everything).
+    pub fn tagMatchesFilter(self: *const App, tag: model.Tag) bool {
+        if (self.tag_filter.len == 0) return true;
+        return textmatch.pathMatchesFilter(tag.name, self.tag_filter);
+    }
+
+    /// Number of tags matching the active filter (the visible count).
+    pub fn visibleTagCount(self: *const App) usize {
+        if (self.tag_filter.len == 0) return self.data.tags.len;
+        var n: usize = 0;
+        for (self.data.tags) |t| {
+            if (self.tagMatchesFilter(t)) n += 1;
+        }
+        return n;
+    }
+
+    /// The raw `data.tags` index of the `ordinal`-th matching tag, or null when
+    /// out of range. Identity when no filter is active.
+    pub fn rawTagIndex(self: *const App, ordinal: usize) ?usize {
+        if (self.tag_filter.len == 0)
+            return if (ordinal < self.data.tags.len) ordinal else null;
+        var ord: usize = 0;
+        for (self.data.tags, 0..) |t, i| {
+            if (!self.tagMatchesFilter(t)) continue;
+            if (ord == ordinal) return i;
+            ord += 1;
+        }
+        return null;
+    }
+
     pub fn selectedTag(self: *const App) ?model.Tag {
-        if (self.data.tags.len == 0) return null;
-        return self.data.tags[@min(self.tag_index, self.data.tags.len - 1)];
+        const raw = self.rawTagIndex(@min(self.tag_index, self.visibleTagCount() -| 1)) orelse return null;
+        return self.data.tags[raw];
     }
 
     pub fn selectedWorktree(self: *const App) ?model.Worktree {
@@ -8495,12 +8642,30 @@ pub const App = struct {
                     if (self.remotesListActive()) {
                         self.remotes_index = step(self.remotes_index, down, self.data.remotes.len);
                     } else if (self.drilledRemoteRange()) |r| {
+                        // Step to the next/previous branch that passes the
+                        // filter; with no filter every branch matches, so this
+                        // is a plain one-step move.
                         if (down) {
-                            if (self.remote_index + 1 < r.end) self.remote_index += 1;
-                        } else if (self.remote_index > r.start) self.remote_index -= 1;
+                            var i = self.remote_index + 1;
+                            while (i < r.end) : (i += 1) {
+                                if (self.remoteBranchMatchesFilter(self.data.remote_branches[i])) {
+                                    self.remote_index = i;
+                                    break;
+                                }
+                            }
+                        } else {
+                            var i = self.remote_index;
+                            while (i > r.start) {
+                                i -= 1;
+                                if (self.remoteBranchMatchesFilter(self.data.remote_branches[i])) {
+                                    self.remote_index = i;
+                                    break;
+                                }
+                            }
+                        }
                     }
                 },
-                .tags => self.tag_index = step(self.tag_index, down, self.data.tags.len),
+                .tags => self.tag_index = step(self.tag_index, down, self.visibleTagCount()),
             },
             .commits => {
                 if (self.commitsFilesActive()) {
@@ -13461,7 +13626,7 @@ pub const App = struct {
             self.remote_drill = null;
         }
         if (self.drilledRemoteRange()) |r| self.remote_index = std.math.clamp(self.remote_index, r.start, r.end - 1);
-        if (self.data.tags.len == 0) self.tag_index = 0 else self.tag_index = @min(self.tag_index, self.data.tags.len - 1);
+        self.tag_index = if (self.visibleTagCount() == 0) 0 else @min(self.tag_index, self.visibleTagCount() - 1);
         if (self.data.worktrees.len == 0) self.worktree_index = 0 else self.worktree_index = @min(self.worktree_index, self.data.worktrees.len - 1);
         if (self.data.submodules.len == 0) self.submodule_index = 0 else self.submodule_index = @min(self.submodule_index, self.data.submodules.len - 1);
         if (self.data.commits.len == 0) self.commit_index = 0 else self.commit_index = @min(self.commit_index, self.data.commits.len - 1);
@@ -13559,7 +13724,8 @@ pub const App = struct {
             .commit = self.dupSelKey(self.data.commits, self.commit_index, commitKey),
             .reflog = self.dupSelKey(self.data.reflog, self.reflog_index, commitKey),
             .remote_branch = self.dupSelKey(self.data.remote_branches, self.remote_index, branchKey),
-            .tag = self.dupSelKey(self.data.tags, self.tag_index, tagKey),
+            // `tag_index` is a visible ordinal, so map it to the raw tag.
+            .tag = self.dupSelKey(self.data.tags, self.rawTagIndex(self.tag_index) orelse self.data.tags.len, tagKey),
             .worktree = self.dupSelKey(self.data.worktrees, self.worktree_index, worktreeKey),
             .submodule = self.dupSelKey(self.data.submodules, self.submodule_index, submoduleKey),
         };
@@ -13581,13 +13747,29 @@ pub const App = struct {
         }
     }
 
+    /// Re-anchor the Tags cursor onto its previously-selected tag by name.
+    /// `tag_index` is a visible ordinal, so count only matching tags; if the tag
+    /// is gone or filtered out, `clampSelections` keeps the index valid.
+    fn restoreTagSelection(self: *App, key: ?[]const u8) void {
+        const k = key orelse return;
+        var ord: usize = 0;
+        for (self.data.tags) |t| {
+            if (!self.tagMatchesFilter(t)) continue;
+            if (std.mem.eql(u8, tagKey(t), k)) {
+                self.tag_index = ord;
+                return;
+            }
+            ord += 1;
+        }
+    }
+
     /// Re-anchor each list's cursor onto its previously-selected item by identity.
     fn restoreSelections(self: *App, keys: SelectionKeys) void {
         self.restoreBranchSelection(keys.branch);
         restoreSelKey(self.data.commits, &self.commit_index, keys.commit, commitKey);
         restoreSelKey(self.data.reflog, &self.reflog_index, keys.reflog, commitKey);
         restoreSelKey(self.data.remote_branches, &self.remote_index, keys.remote_branch, branchKey);
-        restoreSelKey(self.data.tags, &self.tag_index, keys.tag, tagKey);
+        self.restoreTagSelection(keys.tag);
         restoreSelKey(self.data.worktrees, &self.worktree_index, keys.worktree, worktreeKey);
         restoreSelKey(self.data.submodules, &self.submodule_index, keys.submodule, submoduleKey);
     }
@@ -13881,28 +14063,106 @@ pub const App = struct {
         try self.applyFileFilter("");
     }
 
-    /// `/` on the Branches panel's Local tab: open the live branch-name filter
-    /// prompt, prefilled with the active filter so it can be edited.
+    /// The filter string the prompt is currently editing (Local, the drilled
+    /// remote, or Tags), for building status messages.
+    fn activeBranchFilterSlice(self: *const App) []const u8 {
+        return switch (self.branch_filter_target) {
+            .local => self.branch_filter,
+            .remotes => self.remote_branch_filter,
+            .tags => self.tag_filter,
+        };
+    }
+
+    /// Count of items matching the active filter in the list being filtered.
+    fn activeVisibleBranchCount(self: *const App) usize {
+        return switch (self.branch_filter_target) {
+            .local => self.visibleBranchCount(),
+            .remotes => self.visibleRemoteBranchCount(),
+            .tags => self.visibleTagCount(),
+        };
+    }
+
+    /// Total items in the list being filtered (the denominator of n/total).
+    fn activeBranchTotal(self: *const App) usize {
+        return switch (self.branch_filter_target) {
+            .local => self.data.branches.len,
+            .remotes => if (self.drilledRemoteRange()) |r| r.end - r.start else 0,
+            .tags => self.data.tags.len,
+        };
+    }
+
+    /// The plural noun for the list being filtered, for status messages.
+    fn activeBranchFilterNoun(self: *const App) []const u8 {
+        return switch (self.branch_filter_target) {
+            .local => "branches",
+            .remotes => "remote branches",
+            .tags => "tags",
+        };
+    }
+
+    /// `/` on the Branches panel: open the live name-filter prompt, prefilled
+    /// with the active filter. It filters the Local tab, a remote's branches
+    /// once drilled in, or the Tags tab. On the remotes list there is no single
+    /// list to filter yet, so it says to pick a remote first.
     fn startBranchFilterPrompt(self: *App) !void {
-        // The name filter is a Local-tab feature; `/` on Remotes/Tags does nothing.
-        if (self.branches_tab != .local) return;
+        const prefill = blk: {
+            switch (self.branches_tab) {
+                .local => {
+                    self.branch_filter_target = .local;
+                    break :blk self.branch_filter;
+                },
+                .tags => {
+                    self.branch_filter_target = .tags;
+                    break :blk self.tag_filter;
+                },
+                .remotes => {
+                    if (self.remoteDrillActive()) {
+                        self.branch_filter_target = .remotes;
+                        break :blk self.remote_branch_filter;
+                    }
+                    try self.setMessage("select a remote first (enter), then / filters its branches", .{});
+                    return;
+                },
+            }
+        };
         self.focus = .branches;
         self.resetMainView();
         self.mode = .branch_filter_prompt;
         self.branch_filter_buffer.clearRetainingCapacity();
-        try self.branch_filter_buffer.appendSlice(self.allocator, self.branch_filter);
+        try self.branch_filter_buffer.appendSlice(self.allocator, prefill);
         self.branch_filter_cursor = self.branch_filter_buffer.items.len;
         self.branch_filter_scroll = 0;
-        try self.setMessage("filter branches", .{});
+        try self.setMessage("filter {s}", .{self.activeBranchFilterNoun()});
     }
 
     fn setBranchFilter(self: *App, filter: []const u8) !void {
         const next = try self.allocator.dupe(u8, filter);
-        self.allocator.free(self.branch_filter);
-        self.branch_filter = next;
-        // Keep the visible-ordinal selection in range for the new match set.
-        const n = self.visibleBranchCount();
-        self.branch_index = if (n == 0) 0 else @min(self.branch_index, n - 1);
+        switch (self.branch_filter_target) {
+            .remotes => {
+                self.allocator.free(self.remote_branch_filter);
+                self.remote_branch_filter = next;
+                // Keep the raw `remote_index` selection on a visible branch; snap
+                // to the first match when it filtered out (or to the range start
+                // when nothing matches).
+                if (!self.selectedRemoteBranchMatches())
+                    self.remote_index = self.rawRemoteBranchIndex(0) orelse
+                        (if (self.drilledRemoteRange()) |r| r.start else 0);
+            },
+            .tags => {
+                self.allocator.free(self.tag_filter);
+                self.tag_filter = next;
+                // `tag_index` is a visible ordinal; keep it in the new match set.
+                const n = self.visibleTagCount();
+                self.tag_index = if (n == 0) 0 else @min(self.tag_index, n - 1);
+            },
+            .local => {
+                self.allocator.free(self.branch_filter);
+                self.branch_filter = next;
+                // Keep the visible-ordinal selection in range for the new matches.
+                const n = self.visibleBranchCount();
+                self.branch_index = if (n == 0) 0 else @min(self.branch_index, n - 1);
+            },
+        }
         self.resetMainView();
         try self.updatePreview();
     }
@@ -13910,10 +14170,10 @@ pub const App = struct {
     fn updateBranchFilterFromPrompt(self: *App) !void {
         const filter = std.mem.trim(u8, self.branch_filter_buffer.items, " \t\r\n");
         try self.setBranchFilter(filter);
-        if (self.branch_filter.len == 0) {
-            try self.setMessage("filter branches", .{});
+        if (self.activeBranchFilterSlice().len == 0) {
+            try self.setMessage("filter {s}", .{self.activeBranchFilterNoun()});
         } else {
-            try self.setMessage("filter \"{s}\" ({d}/{d})", .{ self.branch_filter, self.visibleBranchCount(), self.data.branches.len });
+            try self.setMessage("filter \"{s}\" ({d}/{d})", .{ self.activeBranchFilterSlice(), self.activeVisibleBranchCount(), self.activeBranchTotal() });
         }
     }
 
@@ -13921,10 +14181,10 @@ pub const App = struct {
         self.mode = .normal;
         try self.setBranchFilter(filter);
         self.branch_filter_buffer.clearRetainingCapacity();
-        if (self.branch_filter.len == 0) {
-            try self.setMessage("branch filter cleared", .{});
+        if (self.activeBranchFilterSlice().len == 0) {
+            try self.setMessage("{s} filter cleared", .{self.activeBranchFilterNoun()});
         } else {
-            try self.setMessage("filter \"{s}\" ({d}/{d})", .{ self.branch_filter, self.visibleBranchCount(), self.data.branches.len });
+            try self.setMessage("filter \"{s}\" ({d}/{d})", .{ self.activeBranchFilterSlice(), self.activeVisibleBranchCount(), self.activeBranchTotal() });
         }
     }
 
@@ -19153,6 +19413,132 @@ test "branch filter narrows the visible branches and maps the selection" {
     try std.testing.expect(app.selectedBranch() == null);
 }
 
+test "remote branch filter narrows a drilled remote and maps the selection" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    // remote_branches sort together by full ref name; two remotes interleave by
+    // name so the drilled range is a contiguous slice of one remote's branches.
+    var remotes = [_]model.Branch{
+        .{ .name = @constCast("origin/feature/login") },
+        .{ .name = @constCast("origin/feature/logout") },
+        .{ .name = @constCast("origin/main") },
+        .{ .name = @constCast("upstream/main") },
+    };
+    app.data.remote_branches = &remotes;
+    app.branches_tab = .remotes;
+    app.remote_drill = try a.dupe(u8, "origin");
+
+    // The drilled range covers origin's three branches (indices 0..3).
+    const r = app.drilledRemoteRange().?;
+    try std.testing.expectEqual(@as(usize, 0), r.start);
+    try std.testing.expectEqual(@as(usize, 3), r.end);
+
+    // No filter: the whole drilled range is visible, identity mapping.
+    try std.testing.expectEqual(@as(usize, 3), app.visibleRemoteBranchCount());
+    try std.testing.expectEqual(@as(?usize, 2), app.rawRemoteBranchIndex(2));
+    app.remote_index = 2;
+    try std.testing.expectEqualStrings("origin/main", app.selectedRemoteBranch().?.name);
+
+    // Filter "feature": only origin's two feature branches match; the upstream
+    // branch is out of range and never considered.
+    app.branch_filter_target = .remotes;
+    try app.setBranchFilter("feature");
+    try std.testing.expectEqual(@as(usize, 2), app.visibleRemoteBranchCount());
+    try std.testing.expectEqual(@as(?usize, 0), app.rawRemoteBranchIndex(0));
+    try std.testing.expectEqual(@as(?usize, 1), app.rawRemoteBranchIndex(1));
+    try std.testing.expectEqual(@as(?usize, null), app.rawRemoteBranchIndex(2));
+    // The selection snapped off the now-hidden origin/main onto the first match.
+    try std.testing.expectEqual(@as(usize, 0), app.remote_index);
+    try std.testing.expectEqualStrings("origin/feature/login", app.selectedRemoteBranch().?.name);
+    app.remote_index = 1;
+    try std.testing.expectEqual(@as(usize, 1), app.remoteBranchVisibleOrdinal());
+    try std.testing.expectEqualStrings("origin/feature/logout", app.selectedRemoteBranch().?.name);
+
+    // A filter matching nothing: nothing visible, no selection.
+    try app.setBranchFilter("zzz");
+    try std.testing.expectEqual(@as(usize, 0), app.visibleRemoteBranchCount());
+    try std.testing.expect(app.selectedRemoteBranch() == null);
+
+    // Backing out of the drill clears the remote filter.
+    try app.closeRemoteDrill();
+    try std.testing.expect(!app.remoteBranchFilterActive());
+}
+
+test "esc inside a drilled remote clears the filter first, then backs out" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    var remotes = [_]model.Remote{ .{ .name = @constCast("origin") } };
+    var rb = [_]model.Branch{
+        .{ .name = @constCast("origin/feature/login") },
+        .{ .name = @constCast("origin/main") },
+    };
+    app.data.remotes = &remotes;
+    app.data.remote_branches = &rb;
+    app.branches_tab = .remotes;
+    app.focus = .branches;
+    try app.openRemoteDrill();
+    try std.testing.expect(app.remoteDrillActive());
+
+    // Apply a filter, then press esc.
+    app.branch_filter_target = .remotes;
+    try app.setBranchFilter("feature");
+    try std.testing.expect(app.remoteBranchFilterActive());
+
+    const esc = vaxis.Key{ .codepoint = vaxis.Key.escape };
+    // First esc: the filter clears but the drill stays open.
+    try app.handleKey(esc);
+    try std.testing.expect(!app.remoteBranchFilterActive());
+    try std.testing.expect(app.remoteDrillActive());
+
+    // Second esc: now back out to the remotes list.
+    try app.handleKey(esc);
+    try std.testing.expect(app.remotesListActive());
+}
+
+test "tag filter narrows the visible tags and maps the selection" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+    var tags = [_]model.Tag{
+        .{ .name = @constCast("v1.0.0") },
+        .{ .name = @constCast("v1.1.0") },
+        .{ .name = @constCast("v2.0.0") },
+        .{ .name = @constCast("nightly") },
+    };
+    app.data.tags = &tags;
+    app.branches_tab = .tags;
+
+    // No filter: identity mapping, everything visible.
+    try std.testing.expectEqual(@as(usize, 4), app.visibleTagCount());
+    try std.testing.expectEqual(@as(?usize, 2), app.rawTagIndex(2));
+    app.tag_index = 2;
+    try std.testing.expectEqualStrings("v2.0.0", app.selectedTag().?.name);
+
+    // Filter "v1": only the two v1 tags match; `tag_index` is a visible ordinal
+    // that maps back to the raw data.tags index.
+    app.branch_filter_target = .tags;
+    try app.setBranchFilter("v1");
+    try std.testing.expectEqual(@as(usize, 2), app.visibleTagCount());
+    try std.testing.expectEqual(@as(?usize, 0), app.rawTagIndex(0));
+    try std.testing.expectEqual(@as(?usize, 1), app.rawTagIndex(1));
+    try std.testing.expectEqual(@as(?usize, null), app.rawTagIndex(2));
+    // The selection clamped from ordinal 2 down into the 2-item match set.
+    app.tag_index = 0;
+    try std.testing.expectEqualStrings("v1.0.0", app.selectedTag().?.name);
+    app.tag_index = 1;
+    try std.testing.expectEqualStrings("v1.1.0", app.selectedTag().?.name);
+
+    // A filter matching nothing: no visible tags, no selection.
+    try app.setBranchFilter("zzz");
+    try std.testing.expectEqual(@as(usize, 0), app.visibleTagCount());
+    try std.testing.expect(app.selectedTag() == null);
+}
+
 test "isHeadCommit marks the tracked HEAD, else the log's newest entry" {
     const a = std.testing.allocator;
     var commits = [_]model.Commit{
@@ -19722,6 +20108,8 @@ fn deinitTestApp(app: *App) void {
     app.allocator.free(app.message);
     app.allocator.free(app.file_filter);
     app.allocator.free(app.branch_filter);
+    app.allocator.free(app.remote_branch_filter);
+    app.allocator.free(app.tag_filter);
     app.branch_filter_buffer.deinit(app.allocator);
     app.clearRememberedConflicts();
     app.conflict_remembered.deinit(app.allocator);

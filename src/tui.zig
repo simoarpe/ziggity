@@ -1823,13 +1823,17 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
                     (std.fmt.bufPrint(&app.branches_title_buf, "[3] Commits ({s}) (esc back)", .{app.branch_commits_ref}) catch "[3] Commits (esc back)");
                 break :blk panel(root, 0, y, side_w, branches_h, t, app.focus == .branches, listScrollInfo(app, .branches));
             } else if (app.remoteDrillActive()) blk: {
-                // Drilled into a remote's branches.
-                const t = std.fmt.bufPrint(&app.branches_title_buf, "[3] {s} (esc back)", .{app.remote_drill.?}) catch "[3] Remote (esc back)";
+                // Drilled into a remote's branches. A `/` name filter adds a
+                // "(filtered)" hint, like the Local tab's.
+                const hint: []const u8 = if (app.remote_branch_filter.len > 0) " (filtered)" else "";
+                const t = std.fmt.bufPrint(&app.branches_title_buf, "[3] {s}{s} (esc back)", .{ app.remote_drill.?, hint }) catch "[3] Remote (esc back)";
                 break :blk panel(root, 0, y, side_w, branches_h, t, app.focus == .branches, listScrollInfo(app, .branches));
             } else blk: {
                 // The Local tab's name filter (`/`) shows a title hint, mirroring
                 // the Commits filter: a clear-hint while focused, else "(filtered)".
-                const suffix = if (app.branches_tab == .local and app.branch_filter.len > 0)
+                const filtered = (app.branches_tab == .local and app.branch_filter.len > 0) or
+                    (app.branches_tab == .tags and app.tag_filter.len > 0);
+                const suffix = if (filtered)
                     (if (app.focus == .branches) "(esc to cancel filter)" else "(filtered)")
                 else
                     "";
@@ -3703,6 +3707,18 @@ fn drawStatus(win: vaxis.Window, app: *const app_mod.App) void {
         print(win, filter_row, 0, line, st.warning);
         filter_row += 1;
     }
+    if (app.remoteBranchFilterActive()) {
+        var rbuf: [200]u8 = undefined;
+        const line = std.fmt.bufPrint(&rbuf, "filtering remote branches (name: {s})", .{app.remote_branch_filter}) catch return;
+        print(win, filter_row, 0, line, st.warning);
+        filter_row += 1;
+    }
+    if (app.tagFilterActive()) {
+        var tbuf: [200]u8 = undefined;
+        const line = std.fmt.bufPrint(&tbuf, "filtering tags (name: {s})", .{app.tag_filter}) catch return;
+        print(win, filter_row, 0, line, st.warning);
+        filter_row += 1;
+    }
     var cbuf: [200]u8 = undefined;
     const commit_filter: ?[]const u8 = if (app.git.log_author) |a|
         (std.fmt.bufPrint(&cbuf, "filtering commits (author: {s})", .{a}) catch null)
@@ -3857,25 +3873,23 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
     // Remotes tab, level 0: the list of remotes (drills into branches on enter).
     if (app.remotesListActive()) return drawRemotesList(win, app);
 
-    var branches: []const model.Branch = app.data.branches;
     var selected: usize = app.branch_index;
-    // The Local tab honours the `/` name filter: `branch_index`, the scroll and
-    // the row index below are visible ordinals over the matching branches. The
-    // remote drill is an unfiltered raw slice.
+    // Both the Local tab and a drilled remote honour the `/` name filter: the
+    // scroll, `selected` and `idx` below are visible ordinals over the matching
+    // branches, mapped back to the raw list per row.
     const local = !app.remoteDrillActive();
     if (app.remoteDrillActive()) {
-        const r = app.drilledRemoteRange() orelse {
+        if (app.drilledRemoteRange() == null) {
             print(win, 0, 0, if (app.initial_load_pending) "Loading..." else "No remote branches", styles().muted);
             return;
-        };
-        branches = app.data.remote_branches[r.start..r.end];
-        selected = app.remote_index - r.start;
+        }
+        selected = app.remoteBranchVisibleOrdinal();
     }
-    const total = if (local) app.visibleBranchCount() else branches.len;
+    const total = if (local) app.visibleBranchCount() else app.visibleRemoteBranchCount();
     if (total == 0) {
         const empty_label = if (app.initial_load_pending)
             "Loading..."
-        else if (local and app.branch_filter.len > 0)
+        else if ((local and app.branch_filter.len > 0) or (!local and app.remote_branch_filter.len > 0))
             "No matching branches"
         else
             "No branches";
@@ -3890,7 +3904,10 @@ fn drawBranches(win: vaxis.Window, app: *const app_mod.App) void {
         idx += 1;
         row += 1;
     }) {
-        const branch = if (local) app.data.branches[app.rawBranchIndex(idx).?] else branches[idx];
+        const branch = if (local)
+            app.data.branches[app.rawBranchIndex(idx).?]
+        else
+            app.data.remote_branches[app.rawRemoteBranchIndex(idx).?];
         // '*' = the checked-out branch; a coloured ◆ = the diffing-mode base,
         // kept visible while navigating away to pick the other side (it wins
         // the marker slot; the current branch keeps its green styling).
@@ -4032,24 +4049,36 @@ fn drawRemotesList(win: vaxis.Window, app: *const app_mod.App) void {
 }
 
 fn drawTags(win: vaxis.Window, app: *const app_mod.App) void {
-    if (app.data.tags.len == 0) {
-        print(win, 0, 0, if (app.initial_load_pending or app.tags_loading) "Loading..." else "No tags", styles().muted);
+    // The Tags tab honours the `/` name filter: the scroll, `tag_index` and the
+    // row index below are visible ordinals over the matching tags.
+    const total = app.visibleTagCount();
+    if (total == 0) {
+        const empty_label = if (app.initial_load_pending or app.tags_loading)
+            "Loading..."
+        else if (app.tag_filter.len > 0)
+            "No matching tags"
+        else
+            "No tags";
+        print(win, 0, 0, empty_label, styles().muted);
         return;
     }
     // Align every subject into one column at the widest tag name (+2 gap), so
     // the annotations line up instead of starting at a ragged edge. Tag names
     // are git refs (ASCII, no spaces), so byte length is their display width.
+    // Measure only the matching tags, so the filtered view aligns to itself.
     var name_w: usize = 0;
-    for (app.data.tags) |t| name_w = @max(name_w, t.name.len);
+    for (app.data.tags) |t| {
+        if (app.tagMatchesFilter(t)) name_w = @max(name_w, t.name.len);
+    }
     const subj_col: u16 = @intCast(@min(name_w + 2, @as(usize, win.width)));
     const start = app.listScroll(.branches);
     var row: u16 = 0;
     var idx = start;
-    while (idx < app.data.tags.len and row < win.height) : ({
+    while (idx < total and row < win.height) : ({
         idx += 1;
         row += 1;
     }) {
-        const tag = app.data.tags[idx];
+        const tag = app.data.tags[app.rawTagIndex(idx).?];
         // Tag name in the default colour, its annotation/subject dimmed so the
         // name stands out (the row's selection background still spans both).
         var base = styles().normal;

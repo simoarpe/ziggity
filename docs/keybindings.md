@@ -102,7 +102,9 @@ the written reference. Every binding is remappable, see
   staging or patch view, or a working tree file's diff; from the staging or
   patch view and a focused Diff panel it opens at the line you are on; see
   [Editor](configuration.md#editor-e))
-- `/` (Branches, Local): filter branches by name live; enter accepts, esc clears
+- `/` (Branches, Local; Tags; or inside a remote's branches after drilling in
+  with `enter`): filter the list by name live; enter accepts, esc clears. On the
+  remotes list it asks you to pick a remote first.
 - `n`: new branch from HEAD (Branches, Local)
 - `c`: checkout a branch or ref by name (switches to a local name, tracks a
   remote one, detaches onto a tag or commit, and `-` returns to the previous

@@ -21,6 +21,11 @@ Releases before 0.55.0 are listed on the
   the cursor line in the staging or patch view, or the top line of a focused
   Diff panel. All editor presets support it, and a custom `editor_command` can
   use a new `{{line}}` placeholder.
+- The `/` name filter now works on the Tags tab and inside a remote's branches,
+  not just on the Local tab. Press `/` and type to narrow the Tags list, or drill
+  into a remote with `enter` and `/` to narrow its branches; enter accepts and
+  esc clears, the same as for local branches. On the remotes list itself `/`
+  reminds you to pick a remote first.
 
 ## [0.65.0] - 2026-11-20
 
