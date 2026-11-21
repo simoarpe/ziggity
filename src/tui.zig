@@ -4747,12 +4747,11 @@ fn aboutUrlLine(win: vaxis.Window, app: *app_mod.App, row: *u16, slot: *usize, u
     n += take;
     app.setDialogRow(row.*, buf[0..n]); // register for selection/copy
     // Record the clickable region so a plain click opens the browser directly.
-    app.about_url = uri;
-    app.about_url_row = row.*;
-    app.about_url_lo = pad;
-    app.about_url_hi = n;
-    const hover = app.hoveringAboutUrl();
-    app.about_url_hovered = hover;
+    if (app.about_url_count < app.about_urls.len) {
+        app.about_urls[app.about_url_count] = .{ .uri = uri, .row = row.*, .lo = pad, .hi = n };
+        app.about_url_count += 1;
+    }
+    const hover = app.aboutRegionHovered(row.*, pad, n);
 
     // Draw the cells ourselves so the URL columns carry the hyperlink (and an
     // underline on hover); the padding columns are plain. Honour any live drag
@@ -4787,6 +4786,7 @@ fn drawAbout(win: vaxis.Window, app: *app_mod.App) void {
     // Register this frame's selection grid over the panel; rows left unset stay
     // empty (non-selectable), so only the text lines below can be copied.
     app.beginDialogGrid(@intCast(@max(win.x_off, 0)), @intCast(@max(win.y_off, 0)), win.height);
+    app.about_url_count = 0; // re-registered by aboutUrlLine below
     var row: u16 = 1;
     var slot: usize = 0;
 
@@ -4834,6 +4834,18 @@ fn drawAbout(win: vaxis.Window, app: *app_mod.App) void {
     }
     aboutLine(win, app, &row, &slot, std.fmt.bufPrint(&sbuf, "{d} changed  ({d} staged, {d} unstaged)", .{ app.data.files.len, app.data.stagedCount(), app.data.unstagedCount() }) catch "", st.normal);
     aboutLine(win, app, &row, &slot, std.fmt.bufPrint(&sbuf, "{d} branches  {d} stashes", .{ app.data.branches.len, app.data.stash.len }) catch "", st.normal);
+    row += 1;
+
+    // A clickable support line above the donut, styled to stand out from the
+    // plain repo-status lines: a bold magenta call to action and a bold accent
+    // URL (which also underlines on hover).
+    const support_label: vaxis.Style = .{ .fg = .{ .index = ui_theme.header }, .bold = true };
+    const support_url: vaxis.Style = .{ .fg = .{ .index = ui_theme.accent }, .bold = true };
+    aboutLine(win, app, &row, &slot, "Consider supporting ziggity's development", support_label);
+    aboutUrlLine(win, app, &row, &slot, "https://ko-fi.com/simoarpe", support_url);
+
+    // Keep the pointer-over-any-URL flag current for the hover-repaint gate.
+    app.about_url_hovered = app.hoveringAboutUrl();
 
     // The donut fills whatever vertical space is left (unregistered rows).
     const donut_top = row + 1;

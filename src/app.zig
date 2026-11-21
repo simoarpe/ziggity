@@ -3114,6 +3114,29 @@ test "clicking another panel while the Status about-splash is up still moves foc
     try std.testing.expectEqual(model.Focus.status, app.focus);
 }
 
+test "about-splash tracks multiple clickable URL regions (repo + donation)" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+
+    // Two URL regions on different rows, as the renderer registers them.
+    app.about_urls[0] = .{ .uri = "https://github.com/simoarpe/ziggity", .row = 2, .lo = 10, .hi = 40 };
+    app.about_urls[1] = .{ .uri = "https://ko-fi.com/simoarpe", .row = 9, .lo = 20, .hi = 46 };
+    app.about_url_count = 2;
+
+    // A point inside each region returns that region's URL.
+    try std.testing.expectEqualStrings("https://github.com/simoarpe/ziggity", app.aboutUrlAt(2, 15).?);
+    try std.testing.expectEqualStrings("https://ko-fi.com/simoarpe", app.aboutUrlAt(9, 30).?);
+    // Right row, outside the span, or wrong row: no match.
+    try std.testing.expect(app.aboutUrlAt(2, 5) == null);
+    try std.testing.expect(app.aboutUrlAt(9, 46) == null); // hi is exclusive
+    try std.testing.expect(app.aboutUrlAt(3, 15) == null);
+    // Only the registered count is considered.
+    app.about_url_count = 1;
+    try std.testing.expect(app.aboutUrlAt(9, 30) == null);
+}
+
 test "review mouse click selects the hunk, including its bottom separator row" {
     const a = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -4346,24 +4369,42 @@ pub const App = struct {
     // dialog-grid selection keeps row slices by reference and reads them on a
     // later mouse-release, so they can't be transient render-time buffers.
     about_bufs: [12][256]u8 = undefined,
-    // The about-splash URL and its clickable region (grid row + column span), set
-    // during render. A plain click there opens the browser directly — the OSC 8
-    // hyperlink alone isn't followed because the app captures the mouse.
-    about_url: []const u8 = "",
-    about_url_row: usize = 0,
-    about_url_lo: usize = 0,
-    about_url_hi: usize = 0,
+    // The about-splash's clickable URLs (the repository and the donation link)
+    // and their grid regions (row + column span), set during render. A plain
+    // click in a region opens that URL — the OSC 8 hyperlink alone isn't followed
+    // because the app captures the mouse. `about_url_count` is reset each render.
+    about_urls: [2]AboutUrl = .{ .{}, .{} },
+    about_url_count: usize = 0,
     about_url_hovered: bool = false,
     // Last known pointer position (absolute cells; -1 = unknown), so the renderer
     // can underline the URL while the pointer is over it.
     mouse_col: i16 = -1,
     mouse_row: i16 = -1,
 
-    /// Whether the pointer is currently over the about-splash URL.
-    pub fn hoveringAboutUrl(self: *const App) bool {
-        if (self.about_url.len == 0 or self.mouse_col < 0 or self.mouse_row < 0) return false;
+    pub const AboutUrl = struct { uri: []const u8 = "", row: usize = 0, lo: usize = 0, hi: usize = 0 };
+
+    /// The about-splash URL whose clickable region covers grid `(row, col)`, or
+    /// null when none does.
+    pub fn aboutUrlAt(self: *const App, row: usize, col: usize) ?[]const u8 {
+        for (self.about_urls[0..self.about_url_count]) |u| {
+            if (u.uri.len > 0 and row == u.row and col >= u.lo and col < u.hi) return u.uri;
+        }
+        return null;
+    }
+
+    /// Whether grid region `[lo, hi)` on `row` is under the pointer (for the
+    /// per-URL hover underline).
+    pub fn aboutRegionHovered(self: *const App, row: usize, lo: usize, hi: usize) bool {
+        if (self.mouse_col < 0 or self.mouse_row < 0) return false;
         const pt = self.dialogPointAt(@intCast(self.mouse_col), @intCast(self.mouse_row)) orelse return false;
-        return pt.row == self.about_url_row and pt.col >= self.about_url_lo and pt.col < self.about_url_hi;
+        return pt.row == row and pt.col >= lo and pt.col < hi;
+    }
+
+    /// Whether the pointer is currently over any about-splash URL.
+    pub fn hoveringAboutUrl(self: *const App) bool {
+        if (self.mouse_col < 0 or self.mouse_row < 0) return false;
+        const pt = self.dialogPointAt(@intCast(self.mouse_col), @intCast(self.mouse_row)) orelse return false;
+        return self.aboutUrlAt(pt.row, pt.col) != null;
     }
 
     /// The main panel shows the "about" splash (banner + repo info + animation)
@@ -5878,14 +5919,10 @@ pub const App = struct {
                 .release => if (self.dialog_sel_active) {
                     if (self.dialog_sel_dragged) {
                         try self.copyDialogSelection();
-                    } else if (self.about_url.len > 0 and
-                        self.dialog_sel_anchor_row == self.about_url_row and
-                        self.dialog_sel_anchor_col >= self.about_url_lo and
-                        self.dialog_sel_anchor_col < self.about_url_hi)
-                    {
-                        // A plain click on the URL opens it in the browser.
-                        if (self.git.openUrl(self.about_url)) |_| {
-                            try self.setMessage("opening {s}", .{self.about_url});
+                    } else if (self.aboutUrlAt(self.dialog_sel_anchor_row, self.dialog_sel_anchor_col)) |uri| {
+                        // A plain click on a URL opens it in the browser.
+                        if (self.git.openUrl(uri)) |_| {
+                            try self.setMessage("opening {s}", .{uri});
                         } else |_| {
                             try self.setMessage("failed to open the browser", .{});
                         }

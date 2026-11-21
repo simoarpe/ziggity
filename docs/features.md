@@ -180,7 +180,8 @@ removes an entry.
 `/` searches: type at least two characters to highlight every match in place
 (the current one stands out and briefly pops), `enter` or `n` jump to the next
 match and `N` to the previous, and esc clears the search. Selecting the Status
-panel shows an about screen with a live animation.
+panel shows an about screen with a live animation, the repository link, and a
+clickable support link.
 
 ![Keybindings help overlay](screenshots/09-help.png)
 

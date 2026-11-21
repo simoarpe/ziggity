@@ -38,6 +38,9 @@ Releases before 0.55.0 are listed on the
   restores the old scattered-subsequence matching.
 
 ### Added
+- The Status panel's about screen now shows a support link
+  (`https://ko-fi.com/simoarpe`) above the animation. It is clickable, as is the
+  repository link next to it.
 - The keybindings help overlay (`?`) now has a `/` search that highlights
   matches in place instead of hiding the rest. A footer shows the `/` prompt;
   type at least two characters to highlight every occurrence and jump to the
