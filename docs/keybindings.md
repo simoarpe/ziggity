@@ -29,7 +29,10 @@ the written reference. Every binding is remappable, see
 - `q` / `ctrl+c`: quit
 - `R`: refresh
 - `?`: keybindings help overlay (`j` and `k` to scroll), opened to the
-  section for the current panel
+  section for the current panel. A footer shows the `/` search: press `/` and
+  type at least two characters to highlight every match in place (the whole list
+  stays visible), `enter` or `n` jump to the next match and `N` to the previous,
+  esc clears the search, and a second esc closes the overlay
 - `ctrl+z`: undo the last operation (reflog reset, after confirmation)
 - `ctrl+r`: switch to a recently opened repository (see
   [comparison.md](comparison.md#jump-between-repositories))

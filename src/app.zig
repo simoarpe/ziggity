@@ -452,6 +452,17 @@ pub const AsyncOp = enum {
 /// the actual header line (e.g. "Branches" for "Branches  (tabs: ...)"); the
 /// renderer matches by prefix. The returned strings are kept in sync with the
 /// help headers by a test in tui.zig. Null when nothing specific matches.
+/// The help overlay's `/` search starts matching at this query length, so a
+/// single stray character does not light up the whole page.
+pub const help_search_min: usize = 2;
+
+/// Per-frame extra cells drawn on each side of the current search match right
+/// after it changes: a quick grow-and-settle so the highlight "pops" (an elastic
+/// bounce in whole cells, the finest a terminal allows). One frame per
+/// animation tick (~80ms); once past the end the highlight sits at its exact
+/// size. Tweak the shape here.
+pub const help_bounce_pad = [_]u8{ 1, 2, 2, 1 };
+
 pub fn helpSectionKeyword(focus: model.Focus, staging_active: bool) ?[]const u8 {
     // The hunk/line staging view has its own section regardless of focus.
     if (staging_active) return "Staging view";
@@ -4131,6 +4142,24 @@ pub const App = struct {
     /// One-shot: on the first help render, scroll so `help_focus_header` is in
     /// view. Cleared by the renderer so the user can scroll freely afterward.
     help_scroll_to_focus: bool = false,
+    /// The help popup's `/` search: a find-and-highlight (every line stays
+    /// visible, occurrences of the query are highlighted), not a filter.
+    /// `help_searching` is the typing sub-mode; the buffer holds the query, which
+    /// needs `help_search_min` characters to match. `help_search_match` is the
+    /// current (centred, brighter) match; `help_search_total` is set by the
+    /// renderer each frame so `n`/`N` can step and wrap; and
+    /// `help_search_scroll_to_match` is a one-shot to bring the current match
+    /// into view. Help text is ASCII, so the shared line editor fits.
+    help_searching: bool = false,
+    help_search_buffer: std.ArrayList(u8) = .empty,
+    help_search_cursor: usize = 0,
+    help_search_match: usize = 0,
+    help_search_total: usize = 0,
+    help_search_scroll_to_match: bool = false,
+    // The current match's "pop" animation: an index into `help_bounce_pad`
+    // advanced one step per animation tick. At or past the array length the
+    // bounce is over and the highlight is drawn at its exact size.
+    help_bounce: u8 = help_bounce_pad.len,
     command_log_scroll: usize = 0,
     command_log_max_scroll: usize = 0,
     undo_label_buf: [160]u8 = undefined,
@@ -4348,7 +4377,10 @@ pub const App = struct {
     /// the top level (no dialog), and the terminal has focus (no CPU spent
     /// animating a hidden/backgrounded window).
     pub fn wantsAnimation(self: *const App) bool {
-        return self.showAboutSplash() and self.mode == .normal and self.terminal_focused;
+        if (!self.terminal_focused) return false;
+        // The help overlay pops the current search match for a few frames.
+        if (self.helpBounceActive()) return true;
+        return self.showAboutSplash() and self.mode == .normal;
     }
 
     pub fn init(
@@ -4468,6 +4500,7 @@ pub const App = struct {
         self.allocator.free(self.remote_branch_filter);
         self.allocator.free(self.tag_filter);
         self.branch_filter_buffer.deinit(self.allocator);
+        self.help_search_buffer.deinit(self.allocator);
         self.clearRememberedConflicts();
         self.conflict_remembered.deinit(self.allocator);
         self.allocator.free(self.op_command);
@@ -5090,16 +5123,7 @@ pub const App = struct {
             return;
         }
         if (self.mode == .help) {
-            if (self.config.keymap.down.matches(key) or key.matches(vaxis.Key.down, .{})) {
-                self.help_scroll = @min(self.help_scroll + 1, self.help_max_scroll);
-                self.clearDialogSelection();
-            } else if (self.config.keymap.up.matches(key) or key.matches(vaxis.Key.up, .{})) {
-                self.help_scroll -|= 1;
-                self.clearDialogSelection();
-            } else {
-                self.mode = .normal;
-                self.clearDialogSelection();
-            }
+            try self.handleHelpKey(key);
             return;
         }
 
@@ -5506,11 +5530,18 @@ pub const App = struct {
             .help => {
                 self.mode = .help;
                 self.help_scroll = 0;
+                self.help_searching = false;
+                self.help_search_buffer.clearRetainingCapacity();
+                self.help_search_cursor = 0;
+                self.help_search_match = 0;
+                self.help_search_total = 0;
+                self.help_search_scroll_to_match = false;
+                self.help_bounce = help_bounce_pad.len; // idle
                 // Open the help scrolled to (and highlighting) the section that
                 // matches where the user pressed `?`.
                 self.help_focus_header = helpSectionKeyword(self.focus, self.staging_active);
                 self.help_scroll_to_focus = self.help_focus_header != null;
-                try self.setMessage("help", .{});
+                try self.setMessage("help ( / to search )", .{});
             },
             .undo => try self.startUndoConfirm(),
             .recent_repos => try self.openRecentRepos(),
@@ -14213,6 +14244,140 @@ pub const App = struct {
         }
     }
 
+    /// Clear the help overlay's search (query, matches, typing sub-mode).
+    fn clearHelpSearch(self: *App) void {
+        self.help_searching = false;
+        self.help_search_buffer.clearRetainingCapacity();
+        self.help_search_cursor = 0;
+        self.help_search_match = 0;
+        self.help_search_total = 0;
+        self.help_bounce = help_bounce_pad.len; // idle
+    }
+
+    /// Restart the current match's pop animation (on a new query or a jump).
+    fn startHelpBounce(self: *App) void {
+        self.help_bounce = 0;
+    }
+
+    /// Advance the pop animation one frame (driven by the animation tick).
+    pub fn advanceHelpBounce(self: *App) void {
+        if (self.help_bounce < help_bounce_pad.len) self.help_bounce += 1;
+    }
+
+    /// Whether the current match's pop is still playing (so the ticker keeps
+    /// posting animation frames). Only while there is a match to pop.
+    pub fn helpBounceActive(self: *const App) bool {
+        return self.mode == .help and self.help_search_total > 0 and self.help_bounce < help_bounce_pad.len;
+    }
+
+    /// Extra cells to draw on each side of the current match this frame (0 once
+    /// the pop has settled).
+    pub fn currentHelpBouncePad(self: *const App) u16 {
+        return if (self.help_bounce < help_bounce_pad.len) help_bounce_pad[self.help_bounce] else 0;
+    }
+
+    /// Step the current search match forward (or back), wrapping, and ask the
+    /// renderer to scroll it into view (and pop it). `help_search_total` is kept
+    /// current by the renderer each frame.
+    fn stepHelpMatch(self: *App, forward: bool) void {
+        if (self.help_search_total == 0) return;
+        if (forward)
+            self.help_search_match = (self.help_search_match + 1) % self.help_search_total
+        else
+            self.help_search_match = (self.help_search_match + self.help_search_total - 1) % self.help_search_total;
+        self.help_search_scroll_to_match = true;
+        self.startHelpBounce();
+    }
+
+    /// Keys while the help popup is open. `/` starts an in-place find that
+    /// highlights the query across the listed keybindings (from two characters
+    /// on); `n`/`N` jump to the next/previous match; up/down and the paging keys
+    /// scroll; any other key closes the popup. While typing the query, letters go
+    /// into it (arrow keys still scroll), enter keeps the search and leaves the
+    /// typing sub-mode, and esc clears the search but keeps the popup open.
+    fn handleHelpKey(self: *App, key: vaxis.Key) !void {
+        // A bare modifier press (e.g. Shift on its way to typing `N`) is not a
+        // command: ignore it so it neither scrolls nor closes the popup.
+        if (key.isModifier()) return;
+
+        const is_down = self.config.keymap.down.matches(key) or key.matches(vaxis.Key.down, .{});
+        const is_up = self.config.keymap.up.matches(key) or key.matches(vaxis.Key.up, .{});
+
+        if (self.help_searching) {
+            if (self.isEscapeKey(key)) {
+                self.clearHelpSearch();
+                self.clearDialogSelection();
+                return;
+            }
+            if (self.isEnterKey(key)) {
+                // Confirm the search (leave typing) and jump to the next match,
+                // like a find box; n/N and j/k then work too.
+                self.help_searching = false;
+                self.stepHelpMatch(true);
+                self.clearDialogSelection();
+                return;
+            }
+            if (key.matches(vaxis.Key.down, .{})) {
+                self.help_scroll = @min(self.help_scroll + 1, self.help_max_scroll);
+                self.clearDialogSelection();
+                return;
+            }
+            if (key.matches(vaxis.Key.up, .{})) {
+                self.help_scroll -|= 1;
+                self.clearDialogSelection();
+                return;
+            }
+            if (try self.editLine(&self.help_search_buffer, &self.help_search_cursor, key) == .changed) {
+                // A new query restarts at the first match (and pops it).
+                self.help_search_match = 0;
+                self.help_search_scroll_to_match = true;
+                self.startHelpBounce();
+            }
+            self.clearDialogSelection();
+            return;
+        }
+
+        if (self.config.keymap.file_filter.matches(key)) {
+            self.help_searching = true;
+            self.clearDialogSelection();
+            return;
+        }
+        // Next / previous match (only meaningful once a search is active).
+        // enter and n step to the next match; N (shift+n) to the previous.
+        if (self.help_search_buffer.items.len >= help_search_min) {
+            if (self.isEnterKey(key) or key.matches('n', .{})) {
+                self.stepHelpMatch(true);
+                self.clearDialogSelection();
+                return;
+            }
+            if (key.matches('N', .{}) or key.matches('n', .{ .shift = true })) {
+                self.stepHelpMatch(false);
+                self.clearDialogSelection();
+                return;
+            }
+        }
+        if (is_down) {
+            self.help_scroll = @min(self.help_scroll + 1, self.help_max_scroll);
+            self.clearDialogSelection();
+            return;
+        }
+        if (is_up) {
+            self.help_scroll -|= 1;
+            self.clearDialogSelection();
+            return;
+        }
+        // esc with a search active clears it (first press) before a second esc
+        // closes the popup; any other key closes it.
+        if (self.isEscapeKey(key) and self.help_search_buffer.items.len > 0) {
+            self.clearHelpSearch();
+            self.clearDialogSelection();
+            return;
+        }
+        self.mode = .normal;
+        self.clearHelpSearch();
+        self.clearDialogSelection();
+    }
+
     fn updateFileFilterFromPrompt(self: *App) !void {
         const filter = std.mem.trim(u8, self.file_filter_buffer.items, " \t\r\n");
         try self.setFileFilter(filter);
@@ -14466,6 +14631,98 @@ test "help dialog scrolling clamps at the bottom and resumes up immediately" {
     const up = vaxis.Key{ .codepoint = 'k' };
     try app.handleKey(up);
     try std.testing.expectEqual(@as(usize, 1), app.help_scroll);
+}
+
+test "help search: / searches, n/N step matches, esc clears then closes" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.focus = .files;
+    try app.handleKey(vaxis.Key{ .codepoint = '?' });
+    try std.testing.expectEqual(Mode.help, app.mode);
+    try std.testing.expect(!app.help_searching);
+
+    // `/` opens the search; letters type into the query (not j/k scrolling).
+    try app.handleKey(vaxis.Key{ .codepoint = '/' });
+    try std.testing.expect(app.help_searching);
+    try app.handleKey(vaxis.Key{ .codepoint = 'p', .text = "p" });
+    try app.handleKey(vaxis.Key{ .codepoint = 'u', .text = "u" });
+    try std.testing.expectEqualStrings("pu", app.help_search_buffer.items);
+
+    // enter keeps the search and leaves typing.
+    try app.handleKey(vaxis.Key{ .codepoint = vaxis.Key.enter });
+    try std.testing.expect(!app.help_searching);
+    try std.testing.expectEqualStrings("pu", app.help_search_buffer.items);
+    try std.testing.expectEqual(Mode.help, app.mode);
+
+    // A bare modifier press (Shift on its way to typing N) must not close the
+    // popup.
+    try app.handleKey(vaxis.Key{ .codepoint = vaxis.Key.left_shift, .mods = .{ .shift = true } });
+    try std.testing.expectEqual(Mode.help, app.mode);
+
+    // n/N step the current match and wrap (the renderer sets the total; simulate
+    // three matches here).
+    app.help_search_total = 3;
+    app.help_search_match = 0;
+    try app.handleKey(vaxis.Key{ .codepoint = 'n' });
+    try std.testing.expectEqual(@as(usize, 1), app.help_search_match);
+    try std.testing.expect(app.help_search_scroll_to_match);
+    try app.handleKey(vaxis.Key{ .codepoint = 'N', .text = "N" });
+    try std.testing.expectEqual(@as(usize, 0), app.help_search_match);
+    try app.handleKey(vaxis.Key{ .codepoint = 'N', .text = "N" });
+    try std.testing.expectEqual(@as(usize, 2), app.help_search_match); // wrapped
+
+    // enter steps to the next match too (like a find box), and does not close.
+    app.help_search_match = 0;
+    try app.handleKey(vaxis.Key{ .codepoint = vaxis.Key.enter });
+    try std.testing.expectEqual(@as(usize, 1), app.help_search_match);
+    try std.testing.expectEqual(Mode.help, app.mode);
+
+    // First esc clears the search but keeps the popup open.
+    try app.handleKey(vaxis.Key{ .codepoint = vaxis.Key.escape });
+    try std.testing.expectEqual(@as(usize, 0), app.help_search_buffer.items.len);
+    try std.testing.expectEqual(Mode.help, app.mode);
+
+    // Second esc closes the popup.
+    try app.handleKey(vaxis.Key{ .codepoint = vaxis.Key.escape });
+    try std.testing.expectEqual(Mode.normal, app.mode);
+}
+
+test "current help match pops then settles" {
+    const allocator = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(allocator, &no_files);
+    defer deinitTestApp(&app);
+
+    app.mode = .help;
+    app.help_search_total = 2;
+
+    // Jumping to a match starts the pop at the first pad value.
+    app.help_bounce = 0;
+    try std.testing.expect(app.helpBounceActive());
+    try std.testing.expectEqual(help_bounce_pad[0], app.currentHelpBouncePad());
+
+    // Each animation tick walks the pad sequence, then it settles to exact size.
+    app.advanceHelpBounce();
+    try std.testing.expectEqual(help_bounce_pad[1], app.currentHelpBouncePad());
+    for (0..help_bounce_pad.len) |_| app.advanceHelpBounce();
+    try std.testing.expect(!app.helpBounceActive());
+    try std.testing.expectEqual(@as(u16, 0), app.currentHelpBouncePad());
+
+    // With no match there is nothing to pop, so the ticker is not kept awake.
+    app.help_search_total = 0;
+    app.help_bounce = 0;
+    try std.testing.expect(!app.helpBounceActive());
+
+    // `n` restarts the pop (query is long enough to search).
+    app.help_search_total = 2;
+    app.help_search_buffer.clearRetainingCapacity();
+    try app.help_search_buffer.appendSlice(allocator, "pu");
+    app.help_bounce = help_bounce_pad.len; // settled
+    try app.handleKey(vaxis.Key{ .codepoint = 'n' });
+    try std.testing.expectEqual(@as(u8, 0), app.help_bounce); // popped again
 }
 
 test "appendDiffColumns strips ANSI, respects columns, preserves tabs" {
@@ -20111,6 +20368,7 @@ fn deinitTestApp(app: *App) void {
     app.allocator.free(app.remote_branch_filter);
     app.allocator.free(app.tag_filter);
     app.branch_filter_buffer.deinit(app.allocator);
+    app.help_search_buffer.deinit(app.allocator);
     app.clearRememberedConflicts();
     app.conflict_remembered.deinit(app.allocator);
     app.allocator.free(app.op_command);

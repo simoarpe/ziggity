@@ -7,6 +7,7 @@ const credentials_mod = @import("credentials.zig");
 const git_mod = @import("git.zig");
 const filetree = @import("filetree.zig");
 const model = @import("model.zig");
+const textmatch = @import("textmatch.zig");
 const patch_mod = @import("patch.zig");
 const conflicts_mod = @import("conflicts.zig");
 const diffmode_mod = @import("diffmode.zig");
@@ -808,7 +809,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
             // Fast tick while something works off-thread: advance the loading
             // spinner only. The worktree refresh rides the slower `.refresh_tick`.
             .spinner_tick => app.spinner_frame +%= 1,
-            .anim_tick => app.advanceDonut(io),
+            .anim_tick => if (app.mode == .help) app.advanceHelpBounce() else app.advanceDonut(io),
             .fetch_tick => {
                 app.bg_fetch_requested = true;
                 // Refresh PR status on the same cadence as the background fetch.
@@ -2547,8 +2548,19 @@ const help_lines = [_][]const u8{
     "                 in the bottom bar)",
 };
 
+/// One highlighted occurrence of the help search query: which wrapped row it is
+/// on, and the byte column and length within that row (help text is ASCII, so a
+/// byte column is a screen column).
+const HelpMatch = struct { row: usize, col: u16, len: u16 };
+
 fn drawHelpPopup(root: vaxis.Window, app: *app_mod.App) void {
     const st = styles();
+
+    const query = app.help_search_buffer.items;
+    // The search only lights up once it has enough characters, so a single stray
+    // key does not flood the page.
+    const search_live = query.len >= app_mod.help_search_min;
+
     // Size the popup to the longest line so nothing is cut on a wide terminal;
     // cap at the screen width and wrap any still-too-long line as a fallback.
     var longest: usize = 0;
@@ -2560,9 +2572,10 @@ fn drawHelpPopup(root: vaxis.Window, app: *app_mod.App) void {
     var wrapped: [512]HelpLine = undefined;
     var total: usize = 0;
     // The first wrapped-line index of the section matching the current context,
-    // so the dialog can open scrolled to it.
+    // so the dialog can open scrolled to it. A search turns it off (the view
+    // follows the current match instead).
     var focus_start: ?usize = null;
-    const want = app.help_focus_header;
+    const want = if (search_live) null else app.help_focus_header;
     for (help_lines) |line| {
         // Section headers have no leading indent; their wrapped parts keep the style.
         const header = line.len > 0 and line[0] != ' ';
@@ -2573,7 +2586,6 @@ fn drawHelpPopup(root: vaxis.Window, app: *app_mod.App) void {
             }
             continue;
         }
-        // Mark the (first) header that matches the wanted section as focused.
         const is_focus = header and focus_start == null and
             want != null and std.mem.startsWith(u8, line, want.?);
         var segs: [8][]const u8 = undefined;
@@ -2586,58 +2598,170 @@ fn drawHelpPopup(root: vaxis.Window, app: *app_mod.App) void {
         }
     }
 
-    const h: u16 = @intCast(@min(@as(usize, root.height -| 1), total + 2));
-    // The inner content height is `h` minus the top and bottom border rows; the
-    // max scroll follows from it. Computed before `popup()` so the one-shot
-    // jump below is reflected in the scrollbar it draws (no first-frame mismatch).
-    const win_height: u16 = h -| 2;
-    const max_scroll = if (total > win_height) total - win_height else 0;
-    app.help_max_scroll = max_scroll; // so key handlers can clamp scrolling
+    // Find every occurrence of the query across the wrapped rows, in reading
+    // order, so `n`/`N` step through them. The renderer owns the count so the
+    // key handler can wrap without re-scanning.
+    var matches: [256]HelpMatch = undefined;
+    var match_count: usize = 0;
+    if (search_live) {
+        for (wrapped[0..total], 0..) |wl, ri| {
+            var from: usize = 0;
+            while (textmatch.findSmart(wl.text, query, from)) |off| {
+                if (match_count >= matches.len) break;
+                matches[match_count] = .{ .row = ri, .col = @intCast(off), .len = @intCast(query.len) };
+                match_count += 1;
+                from = off + query.len;
+            }
+            if (match_count >= matches.len) break;
+        }
+    }
+    app.help_search_total = match_count;
+    app.help_search_match = if (match_count == 0) 0 else app.help_search_match % match_count;
 
-    // One-shot on open: jump so the matched section header sits at the top
-    // (clamped). Cleared here so subsequent up/down scrolling is left alone.
-    if (app.help_scroll_to_focus) {
+    // The last two inner rows are a separator rule and the `/` search footer, so
+    // the scrollable content gets two rows less.
+    const h: u16 = @intCast(@min(@as(usize, root.height -| 1), total + 4));
+    const inner_h: u16 = h -| 2; // rows inside the border
+    const content_rows: u16 = inner_h -| 2; // last two rows: separator + footer
+    const sep_row: u16 = inner_h -| 2;
+    const foot_row: u16 = inner_h -| 1;
+    const max_scroll = if (total > content_rows) total - content_rows else 0;
+    app.help_max_scroll = max_scroll;
+
+    // One-shot: on open (no search) jump to the context section; while searching
+    // keep the current match in view.
+    if (search_live and app.help_search_scroll_to_match) {
+        if (match_count > 0) {
+            const target = matches[app.help_search_match].row;
+            if (target < app.help_scroll)
+                app.help_scroll = target
+            else if (content_rows > 0 and target >= app.help_scroll + content_rows)
+                app.help_scroll = target - content_rows + 1;
+        }
+        app.help_search_scroll_to_match = false;
+    } else if (app.help_scroll_to_focus) {
         if (focus_start) |fs| app.help_scroll = @min(fs, max_scroll);
         app.help_scroll_to_focus = false;
     }
+    app.help_scroll = @min(app.help_scroll, max_scroll);
 
     const win = popup(root, w, h, "Keybindings", .{ .len = total, .pos = app.help_scroll });
 
     const px0: u16 = (root.width - w) / 2;
     const py0: u16 = (root.height - h) / 2;
-    app.beginDialogGrid(px0 + 1, py0 + 1, win.height);
+    app.beginDialogGrid(px0 + 1, py0 + 1, content_rows);
 
-    // The matched header is drawn as a full-width highlighted bar (an arrow
-    // marker plus a selected-row background) so it stands out from the other,
-    // plain-accent section headers.
     const focus_style: vaxis.Style = .{
         .fg = .{ .index = ui_theme.accent },
         .bg = .{ .index = ui_theme.selected_bg },
         .bold = true,
     };
-    // The key column of each command line is redrawn in this colour so the keys
-    // stand out from their descriptions.
     const key_style: vaxis.Style = .{ .fg = .{ .index = ui_theme.footer_key }, .bold = true };
+    // Search highlight: black on yellow for every match, black on green for the
+    // current one, so the match you are on stands out from the rest.
+    const match_style: vaxis.Style = .{ .fg = .{ .index = 0 }, .bg = .{ .index = ui_theme.warning }, .bold = true };
+    const cur_match_style: vaxis.Style = .{ .fg = .{ .index = 0 }, .bg = .{ .index = ui_theme.active }, .bold = true };
+
     const start = @min(app.help_scroll, max_scroll);
     var row: u16 = 0;
-    for (wrapped[start..total]) |wl| {
-        if (row >= win.height) break;
+    for (wrapped[start..total], start..) |wl, abs| {
+        if (row >= content_rows) break;
         if (wl.focus) {
             fillRow(win, row, focus_style);
             drawDialogRow(win, app, row, wl.text, focus_style);
-            // A right-edge "◀" pointer reinforces the highlight (drawn as a
-            // static glyph so it survives the post-render flush).
             _ = printGlyph(win, row, win.width -| 2, glyph_focus_pointer, focus_style);
         } else {
             drawDialogRow(win, app, row, wl.text, if (wl.header) st.bottom_accent else st.normal);
-            // Recolour just the key token (leave headers, notes and any active
-            // text selection untouched).
             if (!wl.header and app.dialogRowSelection(row) == null) {
                 if (helpKeyEnd(wl.text)) |end| print(win, row, 2, wl.text[2..end], key_style);
             }
         }
+        // Paint the search hits on this row over whatever was drawn.
+        if (search_live) {
+            const pad = app.currentHelpBouncePad();
+            for (matches[0..match_count], 0..) |m, mi| {
+                if (m.row != abs) continue;
+                if (mi == app.help_search_match) {
+                    // The current match pops: grow the highlight by `pad` cells on
+                    // each side. Draw the real characters where the line has them,
+                    // then fill any overrun past the line's end with highlighted
+                    // spaces, so the box grows the same amount on the right as on
+                    // the left instead of being cut off at a short line's end.
+                    const lo: u16 = m.col -| pad;
+                    const want_hi: u16 = @intCast(@min(@as(usize, m.col) + m.len + pad, @as(usize, win.width)));
+                    const text_hi: u16 = @intCast(@min(@as(usize, want_hi), wl.text.len));
+                    if (text_hi > lo) print(win, row, lo, wl.text[lo..text_hi], cur_match_style);
+                    var c: u16 = text_hi;
+                    while (c < want_hi) : (c += 1) print(win, row, c, " ", cur_match_style);
+                } else {
+                    print(win, row, m.col, wl.text[m.col .. m.col + m.len], match_style);
+                }
+            }
+        }
         row += 1;
     }
+
+    // A subtle rule separates the list from the search footer below it.
+    const rule_style: vaxis.Style = .{ .fg = .{ .index = ui_theme.inactive_border } };
+    var rc: u16 = 0;
+    while (rc < win.width) : (rc += 1) _ = printGlyph(win, sep_row, rc, "─", rule_style);
+
+    drawHelpFooter(win, app, foot_row, match_count);
+}
+
+/// The footer row of the help popup: a search bar with the `/` prompt, the live
+/// query (and a cursor while typing), the match position, and the keys to move
+/// between matches. Styled like the app's bottom hint bar (keys bright, labels
+/// dim) on a black strip, so it reads as a distinct toolbar under the list.
+fn drawHelpFooter(win: vaxis.Window, app: *app_mod.App, foot_row: u16, match_count: usize) void {
+    const st = styles();
+    const black: vaxis.Color = .{ .index = 0 };
+    const bar: vaxis.Style = .{ .bg = black };
+    const prompt_st: vaxis.Style = .{ .fg = .{ .index = ui_theme.accent }, .bg = black, .bold = true };
+    const query_st: vaxis.Style = .{ .fg = .{ .index = 15 }, .bg = black, .bold = true };
+    const caret_st: vaxis.Style = .{ .fg = black, .bg = .{ .index = 15 } }; // solid block cursor
+    const count_st: vaxis.Style = .{ .fg = .{ .index = ui_theme.accent }, .bg = black, .bold = true };
+    const dim_st: vaxis.Style = .{ .fg = .{ .index = ui_theme.footer }, .bg = black };
+    const muted_st: vaxis.Style = .{ .fg = .{ .index = ui_theme.muted }, .bg = black };
+    const warn_st: vaxis.Style = .{ .fg = .{ .index = ui_theme.warning }, .bg = black, .bold = true };
+    fillRow(win, foot_row, bar);
+
+    const q = app.help_search_buffer.items;
+    var col: u16 = 2;
+
+    // Idle (not in search mode yet): show the `/` key and advertise the search,
+    // without the prompt arrow.
+    if (q.len == 0 and !app.help_searching) {
+        col = printSpan(win, foot_row, col, "/", prompt_st);
+        col = printSpan(win, foot_row, col, " search keybindings", dim_st);
+        drawHints(win, foot_row, col + 3, "j/k scroll  esc close", st.hint_key, st.hint_desc);
+        return;
+    }
+
+    // Search mode (entered with `/`): a right-pointing arrow leads the query —
+    // the mirror of the ◀ used elsewhere, so it is covered by the same font.
+    col = printGlyph(win, foot_row, col, glyph_prompt, prompt_st);
+    col = printSpan(win, foot_row, col, " ", bar);
+    if (q.len > 0) col = printSpan(win, foot_row, col, q, query_st);
+    if (app.help_searching) col = printSpan(win, foot_row, col, " ", caret_st);
+
+    col = printSpan(win, foot_row, col, "   ", dim_st);
+    if (q.len < app_mod.help_search_min) {
+        var tb: [32]u8 = undefined;
+        col = printSpan(win, foot_row, col, std.fmt.bufPrint(&tb, "type {d} or more characters", .{app_mod.help_search_min}) catch "type more", muted_st);
+        return;
+    }
+    if (match_count == 0) {
+        col = printSpan(win, foot_row, col, "no matches", warn_st);
+        drawHints(win, foot_row, col + 3, "esc clear", st.hint_key, st.hint_desc);
+        return;
+    }
+    // "m/n" with the current index accented, then the navigation keys.
+    var nb: [12]u8 = undefined;
+    col = printSpan(win, foot_row, col, std.fmt.bufPrint(&nb, "{d}", .{app.help_search_match + 1}) catch "?", count_st);
+    var tb: [12]u8 = undefined;
+    col = printSpan(win, foot_row, col, std.fmt.bufPrint(&tb, "/{d}", .{match_count}) catch "", dim_st);
+    drawHints(win, foot_row, col + 3, "enter/n next  N prev  esc clear", st.hint_key, st.hint_desc);
 }
 
 /// For a command line (`"  <key>  <description>"`), the byte index just past the
@@ -6276,6 +6400,7 @@ const glyph_collapsed = "▸"; // U+25B8
 const glyph_focus_pointer = "◀"; // U+25C0 (marks the help section for the current context)
 const glyph_expanded = "▾"; // U+25BE
 const glyph_diff_base = "◆"; // U+25C6 (the diffing-mode base marker)
+const glyph_prompt = "▶"; // U+25B6 (the mirror of ◀; the help search prompt)
 const indent_spaces: [32]u8 = @splat(' ');
 
 /// Render ahead/behind status: `↓2↑3`, `✓` when in sync, or `(unpushed)`
@@ -6885,4 +7010,19 @@ test "helpKeyEnd isolates the key column of a command line" {
             if (helpKeyEnd(line)) |end| try std.testing.expect(end > 2);
         }
     }
+}
+
+test "help lines contain searchable, highlightable terms" {
+    // The search highlights occurrences of the query across the help text; make
+    // sure the terms the UI promises are actually present to find.
+    var found_bisect = false;
+    var found_stash_header = false;
+    for (help_lines) |line| {
+        if (textmatch.findSmart(line, "bisect", 0) != null) found_bisect = true;
+        if (std.mem.startsWith(u8, line, "Stash")) found_stash_header = true;
+    }
+    try std.testing.expect(found_bisect);
+    try std.testing.expect(found_stash_header);
+    // Smart case: a lowercase query finds a capitalised header occurrence.
+    try std.testing.expect(textmatch.findSmart("Stash", "stash", 0) != null);
 }

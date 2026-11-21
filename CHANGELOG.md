@@ -26,10 +26,16 @@ Releases before 0.55.0 are listed on the
   restores the old scattered-subsequence matching.
 
 ### Added
-- `e` now opens your editor at the line you are looking at, as lazygit does:
-  the cursor line in the staging or patch view, or the top line of a focused
-  Diff panel. All editor presets support it, and a custom `editor_command` can
-  use a new `{{line}}` placeholder.
+- The keybindings help overlay (`?`) now has a `/` search that highlights
+  matches in place instead of hiding the rest. A footer shows the `/` prompt;
+  type at least two characters to highlight every occurrence and jump to the
+  first; `enter` or `n` jump to the next match and `N` to the previous (the
+  current match is highlighted distinctly and briefly pops when you land on it);
+  esc clears the search, and a second esc closes the overlay.
+- `e` now opens your editor at the line you are looking at: the cursor line in
+  the staging or patch view, or the top line of a focused Diff panel. All editor
+  presets support it, and a custom `editor_command` can use a new `{{line}}`
+  placeholder.
 - The `/` name filter now works on the Tags tab and inside a remote's branches,
   not just on the Local tab. Press `/` and type to narrow the Tags list, or drill
   into a remote with `enter` and `/` to narrow its branches; enter accepts and

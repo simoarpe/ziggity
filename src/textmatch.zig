@@ -41,6 +41,20 @@ fn smartCaseContains(haystack: []const u8, needle: []const u8) bool {
     return substringIndex(haystack, needle, sensitive) != null;
 }
 
+/// The byte offset of the next occurrence of `needle` in `haystack` at or after
+/// `from`, smart-case (case-insensitive unless `needle` has an uppercase
+/// letter). Null when there is none or `needle` is empty. Used by the help
+/// overlay's find-and-highlight search.
+pub fn findSmart(haystack: []const u8, needle: []const u8, from: usize) ?usize {
+    if (needle.len == 0 or needle.len > haystack.len) return null;
+    const sensitive = containsAsciiUppercase(needle);
+    var i = from;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (hasPrefix(haystack[i..], needle, sensitive)) return i;
+    }
+    return null;
+}
+
 /// Rank a completion candidate (a ref name) against what the user has typed so
 /// far, for the checkout-by-name suggestion list. Smart-case: case-insensitive
 /// unless `needle` contains an uppercase letter. Returns null when it doesn't
@@ -138,6 +152,18 @@ test "path filter in fuzzy mode matches scattered subsequences" {
     // Each whitespace term matches independently; empty matches everything.
     try std.testing.expect(pathMatchesFilter("integration-testing", "itg tst", .fuzzy));
     try std.testing.expect(pathMatchesFilter("src/main.zig", "", .fuzzy));
+}
+
+test "findSmart locates occurrences with smart case" {
+    try std.testing.expectEqual(@as(?usize, 0), findSmart("diff", "di", 0));
+    try std.testing.expectEqual(@as(?usize, 3), findSmart("android", "ro", 0));
+    // Searching from past the first hit finds the next.
+    try std.testing.expectEqual(@as(?usize, 4), findSmart("a-b-a", "a", 1));
+    try std.testing.expectEqual(@as(?usize, null), findSmart("a-b-a", "a", 5));
+    // Smart case: lowercase matches any case; an uppercase letter is strict.
+    try std.testing.expectEqual(@as(?usize, 0), findSmart("Push", "push", 0));
+    try std.testing.expectEqual(@as(?usize, null), findSmart("push", "Push", 0));
+    try std.testing.expectEqual(@as(?usize, null), findSmart("abc", "", 0));
 }
 
 test "suggestion rank orders prefix before substring before subsequence" {
