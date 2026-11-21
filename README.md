@@ -255,7 +255,8 @@ libc), so each runs on any device of that architecture.
 ## Quick Start
 
 Run `ziggity` inside any Git repository. Press `?` for the keybindings
-overlay (it opens scrolled to the panel you are on), and `q` to quit.
+overlay (it opens scrolled to the panel you are on; press `/` inside it to
+search the keybindings), and `q` to quit.
 
 ## Design Philosophy
 
@@ -473,8 +474,8 @@ the full setting reference.
 
 ## Keybindings
 
-Press **`?`** in the app for the full, always current overlay. The
-essentials:
+Press **`?`** in the app for the full, always current overlay, and `/` inside
+it to search the keybindings. The essentials:
 
 | Key | Action |
 |---|---|

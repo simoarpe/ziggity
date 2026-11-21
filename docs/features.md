@@ -174,8 +174,11 @@ removes an entry.
 
 ### Help & the About Screen
 
-`?` opens the keybindings overlay, scrolled to the panel you are on.
-Selecting the Status panel shows an about screen with a live animation.
+`?` opens the keybindings overlay, scrolled to the panel you are on. Inside it,
+`/` searches: type at least two characters to highlight every match in place
+(the current one stands out and briefly pops), `enter` or `n` jump to the next
+match and `N` to the previous, and esc clears the search. Selecting the Status
+panel shows an about screen with a live animation.
 
 ![Keybindings help overlay](screenshots/09-help.png)
 
