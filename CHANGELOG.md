@@ -16,6 +16,8 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+## [0.66.0] - 2026-11-21
+
 ### Changed
 - AI settings are now grouped under an `ai.*` namespace (`ai.command`,
   `ai.commit.auto_title`, `ai.commit.auto_description`, `ai.commit.style_defaults`,
