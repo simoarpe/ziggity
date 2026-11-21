@@ -92,7 +92,7 @@ also copies on release.
 
 ![Commit message dialog](screenshots/08-commit-dialog.png)
 
-**AI-assisted authoring (optional).** Set `ai_command` to a CLI that reads a
+**AI-assisted authoring (optional).** Set `ai.command` to a CLI that reads a
 prompt on stdin and prints a completion (for example
 [`pi -p`](https://github.com/earendil-works/pi),
 [`llm`](https://github.com/simonw/llm), or
@@ -108,20 +108,21 @@ live in that tool; nothing AI-related appears until it is configured. Then:
   changes. The title targets `commit_summary_limit` characters and the body is
   reflowed to `commit_body_guide` columns (50 and 72 by default), so the AI
   follows the same length conventions the dialog already nudges you toward.
-- `auto_generate_commit_title` / `auto_generate_commit_description` start
-  generation automatically when the dialog opens (concurrently, never blocking
-  it). A spinner shows in each field while it works.
+- `ai.commit.auto_title` / `ai.commit.auto_description` start generation
+  automatically when the dialog opens (concurrently, never blocking it). A
+  spinner shows in each field while it works.
 - You can type at any time; a generated result never overwrites text you have
   edited, and a failure is a small in-field note (`ctrl+g` to retry), never a
   blocker. Generated text is ordinary editable text once inserted.
 - The style is steerable. By default ziggity adds its own guidance (imperative
   subject, no trailing period, follow your recent commits; a body that explains
-  the motivation), which you can turn off with `ai_commit_style_defaults = false`.
+  the motivation), which you can turn off with `ai.commit.style_defaults = false`.
   For project or personal conventions (Conventional Commits, tone, ticket refs),
-  drop a `commit-instructions.md` file in `<repo>/.ziggity/` or your global config
-  dir; it is fed into the prompt and can use `# Title` / `# Body` sections. See
-  [configuration.md](configuration.md) for the resolution order and an example.
-- The same `ai_command` also drafts pull request descriptions. On the Branches or
+  point `ai.commit.instructions` at a Markdown file; it is opt-in (unset loads
+  nothing) and located by that path, relative to the config file's directory or
+  absolute. It is fed into the prompt and can use `# Title` / `# Body` sections.
+  See [configuration.md](configuration.md) for details and an example.
+- The same `ai.command` also drafts pull request descriptions. On the Branches or
   Commits panel, `ctrl+g` opens an AI-generate menu with "Generate PR
   description": on a branch it asks for a base ref (prefilled with the default
   branch) and describes the branch against it; on a commit it describes that
@@ -130,8 +131,9 @@ live in that tool; nothing AI-related appears until it is configured. Then:
   `r` to regenerate and `b` to re-pick the base (branch). It is kept for the
   session, so reopening the same branch or
   commit shows it without a new call; if the branch has moved on since, the
-  preview flags it as outdated so you can regenerate. Style is customizable with a
-  `pr-instructions.md` file, resolved like `commit-instructions.md`.
+  preview flags it as outdated so you can regenerate. Style is customizable by
+  pointing `ai.pr.instructions` at a Markdown file, located like
+  `ai.commit.instructions`.
 
 ### Branches & Tags
 

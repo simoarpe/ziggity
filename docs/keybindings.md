@@ -163,7 +163,7 @@ the written reference. Every binding is remappable, see
 - `ctrl+g` (commit dialog): generate (or regenerate) the focused field, subject or
   body. For a new commit it reads the staged diff; when rewording, amending, or
   editing a cherry-picked message it reads that commit's own diff instead. Only
-  available when `ai_command` is configured (see
+  available when `ai.command` is configured (see
   [Configuration](configuration.md))
 - `ctrl+g` (Branches / Commits panels): open the "AI generate" menu to draft a
   pull request description (title + markdown body) from the selected branch
@@ -172,7 +172,7 @@ the written reference. Every binding is remappable, see
   regenerate with `r`, change the base with `b` (branch), and scroll with `j`/`k`.
   The result is kept for the session,
   so reopening the same source shows it without regenerating. Only when
-  `ai_command` is set; style is customizable via a `pr-instructions.md` file (see
+  `ai.command` is set; style is customizable via `ai.pr.instructions` (see
   [Configuration](configuration.md))
 - `i` / `y` / `ctrl+f` (Files): ignore or exclude the file (a menu: add to the
   shared `.gitignore`, or to the local, uncommitted `.git/info/exclude`) / copy

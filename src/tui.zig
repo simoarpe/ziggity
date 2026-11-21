@@ -479,6 +479,8 @@ const AiGenRun = struct {
     git_dir: []const u8,
     environ: *std.process.Environ.Map,
     command: []u8,
+    /// Configured commit-instructions path (empty = the default under .ziggity/).
+    instructions: []u8,
     current_title: []u8,
     field: aiauthor_mod.Field,
     limits: aiauthor_mod.Limits = .{},
@@ -495,6 +497,7 @@ const AiGenRun = struct {
 
     fn free(self: *AiGenRun) void {
         async_allocator.free(self.command);
+        async_allocator.free(self.instructions);
         async_allocator.free(self.current_title);
         if (self.result) |r| async_allocator.free(r);
         self.result = null;
@@ -515,7 +518,7 @@ fn runAiGen(ag: *AiGenRun) void {
         for (wgit.command_log.items) |e| async_allocator.free(e);
         wgit.command_log.deinit(async_allocator);
     }
-    if (aiauthor_mod.generate(async_allocator, &wgit, ag.command, ag.field, ag.current_title, ag.limits, ag.source, &ag.error_detail)) |text| {
+    if (aiauthor_mod.generate(async_allocator, &wgit, ag.command, ag.field, ag.current_title, ag.limits, ag.source, ag.instructions, &ag.error_detail)) |text| {
         ag.result = text;
         ag.failed = false;
     } else |_| {
@@ -543,6 +546,8 @@ const PrGenRun = struct {
     git_dir: []const u8,
     environ: *std.process.Environ.Map,
     command: []u8,
+    /// Configured pr-instructions path (empty = the default under .ziggity/).
+    instructions: []u8,
     base: []u8,
     target: []u8,
     subject: []u8,
@@ -554,6 +559,7 @@ const PrGenRun = struct {
 
     fn free(self: *PrGenRun) void {
         async_allocator.free(self.command);
+        async_allocator.free(self.instructions);
         async_allocator.free(self.base);
         async_allocator.free(self.target);
         async_allocator.free(self.subject);
@@ -581,7 +587,7 @@ fn prGenWorker(pr: *PrGenRun) void {
     const diff: []const u8 = wgit.refDiff(pr.base, pr.target, pr.three_dot) catch "";
     defer if (diff.len != 0) async_allocator.free(@constCast(diff));
     const ctx = aiauthor_mod.DocContext{ .subject = pr.subject, .commit_log = log, .diff = diff };
-    if (aiauthor_mod.generatePrDoc(async_allocator, &wgit, pr.command, ctx)) |doc| {
+    if (aiauthor_mod.generatePrDoc(async_allocator, &wgit, pr.command, ctx, pr.instructions)) |doc| {
         pr.title = doc.title;
         pr.body = doc.body;
         pr.failed = false;
@@ -1234,6 +1240,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     .git_dir = app.git.git_dir,
                     .environ = app.git.environ,
                     .command = async_allocator.dupe(u8, app.config.ai_command.get()) catch "",
+                    .instructions = async_allocator.dupe(u8, app.config.ai_commit_instructions.get()) catch "",
                     .current_title = async_allocator.dupe(u8, req.current_title) catch "",
                     .field = .title,
                     .limits = req.limits,
@@ -1262,6 +1269,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     .git_dir = app.git.git_dir,
                     .environ = app.git.environ,
                     .command = async_allocator.dupe(u8, app.config.ai_command.get()) catch "",
+                    .instructions = async_allocator.dupe(u8, app.config.ai_commit_instructions.get()) catch "",
                     .current_title = async_allocator.dupe(u8, req.current_title) catch "",
                     .field = .description,
                     .limits = req.limits,
@@ -1290,6 +1298,7 @@ pub fn run(init: std.process.Init, app: *app_mod.App) !void {
                     .git_dir = app.git.git_dir,
                     .environ = app.git.environ,
                     .command = async_allocator.dupe(u8, app.config.ai_command.get()) catch "",
+                    .instructions = async_allocator.dupe(u8, app.config.ai_pr_instructions.get()) catch "",
                     .base = async_allocator.dupe(u8, req.base) catch "",
                     .target = async_allocator.dupe(u8, req.target) catch "",
                     .subject = async_allocator.dupe(u8, req.subject) catch "",

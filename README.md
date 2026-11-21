@@ -430,10 +430,10 @@ subscriptions you may already have, so there is no per-token bill.
    `ZIGGITY_CONFIG` for every repo):
 
    ```ini
-   ai_command = pi -p
+   ai.command = pi -p
    # optional: draft both fields the moment the commit dialog opens
-   auto_generate_commit_title = true
-   auto_generate_commit_description = true
+   ai.commit.auto_title = true
+   ai.commit.auto_description = true
    ```
 
 3. Stage a change, press `c` to open the commit dialog, and press `ctrl+g` to
@@ -448,13 +448,17 @@ completion on stdout works. Want a specific provider through an API key? Use
 [`llm`](https://github.com/simonw/llm). Want a fully local model?
 [`ollama run <model>`](https://github.com/ollama/ollama).
 
-To steer the style, drop a `commit-instructions.md` file in `<repo>/.ziggity/`
-(or your global config dir) with your conventions, tone, or Conventional Commits
-rules; it feeds into the prompt and supports `# Title` and `# Body` sections. Turn
-off ziggity's built-in style guidance with `ai_commit_style_defaults = false` if
-you want your file (or the model) to decide everything.
+To steer the style, point `ai.commit.instructions` at a Markdown file (for
+example `./commit-instructions.md` beside your `.ziggity.ini`) with your
+conventions, tone, or Conventional Commits rules; it feeds into the prompt and
+supports `# Title` and `# Body` sections. It is opt-in: with the setting unset,
+no file is loaded; a relative path resolves against the directory of the config
+file that set it, and an absolute path (handy for a machine-wide file) is used
+as-is. Turn off ziggity's built-in style guidance with
+`ai.commit.style_defaults = false` if you want your file (or the model) to decide
+everything.
 
-The same `ai_command` also drafts **pull request descriptions**. On the Branches
+The same `ai.command` also drafts **pull request descriptions**. On the Branches
 or Commits panel, `ctrl+g` opens an "AI generate" menu. On a branch it asks for a
 base ref (prefilled with the default branch) and describes the branch against it;
 on a commit it describes that commit or the selected range. The result, a title
@@ -468,9 +472,10 @@ is kept for the session, and flags itself as outdated if the branch moves on.
 
 <p align="center"><i><code>ctrl+g</code> on a branch drafts a PR title and markdown body against the base you pick, in a preview you copy from.</i></p>
 
-Customize the style with a `pr-instructions.md` file, resolved just like
-`commit-instructions.md`. See [docs/configuration.md](docs/configuration.md) for
-the full setting reference.
+Customize the style by pointing `ai.pr.instructions` at a Markdown file, located
+just like `ai.commit.instructions` (relative to the config file's directory, or
+absolute). See [docs/configuration.md](docs/configuration.md) for the full
+setting reference.
 
 ## Keybindings
 

@@ -17,6 +17,18 @@ Releases before 0.55.0 are listed on the
 ## [Unreleased]
 
 ### Changed
+- AI settings are now grouped under an `ai.*` namespace (`ai.command`,
+  `ai.commit.auto_title`, `ai.commit.auto_description`, `ai.commit.style_defaults`,
+  plus the new `ai.commit.instructions` and `ai.pr.instructions` path settings).
+  The old flat keys still work as aliases. The commit and PR instruction files
+  are now opt-in and located by the config path: with the setting unset nothing
+  is loaded (no implicit default location). A relative path resolves against the
+  directory of the config file that set it (so `./commit-instructions.md` sits
+  next to your `.ziggity.ini`, or next to a global `ZIGGITY_CONFIG`); an absolute
+  path is used as-is. The previous automatic loading of
+  `.ziggity/commit-instructions.md` / `.ziggity/pr-instructions.md` and the
+  `~/.config/ziggity/` fallback are removed: set `ai.commit.instructions` /
+  `ai.pr.instructions` to the file's path to use one.
 - The `/` filter (Files, branches, commits, remotes, tags) now matches by
   substring by default, instead of a scattered subsequence. Each
   whitespace-separated term must appear as a run of characters, so typing `di`

@@ -19960,10 +19960,48 @@ test "generatePrDoc runs the ai_command and returns a split title + body" {
 
     const ctx = aiauthor_mod.DocContext{ .subject = "branch feature vs main", .commit_log = "- add feature", .diff = "diff --git a/f b/f" };
     // Fake ai_command: ignores stdin (the piped prompt), prints a title + body.
-    var doc = try aiauthor_mod.generatePrDoc(a, &g, "printf 'Add the feature\\n\\n## Summary\\nDoes the thing.'", ctx);
+    var doc = try aiauthor_mod.generatePrDoc(a, &g, "printf 'Add the feature\\n\\n## Summary\\nDoes the thing.'", ctx, "");
     defer doc.deinit(a);
     try std.testing.expectEqualStrings("Add the feature", doc.title);
     try std.testing.expectEqualStrings("## Summary\nDoes the thing.", doc.body);
+}
+
+test "loadInstructions is opt-in by config path (empty loads nothing)" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q -b main
+        \\mkdir -p .ziggity
+        \\printf 'FILE' > .ziggity/commit-instructions.md
+    );
+    var g = try git_mod.Git.initAt(a, tio, &env, dir_path);
+    defer g.deinit();
+
+    // Empty path loads nothing, even though the conventional file exists.
+    try std.testing.expect(aiauthor_mod.loadInstructions(a, &g, "") == null);
+
+    // A resolved (absolute) path loads the file. The config layer resolves paths
+    // against the config-file directory before they reach here; `g.root` is the
+    // absolute repo root.
+    const abs = try std.fs.path.join(a, &.{ g.root, ".ziggity/commit-instructions.md" });
+    defer a.free(abs);
+    const c = aiauthor_mod.loadInstructions(a, &g, abs).?;
+    defer a.free(c);
+    try std.testing.expectEqualStrings("FILE", c);
+
+    // A missing file yields null (no hidden search of other locations).
+    const miss = try std.fs.path.join(a, &.{ g.root, "nope.md" });
+    defer a.free(miss);
+    try std.testing.expect(aiauthor_mod.loadInstructions(a, &g, miss) == null);
 }
 
 test "merge commit's per-file preview shows the brought-in file (issue #22 follow-up)" {

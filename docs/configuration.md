@@ -46,35 +46,36 @@ prepare_commit_msg_hook = true
 # amending, use `r` on the Commits tab.
 reword_on_amend = false
 
-# AI-assisted commit authoring. `ai_command` is a shell command that reads a
-# prompt on stdin and prints a completion on stdout. ziggity treats it as a
-# black box, so the provider, model, key, or subscription all live in that tool,
-# never in ziggity. AI features (the ctrl+g shortcut in the commit dialog, and
-# the two flags below) appear only when this is set. Examples:
-#   ai_command = pi -p                     # earendil pi; ChatGPT Plus/Claude Pro/Copilot via `pi-ai login`
-#   ai_command = llm                       # Simon Willison's llm (API keys / local)
-#   ai_command = ollama run qwen2.5-coder  # local, free
-ai_command =
+# AI-assisted commit and PR authoring, grouped under the `ai.*` namespace.
+# `ai.command` is a shell command that reads a prompt on stdin and prints a
+# completion on stdout. ziggity treats it as a black box, so the provider,
+# model, key, or subscription all live in that tool, never in ziggity. AI
+# features (the ctrl+g shortcut in the commit dialog, and the auto flags below)
+# appear only when this is set. Examples:
+#   ai.command = pi -p                     # earendil pi; ChatGPT Plus/Claude Pro/Copilot via `pi-ai login`
+#   ai.command = llm                       # Simon Willison's llm (API keys / local)
+#   ai.command = ollama run qwen2.5-coder  # local, free
+ai.command =
 # Start generating automatically when the commit dialog opens (only affects
 # automatic start; ctrl+g manual generation is always available when configured).
-auto_generate_commit_title = false
-auto_generate_commit_description = false
+ai.commit.auto_title = false
+ai.commit.auto_description = false
 # Include ziggity's built-in commit-style guidance in the AI prompts. For the
 # subject: imperative mood, no trailing period, and following the conventions in
 # your recent commits. For the body: don't restate the subject, and explain the
-# motivation rather than the diff. On by default. Set false to hand style entirely
-# to a commit-instructions file (below) or the model. Either way the output format
-# and the commit_summary_limit / commit_body_guide lengths still apply.
-ai_commit_style_defaults = true
+# motivation rather than the diff. On by default. Set false to hand style
+# entirely to an instructions file (below) or the model. Either way the output
+# format and the commit_summary_limit / commit_body_guide lengths still apply.
+ai.commit.style_defaults = true
 #
 # Extra, free-form instructions (style, tone, Conventional Commits, ticket refs,
 # what to emphasize) live in a separate Markdown file, not here, so this file
-# stays small. Ziggity looks for it in this order, and the FIRST it finds wins
-# outright (no merging):
-#   1. <repo>/.ziggity/commit-instructions.md          (per project)
-#   2. <config dir>/ziggity/commit-instructions.md      (global default)
-# where <config dir> is $XDG_CONFIG_HOME (else ~/.config on macOS/Linux, or
-# %APPDATA% on Windows). So a repo file completely overrides your global one.
+# stays small. It is opt-in: UNSET LOADS NOTHING. Set this to the file's path to
+# enable it. A relative path resolves against the directory of THIS config file
+# (so `./commit-instructions.md` means "next to this .ini", whether it is the
+# repo's .ziggity.ini or a global ZIGGITY_CONFIG); an absolute path is used
+# as-is. There is no hidden search of other locations.
+ai.commit.instructions =            # e.g. ./commit-instructions.md
 # The file is injected into the AI prompt AFTER the built-in rules, so it takes
 # precedence over the soft style defaults above (but never over the output format
 # or the length limits). Use optional "# Title" and "# Body" section headings to
@@ -90,17 +91,29 @@ ai_commit_style_defaults = true
 #   # Body
 #   Explain why the change was made. Put "Fixes #123" on its own line at the end.
 #
-# The same ai_command also powers pull request descriptions. On the Branches or
+# For a machine-wide instructions file, keep it beside a global ZIGGITY_CONFIG
+# and use a relative path (resolved next to that config), or give an absolute
+# path:
+#   ai.commit.instructions = ./commit-instructions.md    # next to the global .ini
+#   ai.commit.instructions = /home/you/.config/ziggity/commit-instructions.md
+#
+# The same ai.command also powers pull request descriptions. On the Branches or
 # Commits panel, `ctrl+g` opens an "AI generate" menu with "Generate PR
 # description". On a branch it asks for a base ref (prefilled with the default
 # branch) and describes the branch against it; on a commit it describes that
 # commit (or the current range). The result, a title and a markdown body, opens
 # in a preview you can copy from (y body, t title, a both, or drag to select) and
 # regenerate with r; it is kept for the session, so reopening the same source
-# shows it again without another call. Customize the style with a
-# `pr-instructions.md` file resolved exactly like commit-instructions.md
-# above (repo `<repo>/.ziggity/` overrides the global one), with the same optional
-# `# Title` / `# Body` sections. Remap the key with `key.ai_generate`.
+# shows it again without another call. Customize the style with a PR instructions
+# file; like the commit one it is opt-in (unset loads nothing) and located by
+# this path (relative to this config file's directory, or absolute):
+ai.pr.instructions =                # e.g. ./pr-instructions.md
+# with the same optional `# Title` / `# Body` sections. Remap the key with
+# `key.ai_generate`.
+#
+# Back-compat: the older flat keys still work as aliases (`ai_command`,
+# `auto_generate_commit_title`, `auto_generate_commit_description`,
+# `ai_commit_style_defaults`).
 
 # Seconds between idle background working tree refreshes (git status, run
 # off the interface thread). On a big repo a tight interval makes git status

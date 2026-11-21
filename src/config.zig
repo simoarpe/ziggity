@@ -361,6 +361,17 @@ pub const Config = struct {
     /// output format and the `commit_summary_limit` / `commit_body_guide` lengths
     /// always apply either way. See docs for the commit-instructions file.
     ai_commit_style_defaults: bool = true,
+    /// Path to the commit-instructions file, a prompt fragment appended to the AI
+    /// commit prompt (shared / `# Title` / `# Body` sections). Opt-in: **unset
+    /// loads nothing** (no implicit default location). A relative path resolves
+    /// against the directory of the config file that set it (so a path next to
+    /// `.ziggity.ini`, or next to a global `ZIGGITY_CONFIG`, just works); an
+    /// absolute path is used as-is. Stored already resolved. A common choice is
+    /// `./commit-instructions.md` beside the config.
+    ai_commit_instructions: FixedStr(1024) = .{},
+    /// Path to the pull-request instructions file, like `ai_commit_instructions`
+    /// but for generated PR titles/descriptions. Opt-in: unset loads nothing.
+    ai_pr_instructions: FixedStr(1024) = .{},
     /// When amending (`A`), open the message editor prefilled with the last
     /// commit's message so you can reword it while folding in the staged
     /// changes. Default false keeps the classic amend that reuses the message
@@ -477,10 +488,23 @@ pub const Config = struct {
             else => |e| return e,
         };
         defer allocator.free(bytes);
-        self.applyBytes(bytes);
+        // Relative path values (the AI instruction files) resolve against the
+        // directory of this config file.
+        const base_dir = std.fs.path.dirname(path) orelse ".";
+        self.applyBytesIn(bytes, base_dir);
     }
 
+    /// Apply config text whose relative path values resolve against the current
+    /// working directory (no owning config file). Used by tests and callers that
+    /// have raw bytes rather than a file.
     pub fn applyBytes(self: *Config, bytes: []const u8) void {
+        self.applyBytesIn(bytes, "");
+    }
+
+    /// Apply config text; relative path values (the AI instruction files) resolve
+    /// against `base_dir` (the directory of the config file they came from), or
+    /// are kept as-is when `base_dir` is empty.
+    fn applyBytesIn(self: *Config, bytes: []const u8, base_dir: []const u8) void {
         var lines = std.mem.splitScalar(u8, bytes, '\n');
         while (lines.next()) |raw_line| {
             const no_cr = std.mem.trim(u8, raw_line, "\r");
@@ -490,11 +514,24 @@ pub const Config = struct {
             const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
             const key = std.mem.trim(u8, line[0..eq], " \t");
             const value = std.mem.trim(u8, line[eq + 1 ..], " \t");
-            self.applyEntry(key, value);
+            self.applyEntry(key, value, base_dir);
         }
     }
 
-    fn applyEntry(self: *Config, key: []const u8, value: []const u8) void {
+    /// Resolve a config path `value` against `base_dir` (the directory of the
+    /// config file that declared it). An empty or absolute value is returned
+    /// unchanged; a relative value (with any leading `./` trimmed) becomes
+    /// `<base_dir>/<value>`. Writes into `buf`; returns the original value when
+    /// `base_dir` is empty or the result does not fit.
+    fn resolveConfigPath(base_dir: []const u8, value: []const u8, buf: []u8) []const u8 {
+        if (value.len == 0 or base_dir.len == 0 or std.fs.path.isAbsolute(value)) return value;
+        var v = value;
+        if (std.mem.startsWith(u8, v, "./")) v = v[2..];
+        const bd = std.mem.trimEnd(u8, base_dir, "/");
+        return std.fmt.bufPrint(buf, "{s}/{s}", .{ bd, v }) catch value;
+    }
+
+    fn applyEntry(self: *Config, key: []const u8, value: []const u8, base_dir: []const u8) void {
         if (std.mem.eql(u8, key, "side_panel_width_percent")) {
             const parsed = std.fmt.parseInt(u8, value, 10) catch return;
             self.side_panel_width_percent = @min(70, @max(20, parsed));
@@ -642,6 +679,28 @@ pub const Config = struct {
             if (parseBool(value)) |on| self.editor.in_terminal = on;
             return;
         }
+        // The `ai.*` family groups every AI setting under one visible namespace.
+        // The older flat keys (ai_command, auto_generate_commit_title/description,
+        // ai_commit_style_defaults) are still accepted as aliases, handled above.
+        if (std.mem.startsWith(u8, key, "ai.")) {
+            const sub = key["ai.".len..];
+            if (std.mem.eql(u8, sub, "command")) {
+                self.ai_command.set(value);
+            } else if (std.mem.eql(u8, sub, "commit.auto_title")) {
+                if (parseBool(value)) |on| self.auto_generate_commit_title = on;
+            } else if (std.mem.eql(u8, sub, "commit.auto_description")) {
+                if (parseBool(value)) |on| self.auto_generate_commit_description = on;
+            } else if (std.mem.eql(u8, sub, "commit.style_defaults")) {
+                if (parseBool(value)) |on| self.ai_commit_style_defaults = on;
+            } else if (std.mem.eql(u8, sub, "commit.instructions")) {
+                var buf: [1024]u8 = undefined;
+                self.ai_commit_instructions.set(resolveConfigPath(base_dir, value, &buf));
+            } else if (std.mem.eql(u8, sub, "pr.instructions")) {
+                var buf: [1024]u8 = undefined;
+                self.ai_pr_instructions.set(resolveConfigPath(base_dir, value, &buf));
+            }
+            return; // an unknown ai.* key is ignored, like any other
+        }
         if (std.mem.startsWith(u8, key, "skip_confirm.")) {
             const name = key["skip_confirm.".len..];
             const on = parseBool(value) orelse return;
@@ -771,6 +830,70 @@ test "commit_summary_limit parses and defaults to 50" {
     var off: Config = .{};
     off.applyBytes("commit_summary_limit = 0");
     try std.testing.expectEqual(@as(u16, 0), off.commit_summary_limit);
+}
+
+test "ai.* namespace sets the AI settings, with the old flat keys as aliases" {
+    // Instruction paths are empty by default (the loader fills in the .ziggity/
+    // defaults), and the style defaults are on.
+    const def: Config = .{};
+    try std.testing.expectEqual(@as(usize, 0), def.ai_commit_instructions.get().len);
+    try std.testing.expectEqual(@as(usize, 0), def.ai_pr_instructions.get().len);
+    try std.testing.expect(def.ai_commit_style_defaults);
+
+    var cfg: Config = .{};
+    cfg.applyBytes(
+        \\ai.command = llm -m gpt
+        \\ai.commit.auto_title = true
+        \\ai.commit.auto_description = yes
+        \\ai.commit.style_defaults = false
+        \\ai.commit.instructions = docs/commit.md
+        \\ai.pr.instructions = /abs/pr.md
+    );
+    try std.testing.expectEqualStrings("llm -m gpt", cfg.ai_command.get());
+    try std.testing.expect(cfg.auto_generate_commit_title);
+    try std.testing.expect(cfg.auto_generate_commit_description);
+    try std.testing.expect(!cfg.ai_commit_style_defaults);
+    // No owning config file (applyBytes): relative paths are kept as-is.
+    try std.testing.expectEqualStrings("docs/commit.md", cfg.ai_commit_instructions.get());
+    try std.testing.expectEqualStrings("/abs/pr.md", cfg.ai_pr_instructions.get());
+
+    // With an owning config-file directory, a relative instruction path resolves
+    // against it (and `./` is trimmed); an absolute one is kept.
+    var rel: Config = .{};
+    rel.applyBytesIn(
+        \\ai.commit.instructions = ./commit-instructions.md
+        \\ai.pr.instructions = /etc/pr.md
+    , "/home/me/.config/ziggity");
+    try std.testing.expectEqualStrings("/home/me/.config/ziggity/commit-instructions.md", rel.ai_commit_instructions.get());
+    try std.testing.expectEqualStrings("/etc/pr.md", rel.ai_pr_instructions.get());
+
+    // The pre-namespace flat keys still work (back-compat aliases).
+    var old: Config = .{};
+    old.applyBytes(
+        \\ai_command = pi -p
+        \\auto_generate_commit_title = true
+        \\ai_commit_style_defaults = false
+    );
+    try std.testing.expectEqualStrings("pi -p", old.ai_command.get());
+    try std.testing.expect(old.auto_generate_commit_title);
+    try std.testing.expect(!old.ai_commit_style_defaults);
+
+    // An unknown ai.* key is ignored, like any other unknown key.
+    var unk: Config = .{};
+    unk.applyBytes("ai.bogus = whatever");
+    try std.testing.expectEqual(@as(usize, 0), unk.ai_command.get().len);
+}
+
+test "resolveConfigPath resolves relative values against the config-file dir" {
+    var buf: [1024]u8 = undefined;
+    // Relative resolves against base_dir; a trailing slash on base_dir is fine.
+    try std.testing.expectEqualStrings("/cfg/x.md", Config.resolveConfigPath("/cfg", "x.md", &buf));
+    try std.testing.expectEqualStrings("/cfg/x.md", Config.resolveConfigPath("/cfg/", "./x.md", &buf));
+    // Absolute values are kept as-is.
+    try std.testing.expectEqualStrings("/abs/x.md", Config.resolveConfigPath("/cfg", "/abs/x.md", &buf));
+    // Empty value or empty base_dir: unchanged.
+    try std.testing.expectEqualStrings("", Config.resolveConfigPath("/cfg", "", &buf));
+    try std.testing.expectEqualStrings("x.md", Config.resolveConfigPath("", "x.md", &buf));
 }
 
 test "commit_body_guide parses and defaults to 72" {

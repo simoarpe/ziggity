@@ -257,7 +257,7 @@ rather than a blocker.
 <p align="center"><i><code>ctrl+g</code> drafts the subject from the staged diff, then the body to match, each with its own spinner while it works.</i></p>
 
 The part that keeps ziggity small: it ships no model and calls no API of its
-own. You point `ai_command` at a command that reads a prompt on standard input
+own. You point `ai.command` at a command that reads a prompt on standard input
 and prints the completion on standard output, so the provider, model, key, and
 subscription all live in that tool. The binary stays a tiny static download.
 
@@ -268,15 +268,16 @@ different? [`llm`](https://github.com/simonw/llm) drives any provider you hold a
 API key for. Want it fully local? [`ollama run <model>`](https://github.com/ollama/ollama)
 keeps it on your machine. Nothing is baked into ziggity either way.
 
-The style is steerable too: drop a `commit-instructions.md` in `<repo>/.ziggity/`
-(or your global config dir) for per-project conventions, tone, or Conventional
-Commits rules, and turn ziggity's built-in guidance off with
-`ai_commit_style_defaults = false` when you want your file to decide everything.
+The style is steerable too: point `ai.commit.instructions` at a Markdown file
+(for example `.ziggity/commit-instructions.md`) for per-project conventions,
+tone, or Conventional Commits rules, and turn ziggity's built-in guidance off
+with `ai.commit.style_defaults = false` when you want your file to decide
+everything.
 
 The same command drafts pull request descriptions. On the Branches or Commits
 panel, `ctrl+g` generates a title and markdown body from a branch (against a base
 you pick) or a commit, in a preview you copy from, regenerate, or change the base
-of. A `pr-instructions.md` file steers it the same way.
+of. Point `ai.pr.instructions` at a Markdown file to steer its style the same way.
 
 lazygit has no built-in commit message or PR description drafting; you would bolt
 an external tool on through a custom command, without the in-dialog per-field

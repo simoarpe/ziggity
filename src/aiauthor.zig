@@ -113,7 +113,7 @@ pub const Context = struct {
 
 /// Gather the git context, build the field's prompt, run `command`, and return
 /// the normalized result (caller owns it). Runs off the UI thread.
-pub fn generate(allocator: std.mem.Allocator, git: *git_mod.Git, command: []const u8, field: Field, current_title: []const u8, limits: Limits, source: DiffSource, err_out: *?[]u8) ![]u8 {
+pub fn generate(allocator: std.mem.Allocator, git: *git_mod.Git, command: []const u8, field: Field, current_title: []const u8, limits: Limits, source: DiffSource, instructions_path: []const u8, err_out: *?[]u8) ![]u8 {
     err_out.* = null;
     const diff = switch (source.kind) {
         .staged => try git.stagedDiff(),
@@ -145,8 +145,9 @@ pub fn generate(allocator: std.mem.Allocator, git: *git_mod.Git, command: []cons
         .diff_label = if (staged) "Staged diff" else "Diff",
     };
 
-    // Optional per-project / global commit-instructions file, scoped to this field.
-    const raw_instr = loadInstructions(allocator, git, "commit-instructions.md");
+    // Optional commit-instructions file (opt-in via the config path), scoped to
+    // this field.
+    const raw_instr = loadInstructions(allocator, git, instructions_path);
     defer if (raw_instr) |r| allocator.free(r);
     const instr = if (raw_instr) |r| try composeFieldInstructions(allocator, r, field) else try allocator.dupe(u8, "");
     defer allocator.free(instr);
@@ -200,47 +201,15 @@ const max_instructions_bytes: usize = 16 * 1024;
 /// heading is `shared` (goes to both title and body).
 const Bucket = enum { shared, title, body };
 
-/// The global config directory ziggity looks in, mirroring the state-dir logic
-/// in recentrepos: `$XDG_CONFIG_HOME/ziggity`, else on Windows `%APPDATA%\ziggity`,
-/// else `$HOME/.config/ziggity`. Caller frees. Null when no home is configured.
-fn configDir(allocator: std.mem.Allocator, environ: *std.process.Environ.Map) !?[]u8 {
-    if (environ.get("XDG_CONFIG_HOME")) |x| {
-        if (x.len > 0) return try std.fs.path.join(allocator, &.{ x, "ziggity" });
-    }
-    if (@import("builtin").os.tag == .windows) {
-        if (environ.get("APPDATA")) |a| {
-            if (a.len > 0) return try std.fs.path.join(allocator, &.{ a, "ziggity" });
-        }
-    }
-    if (environ.get("HOME")) |h| {
-        if (h.len > 0) return try std.fs.path.join(allocator, &.{ h, ".config", "ziggity" });
-    }
-    return null;
-}
-
-/// Load a custom instructions file (`filename`, e.g. "commit-instructions.md" or
-/// "pr-instructions.md"), if any. Whole-file resolution, first match wins (no
-/// merge): the repo file completely overrides the global one.
-///   1. <repo>/.ziggity/<filename>
-///   2. <config dir>/<filename>   (see `configDir`)
-/// Returns owned bytes, or null when neither exists or is readable.
-pub fn loadInstructions(allocator: std.mem.Allocator, git: *git_mod.Git, filename: []const u8) ?[]u8 {
-    if (std.fs.path.join(allocator, &.{ git.root, ".ziggity", filename })) |repo_path| {
-        defer allocator.free(repo_path);
-        if (std.Io.Dir.readFileAlloc(.cwd(), git.io, repo_path, allocator, .limited(max_instructions_bytes))) |bytes| {
-            return bytes;
-        } else |_| {}
-    } else |_| {}
-    if (configDir(allocator, git.environ) catch null) |dir| {
-        defer allocator.free(dir);
-        if (std.fs.path.join(allocator, &.{ dir, filename })) |gpath| {
-            defer allocator.free(gpath);
-            if (std.Io.Dir.readFileAlloc(.cwd(), git.io, gpath, allocator, .limited(max_instructions_bytes))) |bytes| {
-                return bytes;
-            } else |_| {}
-        } else |_| {}
-    }
-    return null;
+/// Load the instructions file at `path` (the config value, already resolved by
+/// the config layer against the directory of the config file that declared it,
+/// so it is absolute in normal use). An **empty path loads nothing** (returns
+/// null): the file is opt-in, with no implicit default location and no hidden
+/// search. Returns owned bytes, or null when the path is empty, or the file is
+/// absent or unreadable.
+pub fn loadInstructions(allocator: std.mem.Allocator, git: *git_mod.Git, path: []const u8) ?[]u8 {
+    if (path.len == 0) return null;
+    return std.Io.Dir.readFileAlloc(.cwd(), git.io, path, allocator, .limited(max_instructions_bytes)) catch null;
 }
 
 /// Recognize a section-heading line, or null for ordinary content. Accepts a
@@ -419,11 +388,12 @@ pub const DocContext = struct {
 const max_commit_log_bytes: usize = 8 * 1024;
 
 /// Generate a pull request title + markdown body from `ctx`, honoring an optional
-/// `pr-instructions.md` (repo overrides global; `# Title` / `# Body` sections
-/// route to the title vs the body). One AI call returns "title\n\n<body>", which
-/// is split. Runs off the UI thread. Caller owns the result.
-pub fn generatePrDoc(allocator: std.mem.Allocator, git: *git_mod.Git, command: []const u8, ctx: DocContext) !DocResult {
-    const raw_instr = loadInstructions(allocator, git, "pr-instructions.md");
+/// instructions file at `instructions_path` (the config value; empty loads none),
+/// whose `# Title` / `# Body` sections route to the title vs the body. One AI
+/// call returns "title\n\n<body>", which is split. Runs off the UI thread.
+/// Caller owns the result.
+pub fn generatePrDoc(allocator: std.mem.Allocator, git: *git_mod.Git, command: []const u8, ctx: DocContext, instructions_path: []const u8) !DocResult {
+    const raw_instr = loadInstructions(allocator, git, instructions_path);
     defer if (raw_instr) |r| allocator.free(r);
     const title_instr = if (raw_instr) |r| try composeFieldInstructions(allocator, r, .title) else try allocator.dupe(u8, "");
     defer allocator.free(title_instr);
