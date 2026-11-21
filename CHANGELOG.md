@@ -16,6 +16,15 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+### Changed
+- The `/` filter (Files, branches, commits, remotes, tags) now matches by
+  substring by default, instead of a scattered subsequence. Each
+  whitespace-separated term must appear as a run of characters, so typing `di`
+  keeps `diff` but no longer `android-support`. Matching stays smart case:
+  lowercase matches any case, and an uppercase letter makes that term
+  case-sensitive. A new `filter_mode` setting (`substring` default, or `fuzzy`)
+  restores the old scattered-subsequence matching.
+
 ### Added
 - `e` now opens your editor at the line you are looking at, as lazygit does:
   the cursor line in the staging or patch view, or the top line of a focused

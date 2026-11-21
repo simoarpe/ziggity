@@ -191,6 +191,13 @@ fetch_prune_mode = git             # git (default: follow git's fetch.prune) | o
 # the branch has local commits, since a pull with none can only fast-forward and
 # there is nothing to choose.
 pull_mode = git                    # git (default: follow git's pull.rebase) | menu
+# How the live `/` name filter (Files, branches, commits, remotes, tags)
+# matches. `substring` (default) requires each whitespace-separated term to
+# appear as a contiguous run, so typing `di` keeps `diff` but not `android`.
+# `fuzzy` matches characters in order but not necessarily adjacent, so `di` also
+# keeps `android`. Both are smart case: lowercase matches any case, an uppercase
+# letter makes that term case-sensitive.
+filter_mode = substring            # substring (default) | fuzzy
 # HEAD log ordering. `date` (default) is git's native reverse-chronological
 # order, newest commit first. `topo` keeps a branch's commits contiguous so the
 # graph lanes stay clean, at the cost of a commit's row no longer following its

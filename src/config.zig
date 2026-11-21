@@ -1,5 +1,6 @@
 const std = @import("std");
 const model = @import("model.zig");
+const textmatch = @import("textmatch.zig");
 
 pub const Binding = struct {
     codepoint: u21,
@@ -424,6 +425,12 @@ pub const Config = struct {
     /// `pull.rebase` config; `menu` opens a menu to pick merge / rebase /
     /// fast-forward-only for each pull.
     pull_mode: model.PullMode = .git,
+    /// How the live `/` name filter (Files, branches, commits, remotes, tags)
+    /// matches: `substring` (default) requires each whitespace-separated term to
+    /// appear as a contiguous run, so `di` keeps `diff` but not `android`;
+    /// `fuzzy` matches characters in order but not necessarily adjacent, so `di`
+    /// also keeps `android`. Both are smart case.
+    filter_mode: textmatch.FilterMode = .substring,
     /// HEAD log ordering: `date` (default — git's native reverse-chronological
     /// order, newest commit first), `topo` (keeps a branch's commits contiguous
     /// for clean graph lanes), or `author_date` (reverse-chronological by the
@@ -601,6 +608,10 @@ pub const Config = struct {
         }
         if (std.mem.eql(u8, key, "pull_mode")) {
             if (std.meta.stringToEnum(model.PullMode, value)) |v| self.pull_mode = v;
+            return;
+        }
+        if (std.mem.eql(u8, key, "filter_mode")) {
+            if (std.meta.stringToEnum(textmatch.FilterMode, value)) |v| self.filter_mode = v;
             return;
         }
         if (std.mem.eql(u8, key, "log_order")) {
@@ -812,6 +823,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     try std.testing.expectEqual(model.CommitGraphMode.on, cfg.commit_graph); // graph on by default
     try std.testing.expectEqual(model.CommitGraphScope.current, cfg.commit_graph_scope); // current branch by default
     try std.testing.expectEqual(model.PullMode.git, cfg.pull_mode); // honor git pull.rebase by default
+    try std.testing.expectEqual(textmatch.FilterMode.substring, cfg.filter_mode); // substring by default
     try std.testing.expectEqual(model.LogOrder.date, cfg.log_order); // date order by default
     try std.testing.expect(!cfg.aiConfigured()); // no ai_command -> AI unavailable
     try std.testing.expect(!cfg.auto_generate_commit_title);
@@ -836,6 +848,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
         \\commit_graph_scope = all
         \\fetch_prune_mode = on
         \\pull_mode = menu
+        \\filter_mode = fuzzy
         \\log_order = topo
         \\expand_focused_side_panel = true
         \\expanded_side_panel_weight = 3
@@ -847,6 +860,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     try std.testing.expectEqual(model.CommitGraphScope.all, cfg.commit_graph_scope);
     try std.testing.expectEqual(model.FetchPruneMode.on, cfg.fetch_prune_mode); // default git, overridden
     try std.testing.expectEqual(model.PullMode.menu, cfg.pull_mode);
+    try std.testing.expectEqual(textmatch.FilterMode.fuzzy, cfg.filter_mode); // default substring, overridden
     try std.testing.expectEqual(model.LogOrder.topo, cfg.log_order);
     try std.testing.expect(cfg.aiConfigured());
     try std.testing.expectEqualStrings("pi -p", cfg.ai_command.get());

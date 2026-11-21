@@ -9,16 +9,36 @@ pub fn localNameForRemote(remote_name: []const u8) []const u8 {
     return remote_name;
 }
 
-/// Fuzzy file filtering: each whitespace-separated term
-/// must appear in the path as a smart-case subsequence (its characters in
-/// order, not necessarily contiguous). A term is case-sensitive iff it has an
-/// uppercase letter.
-pub fn pathMatchesFilter(path: []const u8, filter: []const u8) bool {
+/// How the live `/` filter matches each term against a name.
+/// - `.substring` (the default, as in the referenced client): the term must
+///   appear as a contiguous run, so "di" keeps "diff" but not "android".
+/// - `.fuzzy`: the term's characters must appear in order but not necessarily
+///   adjacent, so "di" also keeps "android" (an interior d...i).
+pub const FilterMode = enum { substring, fuzzy };
+
+/// Whether `path` passes `filter` under `mode`: every whitespace-separated term
+/// must match (in any order). Both modes are smart case, a term is
+/// case-sensitive iff it has an uppercase letter. An empty filter matches
+/// everything.
+pub fn pathMatchesFilter(path: []const u8, filter: []const u8, mode: FilterMode) bool {
     var terms = std.mem.tokenizeAny(u8, filter, " \t\r\n");
     while (terms.next()) |term| {
-        if (!fuzzySubsequence(path, term)) return false;
+        const ok = switch (mode) {
+            .substring => smartCaseContains(path, term),
+            .fuzzy => fuzzySubsequence(path, term),
+        };
+        if (!ok) return false;
     }
     return true;
+}
+
+/// Whether `needle` occurs in `haystack` as a contiguous substring. Smart-case:
+/// case-insensitive unless `needle` has an uppercase letter, then that term is
+/// matched case-sensitively. An empty needle matches.
+fn smartCaseContains(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    const sensitive = containsAsciiUppercase(needle);
+    return substringIndex(haystack, needle, sensitive) != null;
 }
 
 /// Rank a completion candidate (a ref name) against what the user has typed so
@@ -85,25 +105,39 @@ fn containsAsciiUppercase(bytes: []const u8) bool {
     return false;
 }
 
-test "path filter matches fuzzy subsequences with smart case" {
-    // Contiguous substrings still match.
-    try std.testing.expect(pathMatchesFilter("src/App.zig", "app"));
-    try std.testing.expect(pathMatchesFilter("src/App.zig", "App"));
-    try std.testing.expect(!pathMatchesFilter("src/App.zig", "APP"));
-    try std.testing.expect(pathMatchesFilter("README.md", "read"));
+test "path filter matches smart-case substrings, each whitespace term" {
+    // Contiguous substrings match, with smart case.
+    try std.testing.expect(pathMatchesFilter("src/App.zig", "app", .substring));
+    try std.testing.expect(pathMatchesFilter("src/App.zig", "App", .substring));
+    try std.testing.expect(!pathMatchesFilter("src/App.zig", "APP", .substring));
+    try std.testing.expect(pathMatchesFilter("README.md", "read", .substring));
     // Whitespace-separated terms each match independently (any order).
-    try std.testing.expect(pathMatchesFilter("integration-testing", "int test"));
-    try std.testing.expect(pathMatchesFilter("integration-testing", "test int"));
-    try std.testing.expect(!pathMatchesFilter("integration-testing", "int missing"));
-    // Non-contiguous subsequences now match (the fuzzy part).
-    try std.testing.expect(pathMatchesFilter("src/main.zig", "mnzig"));
-    try std.testing.expect(pathMatchesFilter("src/main.zig", "smz"));
-    // Characters must still appear in order.
-    try std.testing.expect(!pathMatchesFilter("src/main.zig", "zigm"));
-    try std.testing.expect(!pathMatchesFilter("src/main.zig", "model"));
+    try std.testing.expect(pathMatchesFilter("integration-testing", "int test", .substring));
+    try std.testing.expect(pathMatchesFilter("integration-testing", "test int", .substring));
+    try std.testing.expect(!pathMatchesFilter("integration-testing", "int missing", .substring));
+    // Only contiguous substrings match: a scattered subsequence does not, so
+    // "di" keeps "diff" but not "android-support".
+    try std.testing.expect(pathMatchesFilter("diff", "di", .substring));
+    try std.testing.expect(!pathMatchesFilter("android-support", "di", .substring));
+    try std.testing.expect(!pathMatchesFilter("src/main.zig", "mnzig", .substring));
+    try std.testing.expect(!pathMatchesFilter("src/main.zig", "smz", .substring));
     // Empty / whitespace filters match everything.
-    try std.testing.expect(pathMatchesFilter("src/main.zig", ""));
-    try std.testing.expect(pathMatchesFilter("src/main.zig", "  \t  "));
+    try std.testing.expect(pathMatchesFilter("src/main.zig", "", .substring));
+    try std.testing.expect(pathMatchesFilter("src/main.zig", "  \t  ", .substring));
+}
+
+test "path filter in fuzzy mode matches scattered subsequences" {
+    // Fuzzy mode accepts characters in order but not contiguous, so the loose
+    // matches the substring mode rejects come back.
+    try std.testing.expect(pathMatchesFilter("android-support", "di", .fuzzy));
+    try std.testing.expect(pathMatchesFilter("src/main.zig", "mnzig", .fuzzy));
+    try std.testing.expect(pathMatchesFilter("src/main.zig", "smz", .fuzzy));
+    // Order still matters, and smart case still applies.
+    try std.testing.expect(!pathMatchesFilter("src/main.zig", "zigm", .fuzzy));
+    try std.testing.expect(!pathMatchesFilter("src/App.zig", "APP", .fuzzy));
+    // Each whitespace term matches independently; empty matches everything.
+    try std.testing.expect(pathMatchesFilter("integration-testing", "itg tst", .fuzzy));
+    try std.testing.expect(pathMatchesFilter("src/main.zig", "", .fuzzy));
 }
 
 test "suggestion rank orders prefix before substring before subsequence" {

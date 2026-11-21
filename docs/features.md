@@ -199,8 +199,9 @@ The animation itself is in the [README](../README.md).
   chains compressed to `a/b/c`. Selecting a folder shows the combined diff
   beneath it; in the Files panel `space` stages the whole folder. Set
   `show_file_tree = true` to start in tree mode on every launch.
-- Live fuzzy path filtering (smart case subsequence) with recent filter
-  recall, plus a status filter (staged, unstaged, tracked, untracked).
+- Live path filtering (smart case substring, each whitespace-separated term;
+  set `filter_mode = fuzzy` for scattered-subsequence matching) with recent
+  filter recall, plus a status filter (staged, unstaged, tracked, untracked).
 - Discard a file, or a whole folder in tree view (`d` on a directory), via a
   menu (all, or unstaged only), or discard everything (`D`, confirmed). Ignore
   or exclude a file (`i`): a menu adds it to the shared, committed `.gitignore`

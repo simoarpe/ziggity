@@ -6970,9 +6970,9 @@ pub const App = struct {
             self.file_display_filter.matches(file);
         if (!status_ok) return false;
         if (self.file_filter.len == 0) return true;
-        if (textmatch.pathMatchesFilter(file.path, self.file_filter)) return true;
+        if (textmatch.pathMatchesFilter(file.path, self.file_filter, self.config.filter_mode)) return true;
         if (file.previous_path) |previous| {
-            return textmatch.pathMatchesFilter(previous, self.file_filter);
+            return textmatch.pathMatchesFilter(previous, self.file_filter, self.config.filter_mode);
         }
         return false;
     }
@@ -7001,7 +7001,7 @@ pub const App = struct {
     /// matches everything, so the whole Branches panel behaves as before.
     pub fn branchMatchesFilter(self: *const App, branch: model.Branch) bool {
         if (self.branch_filter.len == 0) return true;
-        return textmatch.pathMatchesFilter(branch.name, self.branch_filter);
+        return textmatch.pathMatchesFilter(branch.name, self.branch_filter, self.config.filter_mode);
     }
 
     /// Number of local branches matching the active filter (the visible count).
@@ -7042,7 +7042,7 @@ pub const App = struct {
     /// filter matches everything, so the drilled list behaves as before.
     pub fn remoteBranchMatchesFilter(self: *const App, branch: model.Branch) bool {
         if (self.remote_branch_filter.len == 0) return true;
-        return textmatch.pathMatchesFilter(branch.name, self.remote_branch_filter);
+        return textmatch.pathMatchesFilter(branch.name, self.remote_branch_filter, self.config.filter_mode);
     }
 
     /// Number of drilled-remote branches matching the active filter.
@@ -7436,7 +7436,7 @@ pub const App = struct {
     /// Whether a tag passes the active name filter (empty matches everything).
     pub fn tagMatchesFilter(self: *const App, tag: model.Tag) bool {
         if (self.tag_filter.len == 0) return true;
-        return textmatch.pathMatchesFilter(tag.name, self.tag_filter);
+        return textmatch.pathMatchesFilter(tag.name, self.tag_filter, self.config.filter_mode);
     }
 
     /// Number of tags matching the active filter (the visible count).
