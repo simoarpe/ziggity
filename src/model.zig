@@ -24,6 +24,12 @@ pub const CommitGraphScope = enum { current, all };
 /// / fast-forward-only for each pull.
 pub const PullMode = enum { git, menu };
 
+/// Panel orientation on small terminals. `auto` (default) stacks the side panels
+/// above the main panel when the terminal is narrow and tall (phone-like), and
+/// keeps them side by side otherwise. `always` forces the stacked layout and
+/// `never` keeps the side-by-side one.
+pub const PortraitMode = enum { auto, always, never };
+
 /// Whether `fetch` (`f`) prunes remote-tracking branches that no longer exist on
 /// the remote: `git` (the default) defers to the user's own `fetch.prune` git
 /// config, `on` always prunes, `off` never does.

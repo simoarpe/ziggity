@@ -16,6 +16,16 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+### Added
+- Small and mobile terminals are now supported. ziggity renders down to a 10x9
+  terminal, squashing unfocused side panels to their title bars when the window
+  is short. On a narrow, tall terminal (a phone, for example) it switches to a
+  stacked "portrait" layout: the side panels sit above the main panel instead of
+  beside it. A new `portrait_mode` setting (`auto` default, or `always` /
+  `never`) controls this; `auto` stacks when the width is 84 or less and the
+  height is 46 or more. In the stacked layout `side_panel_width_percent` sets the
+  side section's share of the height.
+
 ## [0.66.0] - 2026-11-21
 
 ### Changed

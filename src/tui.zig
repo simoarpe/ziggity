@@ -1569,6 +1569,17 @@ fn sidePanelWidth(total: u16, percent: u8) u16 {
     return @max(@as(u16, 20), @min(raw, main_floor));
 }
 
+/// Height of the stacked side section in portrait mode: `percent` of the body
+/// height (the same knob as the landscape width), clamped to leave a few rows
+/// for the main section below and keep the side section tall enough to frame the
+/// Status panel plus a list.
+fn sideSectionHeight(body_h: u16, percent: u8) u16 {
+    const raw: u16 = @intCast((@as(u32, body_h) * percent) / 100);
+    const lo: u16 = @min(body_h, 8);
+    const hi: u16 = @max(lo, body_h -| 6);
+    return std.math.clamp(raw, lo, hi);
+}
+
 const SidePanelHeights = struct { status: u16, files: u16, branches: u16, commits: u16, stash: u16 };
 
 /// Side-panel sizing: the status panel is a fixed height; files,
@@ -1585,7 +1596,11 @@ fn sidePanelHeights(body_h: u16, focused: model.Focus, accordion: bool, expanded
     // filtered at once, so each active filter beyond the first gets its own row.
     // Collapsed (config `collapse_status`), it is a single title-bar row and its
     // filter rows are dropped, so the space flows to the list panels below.
-    const status_h: u16 = if (collapse_status) 1 else @min(body_h, 5 + extra_status_rows);
+    // Cap the Status height so the four list panels still get at least one row
+    // each when the column is tiny (a stacked/narrow terminal), avoiding an
+    // overflow past the body.
+    const status_cap: u16 = body_h -| 4;
+    const status_h: u16 = if (collapse_status) @min(@as(u16, 1), body_h) else @min(@min(body_h, 5 + extra_status_rows), @max(status_cap, 1));
     const stash_fixed: u16 = @min(body_h -| status_h, 3);
     const stash_focused = focused == .stash;
 
@@ -1723,8 +1738,11 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     root.clear();
     root.hideCursor();
 
-    if (root.width < 50 or root.height < 15) {
-        _ = root.printSegment(.{ .text = "ziggity needs at least 50x15", .style = styles().warning }, .{
+    // Only refuse to draw when there is genuinely no room for a framed panel.
+    // Everything above this renders, squashing panels (and, on a narrow, tall
+    // terminal, stacking them) to fit.
+    if (root.width < 10 or root.height < 9) {
+        _ = root.printSegment(.{ .text = "ziggity needs at least 10x9", .style = styles().warning }, .{
             .row_offset = 0,
             .col_offset = 0,
             .wrap = .none,
@@ -1739,35 +1757,73 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     const footer_w = root.width -| 1; // the footer child is indented one column
     const bottom_h: u16 = @min(footerHeight(app, footer_w), @max(1, root.height / 2));
     const body_h = root.height - bottom_h;
-    // Screen mode drives the split: `full` on the main panel hides the side
-    // column (side_w = 0, main fills); `full` on a side panel hides the main
-    // panel instead (side_w = full width, main_w = 0). `half` just enlarges the
-    // focused side panel via the accordion.
-    const side_w = if (app.mainFullscreen())
-        0
-    else if (app.sidePanelFullscreen())
-        root.width
-    else
-        sidePanelWidth(root.width, app.config.side_panel_width_percent);
-    const main_w = root.width - side_w;
+    // Panel geometry. Landscape puts the side column beside the main panel;
+    // portrait (a narrow, tall terminal) stacks the side section above it. Either
+    // way: `pw` is each side panel's width, `side_body` the height the side panels
+    // share, and `mx/my/mw/mh` the main panel's rectangle (mw == 0 hides it).
+    // Screen mode `full` gives one section the whole body (the other is 0); `half`
+    // just enlarges the focused side panel via the accordion.
+    const portrait = app.usePortraitMode(root.width, root.height);
+    var pw: u16 = undefined;
+    var side_body: u16 = undefined;
+    var mx: u16 = undefined;
+    var my: u16 = undefined;
+    var mw: u16 = undefined;
+    var mh: u16 = undefined;
+    if (portrait) {
+        pw = root.width; // side panels span the full width, stacked
+        if (app.mainFullscreen()) {
+            side_body = 0;
+            mx = 0;
+            my = 0;
+            mw = root.width;
+            mh = body_h;
+        } else if (app.sidePanelFullscreen()) {
+            side_body = body_h;
+            mx = 0;
+            my = 0;
+            mw = 0;
+            mh = 0;
+        } else {
+            const sec = sideSectionHeight(body_h, app.config.side_panel_width_percent);
+            side_body = sec;
+            mx = 0;
+            my = sec;
+            mw = root.width;
+            mh = body_h -| sec;
+        }
+    } else {
+        const side_w = if (app.mainFullscreen())
+            0
+        else if (app.sidePanelFullscreen())
+            root.width
+        else
+            sidePanelWidth(root.width, app.config.side_panel_width_percent);
+        pw = side_w;
+        side_body = body_h;
+        mx = side_w;
+        my = 0;
+        mw = root.width - side_w;
+        mh = body_h;
+    }
 
     var y: u16 = 0;
     const heights = sidePanelHeights(
-        body_h,
+        side_body,
         app.contentFocus(),
         app.accordionActive(),
         app.config.expanded_side_panel_weight,
         app.statusIndicatorRows() -| 1, // one indicator line fits the base height; the rest add a row each
         app.statusCollapsed(),
     );
-    // Full mode on a side panel gives that one panel the whole body; the others
-    // collapse to nothing (their draw calls are height-guarded below).
+    // Full mode on a side panel gives that one panel the whole side section; the
+    // others collapse to nothing (their draw calls are height-guarded below).
     const fs: ?model.Focus = if (app.sidePanelFullscreen()) app.contentFocus() else null;
-    const status_h = if (fs) |f| (if (f == .status) body_h else 0) else heights.status;
-    const files_h = if (fs) |f| (if (f == .files) body_h else 0) else heights.files;
-    const branches_h = if (fs) |f| (if (f == .branches) body_h else 0) else heights.branches;
-    const commits_h = if (fs) |f| (if (f == .commits) body_h else 0) else heights.commits;
-    const stash_h = if (fs) |f| (if (f == .stash) body_h else 0) else heights.stash;
+    const status_h = if (fs) |f| (if (f == .status) side_body else 0) else heights.status;
+    const files_h = if (fs) |f| (if (f == .files) side_body else 0) else heights.files;
+    const branches_h = if (fs) |f| (if (f == .branches) side_body else 0) else heights.branches;
+    const commits_h = if (fs) |f| (if (f == .commits) side_body else 0) else heights.commits;
+    const stash_h = if (fs) |f| (if (f == .stash) side_body else 0) else heights.stash;
 
     // Sync each list panel's view scroll to its visible height (inner = panel
     // height minus the border) before drawing: re-anchors to the selection if it
@@ -1779,12 +1835,12 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
 
     // Capture panel hit-boxes for mouse handling.
     app.panel_rects = .{
-        .{ .focus = .status, .x = 0, .y = 0, .w = side_w, .h = status_h },
-        .{ .focus = .files, .x = 0, .y = status_h, .w = side_w, .h = files_h },
-        .{ .focus = .branches, .x = 0, .y = status_h + files_h, .w = side_w, .h = branches_h },
-        .{ .focus = .commits, .x = 0, .y = status_h + files_h + branches_h, .w = side_w, .h = commits_h },
-        .{ .focus = .stash, .x = 0, .y = status_h + files_h + branches_h + commits_h, .w = side_w, .h = stash_h },
-        .{ .focus = .main, .x = side_w, .y = 0, .w = main_w, .h = body_h },
+        .{ .focus = .status, .x = 0, .y = 0, .w = pw, .h = status_h },
+        .{ .focus = .files, .x = 0, .y = status_h, .w = pw, .h = files_h },
+        .{ .focus = .branches, .x = 0, .y = status_h + files_h, .w = pw, .h = branches_h },
+        .{ .focus = .commits, .x = 0, .y = status_h + files_h + branches_h, .w = pw, .h = commits_h },
+        .{ .focus = .stash, .x = 0, .y = status_h + files_h + branches_h + commits_h, .w = pw, .h = stash_h },
+        .{ .focus = .main, .x = mx, .y = my, .w = mw, .h = mh },
     };
     app.panel_rect_count = 6;
 
@@ -1793,9 +1849,9 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
             // `fs` (side-panel fullscreen on Status) always wants the full panel,
             // so the collapsed title bar only applies in the normal layout.
             if (fs == null and app.statusCollapsed())
-                drawStatusTitleBar(root, 0, y, side_w, app.focus == .status, app)
+                drawStatusTitleBar(root, 0, y, pw, app.focus == .status, app)
             else
-                drawStatus(panel(root, 0, y, side_w, status_h, "[1] Status", app.focus == .status, null), app);
+                drawStatus(panel(root, 0, y, pw, status_h, "[1] Status", app.focus == .status, null), app);
         }
         y += status_h;
         if (files_h > 0) {
@@ -1809,7 +1865,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
                 "(esc to cancel filter)"
             else
                 "(filtered)";
-            const w = tabbedPanel(root, 0, y, side_w, files_h, 2, &files_tabs, @intFromEnum(app.files_tab), files_suffix, app.focus == .files, listScrollInfo(app, .files));
+            const w = tabbedPanel(root, 0, y, pw, files_h, 2, &files_tabs, @intFromEnum(app.files_tab), files_suffix, app.focus == .files, listScrollInfo(app, .files));
             beginListPan(app, .files);
             switch (app.files_tab) {
                 .files => drawFiles(w, app),
@@ -1831,13 +1887,13 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
                         "[3] Commit files  (space: add to patch) (esc back)")
                 else
                     (std.fmt.bufPrint(&app.branches_title_buf, "[3] Commits ({s}) (esc back)", .{app.branch_commits_ref}) catch "[3] Commits (esc back)");
-                break :blk panel(root, 0, y, side_w, branches_h, t, app.focus == .branches, listScrollInfo(app, .branches));
+                break :blk panel(root, 0, y, pw, branches_h, t, app.focus == .branches, listScrollInfo(app, .branches));
             } else if (app.remoteDrillActive()) blk: {
                 // Drilled into a remote's branches. A `/` name filter adds a
                 // "(filtered)" hint, like the Local tab's.
                 const hint: []const u8 = if (app.remote_branch_filter.len > 0) " (filtered)" else "";
                 const t = std.fmt.bufPrint(&app.branches_title_buf, "[3] {s}{s} (esc back)", .{ app.remote_drill.?, hint }) catch "[3] Remote (esc back)";
-                break :blk panel(root, 0, y, side_w, branches_h, t, app.focus == .branches, listScrollInfo(app, .branches));
+                break :blk panel(root, 0, y, pw, branches_h, t, app.focus == .branches, listScrollInfo(app, .branches));
             } else blk: {
                 // The Local tab's name filter (`/`) shows a title hint, mirroring
                 // the Commits filter: a clear-hint while focused, else "(filtered)".
@@ -1847,7 +1903,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
                     (if (app.focus == .branches) "(esc to cancel filter)" else "(filtered)")
                 else
                     "";
-                break :blk tabbedPanel(root, 0, y, side_w, branches_h, 3, &branches_tabs, @intFromEnum(app.branches_tab), suffix, app.focus == .branches, listScrollInfo(app, .branches));
+                break :blk tabbedPanel(root, 0, y, pw, branches_h, 3, &branches_tabs, @intFromEnum(app.branches_tab), suffix, app.focus == .branches, listScrollInfo(app, .branches));
             };
             beginListPan(app, .branches);
             drawBranches(w, app);
@@ -1857,13 +1913,13 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         if (commits_h > 0) {
             const commits_tabs = [_][]const u8{ "Commits", "Reflog", "Divergence" };
             const w = if (app.mode == .rebase_plan) blk: {
-                break :blk panel(root, 0, y, side_w, commits_h, "[4] Interactive rebase (enter run, esc cancel)", app.focus == .commits, listScrollInfo(app, .commits));
+                break :blk panel(root, 0, y, pw, commits_h, "[4] Interactive rebase (enter run, esc cancel)", app.focus == .commits, listScrollInfo(app, .commits));
             } else if (app.commitsFilesActive()) blk: {
                 const t = if (patch_mod.commitFilesPatchCount(app) > 0)
                     (std.fmt.bufPrint(&app.commits_title_buf, "[4] Commit files (patch: {d}) (esc back)", .{patch_mod.commitFilesPatchCount(app)}) catch "[4] Commit files (esc back)")
                 else
                     "[4] Commit files  (space: add to patch) (esc back)";
-                break :blk panel(root, 0, y, side_w, commits_h, t, app.focus == .commits, listScrollInfo(app, .commits));
+                break :blk panel(root, 0, y, pw, commits_h, t, app.focus == .commits, listScrollInfo(app, .commits));
             } else blk: {
                 // When the Commits list is filtered (Commits tab only), the title
                 // carries a yellow hint for clearing it (the filter value itself
@@ -1873,7 +1929,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
                     (if (app.focus == .commits) "(esc to cancel filter)" else "(filtered)")
                 else
                     "";
-                break :blk tabbedPanel(root, 0, y, side_w, commits_h, 4, &commits_tabs, @intFromEnum(app.commits_tab), suffix, app.focus == .commits, listScrollInfo(app, .commits));
+                break :blk tabbedPanel(root, 0, y, pw, commits_h, 4, &commits_tabs, @intFromEnum(app.commits_tab), suffix, app.focus == .commits, listScrollInfo(app, .commits));
             };
             beginListPan(app, .commits);
             drawCommits(w, app);
@@ -1881,15 +1937,15 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         }
         y += commits_h;
         if (stash_h > 0) {
-            const w = panel(root, 0, y, side_w, stash_h, "[5] Stash", app.focus == .stash, listScrollInfo(app, .stash));
+            const w = panel(root, 0, y, pw, stash_h, "[5] Stash", app.focus == .stash, listScrollInfo(app, .stash));
             beginListPan(app, .stash);
             drawStash(w, app);
             endListPan(app, .stash, w.width);
         }
     }
 
-    // The main/diff panel, unless a side panel is full-screen (main_w == 0).
-    if (main_w > 0) {
+    // The main/diff panel, unless a side panel is full-screen (mw == 0).
+    if (mw > 0) {
     const main_title = if (app.staging_patch_mode)
         "Building patch (esc back)"
     else if (app.staging_active)
@@ -1926,7 +1982,7 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
     app.main_hscroll = @min(app.main_hscroll, app.maxMainHScroll());
     if (app.staging_active and app.staging_split and !app.staging_patch_mode) {
         // Split staging view: two panes (Unstaged | Staged) fill the main area.
-        drawStagingSplit(root, app, side_w, 0, main_w, body_h);
+        drawStagingSplit(root, app, mx, my, mw, mh);
     } else {
         const scroll: ScrollInfo = .{ .len = app.mainContentLines(), .pos = app.main_scroll };
         // In the single-pane staging view, `[`/`]` switch the unstaged/staged
@@ -1935,16 +1991,16 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         const title_shown = titleWithWrap(app, main_title, &main_title_wrap_buf);
         const main = if (app.staging_active and !app.staging_patch_mode) blk: {
             const staging_tabs = [_][]const u8{ "Unstaged", "Staged" };
-            break :blk tabbedPanel(root, side_w, 0, main_w, body_h, null, &staging_tabs, @as(usize, if (app.staging_staged_view) 1 else 0), wrap_tag, app.focus == .main, scroll);
+            break :blk tabbedPanel(root, mx, my, mw, mh, null, &staging_tabs, @as(usize, if (app.staging_staged_view) 1 else 0), wrap_tag, app.focus == .main, scroll);
         } else if (app.diff_base != null) blk: {
             // Diffing mode: the title carries the whole state (base..selected),
             // so draw it in the warning colour — the same "a mode is active"
             // signal the commit-filter indicator uses.
-            const frame = panelBorder(root, side_w, 0, main_w, body_h, app.focus == .main, scroll);
-            if (main_w >= 4 and body_h >= 3)
-                _ = drawTitleSpan(frame.raw, main_w, 2, title_shown, styles().warning);
+            const frame = panelBorder(root, mx, my, mw, mh, app.focus == .main, scroll);
+            if (mw >= 4 and mh >= 3)
+                _ = drawTitleSpan(frame.raw, mw, 2, title_shown, styles().warning);
             break :blk frame.inner;
-        } else panel(root, side_w, 0, main_w, body_h, title_shown, app.focus == .main, scroll);
+        } else panel(root, mx, my, mw, mh, title_shown, app.focus == .main, scroll);
         app.main_view_height = main.height;
         app.main_view_width = main.width;
         if (app.showAboutSplash()) drawAbout(main, app) else {
@@ -6767,6 +6823,26 @@ test "side panel heights match the weighting" {
     try std.testing.expectEqual(@as(u16, 1), hc.status);
     try std.testing.expectEqual(body_h, hc.status + hc.files + hc.branches + hc.commits + hc.stash);
     try std.testing.expect(hc.files > h.files); // more room than the uncollapsed layout
+}
+
+test "sideSectionHeight splits the body for portrait, with floors" {
+    // A tall body: the side section gets roughly `percent` of it, leaving the
+    // rest for the main section.
+    try std.testing.expectEqual(@as(u16, 20), sideSectionHeight(60, 34)); // 60*34/100 = 20
+    // A short body: clamped to keep room for the main section and the side panels.
+    try std.testing.expect(sideSectionHeight(14, 34) <= 14 - 0);
+    try std.testing.expect(sideSectionHeight(14, 34) >= @min(@as(u16, 8), @as(u16, 14)));
+    // The side section never eats the whole body (>= 6 rows stay for the main).
+    try std.testing.expect(sideSectionHeight(40, 90) <= 40 - 6);
+}
+
+test "sidePanelHeights never overflows a tiny body" {
+    // At the new small floor the heights must still sum to the body, not spill
+    // past it (which would draw a panel over the footer).
+    inline for (.{ 8, 9, 10, 12 }) |bh| {
+        const h = sidePanelHeights(bh, .files, false, 2, 0, false);
+        try std.testing.expectEqual(@as(u16, bh), h.status + h.files + h.branches + h.commits + h.stash);
+    }
 }
 
 test "a high accordion weight keeps unfocused panels at the framed minimum" {

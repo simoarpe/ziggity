@@ -3114,6 +3114,28 @@ test "clicking another panel while the Status about-splash is up still moves foc
     try std.testing.expectEqual(model.Focus.status, app.focus);
 }
 
+test "usePortraitMode: auto by aspect, always/never forced" {
+    const a = std.testing.allocator;
+    var no_files = [_]model.FileStatus{};
+    var app = try testApp(a, &no_files);
+    defer deinitTestApp(&app);
+
+    // auto: portrait only when narrow (<= max width) and tall (>= min height).
+    app.config.portrait_mode = .auto;
+    try std.testing.expect(app.usePortraitMode(50, 60)); // narrow + tall -> portrait
+    try std.testing.expect(!app.usePortraitMode(120, 60)); // wide -> landscape
+    try std.testing.expect(!app.usePortraitMode(50, 30)); // narrow but short -> landscape
+    // The thresholds are inclusive at the boundary.
+    try std.testing.expect(app.usePortraitMode(App.portrait_auto_max_width, App.portrait_auto_min_height));
+    try std.testing.expect(!app.usePortraitMode(App.portrait_auto_max_width + 1, App.portrait_auto_min_height));
+
+    // always / never ignore the size.
+    app.config.portrait_mode = .always;
+    try std.testing.expect(app.usePortraitMode(200, 10));
+    app.config.portrait_mode = .never;
+    try std.testing.expect(!app.usePortraitMode(40, 80));
+}
+
 test "about-splash tracks multiple clickable URL regions (repo + donation)" {
     const a = std.testing.allocator;
     var no_files = [_]model.FileStatus{};
@@ -8579,6 +8601,22 @@ pub const App = struct {
     /// hidden): screen mode `full` while a side panel is focused.
     pub fn sidePanelFullscreen(self: *const App) bool {
         return !self.diff_fullscreen and self.screen_mode == .full and self.focus != .main;
+    }
+
+    /// `auto` portrait engages when the terminal is this narrow or narrower and
+    /// this tall or taller (a phone-like aspect). Forcing `always`/`never` ignores
+    /// these.
+    pub const portrait_auto_max_width: u16 = 84;
+    pub const portrait_auto_min_height: u16 = 46;
+
+    /// Whether to stack the side panels above the main panel (portrait) rather
+    /// than beside it (landscape), for the given terminal size.
+    pub fn usePortraitMode(self: *const App, width: u16, height: u16) bool {
+        return switch (self.config.portrait_mode) {
+            .never => false,
+            .always => true,
+            .auto => width <= portrait_auto_max_width and height >= portrait_auto_min_height,
+        };
     }
 
     /// The focused side panel is enlarged (accordion): the config option

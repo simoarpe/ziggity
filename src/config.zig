@@ -299,6 +299,13 @@ pub const ConfirmSkips = struct {
 
 pub const Config = struct {
     side_panel_width_percent: u8 = 34,
+    /// Panel orientation on small terminals. `auto` (default) stacks the side
+    /// panels above the main panel when the terminal is narrow and tall
+    /// (phone-like: width <= 84 and height >= 46), and keeps them side by side
+    /// otherwise. `always` forces the stacked layout, `never` keeps side by side.
+    /// In the stacked layout `side_panel_width_percent` sets the side section's
+    /// share of the height instead of the width.
+    portrait_mode: model.PortraitMode = .auto,
     diff_context: u8 = 3,
     /// The commit-summary character count at which the counter in the commit /
     /// reword dialog turns red (it is otherwise the warning colour). Default 50
@@ -535,6 +542,10 @@ pub const Config = struct {
         if (std.mem.eql(u8, key, "side_panel_width_percent")) {
             const parsed = std.fmt.parseInt(u8, value, 10) catch return;
             self.side_panel_width_percent = @min(70, @max(20, parsed));
+            return;
+        }
+        if (std.mem.eql(u8, key, "portrait_mode")) {
+            if (std.meta.stringToEnum(model.PortraitMode, value)) |v| self.portrait_mode = v;
             return;
         }
         if (std.mem.eql(u8, key, "diff_context")) {
@@ -946,6 +957,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     try std.testing.expectEqual(model.CommitGraphMode.on, cfg.commit_graph); // graph on by default
     try std.testing.expectEqual(model.CommitGraphScope.current, cfg.commit_graph_scope); // current branch by default
     try std.testing.expectEqual(model.PullMode.git, cfg.pull_mode); // honor git pull.rebase by default
+    try std.testing.expectEqual(model.PortraitMode.auto, cfg.portrait_mode); // auto orientation by default
     try std.testing.expectEqual(textmatch.FilterMode.substring, cfg.filter_mode); // substring by default
     try std.testing.expectEqual(model.LogOrder.date, cfg.log_order); // date order by default
     try std.testing.expect(!cfg.aiConfigured()); // no ai_command -> AI unavailable
@@ -972,6 +984,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
         \\fetch_prune_mode = on
         \\pull_mode = menu
         \\filter_mode = fuzzy
+        \\portrait_mode = always
         \\log_order = topo
         \\expand_focused_side_panel = true
         \\expanded_side_panel_weight = 3
@@ -984,6 +997,7 @@ test "config parser applies result-dialog, command-output, and skip-confirm flag
     try std.testing.expectEqual(model.FetchPruneMode.on, cfg.fetch_prune_mode); // default git, overridden
     try std.testing.expectEqual(model.PullMode.menu, cfg.pull_mode);
     try std.testing.expectEqual(textmatch.FilterMode.fuzzy, cfg.filter_mode); // default substring, overridden
+    try std.testing.expectEqual(model.PortraitMode.always, cfg.portrait_mode); // default auto, overridden
     try std.testing.expectEqual(model.LogOrder.topo, cfg.log_order);
     try std.testing.expect(cfg.aiConfigured());
     try std.testing.expectEqualStrings("pi -p", cfg.ai_command.get());
