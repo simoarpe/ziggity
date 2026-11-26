@@ -16,6 +16,8 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+## [0.67.0] - 2026-11-26
+
 ### Added
 - Small and mobile terminals are now supported. ziggity renders down to a 10x9
   terminal, squashing unfocused side panels to their title bars when the window
