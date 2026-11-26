@@ -255,11 +255,18 @@ pub const StagingSplitMode = enum { off, on, auto };
 pub const CommandOutput = enum { show, silent };
 
 /// Per-action toggles to skip the confirm-before prompt for destructive
-/// actions. Field names match the `Confirmation` enum tags in app.zig so the
+/// actions. Field names match the `Confirmation` tags in app.zig so the
 /// lookup is a direct `@field`. All default to false (confirmations stay on).
 /// Set via `skip_confirm.<name> = true` in the config.
 pub const ConfirmSkips = struct {
     discard_all: bool = false,
+    stage_all: bool = false,
+    stage_selection: bool = false,
+    discard_staging_selection: bool = false,
+    discard_review_hunk: bool = false,
+    reset_hard: bool = false,
+    reset_mixed: bool = false,
+    drop_stash: bool = false,
     amend: bool = false,
     merge_branch: bool = false,
     rebase_branch: bool = false,

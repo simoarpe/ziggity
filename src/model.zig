@@ -474,8 +474,7 @@ pub const RepoData = struct {
         allocator.free(self.commits);
         for (self.reflog) |*entry| entry.deinit(allocator);
         allocator.free(self.reflog);
-        for (self.stash) |*entry| entry.deinit(allocator);
-        allocator.free(self.stash);
+        deinitStashes(allocator, self.stash);
         self.* = empty();
     }
 
@@ -543,8 +542,7 @@ pub const RepoData = struct {
     }
 
     pub fn replaceStash(self: *RepoData, allocator: std.mem.Allocator, stash: []StashEntry) void {
-        for (self.stash) |*s| s.deinit(allocator);
-        allocator.free(self.stash);
+        deinitStashes(allocator, self.stash);
         self.stash = stash;
     }
 
@@ -729,6 +727,11 @@ pub fn dupeCommits(a: std.mem.Allocator, src: []const Commit) std.mem.Allocator.
 }
 pub fn dupeStashes(a: std.mem.Allocator, src: []const StashEntry) std.mem.Allocator.Error![]StashEntry {
     return dupeList(StashEntry, a, src, dupeStash);
+}
+
+pub fn deinitStashes(allocator: std.mem.Allocator, stash: []StashEntry) void {
+    for (stash) |*entry| entry.deinit(allocator);
+    allocator.free(stash);
 }
 
 pub const StatusFields = struct {

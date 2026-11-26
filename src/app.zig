@@ -271,8 +271,17 @@ pub const TextPromptKind = enum {
     }
 };
 
-pub const Confirmation = enum {
+/// A pending action owns any strings, patches, or entries it needs after the
+/// UI refreshes. Release it with the allocator that created those values.
+pub const Confirmation = union(enum) {
     discard_all,
+    stage_all: Staging,
+    stage_selection: Staging,
+    discard_staging_selection: DiscardPatch,
+    discard_review_hunk: DiscardPatch,
+    reset_hard: []const u8,
+    reset_mixed: []const u8,
+    drop_stash: []model.StashEntry,
     /// Offered before amending the last commit with the staged changes — it
     /// rewrites HEAD and is awkward to undo. Skipped when `skip_confirm.amend`
     /// is set.
@@ -323,6 +332,32 @@ pub const Confirmation = enum {
     /// branch onto its upstream, discarding local commits and uncommitted tracked
     /// changes. Recoverable via the reflog, but destructive enough to confirm.
     pull_reset_upstream,
+
+    pub const Kind = std.meta.Tag(Confirmation);
+
+    const Staging = struct {
+        stage: bool,
+        paths: ?[]const []const u8,
+        clear_range: bool,
+    };
+
+    pub const DiscardPatch = struct {
+        bytes: []const u8,
+        staged: bool,
+        whole_hunk: bool = true,
+        forward: bool = false,
+    };
+
+    fn deinit(self: *Confirmation, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .stage_all, .stage_selection => |s| if (s.paths) |paths| Mutation.freeStrList(allocator, paths),
+            .discard_staging_selection, .discard_review_hunk => |p| allocator.free(p.bytes),
+            .reset_hard, .reset_mixed => |ref| allocator.free(ref),
+            .drop_stash => |entries| model.deinitStashes(allocator, entries),
+            else => {},
+        }
+        self.* = undefined;
+    }
 };
 
 /// What to re-run after the user confirms deleting a stale git lock file. Only
@@ -1690,8 +1725,7 @@ pub const Mutation = union(enum) {
     stash_keep: ?[]const u8,
     stash_apply: usize,
     stash_pop: usize,
-    stash_drop: usize,
-    stash_drop_many: []const usize,
+    stash_drop: []model.StashEntry,
     rename_stash: struct { index: usize, hash: []const u8, message: []const u8 },
     undo,
     merge: []const u8,
@@ -1787,8 +1821,7 @@ pub const Mutation = union(enum) {
             },
             .stash_apply => |idx| wgit.stashApply(idx),
             .stash_pop => |idx| wgit.stashPop(idx),
-            .stash_drop => |idx| wgit.stashDrop(idx),
-            .stash_drop_many => |indices| wgit.stashDropMany(indices),
+            .stash_drop => |entries| wgit.stashDropEntries(entries),
             .rename_stash => |x| wgit.renameStash(x.index, x.hash, x.message),
             .undo => wgit.undoLastOperation(),
             .merge => |b| wgit.mergeBranch(b),
@@ -1863,8 +1896,7 @@ pub const Mutation = union(enum) {
             .stash_keep => |m| .{ .stash_keep = try dupeOptStr(gpa, m) },
             .stash_apply => |idx| .{ .stash_apply = idx },
             .stash_pop => |idx| .{ .stash_pop = idx },
-            .stash_drop => |idx| .{ .stash_drop = idx },
-            .stash_drop_many => |indices| .{ .stash_drop_many = try gpa.dupe(usize, indices) },
+            .stash_drop => |entries| .{ .stash_drop = try model.dupeStashes(gpa, entries) },
             .rename_stash => |x| .{ .rename_stash = .{ .index = x.index, .hash = try gpa.dupe(u8, x.hash), .message = try gpa.dupe(u8, x.message) } },
             .undo => .undo,
             .merge => |b| .{ .merge = try gpa.dupe(u8, b) },
@@ -1883,7 +1915,12 @@ pub const Mutation = union(enum) {
             .apply_custom_patch => |x| .{ .apply_custom_patch = .{ .patch = try gpa.dupe(u8, x.patch), .reverse = x.reverse } },
             .remove_patch_from_commit => |x| .{ .remove_patch_from_commit = .{ .base_ref = try gpa.dupe(u8, x.base_ref), .todo = try gpa.dupe(u8, x.todo), .patch = try gpa.dupe(u8, x.patch) } },
             .rebase_todo => |x| .{ .rebase_todo = .{ .base_ref = try gpa.dupe(u8, x.base_ref), .todo = try gpa.dupe(u8, x.todo), .message = if (x.message) |m| try gpa.dupe(u8, m) else null } },
-            .stage_batch => |b| .{ .stage_batch = .{ .all = b.all, .add = try dupeStrList(gpa, b.add), .reset = try dupeStrList(gpa, b.reset) } },
+            .stage_batch => |b| blk: {
+                const add = try dupeStrList(gpa, b.add);
+                errdefer freeStrList(gpa, add);
+                const reset = try dupeStrList(gpa, b.reset);
+                break :blk .{ .stage_batch = .{ .all = b.all, .add = add, .reset = reset } };
+            },
         };
     }
 
@@ -1917,7 +1954,7 @@ pub const Mutation = union(enum) {
                 gpa.free(x.path);
                 freeOptStr(gpa, x.message);
             },
-            .stash_drop_many => |indices| gpa.free(indices),
+            .stash_drop => |entries| model.deinitStashes(gpa, entries),
             .rename_stash => |x| {
                 gpa.free(x.hash);
                 gpa.free(x.message);
@@ -1979,11 +2016,11 @@ pub const Mutation = union(enum) {
                 freeStrList(gpa, b.add);
                 freeStrList(gpa, b.reset);
             },
-            .amend, .undo, .fast_forward_current, .bisect_skip, .bisect_reset, .amend_continue_rebase, .submodule_bulk, .stash_apply, .stash_pop, .stash_drop => {},
+            .amend, .undo, .fast_forward_current, .bisect_skip, .bisect_reset, .amend_continue_rebase, .submodule_bulk, .stash_apply, .stash_pop => {},
         }
     }
 
-    fn dupeStrList(gpa: std.mem.Allocator, items: []const []const u8) ![]const []const u8 {
+    fn dupeStrList(gpa: std.mem.Allocator, items: []const []const u8) std.mem.Allocator.Error![]const []const u8 {
         const out = try gpa.alloc([]const u8, items.len);
         var n: usize = 0;
         errdefer {
@@ -4507,6 +4544,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.clearConfirmation();
         staging_mod.clearStagePending(self);
         self.stage_pending.deinit(self.allocator);
         rebaseplan_mod.free(self);
@@ -5374,9 +5412,8 @@ pub const App = struct {
         // While a slow op runs, navigation/inspection stay live but mutating
         // keys are ignored so a second git command can't race the first. The
         // Files-panel staging keys are exempt: the per-file toggle (`space`) and
-        // stage/unstage-all (`a`) only update the model optimistically and queue a
-        // coalesced batch (flushed off-thread once the worker frees up), so rapid
-        // staging stays responsive even mid-op.
+        // stage/unstage-all (`a`) queue a coalesced batch (flushed off-thread once
+        // the worker frees up) after any required confirmation.
         const staging_key = (action == .select or action == .stage_all) and self.focus == .files;
         if (self.foregroundBusy() and actions.isMutating(action) and !staging_key) {
             return self.setMessage("operation in progress...", .{});
@@ -6908,12 +6945,14 @@ pub const App = struct {
     pub fn toggleDirStaged(self: *App, dir: []const u8) !void {
         var any_unstaged = false;
         var any_staged = false;
+        var overwrites_index = false;
         for (self.data.files) |file| {
             if (!self.fileMatchesFilter(file)) continue;
             if (!filetree.underDir(file.path, dir)) continue;
             if (file.conflict) continue; // resolve conflicts individually
             if (file.has_unstaged) any_unstaged = true;
             if (file.has_staged) any_staged = true;
+            overwrites_index = overwrites_index or staging_mod.stagingWouldOverwriteIndex(file);
         }
         if (!any_unstaged and !any_staged) {
             try self.setMessage("no changes under {s}/", .{dir});
@@ -6930,9 +6969,9 @@ pub const App = struct {
             const include = if (want_staged) file.has_unstaged else file.has_staged;
             if (include) try paths.append(self.allocator, file.path);
         }
-        // Queue each path (optimistic + pending); the loop flushes them as one
-        // off-thread batch, so a big directory never blocks input either.
-        for (paths.items) |p| try staging_mod.queueStageOp(self, p, want_staged);
+        if (overwrites_index or (want_staged and (any_staged or try staging_mod.stagesRemovedPaths(self, paths.items))))
+            return self.confirmStage(.selection, want_staged, paths.items, false);
+        return staging_mod.queueStageSelection(self, want_staged, paths.items, false);
     }
 
     pub fn fileFilterActive(self: *const App) bool {
@@ -8426,8 +8465,30 @@ pub const App = struct {
     }
 
     pub fn confirmationText(self: *const App, buf: []u8) []const u8 {
-        return switch (self.pending_confirmation orelse return "No pending action.") {
+        const pending = self.pending_confirmation orelse return "No pending action.";
+        return switch (pending) {
             .discard_all => "Discard all working tree changes? This cannot be undone.",
+            .stage_all, .stage_selection => |staging| blk: {
+                const verb = if (staging.stage) "Stage" else "Unstage";
+                const scope = if (std.meta.activeTag(pending) == .stage_selection)
+                    "the selection"
+                else if (staging.paths == null)
+                    "all files"
+                else
+                    "all matching files";
+                break :blk std.fmt.bufPrint(buf, "{s} {s}? The current staging state cannot be restored with undo.", .{ verb, scope }) catch "Change staging? The current staging state cannot be restored with undo.";
+            },
+            .discard_staging_selection, .discard_review_hunk => |patch| blk: {
+                const scope = if (patch.whole_hunk) "this hunk" else "the selected lines";
+                const target = if (patch.staged) "the index and working tree" else "the working tree";
+                break :blk std.fmt.bufPrint(buf, "Discard {s} from {s}? This cannot be undone.", .{ scope, target }) catch "Discard these changes? This cannot be undone.";
+            },
+            .reset_hard => |ref| std.fmt.bufPrint(buf, "Hard reset to {s}? Uncommitted changes can be lost.", .{ref}) catch "Hard reset? Uncommitted changes can be lost.",
+            .reset_mixed => |ref| std.fmt.bufPrint(buf, "Mixed reset to {s}? This replaces the current staging state.", .{ref}) catch "Mixed reset? This replaces the current staging state.",
+            .drop_stash => |entries| blk: {
+                if (entries.len == 1) break :blk std.fmt.bufPrint(buf, "Drop {s}? Undo cannot restore it.", .{entries[0].selector}) catch "Drop the selected stash? Undo cannot restore it.";
+                break :blk std.fmt.bufPrint(buf, "Drop {d} stash entries? Undo cannot restore them.", .{entries.len}) catch "Drop the selected stashes? Undo cannot restore them.";
+            },
             .amend => "Amend the last commit with the staged changes?",
             .drop_commit => blk: {
                 if (self.mergeDropSelected())
@@ -8533,7 +8594,7 @@ pub const App = struct {
             .pull_reset_upstream => blk: {
                 const upstream = self.data.upstream orelse break :blk "Reset the current branch to its upstream, discarding local commits and changes?";
                 const n = self.data.ahead orelse 0;
-                break :blk std.fmt.bufPrint(buf, "Discard {d} local commit(s) and all uncommitted changes, resetting {s} to {s}? (recoverable via git reflog)", .{ n, self.data.current_branch, upstream }) catch "Reset to upstream, discarding local commits and changes?";
+                break :blk std.fmt.bufPrint(buf, "Reset {s} to {s}, discarding {d} local commit(s)? Uncommitted changes can be lost.", .{ self.data.current_branch, upstream, n }) catch "Reset to upstream? Uncommitted changes can be lost.";
             },
         };
     }
@@ -8803,7 +8864,7 @@ pub const App = struct {
     /// box costs no row the layout does not already hold.
     /// Null unless the review is showing side-by-side over a hunked diff.
     pub fn selectedHunkRowBox(self: *const App) ?struct { top: usize, bottom: usize } {
-        if (self.mode != .diff_review or !self.splitActive()) return null;
+        if (!self.splitActive()) return null;
         const hunks = self.reviewHunkLines();
         if (hunks.len == 0) return null;
         const hi = @min(self.diff_hunk, hunks.len - 1);
@@ -8845,9 +8906,13 @@ pub const App = struct {
     /// In the review with `=` on, it is the whole-file (full-context) diff built
     /// from the same source.
     pub fn activeMainText(self: *const App) []const u8 {
-        if (self.mode == .diff_review and self.review_whole_file and self.review_whole_diff.len > 0)
+        if (self.showingDiffReview() and self.review_whole_file and self.review_whole_diff.len > 0)
             return self.review_whole_diff;
         return if (self.staging_active) self.staging_diff else self.diff;
+    }
+
+    pub fn showingDiffReview(self: *const App) bool {
+        return self.mode == .diff_review or (self.mode == .confirmation and self.pendingConfirmationKind() == .discard_review_hunk);
     }
 
     /// The `@@` hunks the review's `J`/`K` cursor steps through. In the whole-file
@@ -8870,7 +8935,7 @@ pub const App = struct {
     /// renderer and the scroll math gate on this, so they stay in step. (The
     /// normal Diff panel is always unified; side-by-side lives only in the review.)
     pub fn splitActive(self: *const App) bool {
-        if (self.mode != .diff_review) return false;
+        if (!self.showingDiffReview()) return false;
         const w: u16 = if (self.main_view_width == 0) 80 else self.main_view_width;
         if (w < min_split_width) return false;
         if (self.splitColWidth(w) == 0) return false; // no room for two columns + gutters
@@ -9018,8 +9083,7 @@ pub const App = struct {
         return out.toOwnedSlice(self.allocator) catch null;
     }
 
-    /// Keys for the full-screen side-by-side review: read-only, so scroll, jump
-    /// between changes, wrap, pan, and leave. Nothing here writes.
+    /// Keys for scrolling, navigating, and discarding in the side-by-side review.
     fn handleDiffReviewKey(self: *App, key: vaxis.Key) !void {
         const km = self.config.keymap;
         // Esc first drops a text selection, then (next press) leaves the review.
@@ -9070,12 +9134,9 @@ pub const App = struct {
 
     /// `d` in the review: discard the whole hunk the cursor is on. From staging it
     /// applies to the active side (and the review refreshes in place); from a
-    /// working-tree file's review it discards from the working tree and returns to
-    /// the Diff panel. Immediate, like the staging view's `d` — the highlighted
-    /// hunk is the deliberate target.
+    /// working-tree file's review it discards from the working tree.
     fn discardReviewHunk(self: *App) !void {
         if (self.foregroundBusy()) return self.setMessage("operation in progress...", .{});
-        self.clearReviewSelection(); // the diff reloads, so a selection would be stale
         if (!self.staging_active) {
             // A worktree file only (not a commit/ref diff), unstaged, not partial.
             if (self.contentFocus() != .files) return self.setMessage("discarding works on a working-tree file", .{});
@@ -9108,16 +9169,21 @@ pub const App = struct {
         defer parsed.deinit(self.allocator);
         if (hi >= parsed.hunks.len) return self.setMessage("no hunk to discard", .{});
         const patch = diff_mod.buildHunkPatch(self.allocator, clean, parsed, hi) catch return self.setMessage("could not build the patch", .{});
-        defer self.allocator.free(patch);
+        return self.requestConfirmation(.{ .discard_review_hunk = .{
+            .bytes = patch,
+            .staged = self.staging_active and self.staging_staged_view,
+        } }, "confirm discard hunk", .{});
+    }
 
-        const staged = self.staging_active and self.staging_staged_view;
-        var result = try self.git.discardStagingPatch(patch, staged);
+    fn applyReviewDiscard(self: *App, patch: Confirmation.DiscardPatch) !void {
+        var result = try self.git.discardStagingPatch(patch.bytes, patch.staged);
         defer result.deinit(self.allocator);
         if (!result.ok()) {
             const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
             return self.setMessage("discard failed: {s}", .{if (stderr.len > 0) stderr else "git apply error"});
         }
 
+        self.clearReviewSelection();
         if (self.staging_active) {
             // Reload the active side in place; stay in the review unless it empties.
             staging_mod.loadStaging(self, true) catch {};
@@ -11844,7 +11910,7 @@ pub const App = struct {
                         try self.setMessage("no remote branch selected", .{});
                         return;
                     };
-                    return self.runMutationScoped(try self.git.resetTo(b.name, mode), Refresh.checkout, "reset to {s}", .{b.name});
+                    return self.resetSelectedRevision(b.name, b.name, mode);
                 }
                 // The Tags tab resets to the selected tag's ref.
                 if (self.focus == .branches and self.branches_tab == .tags) {
@@ -11852,7 +11918,7 @@ pub const App = struct {
                         try self.setMessage("no tag selected", .{});
                         return;
                     };
-                    return self.runMutationScoped(try self.git.resetTo(tag.name, mode), Refresh.checkout, "reset to {s}", .{tag.name});
+                    return self.resetSelectedRevision(tag.name, tag.name, mode);
                 }
                 // The local Branches tab resets to the selected branch ref.
                 if (self.focus == .branches and self.branches_tab == .local) {
@@ -11860,13 +11926,13 @@ pub const App = struct {
                         try self.setMessage("no branch selected", .{});
                         return;
                     };
-                    return self.runMutationScoped(try self.git.resetTo(b.name, mode), Refresh.checkout, "reset to {s}", .{b.name});
+                    return self.resetSelectedRevision(b.name, b.name, mode);
                 }
                 const commit = self.selectedCommit() orelse {
                     try self.setMessage("no commit selected", .{});
                     return;
                 };
-                return self.runMutationScoped(try self.git.resetTo(commit.hash, mode), Refresh.checkout, "reset to {s}", .{commit.short_hash});
+                return self.resetSelectedRevision(commit.hash, commit.short_hash, mode);
             },
             .take_ours, .take_theirs => {
                 const file = self.selectedFile() orelse {
@@ -12191,6 +12257,20 @@ pub const App = struct {
         return self.requestConfirmation(.discard_all, "confirm discard all changes", .{});
     }
 
+    fn resetSelectedRevision(self: *App, ref: []const u8, label: []const u8, mode: git_mod.Git.ResetMode) !void {
+        const pending: ?Confirmation = switch (mode) {
+            .soft => null,
+            .mixed => if (self.data.state != .clean or (self.git.hasIndexChanges() catch true))
+                .{ .reset_mixed = try self.allocator.dupe(u8, ref) }
+            else
+                null,
+            // Even a clean status can hide ignored files that a hard reset overwrites.
+            .hard => .{ .reset_hard = try self.allocator.dupe(u8, ref) },
+        };
+        if (pending) |action| return self.requestConfirmation(action, "confirm reset to {s}", .{label});
+        return self.runMutationScoped(try self.git.resetTo(ref, mode), Refresh.checkout, "reset to {s}", .{label});
+    }
+
     /// Undo the last history operation by resetting HEAD to its prior reflog
     /// position. Refused while an operation is in progress or when there are
     /// tracked changes (which a hard reset would discard).
@@ -12280,8 +12360,8 @@ pub const App = struct {
             return;
         }
         if (self.isDialogCloseKey(key) or key.matches('n', .{})) {
-            self.mode = .normal;
-            self.pending_confirmation = null;
+            self.mode = if (self.pendingConfirmationKind() == .discard_review_hunk) .diff_review else .normal;
+            self.clearConfirmation();
             // Drop any lock-recovery state if this was the lock prompt.
             self.clearLockRecovery();
             // Keep a declined dead entry: just drop the pending path.
@@ -12313,14 +12393,39 @@ pub const App = struct {
     }
 
     fn confirmPendingAction(self: *App) !void {
-        const pending = self.pending_confirmation orelse {
+        var pending = self.pending_confirmation orelse {
             self.mode = .normal;
             return;
         };
-        self.mode = .normal;
+        self.mode = if (std.meta.activeTag(pending) == .discard_review_hunk) .diff_review else .normal;
         self.pending_confirmation = null;
+        defer pending.deinit(self.allocator);
         switch (pending) {
             .discard_all => return self.runMutationFiles(try self.git.discardAll(), "discarded all changes", .{}),
+            .stage_all, .stage_selection => |stage| return staging_mod.queueStageSelection(self, stage.stage, stage.paths, stage.clear_range),
+            .discard_staging_selection => |patch| {
+                if (self.foregroundBusy()) return self.setMessage("operation in progress...", .{});
+                return staging_mod.applyStagingDiscard(self, patch);
+            },
+            .discard_review_hunk => |patch| {
+                if (self.foregroundBusy()) return self.setMessage("operation in progress...", .{});
+                return self.applyReviewDiscard(patch);
+            },
+            .reset_hard, .reset_mixed => |ref| {
+                const mode: git_mod.Git.ResetMode = if (std.meta.activeTag(pending) == .reset_hard) .hard else .mixed;
+                return self.runMutationScoped(try self.git.resetTo(ref, mode), Refresh.checkout, "reset to {s}", .{ref});
+            },
+            .drop_stash => |entries| {
+                if (self.foregroundBusy()) return self.setMessage("operation in progress...", .{});
+                const op: Mutation = .{ .stash_drop = entries };
+                const meta: MutationMeta = .{ .gerund = "dropping stash", .command = "git stash drop", .refresh = Refresh.stash };
+                if (entries.len == 1) {
+                    try self.requestMutation(op, meta, "dropped {s}", .{entries[0].selector});
+                } else {
+                    try self.requestMutation(op, meta, "dropped {d} stash entries", .{entries.len});
+                }
+                self.clearRange();
+            },
             .amend => return self.requestMutation(.amend, .{ .gerund = "amending", .command = "git commit --amend", .refresh = Refresh.commit }, "amended last commit", .{}),
             .drop_commit => {
                 if (self.mergeDropSelected()) {
@@ -12486,7 +12591,8 @@ pub const App = struct {
                 // Reset onto the local remote-tracking ref (`origin/<branch>`),
                 // which git resolves without a network round trip; ziggity's
                 // background fetch keeps it current. A hard reset drops local
-                // commits and tracked working changes (untracked files survive).
+                // commits and working changes, including untracked paths that
+                // obstruct files in the target tree.
                 const upstream = self.data.upstream orelse {
                     try self.setMessage("current branch has no upstream to reset to", .{});
                     return;
@@ -12499,24 +12605,51 @@ pub const App = struct {
     /// Whether the confirm-before prompt for `kind` is disabled in config. Field
     /// names in `ConfirmSkips` match the `Confirmation` tags, so the lookup is a
     /// direct comptime `@field`.
-    fn shouldSkipConfirm(self: *const App, kind: Confirmation) bool {
+    fn shouldSkipConfirm(self: *const App, kind: Confirmation.Kind) bool {
         return switch (kind) {
             inline else => |k| @field(self.config.skip_confirm, @tagName(k)),
         };
     }
 
-    /// Begin a confirm-before-destructive action. If its skip flag is set the
-    /// action runs immediately (no prompt); otherwise the confirmation prompt is
-    /// shown with `prompt_fmt`/`prompt_args` in the bottom bar. The prompt text
-    /// is irrelevant when skipping, since the action sets its own message.
-    pub fn requestConfirmation(self: *App, kind: Confirmation, comptime prompt_fmt: []const u8, prompt_args: anytype) !void {
-        self.pending_confirmation = kind;
+    /// Takes ownership of the action and its payload, even on error. A skip
+    /// flag executes the action immediately. Otherwise show the prompt.
+    pub fn requestConfirmation(self: *App, action: Confirmation, comptime prompt_fmt: []const u8, prompt_args: anytype) !void {
+        var owned = action;
+        const skip = self.shouldSkipConfirm(std.meta.activeTag(owned));
+        if (!skip) {
+            errdefer owned.deinit(self.allocator);
+            try self.setMessage(prompt_fmt, prompt_args);
+        }
+        self.clearConfirmation();
+        self.pending_confirmation = owned;
         self.confirm_scroll = 0; // a fresh prompt starts at the top of its list
         self.confirm_hscroll = 0;
 
-        if (self.shouldSkipConfirm(kind)) return self.confirmPendingAction();
+        if (skip) return self.confirmPendingAction();
         self.mode = .confirmation;
-        try self.setMessage(prompt_fmt, prompt_args);
+    }
+
+    pub fn confirmStage(self: *App, scope: enum { all, selection }, stage: bool, paths: ?[]const []const u8, clear_range: bool) !void {
+        const owned = if (paths) |items| try Mutation.dupeStrList(self.allocator, items) else null;
+        const staging: Confirmation.Staging = .{
+            .stage = stage,
+            .paths = owned,
+            .clear_range = clear_range,
+        };
+        const pending: Confirmation = switch (scope) {
+            .all => .{ .stage_all = staging },
+            .selection => .{ .stage_selection = staging },
+        };
+        return self.requestConfirmation(pending, "confirm {s}", .{if (stage) "stage" else "unstage"});
+    }
+
+    pub fn pendingConfirmationKind(self: *const App) ?Confirmation.Kind {
+        return if (self.pending_confirmation) |pending| std.meta.activeTag(pending) else null;
+    }
+
+    fn clearConfirmation(self: *App) void {
+        if (self.pending_confirmation) |*pending| pending.deinit(self.allocator);
+        self.pending_confirmation = null;
     }
 
     /// The panel whose selection drives the main-panel content. When the main
@@ -13225,6 +13358,7 @@ pub const App = struct {
         self.op_ok = ok;
         self.op_running = false;
         self.op_scroll = 0;
+        self.clearConfirmation();
         self.mode = .operation;
         // Mirror the outcome in the bottom bar for a glance after dismissal.
         self.allocator.free(self.message);
@@ -13281,6 +13415,7 @@ pub const App = struct {
             self.fetch_remote_name = try self.allocator.dupe(u8, conflict.remote);
             self.stale_ref = try self.allocator.dupe(u8, conflict.stale_ref);
             self.dismissOpFrame();
+            self.clearConfirmation();
             self.pending_confirmation = .prune_remote_refs;
             self.mode = .confirmation;
             try self.setMessage("stale remote-tracking ref — press y to run git remote prune {s} and retry", .{conflict.remote});
@@ -13295,6 +13430,7 @@ pub const App = struct {
         self.retry_action = action;
         try self.captureLockPath(raw);
         self.dismissOpFrame();
+        self.clearConfirmation();
         self.pending_confirmation = .delete_index_lock;
         self.mode = .confirmation;
         try self.setMessage("git is locked — press y to delete the lock and retry", .{});
@@ -13509,6 +13645,7 @@ pub const App = struct {
         errdefer job.deinit(page_alloc);
         const msg = try std.fmt.allocPrint(page_alloc, success_fmt, args);
         errdefer page_alloc.free(msg);
+        try self.setMessage("{s}...", .{meta.gerund});
         if (meta.command.len > 0) self.git.recordRaw(meta.command);
 
         if (self.mutation_requested) |old| old.deinit(page_alloc);
@@ -13520,7 +13657,6 @@ pub const App = struct {
         self.mutation_refresh = meta.refresh;
         self.mutation_gerund = meta.gerund;
         self.spinner_frame = 0;
-        try self.setMessage("{s}...", .{meta.gerund});
     }
 
     /// TUI loop hook: claim the queued mutation to run off-thread.
@@ -13673,9 +13809,10 @@ pub const App = struct {
         self.refreshViews(Refresh.all);
     }
 
-    pub fn setMessage(self: *App, comptime fmt: []const u8, args: anytype) !void {
+    pub fn setMessage(self: *App, comptime fmt: []const u8, args: anytype) std.mem.Allocator.Error!void {
+        const message = try self.allocator.print(fmt, args);
         self.allocator.free(self.message);
-        self.message = try std.fmt.allocPrint(self.allocator, fmt, args);
+        self.message = message;
         // A new log line invalidates any selection over the old one.
         self.footer_sel_active = false;
         self.footer_sel_dragged = false;
@@ -15547,7 +15684,7 @@ test "drop and squash gate a confirmation before rewriting history" {
 
     // Drop asks first by default.
     try commitops_mod.requestRebaseConfirm(&app, .drop);
-    try std.testing.expectEqual(Confirmation.drop_commit, app.pending_confirmation.?);
+    try std.testing.expectEqual(Confirmation.Kind.drop_commit, app.pendingConfirmationKind().?);
     try std.testing.expect(app.mode == .confirmation);
     try std.testing.expectEqualStrings("Drop this commit? This rewrites history.", app.confirmationText(&buf));
 
@@ -15555,7 +15692,7 @@ test "drop and squash gate a confirmation before rewriting history" {
     app.pending_confirmation = null;
     app.mode = .normal;
     try commitops_mod.requestRebaseConfirm(&app, .squash);
-    try std.testing.expectEqual(Confirmation.squash_commit, app.pending_confirmation.?);
+    try std.testing.expectEqual(Confirmation.Kind.squash_commit, app.pendingConfirmationKind().?);
     try std.testing.expectEqualStrings("Squash this commit into the one below?", app.confirmationText(&buf));
 
     // The skip flags short-circuit the prompt, and are independent of each other.
@@ -15585,7 +15722,7 @@ test "dropping a merge commit warns differently (rebase --onto path)" {
     app.commit_index = 0;
     try std.testing.expect(app.mergeDropSelected());
     try commitops_mod.requestRebaseConfirm(&app, .drop);
-    try std.testing.expectEqual(Confirmation.drop_commit, app.pending_confirmation.?);
+    try std.testing.expectEqual(Confirmation.Kind.drop_commit, app.pendingConfirmationKind().?);
     try std.testing.expectEqualStrings("Drop this merge commit? It removes the merge and the commits it brought in.", app.confirmationText(&buf));
 
     // On a plain commit: normal prompt, normal path.
@@ -15877,7 +16014,7 @@ test "amending the last commit asks first, but only with staged changes" {
     // Clean repo + staged changes: amend confirms first
     // instead of rewriting HEAD outright.
     try commits_mod.amendLastCommit(&app);
-    try std.testing.expect(app.pending_confirmation != null and app.pending_confirmation.? == .amend);
+    try std.testing.expect(app.pendingConfirmationKind() == .amend);
     try std.testing.expect(app.mode == .confirmation);
 
     // Nothing staged: nothing to fold in, so no prompt — just a hint message.
@@ -16140,7 +16277,7 @@ test "creating a tag that already exists prompts to force-overwrite" {
     try app.input_buffer.appendSlice(allocator, "");
     try app.submitTextPrompt(); // exists -> force confirmation
 
-    try std.testing.expectEqual(Confirmation.force_tag, app.pending_confirmation.?);
+    try std.testing.expectEqual(Confirmation.Kind.force_tag, app.pendingConfirmationKind().?);
     try std.testing.expectEqualStrings("v1.0", app.remote_name_buf[0..app.remote_name_len]);
 }
 
@@ -16236,7 +16373,7 @@ test "custom patch toggles commit files and is tied to one commit" {
     app.commit_index = 1;
     app.commit_file_index = 0;
     try patch_mod.toggleFileInPatch(&app);
-    try std.testing.expectEqual(Confirmation.reset_patch, app.pending_confirmation.?);
+    try std.testing.expectEqual(Confirmation.Kind.reset_patch, app.pendingConfirmationKind().?);
     try std.testing.expectEqual(Mode.confirmation, app.mode);
     try std.testing.expectEqual(@as(usize, 1), patch_mod.patchFileCount(&app)); // still g.txt from the first commit
 
@@ -16953,6 +17090,152 @@ test "optimistic staging flips file state in the model immediately" {
     staging_mod.applyOptimisticStage(&app, false, null);
     try std.testing.expectEqual([2]u8{ ' ', 'M' }, app.data.files[0].short_status);
     try std.testing.expectEqual([2]u8{ '?', '?' }, app.data.files[1].short_status);
+}
+
+test "stage all confirms only when it would lose the previous staging selection" {
+    const a = std.testing.allocator;
+    var files = [_]model.FileStatus{
+        .{ .path = @constCast("a.zig"), .short_status = .{ 'M', ' ' }, .has_staged = true, .has_unstaged = false, .tracked = true, .added = false, .deleted = false, .conflict = false },
+        .{ .path = @constCast("b.zig"), .short_status = .{ ' ', 'M' }, .has_staged = false, .has_unstaged = true, .tracked = true, .added = false, .deleted = false, .conflict = false },
+    };
+    var app = try testApp(a, &files);
+    defer deinitTestApp(&app);
+    app.focus = .files;
+
+    try app.handleKey(.{ .codepoint = 'a' });
+    try std.testing.expectEqual(Mode.confirmation, app.mode);
+    try std.testing.expectEqual(Confirmation.Kind.stage_all, app.pendingConfirmationKind().?);
+    try std.testing.expect(app.stage_all_pending == null);
+    try std.testing.expect(!files[1].has_staged);
+
+    try app.handleKey(.{ .codepoint = 'n' });
+    try std.testing.expectEqual(Mode.normal, app.mode);
+    try std.testing.expect(app.stage_all_pending == null);
+    try std.testing.expect(files[0].has_staged and !files[1].has_staged);
+
+    try app.handleKey(.{ .codepoint = 'a' });
+    try app.handleKey(.{ .codepoint = 'y' });
+    try std.testing.expectEqual(Mode.normal, app.mode);
+    try std.testing.expectEqual(true, app.stage_all_pending.?);
+    try std.testing.expect(files[0].has_staged and files[1].has_staged);
+
+    try app.handleKey(.{ .codepoint = 'a' });
+    try std.testing.expectEqual(Mode.normal, app.mode);
+    try std.testing.expectEqual(false, app.stage_all_pending.?);
+    try app.handleKey(.{ .codepoint = 'a' });
+    try std.testing.expectEqual(Mode.normal, app.mode);
+    try std.testing.expectEqual(true, app.stage_all_pending.?);
+}
+
+test "staging preserves its prior state when allocation fails" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkStagingAllocations, .{});
+}
+
+fn checkStagingAllocations(allocator: std.mem.Allocator) !void {
+    var files = [_]model.FileStatus{.{
+        .path = @constCast("a.zig"),
+        .short_status = .{ ' ', 'M' },
+        .has_staged = false,
+        .has_unstaged = true,
+        .tracked = true,
+        .added = false,
+        .deleted = false,
+        .conflict = false,
+    }};
+    var app = try testApp(allocator, &files);
+    defer deinitTestApp(&app);
+    try staging_mod.queueStageOp(&app, "a.zig", true);
+    const generation = app.refresh_generation;
+
+    try app.confirmStage(.selection, false, &.{ "a.zig", "b.zig", "c.zig" }, false);
+    app.confirmPendingAction() catch |err| {
+        try std.testing.expectEqual(@as(usize, 1), app.stage_pending.count());
+        try std.testing.expectEqual(@as(?bool, true), app.stage_pending.get("a.zig"));
+        try std.testing.expect(files[0].has_staged);
+        try std.testing.expectEqual(generation, app.refresh_generation);
+        return err;
+    };
+    try std.testing.expectEqual(@as(usize, 3), app.stage_pending.count());
+    try std.testing.expect(!files[0].has_staged);
+
+    const batch: Mutation = .{ .stage_batch = .{ .add = &.{"a.zig"}, .reset = &.{"b.zig"} } };
+    const copy = try batch.dupe(allocator);
+    defer copy.deinit(allocator);
+}
+
+test "filtered staging confirmation keeps its original paths and preserves hidden files" {
+    const a = std.testing.allocator;
+    var files = [_]model.FileStatus{
+        .{ .path = @constCast("src/a.zig"), .short_status = .{ 'M', 'M' }, .has_staged = true, .has_unstaged = true, .tracked = true, .added = false, .deleted = false, .conflict = false },
+        .{ .path = @constCast("docs/b.md"), .short_status = .{ ' ', 'M' }, .has_staged = false, .has_unstaged = true, .tracked = true, .added = false, .deleted = false, .conflict = false },
+    };
+    var app = try testApp(a, &files);
+    defer deinitTestApp(&app);
+    app.focus = .files;
+    a.free(app.file_filter);
+    app.file_filter = try a.dupe(u8, "src/");
+
+    try app.handleKey(.{ .codepoint = 'a' });
+    try std.testing.expectEqual(Confirmation.Kind.stage_all, app.pendingConfirmationKind().?);
+    try std.testing.expectEqual(@as(usize, 0), app.stage_pending.count());
+    try app.handleKey(.{ .codepoint = 'y' });
+    try std.testing.expect(app.stage_all_pending == null);
+    try std.testing.expectEqual(true, app.stage_pending.get("src/a.zig").?);
+    try std.testing.expect(!app.stage_pending.contains("docs/b.md"));
+    try std.testing.expect(files[1].has_unstaged and !files[1].has_staged);
+}
+
+test "filtered staging confirms a recreated path and stages only the literal name" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q
+        \\printf 'base\n' > 'file[1]'
+        \\git --literal-pathspecs add -- 'file[1]'
+        \\git -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -qm initial
+        \\git --literal-pathspecs rm -q -- 'file[1]'
+        \\printf 'recreated\n' > 'file[1]'
+        \\printf 'hidden\n' > file1
+    );
+
+    var app = try testApp(a, &.{});
+    defer deinitTestApp(&app);
+    app.git = try git_mod.Git.initAt(a, tio, &env, dir_path);
+    defer app.git.deinit();
+    defer app.data.deinit(a);
+    try app.refreshFiles();
+    app.focus = .files;
+    app.file_display_filter = .untracked;
+    a.free(app.file_filter);
+    app.file_filter = try a.dupe(u8, "file[1]");
+
+    try app.handleKey(.{ .codepoint = 'a' });
+    try std.testing.expectEqual(Confirmation.Kind.stage_all, app.pendingConfirmationKind().?);
+    try app.handleKey(.{ .codepoint = 'n' });
+    var before = try app.git.exec(&.{ "diff", "--cached", "--name-status" });
+    defer before.deinit(a);
+    try std.testing.expectEqualStrings("D\tfile[1]\n", before.stdout);
+
+    try app.handleKey(.{ .codepoint = 'a' });
+    try app.handleKey(.{ .codepoint = 'y' });
+    staging_mod.tryFlushStaging(&app);
+    const job = app.takeMutation().?;
+    defer job.deinit(page_alloc);
+    var staged = try job.run(a, tio, &env, app.git.root, app.git.git_dir);
+    defer staged.deinit(a);
+    try std.testing.expect(staged.ok());
+    var after = try app.git.exec(&.{ "diff", "--cached", "--name-status" });
+    defer after.deinit(a);
+    try std.testing.expectEqualStrings("M\tfile[1]\n", after.stdout);
 }
 
 test "navigating to another item resets the diff scroll so it can't render blank" {
@@ -18019,7 +18302,7 @@ test "lock errors offer delete-and-retry; other failures report normally" {
     const handled = try app.reportFailureOrLock("push failed", "fatal: Unable to create '/repo/.git/index.lock': File exists.", .{ .async_op = .push });
     try std.testing.expect(handled);
     try std.testing.expectEqual(Mode.confirmation, app.mode);
-    try std.testing.expectEqual(Confirmation.delete_index_lock, app.pending_confirmation.?);
+    try std.testing.expectEqual(Confirmation.Kind.delete_index_lock, app.pendingConfirmationKind().?);
     try std.testing.expectEqual(AsyncOp.push, app.retry_action.async_op);
     try std.testing.expectEqualStrings("/repo/.git/index.lock", app.lock_path.?);
     app.clearLockRecovery();
@@ -18047,7 +18330,7 @@ test "a stale remote-tracking ref collision offers git remote prune, then re-run
     const handled = try app.reportFailureOrLock("pull failed", raw, .{ .async_op = .pull });
     try std.testing.expect(handled);
     try std.testing.expectEqual(Mode.confirmation, app.mode);
-    try std.testing.expectEqual(Confirmation.prune_remote_refs, app.pending_confirmation.?);
+    try std.testing.expectEqual(Confirmation.Kind.prune_remote_refs, app.pendingConfirmationKind().?);
     try std.testing.expectEqual(AsyncOp.pull, app.retry_action.async_op);
     try std.testing.expect(app.lock_path == null);
     try std.testing.expectEqualStrings("origin", app.fetch_remote_name.?);
@@ -18719,7 +19002,7 @@ test "skip-confirm flag controls whether the confirm prompt is shown" {
     // With the flag off, the prompt is shown (no git touched on this path).
     try app.requestConfirmation(.discard_all, "confirm discard", .{});
     try std.testing.expectEqual(Mode.confirmation, app.mode);
-    try std.testing.expectEqual(Confirmation.discard_all, app.pending_confirmation.?);
+    try std.testing.expectEqual(Confirmation.Kind.discard_all, app.pendingConfirmationKind().?);
 }
 
 test "scoped refresh replaces only the loaded views" {
@@ -18999,13 +19282,20 @@ test "stash panel apply pop and drop queue off-thread mutations" {
     app.range_sticky = true;
     app.range_key = app.activeListKey();
     try stash_mod.dropSelectedStash(&app);
+    try std.testing.expectEqual(Confirmation.Kind.drop_stash, app.pendingConfirmationKind().?);
+    try std.testing.expect(!app.foregroundBusy());
+    try app.handleKey(.{ .codepoint = 'n' });
+    try std.testing.expect(app.rangeActive());
+    try std.testing.expect(!app.foregroundBusy());
+    try app.handleKey(.{ .codepoint = 'd' });
+    try app.handleKey(.{ .codepoint = 'y' });
     try std.testing.expect(app.foregroundBusy());
     try std.testing.expect(!app.rangeActive());
     switch (app.mutation_requested.?) {
-        .stash_drop_many => |indices| {
-            try std.testing.expectEqual(@as(usize, 2), indices.len);
-            try std.testing.expectEqual(@as(usize, 0), indices[0]);
-            try std.testing.expectEqual(@as(usize, 1), indices[1]);
+        .stash_drop => |entries| {
+            try std.testing.expectEqual(@as(usize, 2), entries.len);
+            try std.testing.expectEqual(@as(usize, 0), entries[0].index);
+            try std.testing.expectEqual(@as(usize, 1), entries[1].index);
         },
         else => try std.testing.expect(false),
     }
@@ -19605,6 +19895,7 @@ test "pull menu 'Reset to remote' confirms, then hard-resets onto the upstream" 
         \\git push -q -u origin main
         \\git commit -q --allow-empty -m "local only"
         \\printf 'dirty\n' >> f.txt
+        \\git add f.txt
     );
 
     var pbuf2: [200]u8 = undefined;
@@ -19623,9 +19914,21 @@ test "pull menu 'Reset to remote' confirms, then hard-resets onto the upstream" 
     app.data.ahead = 1;
     try std.testing.expect(app.currentBranchHasUpstream());
 
+    // The Files panel hasn't seen the staged change yet.
+    try std.testing.expectEqual(@as(usize, 0), app.data.files.len);
+    try app.resetSelectedRevision("HEAD", "HEAD", .mixed);
+    try std.testing.expectEqual(Confirmation.Kind.reset_mixed, app.pendingConfirmationKind().?);
+    try app.handleKey(.{ .codepoint = 'n' });
+    try app.resetSelectedRevision("HEAD", "HEAD", .hard);
+    try std.testing.expectEqual(Confirmation.Kind.reset_hard, app.pendingConfirmationKind().?);
+    try app.handleKey(.{ .codepoint = 'n' });
+    var staged = try app.git.exec(&.{ "diff", "--cached", "--name-only" });
+    defer staged.deinit(a);
+    try std.testing.expectEqualStrings("f.txt\n", staged.stdout);
+
     // Selecting the menu item asks first (destructive), it does not reset yet.
     try app.runMenuAction(.pull_reset_upstream);
-    try std.testing.expectEqual(Confirmation.pull_reset_upstream, app.pending_confirmation.?);
+    try std.testing.expectEqual(Confirmation.Kind.pull_reset_upstream, app.pendingConfirmationKind().?);
     var pre = try app.git.exec(&.{ "rev-list", "--count", "HEAD" });
     defer pre.deinit(a);
     try std.testing.expectEqualStrings("2", std.mem.trim(u8, pre.stdout, " \n")); // base + local only
@@ -19642,6 +19945,23 @@ test "pull menu 'Reset to remote' confirms, then hard-resets onto the upstream" 
     var st = try app.git.exec(&.{ "status", "--porcelain" });
     defer st.deinit(a);
     try std.testing.expectEqualStrings("", std.mem.trim(u8, st.stdout, " \n")); // clean tree
+
+    try testRunSetup(a, tio, &env, work_path,
+        \\set -e
+        \\git rm -q f.txt
+        \\printf 'f.txt\n' > .gitignore
+        \\git add .gitignore
+        \\git commit -qm ignored
+        \\printf 'ignored local content\n' > f.txt
+    );
+    try app.refreshFiles();
+    try std.testing.expectEqual(@as(usize, 0), app.data.files.len);
+    try app.resetSelectedRevision("HEAD^", "HEAD^", .hard);
+    try std.testing.expectEqual(Confirmation.Kind.reset_hard, app.pendingConfirmationKind().?);
+    try app.handleKey(.{ .codepoint = 'n' });
+    const ignored = try app.git.readWorkingFile("f.txt");
+    defer a.free(ignored);
+    try std.testing.expectEqualStrings("ignored local content\n", ignored);
 }
 
 test "activeFilterCount counts the file, branch and commit filters together" {
@@ -20313,6 +20633,61 @@ test "staging the last change falls back to the change above (e2e)" {
     try std.testing.expect(std.mem.indexOf(u8, app.staging_diff, "+TOP") != null);
 }
 
+test "staging and side-by-side review wait for confirmation before discarding changes" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q
+        \\printf 'base\n' > f.txt
+        \\git add f.txt
+        \\git -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -qm file
+        \\printf 'base\nfirst\nsecond\n' > f.txt
+    );
+
+    var app = try testApp(a, &.{});
+    defer deinitTestApp(&app);
+    app.git = try git_mod.Git.initAt(a, tio, &env, dir_path);
+    defer app.git.deinit();
+    defer app.data.deinit(a);
+    try app.refreshFiles();
+    try staging_mod.openStaging(&app);
+    app.staging_cursor = testFindChange(app.staging_diff, staging_mod.stagingFirstLine(&app), false).?;
+
+    try app.handleKey(.{ .codepoint = 'd' });
+    try std.testing.expectEqual(Confirmation.Kind.discard_staging_selection, app.pendingConfirmationKind().?);
+    const before = try app.git.rawFileDiff("f.txt", false, 3);
+    defer a.free(before);
+    try std.testing.expect(std.mem.indexOf(u8, before, "+first") != null);
+    try app.handleKey(.{ .codepoint = 'n' });
+    try std.testing.expect(app.staging_active);
+    try app.handleKey(.{ .codepoint = 'd' });
+    try app.handleKey(.{ .codepoint = 'y' });
+    try std.testing.expect(std.mem.indexOf(u8, app.staging_diff, "+first") == null);
+    try std.testing.expect(std.mem.indexOf(u8, app.staging_diff, "+second") != null);
+
+    try app.openDiffReview();
+    try app.handleKey(.{ .codepoint = 'd' });
+    try std.testing.expectEqual(Confirmation.Kind.discard_review_hunk, app.pendingConfirmationKind().?);
+    try std.testing.expect(app.showingDiffReview());
+    try app.handleKey(.{ .codepoint = 'n' });
+    try std.testing.expectEqual(Mode.diff_review, app.mode);
+    try app.handleKey(.{ .codepoint = 'd' });
+    try app.handleKey(.{ .codepoint = 'y' });
+    const after = try app.git.rawFileDiff("f.txt", false, 3);
+    defer a.free(after);
+    try std.testing.expectEqualStrings("", after);
+    try std.testing.expect(app.mode != .confirmation);
+}
+
 test "the staging view picks up an external edit on the next refresh (e2e)" {
     const a = std.testing.allocator;
     const tio = std.testing.io;
@@ -20432,6 +20807,7 @@ fn testApp(allocator: std.mem.Allocator, files: []model.FileStatus) !App {
 }
 
 fn deinitTestApp(app: *App) void {
+    app.clearConfirmation();
     app.clearAiRequest(.title);
     app.clearAiRequest(.description);
     if (app.commit_ai_error) |e| app.allocator.free(e);
