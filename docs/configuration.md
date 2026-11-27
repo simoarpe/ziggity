@@ -18,6 +18,13 @@ to per repo auto detection (notably the editor).
 
 ```ini
 side_panel_width_percent = 34
+# Panel orientation on small terminals. `auto` (default) stacks the side panels
+# above the main panel when the terminal is narrow and tall (phone-like: width
+# <= 84 and height >= 46), and keeps them side by side otherwise; `always` forces
+# the stacked layout (handy for a short, narrow terminal like Termux), `never`
+# keeps them side by side. In the stacked layout side_panel_width_percent sets
+# the side section's share of the height instead of the width.
+portrait_mode = auto               # auto (default) | always | never
 diff_context = 3
 
 # The commit summary character count (shown in the commit and reword dialog)
