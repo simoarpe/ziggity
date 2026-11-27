@@ -529,7 +529,7 @@ fn toggleRangeStaged(app: *App) !void {
             overwrites_index = overwrites_index or stagingWouldOverwriteIndex(file);
         }
     }
-    if (overwrites_index or (any_unstaged and (any_staged or try stagesRemovedPaths(app, paths.items))))
+    if (overwrites_index or (any_unstaged and any_staged) or try wouldLoseStagedRemoval(app, any_unstaged, paths.items))
         return app.confirmStage(.selection, any_unstaged, paths.items, true);
     return queueStageSelection(app, any_unstaged, paths.items, true);
 }
@@ -570,12 +570,15 @@ pub fn toggleFileStaged(app: *App) !void {
         return;
     };
     if (file.conflict) return app.startConflictResolveMenu();
+    if (!file.has_unstaged and !file.has_staged)
+        return app.setMessage("file has no staged or unstaged changes", .{});
+
+    const stage = file.has_unstaged;
+    const removal_status: u8 = if (stage) '?' else 'D';
     if (stagingWouldOverwriteIndex(file) or
-        (file.short_status[0] == '?' and try stagesRemovedPaths(app, &.{file.path})))
-        return app.confirmStage(.selection, true, &.{file.path}, false);
-    if (file.has_unstaged) return queueStageOp(app, file.path, true);
-    if (file.has_staged) return queueStageOp(app, file.path, false);
-    try app.setMessage("file has no staged or unstaged changes", .{});
+        (file.short_status[0] == removal_status and try wouldLoseStagedRemoval(app, stage, &.{file.path})))
+        return app.confirmStage(.selection, stage, &.{file.path}, false);
+    return queueStageOp(app, file.path, stage);
 }
 
 /// Record a stage (`true`) or unstage (`false`) of `path`: update the model
@@ -629,21 +632,31 @@ pub fn stagingWouldOverwriteIndex(file: model.FileStatus) bool {
         std.mem.eql(u8, &file.short_status, " A"); // intent to add
 }
 
-/// A recreated path can appear as an untracked row and a staged deletion or
-/// rename. The filter or range might contain only the untracked row.
-pub fn stagesRemovedPaths(app: *const App, paths: []const []const u8) !bool {
-    var removed: std.StringHashMapUnmanaged(void) = .empty;
+/// A recreated path can have both an untracked row and a staged removal row.
+/// Consult the full status list even when the selection contains only one row.
+pub fn wouldLoseStagedRemoval(app: *const App, stage: bool, paths: []const []const u8) std.mem.Allocator.Error!bool {
+    if (paths.len == 0) return false;
+    var removed: std.StringHashMapUnmanaged(bool) = .empty;
     defer removed.deinit(app.allocator);
     for (app.data.files) |file| {
         const path = switch (file.short_status[0]) {
             'D' => file.path,
-            'R' => file.previous_path orelse continue,
+            'R' => if (stage) file.previous_path orelse continue else continue,
             else => continue,
         };
-        try removed.put(app.allocator, path, {});
+        // Staging a removed path replaces its index entry. A deletion can be
+        // unstaged and restored with a toggle only while the path is absent.
+        try removed.put(app.allocator, path, stage);
+    }
+    if (removed.count() == 0) return false;
+    if (!stage) {
+        for (app.data.files) |file| {
+            if (file.short_status[0] != '?') continue;
+            if (removed.getPtr(file.path)) |recreated| recreated.* = true;
+        }
     }
     for (paths) |path| {
-        if (removed.contains(path)) return true;
+        if (removed.get(path) orelse false) return true;
     }
     return false;
 }
@@ -691,8 +704,8 @@ pub fn toggleAllStaged(app: *App) !void {
     // Even if each staged file is fully staged, the opposite bulk action would
     // clear the original selection along with the files added by this action.
     if (stage and any_staged) return app.confirmStage(.all, true, targets, false);
-    if (filtered and stage and try stagesRemovedPaths(app, paths.items))
-        return app.confirmStage(.all, true, targets, false);
+    if (filtered and try wouldLoseStagedRemoval(app, stage, paths.items))
+        return app.confirmStage(.all, stage, targets, false);
     for (app.data.files) |file| {
         if (!app.fileMatchesFilter(file)) continue;
         if (filtered and !(if (stage) file.has_unstaged else file.has_staged)) continue;

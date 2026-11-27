@@ -16,6 +16,11 @@ Releases before 0.55.0 are listed on the
 
 ## [Unreleased]
 
+### Added
+
+- Configurable confirmations before losing a staging selection, discarding lines
+  or hunks, running a destructive reset, or dropping stashes.
+
 ## [0.66.0] - 2026-11-21
 
 ### Changed

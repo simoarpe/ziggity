@@ -6969,7 +6969,7 @@ pub const App = struct {
             const include = if (want_staged) file.has_unstaged else file.has_staged;
             if (include) try paths.append(self.allocator, file.path);
         }
-        if (overwrites_index or (want_staged and (any_staged or try staging_mod.stagesRemovedPaths(self, paths.items))))
+        if (overwrites_index or (want_staged and any_staged) or try staging_mod.wouldLoseStagedRemoval(self, want_staged, paths.items))
             return self.confirmStage(.selection, want_staged, paths.items, false);
         return staging_mod.queueStageSelection(self, want_staged, paths.items, false);
     }
@@ -17238,6 +17238,77 @@ test "filtered staging confirms a recreated path and stages only the literal nam
     try std.testing.expectEqualStrings("M\tfile[1]\n", after.stdout);
 }
 
+test "filtered unstaging confirms before clearing a recreated file's staged deletion" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q
+        \\printf 'base\n' > file
+        \\git add -- file
+        \\git -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -qm initial
+        \\git rm -q -- file
+        \\printf 'recreated\n' > file
+    );
+
+    var app = try testApp(a, &.{});
+    defer deinitTestApp(&app);
+    app.git = try git_mod.Git.initAt(a, tio, &env, dir_path);
+    defer app.git.deinit();
+    defer app.data.deinit(a);
+    app.focus = .files;
+    app.file_display_filter = .staged;
+    try app.refreshFiles();
+
+    const actions_to_test = [_]struct { key: u21, confirmation: Confirmation.Kind }{
+        .{ .key = ' ', .confirmation = .stage_selection },
+        .{ .key = 'a', .confirmation = .stage_all },
+    };
+    for (actions_to_test) |action| {
+        try app.handleKey(.{ .codepoint = action.key });
+        try std.testing.expectEqual(Mode.confirmation, app.mode);
+        try std.testing.expectEqual(action.confirmation, app.pendingConfirmationKind().?);
+        switch (app.pending_confirmation.?) {
+            .stage_all, .stage_selection => |pending| try std.testing.expect(!pending.stage),
+            else => unreachable,
+        }
+        try app.handleKey(.{ .codepoint = 'n' });
+        try std.testing.expectEqual(@as(usize, 0), app.stage_pending.count());
+        var before = try app.git.exec(&.{ "diff", "--cached", "--name-status" });
+        defer before.deinit(a);
+        try std.testing.expectEqualStrings("D\tfile\n", before.stdout);
+
+        try app.handleKey(.{ .codepoint = action.key });
+        try app.handleKey(.{ .codepoint = 'y' });
+        try std.testing.expectEqual(@as(?bool, false), app.stage_pending.get("file"));
+        staging_mod.tryFlushStaging(&app);
+        const job = app.takeMutation().?;
+        defer job.deinit(page_alloc);
+        var result = try job.run(a, tio, &env, app.git.root, app.git.git_dir);
+        defer result.deinit(a);
+        try std.testing.expect(result.ok());
+        app.mutation_active = false;
+
+        var after = try app.git.exec(&.{ "diff", "--cached", "--name-status" });
+        defer after.deinit(a);
+        try std.testing.expectEqualStrings("", after.stdout);
+        const working = try app.git.readWorkingFile("file");
+        defer a.free(working);
+        try std.testing.expectEqualStrings("recreated\n", working);
+
+        try testRunSetup(a, tio, &env, dir_path, "git rm -q --cached -- file");
+        try app.refreshFiles();
+    }
+}
+
 test "navigating to another item resets the diff scroll so it can't render blank" {
     const allocator = std.testing.allocator;
     var files = [_]model.FileStatus{
@@ -19298,6 +19369,69 @@ test "stash panel apply pop and drop queue off-thread mutations" {
             try std.testing.expectEqual(@as(usize, 1), entries[1].index);
         },
         else => try std.testing.expect(false),
+    }
+}
+
+test "confirming a stale stash selection drops none of the entries" {
+    const a = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [160]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testGitEnv(&env, dir_path);
+    try testRunSetup(a, tio, &env, dir_path,
+        \\set -e
+        \\git init -q
+        \\git config user.name t
+        \\git config user.email t@t
+        \\git config commit.gpgsign false
+        \\printf 'base\n' > file
+        \\git add -- file
+        \\git commit -qm initial
+        \\for entry in first second third; do
+        \\  printf '%s\n' "$entry" > file
+        \\  git stash push -q -m "$entry"
+        \\done
+    );
+
+    var app = try testApp(a, &.{});
+    defer deinitTestApp(&app);
+    app.git = try git_mod.Git.initAt(a, tio, &env, dir_path);
+    defer app.git.deinit();
+    defer app.data.deinit(a);
+    app.data.stash = try app.git.loadStash();
+    app.focus = .stash;
+    app.stash_index = 1;
+    app.range_anchor = 0;
+    app.range_sticky = true;
+    app.range_key = app.activeListKey();
+    try app.handleKey(.{ .codepoint = 'd' });
+    try std.testing.expectEqual(Confirmation.Kind.drop_stash, app.pendingConfirmationKind().?);
+
+    // The top entry still matches, but the second index now names a different stash.
+    try testRunSetup(a, tio, &env, dir_path, "git stash drop -q 'stash@{1}'");
+    const before = try app.git.loadStash();
+    defer model.deinitStashes(a, before);
+    try std.testing.expectEqual(@as(usize, 2), before.len);
+
+    try app.handleKey(.{ .codepoint = 'y' });
+    const job = app.takeMutation().?;
+    defer job.deinit(page_alloc);
+    var result = try job.run(a, tio, &env, app.git.root, app.git.git_dir);
+    defer result.deinit(a);
+    try std.testing.expect(!result.ok());
+    try std.testing.expect(std.mem.startsWith(u8, result.stderr, "The stash list changed."));
+
+    const after = try app.git.loadStash();
+    defer model.deinitStashes(a, after);
+    try std.testing.expectEqual(before.len, after.len);
+    for (before, after) |expected, actual| {
+        try std.testing.expectEqualStrings(expected.hash, actual.hash);
+        try std.testing.expectEqualStrings(expected.message, actual.message);
     }
 }
 
