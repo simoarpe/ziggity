@@ -157,7 +157,9 @@ the written reference. Every binding is remappable, see
 - `/` (Commits): filter the log · `b` (Commits): bisect menu
 - `ctrl+p`: custom patch menu; `space` in a commit's files adds a file to the
   patch
-- `a`: stage all (or unstage all) · `s` (Files): stash menu
+- `a`: stage all (or unstage all). Confirms when the previous staging state
+  would be lost.
+- `s` (Files): stash menu
 - `d` / `D`: discard menu for the file / discard all (confirmed)
 - `c` · `w` (Files): commit · commit `--no-verify`
 - `ctrl+g` (commit dialog): generate (or regenerate) the focused field, subject or

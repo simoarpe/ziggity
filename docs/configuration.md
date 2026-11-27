@@ -258,6 +258,13 @@ command_output = show       # show (default) custom command output in a dialog,
 # Skip the confirm prompt for individual destructive actions (all default
 # false, i.e. confirmations stay on). Names match the action:
 skip_confirm.discard_all = false
+skip_confirm.stage_all = false        # when the current staging state would be lost
+skip_confirm.stage_selection = false  # includes partially staged files and mixed ranges
+skip_confirm.discard_staging_selection = false
+skip_confirm.discard_review_hunk = false
+skip_confirm.reset_hard = false       # hard resets can overwrite ignored files
+skip_confirm.reset_mixed = false      # when a mixed reset would replace staged changes
+skip_confirm.drop_stash = false
 skip_confirm.amend = false             # confirm before `A` amends the last commit
 skip_confirm.drop_commit = false       # confirm before `d` drops a commit
 skip_confirm.squash_commit = false     # confirm before `s` squashes a commit down

@@ -3,6 +3,7 @@
 //! `*App`; mutating actions route through the shared background mutation queue.
 const std = @import("std");
 const app_mod = @import("app.zig");
+const model = @import("model.zig");
 
 const App = app_mod.App;
 
@@ -72,24 +73,15 @@ pub fn createPatchFromSelectedStash(self: *App) !void {
 }
 
 pub fn dropSelectedStash(self: *App) !void {
+    const entry = self.selectedStash() orelse return self.setMessage("no stash entry selected", .{});
+    const selected = [_]model.StashEntry{entry};
+    var entries: []const model.StashEntry = &selected;
     if (self.rangeActive() and self.focus == .stash) {
         if (self.rangeBounds()) |bnd| {
-            var indices: std.ArrayList(usize) = .empty;
-            defer indices.deinit(self.allocator);
-            var i = bnd.lo;
-            while (i <= bnd.hi and i < self.data.stash.len) : (i += 1) {
-                try indices.append(self.allocator, self.data.stash[i].index);
-            }
-            if (indices.items.len > 0) {
-                const n = indices.items.len;
-                self.clearRange();
-                return self.requestMutation(.{ .stash_drop_many = indices.items }, .{ .gerund = "dropping stash", .command = "git stash drop", .refresh = App.Refresh.stash }, "dropped {d} stash entries", .{n});
-            }
+            const end = @min(bnd.hi + 1, self.data.stash.len);
+            if (bnd.lo < end) entries = self.data.stash[bnd.lo..end];
         }
     }
-    const entry = self.selectedStash() orelse {
-        try self.setMessage("no stash entry selected", .{});
-        return;
-    };
-    return self.requestMutation(.{ .stash_drop = entry.index }, .{ .gerund = "dropping stash", .command = "git stash drop", .refresh = App.Refresh.stash }, "dropped {s}", .{entry.selector});
+    const targets = try model.dupeStashes(self.allocator, entries);
+    return self.requestConfirmation(.{ .drop_stash = targets }, "confirm drop stash", .{});
 }

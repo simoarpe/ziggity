@@ -1750,6 +1750,12 @@ fn render(vx: *vaxis.Vaxis, app: *app_mod.App) void {
         return;
     }
 
+    if (app.mode == .confirmation and app.showingDiffReview()) {
+        drawDiffReview(root, app);
+        drawConfirmPopup(root, app);
+        return;
+    }
+
     // The footer wraps its hints onto extra rows when they overflow (see
     // `footer_hint_rows`). Its height is stable across navigation (sized to the
     // busiest panel, not the focused one), so only a resize reflows the body;
@@ -3486,7 +3492,7 @@ fn drawMenuPopup(root: vaxis.Window, app: *const app_mod.App) void {
 fn drawConfirmPopup(root: vaxis.Window, app: *app_mod.App) void {
     // The discard-all prompt lists every file it will wipe, scrollable when the
     // list is longer than the popup — so nothing gets discarded unseen.
-    if (app.pending_confirmation == .discard_all and app.data.files.len > 0)
+    if (app.pendingConfirmationKind() == .discard_all and app.data.files.len > 0)
         return drawDiscardConfirmPopup(root, app);
     app.confirm_list_view_h = 0; // no scrollable body on the other prompts
 
@@ -3496,6 +3502,12 @@ fn drawConfirmPopup(root: vaxis.Window, app: *app_mod.App) void {
     const text = app.confirmationText(&app.confirm_text_buf);
     const title = switch (app.pending_confirmation orelse .discard_all) {
         .discard_all => "Discard all changes",
+        .stage_all => |staging| if (staging.stage) "Stage all" else "Unstage all",
+        .stage_selection => |staging| if (staging.stage) "Stage selection" else "Unstage selection",
+        .discard_staging_selection, .discard_review_hunk => "Discard changes",
+        .reset_hard => "Hard reset",
+        .reset_mixed => "Mixed reset",
+        .drop_stash => "Drop stash",
         .amend => "Amend last commit",
         .merge_branch => "Merge branch",
         .rebase_branch => "Rebase branch",
@@ -5200,7 +5212,7 @@ fn drawHunkBoxBottom(win: vaxis.Window, row: u16, right_edge_x: u16) void {
 /// null. Used by the narrow-terminal unified fallback, which has no room for the
 /// box and marks the selection by showing that header row in reverse video.
 fn selectedHunkHeaderLine(app: *const app_mod.App) ?usize {
-    if (app.mode != .diff_review) return null;
+    if (!app.showingDiffReview()) return null;
     const r = app.currentDiffHunkRange() orelse return null;
     return r.start;
 }

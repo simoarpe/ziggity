@@ -1489,7 +1489,7 @@ pub const Git = struct {
         if (paths.len == 0) return self.successResult();
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(self.allocator);
-        try args.appendSlice(self.allocator, &.{ "add", "--" });
+        try args.appendSlice(self.allocator, &.{ "--literal-pathspecs", "add", "--" });
         try args.appendSlice(self.allocator, paths);
         return self.exec(args.items);
     }
@@ -1498,7 +1498,7 @@ pub const Git = struct {
         if (paths.len == 0) return self.successResult();
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(self.allocator);
-        try args.appendSlice(self.allocator, &.{ "reset", "HEAD", "--" });
+        try args.appendSlice(self.allocator, &.{ "--literal-pathspecs", "reset", "HEAD", "--" });
         try args.appendSlice(self.allocator, paths);
         return self.exec(args.items);
     }
@@ -1856,6 +1856,12 @@ pub const Git = struct {
         return self.exec(&.{ "reset", mode.flag(), hash });
     }
 
+    pub fn hasIndexChanges(self: *Git) !bool {
+        var result = try self.exec(&.{ "diff", "--cached", "--quiet", "--ita-visible-in-index" });
+        defer result.deinit(self.allocator);
+        return !result.ok();
+    }
+
     pub fn revertCommit(self: *Git, hash: []const u8) !ExecResult {
         return self.exec(&.{ "revert", "--no-edit", hash });
     }
@@ -2110,9 +2116,26 @@ pub const Git = struct {
 
     /// Drop several stash entries. Entries are dropped highest-index-first so the
     /// lower indices stay valid as the list shifts.
-    pub fn stashDropMany(self: *Git, indices: []const usize) !ExecResult {
-        const sorted = try self.allocator.dupe(usize, indices);
+    pub fn stashDropEntries(self: *Git, entries: []const model.StashEntry) !ExecResult {
+        // Stash numbers can move while the confirmation is open. Verify the
+        // captured targets before dropping any of them.
+        const current = try self.loadStash();
+        defer model.deinitStashes(self.allocator, current);
+        const sorted = try self.allocator.alloc(usize, entries.len);
         defer self.allocator.free(sorted);
+        for (entries, sorted) |entry, *idx| {
+            if (entry.index >= current.len or
+                !std.mem.eql(u8, entry.hash, current[entry.index].hash) or
+                !std.mem.eql(u8, entry.message, current[entry.index].message))
+            {
+                return .{
+                    .stdout = &.{},
+                    .stderr = try self.allocator.dupe(u8, "The stash list changed. Review the selection and try again."),
+                    .term = .{ .exited = 1 },
+                };
+            }
+            idx.* = entry.index;
+        }
         std.mem.sort(usize, sorted, {}, std.sort.desc(usize));
         for (sorted) |idx| {
             var r = try self.stashDrop(idx);
@@ -2718,18 +2741,21 @@ pub fn parseStash(allocator: std.mem.Allocator, bytes: []const u8) ![]model.Stas
         if (line.len == 0) continue;
         var fields = std.mem.splitScalar(u8, line, 0);
         const selector = fields.next() orelse continue;
-        const hash = fields.next() orelse "";
-        const time = fields.next() orelse "";
-        const message = fields.next() orelse "";
-        var entry = model.StashEntry{
+        try entries.ensureUnusedCapacity(allocator, 1);
+        const selector_copy = try allocator.dupe(u8, selector);
+        errdefer allocator.free(selector_copy);
+        const hash = try allocator.dupe(u8, fields.next() orelse "");
+        errdefer allocator.free(hash);
+        const time = try allocator.dupe(u8, fields.next() orelse "");
+        errdefer allocator.free(time);
+        const message = try allocator.dupe(u8, fields.next() orelse "");
+        entries.appendAssumeCapacity(.{
             .index = parseStashIndex(selector) orelse entries.items.len,
-            .selector = try allocator.dupe(u8, selector),
-            .hash = try allocator.dupe(u8, hash),
-            .time = try allocator.dupe(u8, time),
-            .message = try allocator.dupe(u8, message),
-        };
-        errdefer entry.deinit(allocator);
-        try entries.append(allocator, entry);
+            .selector = selector_copy,
+            .hash = hash,
+            .time = time,
+            .message = message,
+        });
     }
 
     return entries.toOwnedSlice(allocator);

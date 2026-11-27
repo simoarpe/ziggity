@@ -380,8 +380,7 @@ pub fn applyStagingSelection(app: *App) !void {
 /// staging it. Selection works exactly like `space` — on a `@@` header the
 /// whole hunk goes, otherwise the selected line(s). The active side decides the
 /// target: on the unstaged side the change is dropped from the working tree; on
-/// the staged side it is dropped from both the index and the working tree, so it
-/// is gone entirely. Destructive and immediate (no confirmation), like `space`.
+/// the staged side it is dropped from both the index and the working tree.
 pub fn discardStagingSelection(app: *App) !void {
     const parsed = app.staging orelse return;
     if (parsed.hunks.len == 0) {
@@ -435,19 +434,26 @@ pub fn discardStagingSelection(app: *App) !void {
             else => return err,
         };
     };
-    defer app.allocator.free(patch);
+    return app.requestConfirmation(.{ .discard_staging_selection = .{
+        .bytes = patch,
+        .staged = app.staging_staged_view,
+        .whole_hunk = whole_hunk,
+        .forward = forward,
+    } }, "confirm discard {s}", .{if (whole_hunk) "hunk" else "selected lines"});
+}
 
-    var result = if (forward)
-        try app.git.discardForwardPatch(patch, app.staging_staged_view)
+pub fn applyStagingDiscard(app: *App, patch: app_mod.Confirmation.DiscardPatch) !void {
+    var result = if (patch.forward)
+        try app.git.discardForwardPatch(patch.bytes, patch.staged)
     else
-        try app.git.discardStagingPatch(patch, app.staging_staged_view);
+        try app.git.discardStagingPatch(patch.bytes, patch.staged);
     defer result.deinit(app.allocator);
     if (!result.ok()) {
         const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
         try app.setMessage("discard failed: {s}", .{if (stderr.len > 0) stderr else "git apply error"});
         return;
     }
-    const scope = if (whole_hunk) "hunk" else "selection";
+    const scope = if (patch.whole_hunk) "hunk" else "selection";
     try app.setMessage("discarded {s}", .{scope});
     app.staging_anchor = null;
     // Discarding rewrites the working tree (and, on the staged side, the index),
@@ -459,7 +465,7 @@ pub fn discardStagingSelection(app: *App) !void {
     // Same as a stage: keep the cursor on an actionable spot so repeated `d`
     // flows on — the next change for a line discard, the next hunk header for a
     // whole-hunk discard — instead of stranding on a context line.
-    if (whole_hunk) advanceToNextHunk(app) else advanceToNextStageable(app);
+    if (patch.whole_hunk) advanceToNextHunk(app) else advanceToNextStageable(app);
 }
 
 pub fn closeStaging(app: *App) !void {
@@ -510,6 +516,8 @@ fn toggleRangeStaged(app: *App) !void {
     var paths: std.ArrayList([]const u8) = .empty;
     defer paths.deinit(app.allocator);
     var any_unstaged = false;
+    var any_staged = false;
+    var overwrites_index = false;
     var ord: usize = 0;
     for (app.data.files) |file| {
         if (!app.fileMatchesFilter(file)) continue;
@@ -517,10 +525,13 @@ fn toggleRangeStaged(app: *App) !void {
         if (ord >= b.lo and ord <= b.hi and !file.conflict) {
             try paths.append(app.allocator, file.path);
             if (file.has_unstaged) any_unstaged = true;
+            if (file.has_staged) any_staged = true;
+            overwrites_index = overwrites_index or stagingWouldOverwriteIndex(file);
         }
     }
-    for (paths.items) |p| try queueStageOp(app, p, any_unstaged);
-    app.clearRange();
+    if (overwrites_index or (any_unstaged and any_staged) or try wouldLoseStagedRemoval(app, any_unstaged, paths.items))
+        return app.confirmStage(.selection, any_unstaged, paths.items, true);
+    return queueStageSelection(app, any_unstaged, paths.items, true);
 }
 
 /// Optimistically flip the staged/unstaged state of the matching files in the
@@ -559,9 +570,15 @@ pub fn toggleFileStaged(app: *App) !void {
         return;
     };
     if (file.conflict) return app.startConflictResolveMenu();
-    if (file.has_unstaged) return queueStageOp(app, file.path, true);
-    if (file.has_staged) return queueStageOp(app, file.path, false);
-    try app.setMessage("file has no staged or unstaged changes", .{});
+    if (!file.has_unstaged and !file.has_staged)
+        return app.setMessage("file has no staged or unstaged changes", .{});
+
+    const stage = file.has_unstaged;
+    const removal_status: u8 = if (stage) '?' else 'D';
+    if (stagingWouldOverwriteIndex(file) or
+        (file.short_status[0] == removal_status and try wouldLoseStagedRemoval(app, stage, &.{file.path})))
+        return app.confirmStage(.selection, stage, &.{file.path}, false);
+    return queueStageOp(app, file.path, stage);
 }
 
 /// Record a stage (`true`) or unstage (`false`) of `path`: update the model
@@ -569,14 +586,8 @@ pub fn toggleFileStaged(app: *App) !void {
 /// actual `git add`/`git reset` is flushed off the UI thread by the loop (see
 /// `tryFlushStaging`), coalesced with any other rapid toggles, so input never
 /// blocks on git. Re-toggling a path just overwrites its desired state.
-pub fn queueStageOp(app: *App, path: []const u8, stage: bool) !void {
-    applyOptimisticStage(app, stage, &[_][]const u8{path});
-    const gop = try app.stage_pending.getOrPut(app.allocator, path);
-    if (!gop.found_existing) gop.key_ptr.* = try app.allocator.dupe(u8, path);
-    gop.value_ptr.* = stage;
-    // Drop any background worktree snapshot started before this change so it
-    // can't clobber the optimistic state with the pre-toggle index.
-    app.refresh_generation +%= 1;
+pub fn queueStageOp(app: *App, path: []const u8, stage: bool) std.mem.Allocator.Error!void {
+    return queueStageSelection(app, stage, &.{path}, false);
 }
 
 /// TUI-loop hook: if any stage toggles are pending and the mutation worker is
@@ -616,34 +627,91 @@ pub fn queueStageAll(app: *App, stage: bool) void {
     app.refresh_generation +%= 1;
 }
 
+pub fn stagingWouldOverwriteIndex(file: model.FileStatus) bool {
+    return (file.has_staged and file.has_unstaged) or file.conflict or
+        std.mem.eql(u8, &file.short_status, " A"); // intent to add
+}
+
+/// A recreated path can have both an untracked row and a staged removal row.
+/// Consult the full status list even when the selection contains only one row.
+pub fn wouldLoseStagedRemoval(app: *const App, stage: bool, paths: []const []const u8) std.mem.Allocator.Error!bool {
+    if (paths.len == 0) return false;
+    var removed: std.StringHashMapUnmanaged(bool) = .empty;
+    defer removed.deinit(app.allocator);
+    for (app.data.files) |file| {
+        const path = switch (file.short_status[0]) {
+            'D' => file.path,
+            'R' => if (stage) file.previous_path orelse continue else continue,
+            else => continue,
+        };
+        // Staging a removed path replaces its index entry. A deletion can be
+        // unstaged and restored with a toggle only while the path is absent.
+        try removed.put(app.allocator, path, stage);
+    }
+    if (removed.count() == 0) return false;
+    if (!stage) {
+        for (app.data.files) |file| {
+            if (file.short_status[0] != '?') continue;
+            if (removed.getPtr(file.path)) |recreated| recreated.* = true;
+        }
+    }
+    for (paths) |path| {
+        if (removed.get(path) orelse false) return true;
+    }
+    return false;
+}
+
+pub fn queueStageSelection(app: *App, stage: bool, paths: ?[]const []const u8, clear_range: bool) std.mem.Allocator.Error!void {
+    if (paths) |items| {
+        const pending = &app.stage_pending;
+        const original_count = pending.count();
+        try pending.ensureUnusedCapacity(app.allocator, items.len);
+        // Build the owned keys before updating existing entries or the model.
+        // If a copy fails, only newly appended entries need to be removed.
+        errdefer while (pending.count() > original_count) {
+            const added = pending.pop().?;
+            app.allocator.free(added.key);
+        };
+        for (items) |path| {
+            if (pending.contains(path)) continue;
+            const owned = try app.allocator.dupe(u8, path);
+            pending.putAssumeCapacityNoClobber(owned, stage);
+        }
+        if (items.len > 0) {
+            for (items) |path| pending.getPtr(path).?.* = stage;
+            applyOptimisticStage(app, stage, items);
+            // Invalidate snapshots started before this optimistic update.
+            app.refresh_generation +%= 1;
+        }
+    } else {
+        queueStageAll(app, stage);
+    }
+    if (clear_range) app.clearRange();
+}
+
 pub fn toggleAllStaged(app: *App) !void {
-    // Like the per-file toggle, this only updates the model optimistically and
-    // queues the work; the loop flushes it off the UI thread so `a` is
-    // non-blocking too. A filter narrows it to the visible paths (a per-path
-    // batch); unfiltered, it uses the efficient `git add -A` / `git reset`.
-    if (app.visibleUnstagedCount() > 0) {
-        if (app.anyFileFilterActive()) {
-            var paths: std.ArrayList([]const u8) = .empty;
-            defer paths.deinit(app.allocator);
-            try app.collectVisiblePaths(&paths, .unstaged);
-            for (paths.items) |p| try queueStageOp(app, p, true);
-            return;
-        }
-        queueStageAll(app, true);
-        return;
+    // A filter narrows the queued batch to visible paths. With no filter, use
+    // `git add -A` or `git reset` for the whole repository.
+    const stage = app.visibleUnstagedCount() > 0;
+    const any_staged = app.visibleStagedCount() > 0;
+    if (!stage and !any_staged) return app.setMessage("no visible files to stage", .{});
+
+    const filtered = app.anyFileFilterActive();
+    var paths: std.ArrayList([]const u8) = .empty;
+    defer paths.deinit(app.allocator);
+    if (filtered) try app.collectVisiblePaths(&paths, if (stage) .unstaged else .staged);
+    const targets: ?[]const []const u8 = if (filtered) paths.items else null;
+    // Even if each staged file is fully staged, the opposite bulk action would
+    // clear the original selection along with the files added by this action.
+    if (stage and any_staged) return app.confirmStage(.all, true, targets, false);
+    if (filtered and try wouldLoseStagedRemoval(app, stage, paths.items))
+        return app.confirmStage(.all, stage, targets, false);
+    for (app.data.files) |file| {
+        if (!app.fileMatchesFilter(file)) continue;
+        if (filtered and !(if (stage) file.has_unstaged else file.has_staged)) continue;
+        if (stagingWouldOverwriteIndex(file)) return app.confirmStage(.all, stage, targets, false);
     }
-    if (app.visibleStagedCount() > 0) {
-        if (app.anyFileFilterActive()) {
-            var paths: std.ArrayList([]const u8) = .empty;
-            defer paths.deinit(app.allocator);
-            try app.collectVisiblePaths(&paths, .staged);
-            for (paths.items) |p| try queueStageOp(app, p, false);
-            return;
-        }
-        queueStageAll(app, false);
-        return;
-    }
-    try app.setMessage("no visible files to stage", .{});
+    return queueStageSelection(app, stage, targets, false);
 }
 
 test "nearestStageableLine prefers the next change below, else falls back above" {
